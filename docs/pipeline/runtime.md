@@ -495,6 +495,38 @@ the constant `true` against a non-nilable type — a correct fold of an
 incorrect type, which signed every visitor in and stopped the join-code
 page from 404ing. A lie the type system can act on is worse than a gap.
 
+### `ActiveStorage::Blob.service` and `create_and_upload!` raise
+
+The last unnamed corner of Active Storage's bytes half. `runtime/ruby/
+active_storage.rb` now defines `ActiveStorage::Blob.service` (answering
+an `ActiveStorage::Service` whose `path_for` raises) and
+`ActiveStorage::Blob.create_and_upload!` (which raises), in the same
+voice and for the same reason as `Attached#url` and
+`RouteHelpers.rails_blob_path` beside them: no storage service, no
+processor, no signed ids, and the shared runtime does no file I/O
+anywhere.
+
+What changes is where the gap lands. campfire writes both —
+`Blob.service.path_for(variant.key)` serves the custom account logo and
+a bot's webp avatar, `create_and_upload!` stores a webhook's attachment
+reply — and until these existed each was an unresolved call that stopped
+the whole strict build, which reads like a compiler bug rather than the
+gap it is. `Service` is a class rather than a module because
+`Blob.service` is a singleton in Rails and app code chains off it, so a
+real service can land later without touching a call site.
+
+### `ActionCable.server` exists; the registry did not say so
+
+`runtime/spinel/action_cable.rb` has had `ActionCable.server`,
+`Server#broadcast`, `#remote_connections`, `RemoteConnections#where` and
+`RemoteConnection#disconnect` since the cable work. None was in the
+analyzer's class registry, so campfire's
+`User#close_remote_connections` — the one caller — read out as
+`no known method server on Class { ActionCable }` about a chain the
+emitted tree resolves. Registered, not implemented: the divergence that
+the selected connection set is always EMPTY is recorded with the cable
+notes, unchanged.
+
 ### `IPAddr` is a port, and it rejects a prefix
 
 `runtime/ruby/ipaddr.rb` implements the slice of Ruby's stdlib class the
@@ -527,9 +559,10 @@ deliberate choice over answering about `10.0.0.0` when the caller wrote
 `10.0.0.0/8`.
 
 **The CRuby and JRuby trees get Ruby's own instead.** `project::
-ruby_runtime_files` rewrites `runtime/ipaddr.rb` to a one-line
+ruby_runtime_files` rewrites the emitted tree's ipaddr.rb to a one-line
 `require "ipaddr"` — the same "one require path, target-appropriate
-implementation" split `runtime/db.rb` carries. That is not tidiness:
+implementation" split the emitted db.rb carries
+(`runtime/spinel/db_cruby.rb` here). That is not tidiness:
 something on the CRuby side already loads the stdlib's ipaddr, and two
 definitions of `IPAddr::InvalidAddressError` with different superclasses
 is a `TypeError: superclass mismatch` at REQUIRE time. campfire's suite

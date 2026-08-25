@@ -250,6 +250,51 @@ end
 # `disposition` and `only_path` are spelled out because those are the
 # two options an ingested app has written; a bag would buy nothing here,
 # since the body cannot use them either way.
+# `ActiveStorage::Blob` — the CLASS-side surface an app reaches directly,
+# and the last unnamed corner of the bytes half.
+#
+# Same voice, same reason as `RouteHelpers.rails_blob_path` below and
+# `Attached#url` above: no storage service exists here, so nothing can
+# answer where a key's file lives or put one there. campfire writes both
+# — `ActiveStorage::Blob.service.path_for(variant.key)` serves the
+# custom account logo and a bot's webp avatar,
+# `ActiveStorage::Blob.create_and_upload!` stores a webhook's attachment
+# reply — and until this existed each was an unresolved call that stopped
+# the whole strict build, which reads like a compiler bug rather than
+# the gap it is.
+#
+# `Service` is a class rather than a module because `Blob.service` is a
+# SINGLETON in Rails and app code chains off it; keeping the shape means
+# the call site needs no rewrite when a real service lands.
+module ActiveStorage
+  class Service
+    def path_for(key)
+      raise NotImplementedError,
+            "ActiveStorage::Blob.service.path_for: no storage service is " \
+            "modeled — the shared runtime does no file I/O; see " \
+            "ActiveStorage::Attached#url"
+    end
+  end
+
+  class Blob
+    def self.service
+      Service.new
+    end
+
+    # Rails builds the blob row AND writes the bytes. The row half is
+    # what `Attached#attach` already does for an attachment; this one
+    # is reached with no record to attach to, so there is nothing to
+    # write the row FOR until the caller attaches it — and the bytes
+    # have nowhere to go regardless.
+    def self.create_and_upload!(io, filename, content_type)
+      raise NotImplementedError,
+            "ActiveStorage::Blob.create_and_upload!: no storage service is " \
+            "modeled — the shared runtime does no file I/O; see " \
+            "ActiveStorage::Attached#url"
+    end
+  end
+end
+
 module RouteHelpers
   def self.rails_blob_path(attachment, disposition: nil, only_path: nil)
     raise NotImplementedError,

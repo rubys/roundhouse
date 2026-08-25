@@ -590,6 +590,7 @@ impl Analyzer {
         // see `registry::ar`.
         registry::ar::register(&mut classes);
         registry::ar::register_action_text(&mut classes);
+        registry::ar::register_action_cable(&mut classes);
 
         // ActiveModel::Validations / Model modules + the ActiveModel::Errors
         // collection and individual ActiveModel::Error classes — see

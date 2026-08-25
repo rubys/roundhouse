@@ -153,6 +153,30 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         classes.insert(ClassId(Symbol::from("ActiveStorage::Attached")), attached);
     }
 
+    // The CLASS-side surface an app reaches directly:
+    // `ActiveStorage::Blob.service.path_for(key)` and
+    // `ActiveStorage::Blob.create_and_upload!`. Both RAISE in
+    // `runtime/ruby/active_storage.rb` — no storage service is modeled
+    // — but they are typed as what Rails answers, so a chain off one
+    // resolves and the gap has one named home instead of stopping the
+    // build. Method list is active_storage.rbs verbatim.
+    {
+        let service_id = ClassId(Symbol::from("ActiveStorage::Service"));
+        let blob_id = ClassId(Symbol::from("ActiveStorage::Blob"));
+        let mut service = ClassInfo::default();
+        service.instance_methods.insert(Symbol::from("path_for"), Ty::Str);
+        classes.insert(service_id.clone(), service);
+
+        let mut blob = ClassInfo::default();
+        blob.class_methods
+            .insert(Symbol::from("service"), Ty::Class { id: service_id, args: vec![] });
+        blob.class_methods.insert(
+            Symbol::from("create_and_upload!"),
+            Ty::Class { id: blob_id.clone(), args: vec![] },
+        );
+        classes.insert(blob_id, blob);
+    }
+
     // Arel — the low-level SQL AST that advanced scopes reach for
     // (`Model.arel_table[:col].not_in(subquery)`, `relation.arel.exists`,
     // `Arel.sql(...)`). A small class family whose methods all return
@@ -229,6 +253,44 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
 ///
 /// Unconditional, like every other entry in this file — an app with no
 /// `has_rich_text` simply never dispatches against these.
+/// `ActionCable.server` and the two hops campfire takes off it —
+/// `.remote_connections.where(current_user:).disconnect(reconnect:)`,
+/// which `User#close_remote_connections` writes. Every class here
+/// exists in `runtime/spinel/action_cable.rb`; the registry is the only
+/// place they did not, so a call the emitted tree resolves read out as
+/// `no known method server on Class { ActionCable }`.
+///
+/// `broadcast` is on the same singleton and answers nothing, which is
+/// what the runtime returns.
+pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, ClassInfo>) {
+    let server_id = ClassId(Symbol::from("ActionCable::Server"));
+    let remotes_id = ClassId(Symbol::from("ActionCable::RemoteConnections"));
+    let remote_id = ClassId(Symbol::from("ActionCable::RemoteConnection"));
+
+    let mut remote = ClassInfo::default();
+    remote.instance_methods.insert(Symbol::from("disconnect"), Ty::Nil);
+    classes.insert(remote_id.clone(), remote);
+
+    let mut remotes = ClassInfo::default();
+    remotes
+        .instance_methods
+        .insert(Symbol::from("where"), Ty::Class { id: remote_id, args: vec![] });
+    classes.insert(remotes_id.clone(), remotes);
+
+    let mut server = ClassInfo::default();
+    server.instance_methods.insert(Symbol::from("broadcast"), Ty::Nil);
+    server
+        .instance_methods
+        .insert(Symbol::from("remote_connections"), Ty::Class { id: remotes_id, args: vec![] });
+    classes.insert(server_id.clone(), server);
+
+    let mut cable = ClassInfo::default();
+    cable
+        .class_methods
+        .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![] });
+    classes.insert(ClassId(Symbol::from("ActionCable")), cable);
+}
+
 pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, ClassInfo>) {
     let attachment_id = ClassId(Symbol::from("ActionText::Attachment"));
     let attachment_ty = Ty::Class { id: attachment_id.clone(), args: vec![] };

@@ -30,6 +30,20 @@ module ActiveStorage
   end
 end
 
+# See the .rb: the class-side surface an app reaches directly. Both
+# raise — no storage service is modeled — and both are typed as what
+# Rails answers so a call site that chains off one still resolves.
+module ActiveStorage
+  class Service
+    def path_for: (String key) -> String
+  end
+
+  class Blob
+    def self.service: () -> ActiveStorage::Service
+    def self.create_and_upload!: (String io, String filename, String content_type) -> ActiveStorage::Blob
+  end
+end
+
 # See the .rb: Active Storage's engine-mounted route helpers, reopened
 # onto the app's generated RouteHelpers so a view that writes one
 # compiles on every target and raises in one named place.
