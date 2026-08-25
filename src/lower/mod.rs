@@ -67,6 +67,7 @@ pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
+pub mod to_json;
 pub mod presence_in;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
@@ -136,6 +137,7 @@ pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
+pub use to_json::apply_to_json_lowering;
 pub use presence_in::apply_presence_in_grounding;
 pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
@@ -226,6 +228,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const no pass produces and writes a name no pass consumes, so
     // no ordering constraints.
     ("random_formatter", &[]),
+    // `hash.to_json` → `JSON.generate(hash)`; a receiver-shape rewrite
+    // of a name no other pass produces or consumes.
+    ("to_json", &[]),
     // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
     // list)`; a receiver-shape rewrite of a name no other pass produces
     // or consumes, so no ordering constraints.
@@ -511,6 +516,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");
+    to_json::apply_to_json_lowering(app);
+    ran!("to_json");
     presence_in::apply_presence_in_grounding(app);
     ran!("presence_in");
     enumerable_ext::apply_enumerable_ext_grounding(app);

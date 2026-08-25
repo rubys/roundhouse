@@ -495,6 +495,27 @@ the constant `true` against a non-nilable type — a correct fold of an
 incorrect type, which signed every visitor in and stopped the join-code
 page from 404ing. A lie the type system can act on is worse than a gap.
 
+### `hash.to_json` becomes `JSON.generate(hash)`
+
+`Hash#to_json` is a core_ext reopen — Ruby's json library adds it,
+ActiveSupport replaces it — and a reopened builtin is the one shape no
+strict target can host and spinel cannot dispatch on. `lower::to_json`
+rewrites it to the bundled JSON package every emitted tree already
+requires, which takes the same collection and answers the same String.
+
+The gate is the receiver's type: `Ty::Hash` or `Ty::Array` only. A MODEL
+receiver is deliberately excluded — `record.to_json` is Rails'
+`as_json`-then-encode, which the `as_json_*` passes own and which
+answers the model's declared shape rather than its ivars — and so is an
+untyped receiver, where the rewrite would be a guess.
+
+**The divergence:** ActiveSupport walks `as_json` first, so a `Time`
+value renders in Rails' ISO-8601 form where `JSON.generate` refuses it.
+The corpus receiver (campfire's `Webhook#payload`, which is the entire
+request body a bot receives) holds strings, integers and nested hashes
+of the same; a value JSON cannot encode raises rather than rendering
+wrongly.
+
 ### `ActiveStorage::Blob.service` and `create_and_upload!` raise
 
 The last unnamed corner of Active Storage's bytes half. `runtime/ruby/

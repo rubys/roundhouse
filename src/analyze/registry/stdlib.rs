@@ -117,6 +117,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("base64digest", Ty::Str),
         ], &[]);
     }
+    // The gem façades `runtime/ruby/gem_facades.rb` hosts and the emit
+    // already anchors (`is_gem_facade_root`). They RAISE when reached —
+    // that is the contract — but they are real classes with real
+    // shapes, and the analyzer knowing neither made campfire's
+    // `UserAgent.parse(user_agent).browser` in a partial read out as
+    // `no known method parse on Class { UserAgent }`. Method lists are
+    // gem_facades.rbs verbatim, so the analyzer and a strict target
+    // agree; `PlatformAgent` rides along because
+    // `ApplicationPlatform < PlatformAgent` names it at LOAD time.
+    let user_agent_ty = Ty::Class { id: ClassId(Symbol::from("UserAgent")), args: vec![] };
+    register_stdlib_class(classes, "UserAgent", &[
+        ("parse", user_agent_ty.clone()),
+    ], &[
+        ("browser", Ty::Str), ("platform", Ty::Str), ("version", Ty::Str),
+    ]);
+    register_stdlib_class(classes, "PlatformAgent", &[], &[
+        ("os", Ty::Str), ("match?", Ty::Bool), ("user_agent", user_agent_ty),
+    ]);
     // `IPAddr` — the class `runtime/ruby/ipaddr.rb` ports. Only the
     // surface that file implements is registered, so a call beyond it
     // stays an honest gap rather than a method that types and then
