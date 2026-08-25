@@ -117,6 +117,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("base64digest", Ty::Str),
         ], &[]);
     }
+    // `IPAddr` — the class `runtime/ruby/ipaddr.rb` ports. Only the
+    // surface that file implements is registered, so a call beyond it
+    // stays an honest gap rather than a method that types and then
+    // raises. `IPAddr.new(x)` reaches the universal `.new`, so the
+    // predicates are looked up as INSTANCE methods on the result.
+    register_stdlib_class(classes, "IPAddr", &[], &[
+        ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
+        ("loopback?", Ty::Bool), ("private?", Ty::Bool), ("link_local?", Ty::Bool),
+        ("to_s", Ty::Str),
+        ("octets", Ty::Array { elem: Box::new(Ty::Int) }),
+    ]);
     // `URI.parse` returns a URI object we don't model; `Untyped` lets
     // chained `.scheme` / `.host` flow gradually instead of erroring.
     register_stdlib_class(classes, "URI", &[

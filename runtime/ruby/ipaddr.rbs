@@ -1,0 +1,30 @@
+class IPAddr
+  class InvalidAddressError < StandardError
+  end
+
+  @octets: Array[Integer]
+
+  def initialize: (String addr) -> void
+  def octets: () -> Array[Integer]
+  def ipv4?: () -> bool
+  def ipv6?: () -> bool
+  def ipv4_mapped?: () -> bool
+  def loopback?: () -> bool
+  def private?: () -> bool
+  def link_local?: () -> bool
+  def to_s: () -> String
+
+  def self.parse_octets: (String addr) -> Array[Integer]
+  def self.parse_v4: (String text) -> Array[Integer]
+  def self.parse_dec_octet: (String part, String text) -> Integer
+  def self.parse_v6: (String text) -> Array[Integer]
+  def self.parse_v6_groups: (String part, String text) -> Array[Integer]
+  def self.parse_hex_group: (String group, String text) -> Array[Integer]
+  def self.digit_value: (String ch, Integer base) -> Integer
+  def self.hex4: (Integer value) -> String
+
+  private
+  def v4_loopback?: (Integer at) -> bool
+  def v4_private?: (Integer at) -> bool
+  def v4_link_local?: (Integer at) -> bool
+end

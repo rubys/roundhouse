@@ -1053,6 +1053,31 @@ fn ruby_runtime_files(
 
     files.retain(|(p, _)| p != "runtime/db.rb");
 
+    // `IPAddr`: the CRuby/JRuby trees have Ruby's own, and it is a
+    // superset of the port. Same shape as the db.rb swap above — one
+    // require path, target-appropriate implementation — but written as
+    // a one-line file rather than a rename, because the require the
+    // emitted models carry is `require_relative ".../runtime/ipaddr"`
+    // and that path has to keep resolving.
+    //
+    // THIS IS NOT TIDINESS. Something on the CRuby side already loads
+    // the stdlib's ipaddr (net/http reaches it through resolv), and two
+    // definitions of `IPAddr::InvalidAddressError` with different
+    // superclasses is a `TypeError: superclass mismatch` at REQUIRE
+    // time — campfire's suite went 219/240 to 0/240, every file dying
+    // on the same line.
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/ipaddr.rb" {
+            *content = "# Ruby's own ipaddr — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/ruby/ipaddr.rb exists for the targets\n\
+                        # that have no stdlib to reach for; this tree has one, and\n\
+                        # defining a second IPAddr beside it is a superclass mismatch\n\
+                        # at require time.\n\
+                        require \"ipaddr\"\n"
+                .to_string();
+        }
+    }
+
     // Same swap as db.rb below: the flat walk picked up BOTH halves of
     // the keyed-digest split, and the CRuby/JRuby trees want the OpenSSL
     // one at the shared path. The spinel half reaches sp_crypto through
@@ -1596,9 +1621,15 @@ fn jruby_runtime_files(
     // backend. Without this the JVM tree got a `raise`-only
     // MessageDigest and the boot died where the aggregator requires it.
     files.retain(|(p, _)| p != "runtime/message_digest.rb");
-    for (path, _) in files.iter_mut() {
+    for (path, content) in files.iter_mut() {
         if path == "runtime/message_digest_cruby.rb" {
             *path = "runtime/message_digest.rb".to_string();
+        }
+        // JRuby has Ruby's own ipaddr too — same swap, same reason
+        // (a second `IPAddr::InvalidAddressError` is a superclass
+        // mismatch at require time). See `ruby_runtime_files`.
+        if path == "runtime/ipaddr.rb" {
+            *content = "require \"ipaddr\"\n".to_string();
         }
     }
 
@@ -1923,6 +1954,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "params",
         "action_text",
         "active_storage",
+        // The stdlib class the strict targets have no stdlib for. The
+        // ruby family reaches Ruby's own through a bare `require`, so
+        // this one only has to exist where that does not.
+        "ipaddr",
     ] {
         let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
         let content = fs::read_to_string(&rb)

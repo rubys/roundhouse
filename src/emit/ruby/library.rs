@@ -5394,6 +5394,14 @@ fn require_path_for_body_const(
         // time, so a missing anchor here is a tree that does not boot.
         "Turbo" => Some("runtime/turbo_streams".to_string()),
         "Inflector" => Some("runtime/inflector".to_string()),
+        // `IPAddr` — ported into `runtime/ruby/ipaddr.rb` because the
+        // strict targets have no stdlib to reach for. Anchored for
+        // every target, ruby family included: `ipaddr` is not in
+        // `project::BUNDLED`, so nothing inserts a bare
+        // `require "ipaddr"` that would reopen this class with the
+        // stdlib's own `initialize` and leave the predicates reading a
+        // slot nobody filled. One IPAddr per tree, and it is ours.
+        "IPAddr" => Some("runtime/ipaddr".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),
         // Gem façades — typed raising stand-ins for write-path-only
