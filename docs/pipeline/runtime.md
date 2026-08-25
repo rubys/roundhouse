@@ -495,6 +495,21 @@ the constant `true` against a non-nilable type — a correct fold of an
 incorrect type, which signed every visitor in and stopped the join-code
 page from 404ing. A lie the type system can act on is worse than a gap.
 
+### `list.many?` becomes `ActiveSupport.many?(list)`
+
+Another `Enumerable` core_ext reopen the transpiled runtimes cannot host
+— same home and same rule as `index_by` beside it, the receiver
+evaluated exactly once. Rails writes the no-block form as a
+short-circuiting `any?` with a counter so it stops at the second hit;
+the receivers that reach here are already materialized, so `length > 1`
+answers the same question.
+
+The BLOCK form (`many? { … }`) is not rewritten: it counts matches
+rather than elements, which is a different question no corpus app asks,
+so it stays visible. Neither is a receiver that is not an `Array` —
+`ActiveSupport.many?` names an Array parameter, and a Relation has its
+own surface.
+
 ### `hash.to_json` becomes `JSON.generate(hash)`
 
 `Hash#to_json` is a core_ext reopen — Ruby's json library adds it,

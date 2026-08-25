@@ -1,7 +1,7 @@
 //! ActiveSupport's `Enumerable` extensions on a plain collection,
 //! grounded to a runtime function instead of a core_ext reopen.
 //!
-//! Rails ships `index_by` by reopening `Enumerable`, which is a shape
+//! Rails ships `index_by` and `many?` by reopening `Enumerable`, which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
 //! reopen a builtin, and spinel AOT cannot dispatch a user-defined
 //! method on one. The runtime already answers `index_by` on
@@ -39,11 +39,30 @@ fn rewrite(expr: &mut Expr) {
     let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
         return;
     };
-    if method.as_str() != "index_by" || !args.is_empty() || block.is_none() {
+    // `index_by` takes the block and `many?` refuses one — the bare
+    // call is the form Rails' counter-and-`any?` body reduces to a
+    // length test, and the block form counts MATCHES instead, which is
+    // a different question no corpus app asks.
+    let wants_block = match method.as_str() {
+        "index_by" => true,
+        "many?" => false,
+        _ => return,
+    };
+    if !args.is_empty() || block.is_some() != wants_block {
         return;
     }
     let Some(receiver) = recv.as_ref() else { return };
     if is_relation(receiver.ty.as_ref()) {
+        return;
+    }
+    // `many?` names an `Array` parameter, so only an Array receiver
+    // goes. `index_by` keeps the wider gate it has always had (its
+    // parameter is untyped, and an untyped receiver is the case the
+    // header explains). A Hash or String receiver here stays visible
+    // rather than becoming a call whose argument does not fit.
+    if method.as_str() == "many?"
+        && !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. }))
+    {
         return;
     }
     let receiver = recv.take().expect("checked above");

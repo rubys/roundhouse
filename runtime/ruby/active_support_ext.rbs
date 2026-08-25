@@ -16,4 +16,5 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
+  def self.many?: (Array[untyped] list) -> bool
 end

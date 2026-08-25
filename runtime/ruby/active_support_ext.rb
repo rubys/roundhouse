@@ -110,4 +110,19 @@ module ActiveSupport
     list.each { |x| h[yield x] = x }
     h
   end
+
+  # AS `Enumerable#many?`, no-block form: MORE THAN ONE element. Rails
+  # writes it as a short-circuiting `any?` with a counter so it stops at
+  # the second hit; the receivers that reach here are already
+  # materialized, so `length` answers the same question without the
+  # block. Another core_ext reopen the transpiled runtimes cannot host —
+  # same home and same rule as `index_by` above, the receiver evaluated
+  # exactly once.
+  #
+  # The block form (`many? { … }`) is NOT here: it counts matches
+  # instead, and no corpus app writes it. `lower::enumerable_ext`
+  # rewrites only the bare call, so the block form stays visible.
+  def self.many?(list)
+    list.length > 1
+  end
 end

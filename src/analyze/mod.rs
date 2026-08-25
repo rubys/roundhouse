@@ -1288,8 +1288,13 @@ impl Analyzer {
             let mut chained_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
             // Overlay each class's Phase-B refinements onto its Phase-A
             // harvest as we walk. Per-KEY, and only where the refined
-            // value carries shape, so this can add an answer but never
-            // take one away.
+            // value carries SHAPE — `is_unknown`, not `is_open`, because
+            // `Untyped` is as empty an answer as `Var` and unioning it
+            // into the controller-wide env widens every sibling binding
+            // of the same name. Mastodon's `@account` came out
+            // `Account | untyped` under the looser gate, which the IDE
+            // smoke reads as a hover regression. This can add an answer,
+            // never take one away.
             let layer = |dst: &mut HashMap<Symbol, HashMap<Symbol, Ty>>,
                              owner: &ClassId,
                              name: &Symbol,
@@ -1299,7 +1304,7 @@ impl Analyzer {
                     self.refined_action_bindings.get(&(owner.clone(), name.clone()))
                 {
                     for (k, v) in refined {
-                        if !v.is_open() {
+                        if is_clean_binding(v) {
                             merged.insert(k.clone(), v.clone());
                         }
                     }
@@ -1458,7 +1463,7 @@ impl Analyzer {
                     }
                     let shaped: HashMap<Symbol, Ty> = ivars
                         .iter()
-                        .filter(|(_, v)| !v.is_open())
+                        .filter(|(_, v)| is_clean_binding(v))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     if shaped.is_empty() {
@@ -3815,6 +3820,27 @@ fn collect_const_attr_writes(
         }
     }
     expr.node.for_each_child(&mut |c| collect_const_attr_writes(c, targets, out));
+}
+
+/// A binding worth carrying to a SUBCLASS: one that is an answer.
+///
+/// `is_unknown` is not enough. `Account | untyped` is neither `Var` nor
+/// `Untyped`, so it passes that test — and then it unions into the
+/// subclass's controller-wide environment and widens a sibling binding
+/// of the same name that WAS clean. Mastodon's `@account` hovered as
+/// `Account` before this persistence existed and as `Account | untyped`
+/// after, which is the IDE's whole product getting worse to close a
+/// campfire error.
+///
+/// So: no open or gradual arm anywhere in a top-level union, and not
+/// one itself. The persistence exists to carry a shaped answer down an
+/// inheritance chain; a half-answer is what the Phase-A harvest already
+/// provides, and layering one can only subtract.
+fn is_clean_binding(ty: &Ty) -> bool {
+    match ty {
+        Ty::Union { variants } => variants.iter().all(|v| !v.is_unknown()),
+        t => !t.is_unknown(),
+    }
 }
 
 pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
