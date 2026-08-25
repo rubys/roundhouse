@@ -323,7 +323,15 @@ async function boot() {
   client = createClient({
     workerUrl: new URL("../lib/worker.mjs", import.meta.url),
     wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,
-    timeoutMs: 30000,
+    // 60s, not 30s: this is a HANG detector, and a hang is infinite — the
+    // only thing the threshold decides is how long a genuinely-working
+    // transpile may take before we call it dead. Mastodon, the largest app
+    // in the picker, needs ~30s of honest work here, so 30000 left no
+    // headroom at all: the check went red on 192afe42 and again on
+    // 68f4d828 (a change measured at +0.6% native, 8.02s -> 8.07s), which
+    // is a gate reporting runner variance rather than regressions. Raising
+    // it does not make the transpile faster — that stays on the list.
+    timeoutMs: 60000,
     onRestart: (reason) => setStatus(`compiler restarted — ${reason}`, "err"),
   });
   await client.ready();
