@@ -254,6 +254,16 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
 }
 
 fn render_union(variants: &[Ty]) -> String {
+    // `String | untyped` IS `untyped` — the gradual arm subsumes every
+    // other one, so rendering the members alongside it advertises a
+    // precision the type does not have. Spinel reads `(String |
+    // untyped)` as a real union and emits the poly dispatch anyway, so
+    // the fake arm costs speed on top of honesty. Collapse first,
+    // before the `T?` sugar, or a `T | untyped | nil` renders the
+    // equally-meaningless `untyped?`.
+    if variants.iter().any(|v| matches!(v, Ty::Untyped | Ty::Var { .. })) {
+        return "untyped".into();
+    }
     // `T | nil` collapses to `T?` (RBS idiomatic optional form).
     let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
     // Dedup structurally-equal members, preserving first-seen order. A

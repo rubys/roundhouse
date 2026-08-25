@@ -725,60 +725,129 @@ impl Analyzer {
             self.run_typing_passes(app);
         }
 
+        // The loop's last act is a typing pass whose results nothing
+        // harvested — either it hit the cap, or it ran on the round
+        // that then converged. Either way `self.classes` is one round
+        // behind the bodies in `app`, and the signature stamping below
+        // reads the registry. Harvesting once more costs no re-typing
+        // and makes the two agree.
+        self.harvest_returns_to_registry(app);
+
         if let Ok(name) = std::env::var("RH_DEBUG_CLASS") {
             let id = ClassId(Symbol::from(name.as_str()));
             if let Some(ci) = self.classes.get(&id) {
                 eprintln!("DBG class {name} instance={:?}", ci.instance_methods);
                 eprintln!("DBG class {name} class={:?}", ci.class_methods);
+                for ((c, m), v) in &self.inferred_params {
+                    if c == &id {
+                        eprintln!("DBG params {}#{} = {:?}", c.0.as_str(), m.as_str(), v);
+                    }
+                }
             } else {
                 eprintln!("DBG class {name} NOT REGISTERED");
             }
         }
-        self.stamp_inferred_helper_signatures(app);
+        self.stamp_inferred_library_signatures(app);
     }
 
-    /// Post-fixpoint: write call-site-inferred parameter types into the
-    /// `MethodDef.signature` of app-helper methods, so the emitted RBS
-    /// carries what inference discovered (`errors_for: (Comment |
-    /// Story | …) -> String?` instead of `(untyped) -> untyped`) and
-    /// AOT targets can dispatch inside the helper body. Self-describing
-    /// IR: the body typer already consumed these seeds during the
-    /// fixpoint; this records the same fact where emitters read it.
+    /// Post-fixpoint: write what inference discovered into the
+    /// `MethodDef.signature` of every library-class method, so the
+    /// emitted RBS carries it (`errors_for: (Comment | Story | …) ->
+    /// String?` instead of `(untyped) -> untyped`) and AOT targets can
+    /// dispatch inside the body. Self-describing IR: the body typer
+    /// already consumed these seeds during the fixpoint; this records
+    /// the same fact where emitters read it.
     ///
-    /// Scoped to helper modules (`app.helper_method_index` values) —
-    /// the view→helper channel is where params have no other typing
-    /// source. Widening to all library classes is a deliberate later
-    /// step (it shifts strict-target emit for non-helper classes).
-    /// Never clobbers an existing signature (RBS-derived or
-    /// author-written), and stamps nothing when inference learned
-    /// nothing (all params `Var`).
-    fn stamp_inferred_helper_signatures(&self, app: &mut App) {
-        let helper_classes: std::collections::HashSet<ClassId> =
-            app.helper_method_index.values().cloned().collect();
+    /// **This used to be scoped to helper modules**, on the reasoning
+    /// that the view→helper channel is where params have no other
+    /// typing source. That left every other plain class emitting a
+    /// fully-`untyped` sidecar even though the analyzer had the shapes
+    /// all along — lobsters' `CandidateId#to_s` registered as `String`
+    /// in `self.classes` and shipped as `() -> untyped`, and the
+    /// resulting poly `.to_s` widened a `Hash[String, String]` far
+    /// enough downstream to produce two C errors. The registry is the
+    /// same answer call sites resolve against, so sourcing the return
+    /// from it keeps the sidecar and dispatch from disagreeing.
+    ///
+    /// Three things it will not do:
+    ///
+    /// * **Clobber an existing signature** (RBS-derived, façade, or
+    ///   author-written). Hand-written wins, as everywhere else.
+    /// * **Stamp `initialize`.** Its body type is whatever the last
+    ///   assignment happened to be; `new` answers the class. Leaving it
+    ///   unstamped renders the untyped fallback, which is true.
+    /// * **Stamp when it learned nothing.** All-`Var` params and a
+    ///   `Var`/`Untyped`/absent return render exactly what the untyped
+    ///   fallback renders, so skipping keeps the output byte-identical
+    ///   rather than routing it through a second code path.
+    fn stamp_inferred_library_signatures(&self, app: &mut App) {
         for lc in &mut app.library_classes {
-            if !helper_classes.contains(&lc.name) {
-                continue;
-            }
+            let registered = self.classes.get(&lc.name);
             for method in &mut lc.methods {
                 if method.signature.is_some() {
                     continue;
                 }
-                let key = (lc.name.clone(), method.name.clone());
-                let Some(inferred) = self.inferred_params.get(&key) else { continue };
-                if inferred.iter().all(|t| matches!(t, Ty::Var { .. })) {
+                if method.name.as_str() == "initialize" {
                     continue;
                 }
+                let key = (lc.name.clone(), method.name.clone());
+                let inferred = self.inferred_params.get(&key);
+                let has_params = inferred
+                    .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
+
+                // The registry first: `harvest_returns_to_registry`
+                // already walked this class and wrote the answer every
+                // call site resolves against. `effective_return_ty` is
+                // the fallback for a method the harvest skipped (a
+                // scope-shaped class method takes an early `continue`
+                // there).
+                let table = registered.map(|ci| match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &ci.class_methods,
+                });
+                let ret = table
+                    .and_then(|t| t.get(&method.name))
+                    .filter(|t| !matches!(t, Ty::Fn { .. }))
+                    .cloned()
+                    .or_else(|| effective_return_ty(&method.body))
+                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
+
+                if !has_params && ret.is_none() {
+                    continue;
+                }
+
                 let params: Vec<crate::ty::Param> = method
                     .params
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        let ty = inferred
-                            .get(i)
-                            .filter(|t| !matches!(t, Ty::Var { .. }))
-                            .cloned()
-                            .unwrap_or(Ty::Untyped);
-                        let kind = if p.keyword {
+                        // A rest slot stays untyped. `collect_send_sites`
+                        // records argument types BY POSITION, so the
+                        // slot under a `*streams` sees only whatever
+                        // landed in that one position — the second and
+                        // later varargs of the same call are recorded
+                        // against positions that have no param at all.
+                        // `Utils.silence_stream(STDOUT, STDERR)` unified
+                        // to `*STDERR streams`, a declaration about
+                        // every vararg made from one of them.
+                        let ty = if p.rest {
+                            Ty::Untyped
+                        } else {
+                            inferred
+                                .and_then(|v| v.get(i))
+                                .filter(|t| !matches!(t, Ty::Var { .. }))
+                                .cloned()
+                                .unwrap_or(Ty::Untyped)
+                        };
+                        // Kind must survive verbatim: the untyped
+                        // fallback this replaces is kind-aware, and a
+                        // `*streams` rendered positionally makes the
+                        // sig disagree with the def.
+                        let kind = if p.keyword && p.rest {
+                            crate::ty::ParamKind::KeywordRest
+                        } else if p.rest {
+                            crate::ty::ParamKind::Rest
+                        } else if p.keyword {
                             crate::ty::ParamKind::Keyword { required: p.default.is_none() }
                         } else if p.default.is_some() {
                             crate::ty::ParamKind::Optional
@@ -788,13 +857,10 @@ impl Analyzer {
                         crate::ty::Param { name: p.name.clone(), ty, kind }
                     })
                     .collect();
-                let ret = effective_return_ty(&method.body)
-                    .filter(|t| !matches!(t, Ty::Var { .. }))
-                    .unwrap_or(Ty::Untyped);
                 method.signature = Some(Ty::Fn {
                     params,
                     block: None,
-                    ret: Box::new(ret),
+                    ret: Box::new(ret.unwrap_or(Ty::Untyped)),
                     effects: method.effects.clone(),
                 });
             }
@@ -2817,6 +2883,16 @@ impl Analyzer {
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
     fn unify_params_from_call_sites(&mut self, app: &App) {
+        // Rebuilt from scratch every fixpoint round. The table is pure
+        // derived state — a function of the types the last typing pass
+        // wrote onto the call-site argument expressions — and carrying
+        // it forward makes it MONOTONIC in the wrong direction: round 1
+        // sees `self.id = generate_id` before `generate_id` is known
+        // and records `Untyped`; round 2 sees `Str`; unify fuses them
+        // into `Str | Untyped`, which is `untyped` with extra steps.
+        // The refined round strictly dominates the one before it, so
+        // the earlier observation has nothing to contribute.
+        self.inferred_params.clear();
         let helpers = &app.helper_method_index;
         let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
         for model in &app.models {

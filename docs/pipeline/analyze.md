@@ -17,11 +17,20 @@ whole app, then a whole-program fixpoint: harvest inferred return
 types from method bodies into the dispatch registry, unify parameter
 types across call sites, re-type with the refined registry, and
 repeat until a signature fingerprint stabilizes (bounded iterations).
+The param table is rebuilt each round rather than accumulated: it is
+derived from the types the last pass wrote, and carrying a round-1
+observation forward fuses an under-informed `Untyped` into the
+converged answer. The loop's last act is a typing pass, so one final
+harvest runs after it — otherwise the registry is permanently a round
+behind the bodies.
 A companion fixpoint (`Analyzer::build_constant_registry`) types
 app-level constants — see below. After convergence,
-`stamp_inferred_helper_signatures` writes call-site-inferred
-parameter types into helper `MethodDef.signature`s so emitters read
-what inference discovered.
+`stamp_inferred_library_signatures` writes what inference discovered
+into every library-class `MethodDef.signature` — returns from the
+dispatch registry, params from the call-site unification — so emitters
+and the emitted `.rbs` sidecars carry it. It never clobbers a
+hand-written signature, never stamps `initialize`, and stamps nothing
+when it learned nothing.
 
 ### Type walk — `BodyTyper`
 
