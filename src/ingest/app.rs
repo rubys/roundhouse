@@ -792,6 +792,29 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
+    // Façade typing contracts, merged the same way an app's own `sig/`
+    // sidecars are. A façade's `.rbs` is written to describe the REAL
+    // shapes consumers chain on, and until now it was applied only at
+    // emit time — after inference had already run — so analysis never
+    // saw it. That cost lobsters two C errors ten links downstream:
+    // `OpenSSL::Random.random_bytes` typed untyped, which widened `str`
+    // in `Utils.random_str`, which made `CandidateId#to_s` untyped,
+    // which put a `def to_s: () -> untyped` in the program — and one of
+    // those widens every poly `.to_s` (matz/spinel#4090).
+    //
+    // Signatures merge for EVERY target, not just the strict ones that
+    // swap the bodies. The contract describes the true API (`to_html`
+    // really does answer a String; `random_bytes` really does answer a
+    // String), so it is correct where the real gem runs too — and
+    // target-conditional inference would let the CRuby and spinel lanes
+    // disagree about types, which is what dual-runtime parity forbids.
+    for (class_id, methods) in crate::facades::signatures_for(&app) {
+        app.rbs_signatures
+            .entry(class_id)
+            .or_default()
+            .extend(methods);
+    }
+
     app.sources = super::sources::drain();
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.

@@ -62,63 +62,40 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
-/// App-defined classes whose bodies drive un-modeled native/stdlib
-/// surface or a spinel-refused control-flow shape. Spinel AOT prices
-/// every method body in the reachable require graph, and these bodies
-/// cannot compile — so the scaffold base swaps their emitted files for
-/// hand-written raising façades at the SAME emit path, leaving the
-/// require graph untouched. The CRuby tree, where the real gems/stdlib
-/// exist and the source runs as written, restores the verbatim emit via
-/// `restore_extras_facades`. Same raise-loudly contract as
-/// runtime/ruby/gem_facades.rb.
-///
-/// - Sponge = Net::HTTP + Resolv + IPAddr + OpenSSL (pending the stdlib
-///   spin packages).
-/// - Markdowner walks a Markly DOM with a recursive block-driving helper
-///   (`walk_text_nodes` forwards `&block` through `Markly::Node#each`);
-///   that identity-forwarding block-through-a-yielding-method recursion
-///   is a deliberate spinel always-inline boundary (matz/spinel#2948).
-///   All consumers are write-path (`markeddown_*` precomputed on save),
-///   so the read benchmark never renders markdown. Real fix = a
-///   Commonmarker façade over the gem's iterative `Node#walk`.
-/// - FlaggedCommenters computes flag statistics with MySQL-only SQL
-///   (stddev(), if()) under `Rails.cache.fetch` blocks whose bodies
-///   also carry un-modeled calls (`exec_query().first.symbolize_keys!`,
-///   select-alias readers); the lobsters-bench capture disables the
-///   feature rather than port that SQL to SQLite. Constructor and
-///   readers stay real; the statistics methods raise.
-const EXTRAS_FACADES: &[(&str, &str, &str)] = &[
-    (
-        "app/models/sponge",
-        include_str!("../../../runtime/spinel/facades/sponge.rb"),
-        include_str!("../../../runtime/spinel/facades/sponge.rbs"),
-    ),
-    (
-        "app/models/markdowner",
-        include_str!("../../../runtime/spinel/facades/markdowner.rb"),
-        include_str!("../../../runtime/spinel/facades/markdowner.rbs"),
-    ),
-    (
-        "app/models/flagged_commenters",
-        include_str!("../../../runtime/spinel/facades/flagged_commenters.rb"),
-        include_str!("../../../runtime/spinel/facades/flagged_commenters.rbs"),
-    ),
-    (
-        "app/models/html_encoder",
-        include_str!("../../../runtime/spinel/facades/html_encoder.rb"),
-        include_str!("../../../runtime/spinel/facades/html_encoder.rbs"),
-    ),
-];
+use crate::facades::{Facade, EXTRAS_FACADES};
 
 /// Swap façade-fated extras emits (scaffold base: spinel + the trees
 /// derived from it). No-op when the app doesn't define the class —
 /// the path simply isn't present.
 pub(super) fn apply_extras_facades(files: &mut [(String, String)]) {
-    for (stem, rb, rbs) in EXTRAS_FACADES {
+    for Facade {
+        stem, rb, rbs, ..
+    } in EXTRAS_FACADES
+    {
         for (path, content) in files.iter_mut() {
             if path == &format!("{stem}.rb") {
                 *content = (*rb).to_string();
-            } else if path == &format!("{stem}.rbs") {
+            } else if path == &format!("{stem}.rbs") || path == &format!("sig/{stem}.rbs") {
+                // BOTH forms, and the `sig/` one is the one that fires.
+                // `emit_library_class_rbs` writes sidecars `sig/`-rooted
+                // (`sig_path_for`), and `spin_shape` only flattens them to
+                // file-adjacent LATER — so at this point every sidecar is
+                // still `sig/app/models/<stem>.rbs`. Matching only the bare
+                // form meant this arm never fired for any of the four
+                // façades: the `.rb` swapped, the `.rbs` did not, and every
+                // consumer read roundhouse's own inference instead of the
+                // hand-written contract sitting beside the façade.
+                //
+                // What that cost, end to end: the contract declares
+                // `OpenSSL::RandomSource.random_bytes: (Integer) -> String`,
+                // and without it that call typed untyped, which widened
+                // `str` in `Utils.random_str`, which made
+                // `CandidateId#to_s` untyped, which put a
+                // `def to_s: () -> untyped` in the program — and one of
+                // those widens every poly `.to_s` (matz/spinel#4090). Ten
+                // links on, the cookie jar's `@inbound[k.to_s] = v` had
+                // untyped KEYS and the C build stopped on a PolyPolyHash
+                // reaching a `Hash[String, String]` slot.
                 *content = (*rbs).to_string();
             }
         }
@@ -135,7 +112,7 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
         let p = ef.path.to_string_lossy().into_owned();
         if EXTRAS_FACADES
             .iter()
-            .any(|(stem, _, _)| p == format!("{stem}.rb") || p == format!("{stem}.rbs"))
+            .any(|f| p == format!("{}.rb", f.stem) || p == format!("{}.rbs", f.stem))
         {
             for (path, content) in files.iter_mut() {
                 if *path == p {

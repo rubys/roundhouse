@@ -33,4 +33,23 @@ module OpenSSL
   module RandomSource
     def self.random_bytes: (Integer n) -> String
   end
+
+  # `sponge.rb` closes with `Random = RandomSource` — the implementation
+  # module cannot BE named Random (spinel#2455: it collides with the
+  # builtin PRNG's C typedef), so the name app code calls is a constant
+  # alias. RBS here has no alias form and our parser has no case for one,
+  # so the signature is declared under both names rather than inherited
+  # through the alias.
+  #
+  # This is load-bearing, not tidiness. Lobsters reaches entropy as
+  # `OpenSSL::Random.random_bytes(1)`; with only RandomSource declared
+  # that call typed untyped, which widened `str` in `Utils.random_str`,
+  # which made `CandidateId#to_s` untyped, which put a
+  # `def to_s: () -> untyped` in the program — and one of those widens
+  # every poly `.to_s` (matz/spinel#4090). Ten links later the cookie
+  # jar's `@inbound[k.to_s] = v` had untyped KEYS and the C build stopped
+  # on a PolyPolyHash reaching a Hash[String, String] slot.
+  module Random
+    def self.random_bytes: (Integer n) -> String
+  end
 end
