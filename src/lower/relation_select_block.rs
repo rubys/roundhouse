@@ -39,7 +39,10 @@
 //! A receiver typed as something concrete and non-relational is left
 //! alone. It cannot be the runtime Relation, its `select` already means
 //! Enumerable's, and every target emitter has a path for that name
-//! today — no reason to move it.
+//! today — no reason to move it. `Array<Model>` is NOT that: it is the
+//! array REPRESENTATION of a relation chain (an association read, an
+//! inline `Model.where(…)`), a runtime Relation, and it is rewritten
+//! with the rest.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
@@ -65,10 +68,35 @@ fn rewrite(expr: &mut Expr) {
         // No annotation at all — the same "nothing is known here" the
         // predicate below names, spelled by absence.
         None => true,
-        Some(t) => matches!(t, Ty::Relation { .. }) || t.is_unknown(),
+        // The ARRAY REPRESENTATION of a relation counts too: an
+        // association read and an inline `Model.where(…)` chain are
+        // both `Array<Model>` in this type system and both an
+        // `ActiveRecord::Relation` at runtime, where `select` is the
+        // projection. campfire's `extract_direct_memberships` reached
+        // here as `Ty::Untyped` until its caller's receiver got a type,
+        // and then the same call — the same runtime relation — stopped
+        // being rewritten and raised `select: no columns (a block form
+        // reached the projection)`. A type getting BETTER must not
+        // change what a gate decides about the same value.
+        Some(t) => t.is_unknown() || relation_shaped(t),
     };
     if !rewritable {
         return;
     }
     *method = Symbol::from("filter");
+}
+
+/// A `Ty` that can be an `ActiveRecord::Relation` at runtime:
+/// `Ty::Relation`, its ARRAY REPRESENTATION (`Array<Model>` — an
+/// association read, an inline `Model.where(…)` chain), or a union
+/// with either inside. The union arm is not hypothetical: campfire's
+/// `Current.user.memberships.visible…` starts from a nilable
+/// `Current.user`, and the dispatch over the union hands back a union.
+fn relation_shaped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Relation { .. } => true,
+        Ty::Array { elem } => matches!(&**elem, Ty::Class { .. }),
+        Ty::Union { variants } => variants.iter().any(relation_shaped),
+        _ => false,
+    }
 }

@@ -470,6 +470,31 @@ UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
 reported `no known method insert_all on Class { Membership }` while the
 emitted code was the inlined loop, correct all along.
 
+### `Current.reset` replaces the instance instead of nilling it
+
+`ingest::current_attributes` turns `class Current <
+ActiveSupport::CurrentAttributes` into a plain singleton, and `reset`
+used to set the slot to nil. Rails' `CurrentAttributes.reset` puts every
+attribute back to its default, which a fresh instance also does — so at
+runtime the two agree, at the cost of one allocation per request.
+
+They do not agree in the type system, and that is why it changed.
+`@__instance`'s type is the union of what the class assigns it, so the
+single `= nil` made `self.instance` answer `Current | Nil`; the
+class-level forwarders are all `Current.instance.<name>`, so every one
+of them registered `Untyped`; and campfire routes essentially all
+per-request state through those forwarders. One `nil` in a synthesized
+method, and `Current.user.rooms` — plus every ivar downstream of one —
+had no shape.
+
+**`Current.<attr>` keeps its Nil arm**, unlike the controller-wide ivar
+seed, which strips it. The write sites are the seed (`Current.user =
+bot` in the authentication concern says `User | Nil`), and something
+reads that arm: `def signed_in?; Current.user.present?; end` folds to
+the constant `true` against a non-nilable type — a correct fold of an
+incorrect type, which signed every visitor in and stopped the join-code
+page from 404ing. A lie the type system can act on is worse than a gap.
+
 ### `Random.uuid` reads the CSPRNG, not the PRNG
 
 `securerandom.rb` defines one module, `Random::Formatter`, and extends

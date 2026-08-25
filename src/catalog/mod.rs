@@ -1431,6 +1431,29 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ArrayOfSelf),
     },
+    // `destroy_by` / `delete_by` — `where` plus the write above it, and
+    // real `Relation` methods in Rails and in `runtime/ruby/
+    // active_record/relation.rb` alike. At a CLASS root
+    // `lower::destroy_by` splits them earlier; on an ASSOCIATION READ
+    // (`Current.user.push_subscriptions.destroy_by(id: …)`) the
+    // receiver is Array-representation, which resolves through this
+    // context — so leaving them out of it reported `no known method
+    // destroy_by on Array { Push::Subscription }` about the one method
+    // Rails and our Relation both define.
+    CatalogedMethod {
+        name: "destroy_by",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "delete_by",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Int),
+    },
     // Introspection. `relation.model` is the element's class object;
     // `SelfType` reproduces the send.rs arm's `elem.clone()` (the
     // class/instance conflation is the arm's, kept deliberately).

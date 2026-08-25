@@ -61,6 +61,37 @@ pub(in crate::analyze) fn register(
         }
     }
 
+    // `self.becomes_from(source)` on an STI subclass — the recast
+    // constructor `lower::sti_scope` synthesizes for
+    // `room.becomes!(Rooms::Closed)`. That pass runs AFTER analyze, so
+    // nothing typed the name and campfire's `@room = @room
+    // .becomes!(Rooms::Closed)` left `@room` shapeless from the filter
+    // on down: four reads in `Rooms::ClosedsController` and two more in
+    // the Opens twin reported `@room has no known type` about an ivar
+    // holding exactly what its own class name says.
+    //
+    // Registered for every subclass of a model rather than only the
+    // recast targets, on the same reasoning `attachable_sgid` carries:
+    // this walk cannot see the demand gate, and the method's TYPE is
+    // the same either way — whether it EXISTS is decided at the seam
+    // that synthesizes it. Nobody writes the name by hand, so a
+    // registration here cannot mask a typo.
+    {
+        let model_names: std::collections::HashSet<&ClassId> =
+            app.models.iter().map(|m| &m.name).collect();
+        for lc in &app.library_classes {
+            if !lc.parent.as_ref().is_some_and(|p| model_names.contains(p)) {
+                continue;
+            }
+            classes
+                .entry(lc.name.clone())
+                .or_default()
+                .class_methods
+                .entry(Symbol::from("becomes_from"))
+                .or_insert(Ty::Class { id: lc.name.clone(), args: vec![] });
+        }
+    }
+
     // ActionMailer classes: a mailer declares its actions as plain
     // instance `def`s (`def notify(user, …)`) but Rails invokes them
     // on the *class* and returns a deliverable

@@ -244,6 +244,57 @@ impl<'a> BodyTyper<'a> {
     /// Methods declared with `Keyword`/`KeywordRest` last params stay
     /// kwargs (the bare named-args call shape); methods declared with
     /// `opts = {}` (positional Hash) get the rewrite.
+    /// `room.memberships.grant_to(users)` — an association EXTENSION
+    /// method, resolved from the receiver's SHAPE because its type
+    /// cannot carry the answer: the association read is
+    /// `Array<Membership>`, and `Membership` has no `grant_to` (nor
+    /// does `Room`). Reading the two hops here is the same thing the
+    /// emit-time flattening reads when it rewrites the call to
+    /// `room.memberships_grant_to(users)`.
+    ///
+    /// The owner has to be a KNOWN class and the pair has to be
+    /// registered, so this resolves declared extension methods and
+    /// nothing else — `room.memberships.no_such_thing` still lands in
+    /// the ledger.
+    pub(super) fn assoc_extension_ty(
+        &self,
+        recv: Option<&crate::expr::Expr>,
+        method: &Symbol,
+    ) -> Option<Ty> {
+        let ExprNode::Send { recv: Some(owner), method: assoc, block: None, .. } =
+            &*recv?.node
+        else {
+            return None;
+        };
+        // Peel a nilable owner: `Room.first.memberships.grant_to(u)`
+        // has a `Room | Nil` receiver, and the extension is the same
+        // one either way — the nil case is a NoMethodError in Rails
+        // too, reported (if at all) about `memberships`, not about the
+        // extension.
+        let id = match owner.ty.as_ref()? {
+            Ty::Class { id, .. } => id,
+            Ty::Union { variants } => variants.iter().find_map(|v| match v {
+                Ty::Class { id, .. } => Some(id),
+                _ => None,
+            })?,
+            _ => return None,
+        };
+        // Walk the parent chain: an STI subclass declares no
+        // associations of its own, so campfire's `@room` — a
+        // `Rooms::Closed` after `becomes!` — reaches `memberships`
+        // and its extension block through `Room`.
+        let key = (assoc.clone(), method.clone());
+        let mut current = Some(id);
+        for _ in 0..32 {
+            let cls = self.classes().get(current?)?;
+            if let Some(ty) = cls.assoc_extensions.get(&key) {
+                return Some(ty.clone());
+            }
+            current = cls.parent.as_ref();
+        }
+        None
+    }
+
     pub(super) fn normalize_trailing_kwargs(
         &self,
         recv_ty: Option<&Ty>,
@@ -313,6 +364,25 @@ impl<'a> BodyTyper<'a> {
         // For non-class receivers (`1.class`, `"x".class`) we still
         // hand back generic `Class` since the per-primitive metaclass
         // isn't represented in the registry.
+        // `record.becomes!(Rooms::Closed)` — Rails' STI recast. The
+        // answer is named by the ARGUMENT, not the receiver, which no
+        // class table can express, so it is resolved here rather than
+        // through the registry walk. `lower::sti_scope` rewrites the
+        // call to `Rooms::Closed.becomes_from(record)` after analyze;
+        // both spellings answer the same class, and without this one
+        // campfire's `@room = @room.becomes!(Rooms::Closed)` made
+        // `@room` shapeless for every read downstream of the filter
+        // that ran it — four in the Closeds controller, two in Opens.
+        if matches!(method.as_str(), "becomes" | "becomes!") && args.len() == 1 {
+            if let ExprNode::Const { path } = &*args[0].node {
+                return Ty::Class {
+                    id: ClassId(Symbol::from(
+                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str(),
+                    )),
+                    args: vec![],
+                };
+            }
+        }
         if method.as_str() == "class" {
             return match recv_ty {
                 Some(Ty::Class { id, args }) => Ty::Class {
@@ -684,6 +754,41 @@ impl<'a> BodyTyper<'a> {
                             Some(other) if cls.relation_derived.contains(method) => {
                                 return other.clone();
                             }
+                            // Any other class method the element model
+                            // defines — the Array-representation twin of
+                            // the Relation arm's widened delegation
+                            // below, and for the same reason: an
+                            // association read is a relation in Rails,
+                            // the scope-chain survey re-roots the call at
+                            // the constant for ANY class method
+                            // (`user.searches.record(q)`,
+                            // `@room.messages.create_with_attachment!`),
+                            // and the analyzer declining to type it left
+                            // it stricter than the pipeline. Gated on the
+                            // model DEFINING the name, so it is not
+                            // method_missing.
+                            //
+                            // NOT for a name the AR catalog owns. Those
+                            // are already registered on every model's
+                            // class side, and their CLASS-context answer
+                            // is deliberately not their relation-context
+                            // one — `find` raises on a relation and
+                            // returns `Self`, while on this receiver it
+                            // is `Enumerable#detect`. Delegating them
+                            // here jumped over `array_method`, and
+                            // `@room.messages.where(…).first` came back
+                            // shaped wrongly enough that the route
+                            // helper stopped coercing it to an id:
+                            // `room_message_path(@room.id, message)`.
+                            Some(other)
+                                if crate::catalog::lookup(
+                                    method.as_str(),
+                                    crate::catalog::ReceiverContext::Class,
+                                )
+                                .is_none() =>
+                            {
+                                return other.clone()
+                            }
                             _ => {}
                         }
                     }
@@ -810,8 +915,21 @@ impl<'a> BodyTyper<'a> {
                         // said the model defines this name. A name no
                         // model defines still falls through to the
                         // Enumerable surface and then to the ledger.
-                        Some(other) => return other.clone(),
-                        None => {}
+                        // Same widening, same carve-out as the
+                        // Array arm above: a name the AR catalog owns
+                        // was already answered in relation context by
+                        // the lookup at the top of this arm, and its
+                        // class-context entry means something else.
+                        Some(other)
+                            if crate::catalog::lookup(
+                                method.as_str(),
+                                crate::catalog::ReceiverContext::Class,
+                            )
+                            .is_none() =>
+                        {
+                            return other.clone()
+                        }
+                        _ => {}
                     }
                 }
                 let elem = Ty::Class { id: of.clone(), args: vec![] };

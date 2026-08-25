@@ -113,6 +113,20 @@ pub struct ClassInfo {
     /// `AccessorKind::Method` and forcing the parens). Class lookups
     /// use the same `ClassId` shape the registry keys use.
     pub parent: Option<crate::ident::ClassId>,
+    /// `has_many :memberships do def grant_to(users) … end end` — the
+    /// methods an association EXTENSION BLOCK declares, keyed
+    /// `(association, method)`.
+    ///
+    /// They cannot live in `instance_methods` of either class
+    /// involved: they are not the owner's (you call them on the
+    /// association) and not the target's (`Membership` has no
+    /// `grant_to`). And the association read types `Array<Membership>`,
+    /// which has forgotten which association produced it — so the
+    /// dispatch arms cannot find them from the receiver's TYPE at all.
+    /// The Send arm looks them up from the receiver's SHAPE instead,
+    /// which is the same two hops the emit-time flattening reads
+    /// (`room.memberships.grant_to(u)` → `room.memberships_grant_to(u)`).
+    pub assoc_extensions: HashMap<(Symbol, Symbol), Ty>,
     /// Modules mixed in via `include` (e.g. a controller's
     /// `include IntervalHelper`). A mixed-in module's instance methods
     /// become instance methods of the includer, so dispatch consults
@@ -633,6 +647,9 @@ impl<'a> BodyTyper<'a> {
                 // (Crystal NamedTuple-friendly, TS object-spread-
                 // friendly via the named-param shape).
                 self.normalize_trailing_kwargs(recv_ty.as_ref(), method, args);
+                if let Some(t) = self.assoc_extension_ty(recv.as_ref(), method) {
+                    return t;
+                }
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
             }
 

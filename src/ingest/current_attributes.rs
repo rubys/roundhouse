@@ -197,9 +197,20 @@ fn synthesized_source(
     };
 
     let mut body = String::new();
+    // `reset` REPLACES the instance rather than nilling it. Rails'
+    // `CurrentAttributes.reset` sets every attribute back to its
+    // default, which a fresh instance is; nilling the slot means the
+    // same thing at runtime and something else in the type system.
+    // `@__instance`'s type is the union of what the class assigns to
+    // it, so a single `= nil` made it `Current | Nil` — and then
+    // `self.instance` answered a nilable, `Current.instance.user`
+    // failed to dispatch on the union, and EVERY class-level forwarder
+    // (which is the whole surface app code calls) registered `Untyped`.
+    // One `nil` in a synthesized reset, and campfire's per-request
+    // state was shapeless.
     body.push_str(&format!(
         "  def self.instance\n    @__instance = {class}.new if @__instance.nil?\n    @__instance\n  end\n\n\
-         \x20 def self.reset\n    @__instance = nil\n    nil\n  end\n\n"
+         \x20 def self.reset\n    @__instance = {class}.new\n    nil\n  end\n\n"
     ));
 
     for a in attrs {
