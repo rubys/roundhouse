@@ -25,7 +25,6 @@
 //! deduplicated punch list is printed at the end. Useful for
 //! scope-estimation passes on unfamiliar fixtures.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -157,39 +156,6 @@ fn main() -> ExitCode {
 /// (`survey::bucket_key`) so "ConstantWriteNode at foo.rb" and "...
 /// at bar.rb" group into one entry with a file list.
 fn print_survey_report(errors: &[IngestError]) {
-    let mut buckets: BTreeMap<String, Vec<&IngestError>> = BTreeMap::new();
-    for err in errors {
-        buckets
-            .entry(survey::bucket_key(err))
-            .or_default()
-            .push(err);
-    }
-
-    let mut sorted: Vec<(&String, &Vec<&IngestError>)> = buckets.iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-
     eprintln!();
-    eprintln!(
-        "── Survey: {} ingest gap(s), {} distinct kind(s) ──",
-        errors.len(),
-        sorted.len(),
-    );
-    for (key, items) in sorted {
-        eprintln!("  [{}×] {}", items.len(), key);
-        // Show up to 4 file locations per bucket; collapse the tail.
-        let mut shown = std::collections::BTreeSet::new();
-        for err in items.iter().take(64) {
-            if let IngestError::Unsupported { file, .. } | IngestError::Parse { file, .. } = err {
-                shown.insert(file.clone());
-            }
-        }
-        let mut files: Vec<_> = shown.into_iter().collect();
-        files.sort();
-        for f in files.iter().take(4) {
-            eprintln!("        {f}");
-        }
-        if files.len() > 4 {
-            eprintln!("        … and {} more file(s)", files.len() - 4);
-        }
-    }
+    eprint!("{}", survey::render_report(errors));
 }

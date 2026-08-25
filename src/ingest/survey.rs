@@ -102,6 +102,53 @@ pub fn unwrap_or_record<T>(result: super::IngestResult<T>) -> super::IngestResul
 /// (which truncates the Prism-node-Debug repr's pointer-bearing
 /// payload). Used by the punch-list printer to dedupe "ConstantWriteNode
 /// at FOO" + "ConstantWriteNode at BAR" into a single grouped entry.
+/// Render the deduplicated punch list for a drained survey: one bucket
+/// per distinct gap kind, biggest first, with up to four example files
+/// each and a collapsed tail.
+///
+/// Lives here rather than in a binary because BOTH front ends print it —
+/// `roundhouse-check --continue` and `roundhouse --survey`. Returns the
+/// text instead of printing it so the caller owns the stream and the
+/// surrounding blank lines.
+pub fn render_report(errors: &[IngestError]) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fmt::Write;
+
+    let mut buckets: BTreeMap<String, Vec<&IngestError>> = BTreeMap::new();
+    for err in errors {
+        buckets.entry(bucket_key(err)).or_default().push(err);
+    }
+    let mut sorted: Vec<(&String, &Vec<&IngestError>)> = buckets.iter().collect();
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "── Survey: {} ingest gap(s), {} distinct kind(s) ──",
+        errors.len(),
+        sorted.len(),
+    );
+    for (key, items) in sorted {
+        let _ = writeln!(out, "  [{}×] {}", items.len(), key);
+        // Show up to 4 file locations per bucket; collapse the tail.
+        let mut shown = BTreeSet::new();
+        for err in items.iter().take(64) {
+            if let IngestError::Unsupported { file, .. } | IngestError::Parse { file, .. } = err {
+                shown.insert(file.clone());
+            }
+        }
+        let mut files: Vec<_> = shown.into_iter().collect();
+        files.sort();
+        for f in files.iter().take(4) {
+            let _ = writeln!(out, "        {f}");
+        }
+        if files.len() > 4 {
+            let _ = writeln!(out, "        … and {} more file(s)", files.len() - 4);
+        }
+    }
+    out
+}
+
 pub fn bucket_key(err: &IngestError) -> String {
     let msg = err_message(err);
     let trimmed = msg.split('(').next().unwrap_or(&msg);

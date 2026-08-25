@@ -49,6 +49,13 @@ Options:
                        stub at each site, downgrade the diagnostics to
                        warnings, and write the output anyway. Use to see
                        the full inventory of gaps in one run.
+      --survey         Don't abort INGEST at the first unsupported
+                       construct: record it as a gap, substitute a nil
+                       placeholder, and keep going. Prints a
+                       deduplicated punch list, and downgrades the
+                       diagnostics those gaps caused to notes. Combine
+                       with --allow-unsupported to transpile an app that
+                       is not fully covered yet.
   -h, --help           Show this help and exit.
   -V, --version        Show version and exit.
 
@@ -56,6 +63,8 @@ Examples:
   roundhouse --target rust                            # → ./out/rust/
   roundhouse --target typescript -o build/ my-app/    # explicit input + output
   roundhouse --site                                   # → ./_site/
+  roundhouse -t ruby --survey --allow-unsupported ~/git/mastodon
+                                                      # partly-covered app
 "
 }
 
@@ -69,8 +78,8 @@ fn main() -> ExitCode {
             println!("roundhouse {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Ok(Action::Transpile { target, input, out, allow_unsupported }) => {
-            match run_transpile(target, &input, &out, allow_unsupported) {
+        Ok(Action::Transpile { target, input, out, allow_unsupported, survey }) => {
+            match run_transpile(target, &input, &out, allow_unsupported, survey) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("roundhouse: {e}");
@@ -102,6 +111,7 @@ enum Action {
         input: PathBuf,
         out: PathBuf,
         allow_unsupported: bool,
+        survey: bool,
     },
     Site {
         input: PathBuf,
@@ -114,6 +124,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
     let mut site = false;
     let mut out: Option<PathBuf> = None;
     let mut allow_unsupported = false;
+    let mut survey = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut iter = args.into_iter();
@@ -123,6 +134,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
             "-V" | "--version" => return Ok(Action::Version),
             "--site" => site = true,
             "--allow-unsupported" => allow_unsupported = true,
+            "--survey" => survey = true,
             "-t" | "--target" => {
                 let v = iter
                     .next()
@@ -166,7 +178,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
                 .unwrap_or_else(|| PathBuf::from("."));
             let out =
                 out.unwrap_or_else(|| PathBuf::from("out").join(target.as_str()));
-            Ok(Action::Transpile { target, input, out, allow_unsupported })
+            Ok(Action::Transpile { target, input, out, allow_unsupported, survey })
         }
         (None, true) => {
             let input = positional
@@ -201,15 +213,29 @@ fn run_transpile(
     input: &std::path::Path,
     out: &std::path::Path,
     allow_unsupported: bool,
+    survey: bool,
 ) -> Result<(), String> {
     if !input.exists() {
         return Err(format!("input {} does not exist", input.display()));
+    }
+    // Survey mode: record unsupported constructs as gaps and substitute
+    // a nil placeholder instead of aborting at the first one. Without
+    // it the ingester is fail-fast, which is right for a supported app
+    // and useless for an unsupported one — mastodon dies on a single
+    // `alias` in `account.rb` after 0.02s, having transpiled nothing.
+    // The /ide/ page has always done this (its wasm entry calls
+    // `survey::activate()`), so before this flag the BROWSER could
+    // transpile an app the command line could not.
+    if survey {
+        roundhouse::ingest::survey::activate();
     }
     // Ingest inside a parse-diagnostic scope so Prism syntax errors —
     // which the error-recovering parser otherwise drops on the floor —
     // are collected and routed through the same report as emit gaps.
     let (app_result, parse_diags) =
         roundhouse::ingest::prism::scope(|| ingest_app(input));
+    let survey_gaps =
+        if survey { roundhouse::ingest::survey::drain() } else { Vec::new() };
     let mut app = match app_result {
         Ok(app) => app,
         Err(e) => {
@@ -219,6 +245,18 @@ fn run_transpile(
             // the error path, so these render message-only.
             for d in &parse_diags {
                 eprintln!("roundhouse: {}", d.render(&[]));
+            }
+            // Survey mode can still fail — on I/O, or on a construct
+            // outside `ingest_expr`'s interception. Print what it did
+            // collect rather than dropping it.
+            if !survey_gaps.is_empty() {
+                eprintln!();
+                eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
+            } else if !survey {
+                eprintln!(
+                    "roundhouse: hint: re-run with --survey to record unsupported \
+                     constructs as a punch list and keep going"
+                );
             }
             return Err(format!("ingest {}: {e}", input.display()));
         }
@@ -252,6 +290,17 @@ fn run_transpile(
     let mut analyze_diags =
         if target == BuildTarget::Roda { Vec::new() } else { diagnose(&app) };
     analyze_diags.extend(lower_diags);
+
+    // A diagnostic whose root cause is a recorded ingest gap is OUR
+    // coverage problem, not the app's: the nil placeholder survey mode
+    // substituted is what the analyzer then failed to resolve. Downgrade
+    // those to notes with the cause attached, so the error count means
+    // "findings" rather than "shadows of the gaps listed below".
+    roundhouse::analyze::attribution::attribute_ingest_gaps(
+        &mut analyze_diags,
+        &app,
+        &survey_gaps,
+    );
 
     // Emit inside a diagnostic scope so unsupported-construct gaps in
     // any lowerer/emitter are collected rather than lost (issue #28).
@@ -299,6 +348,19 @@ fn run_transpile(
         eprintln!(
             "roundhouse: {suppressed_warnings} analyze warning(s) not shown — \
              rerun with --allow-unsupported to list them"
+        );
+    }
+
+    // The punch list, before the gate: on an app that fails the gate
+    // this is the most useful thing in the run, and printing it after
+    // the early `return Err` would mean never printing it at all.
+    if !survey_gaps.is_empty() {
+        let notes = analyze_diags.iter().filter(|d| d.severity == Severity::Info).count();
+        eprintln!();
+        eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
+        eprintln!(
+            "roundhouse: {} ingest gap(s) recorded; {notes} diagnostic(s) attributed to them",
+            survey_gaps.len()
         );
     }
 
