@@ -805,6 +805,43 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      # The OTHER campfire number, and the one #71's Phase 0 gates on:
+      # the STRICT emit — no `--allow-unsupported`, so an unsupported
+      # construct is an ERROR and the run writes nothing at all. It
+      # reached 0 on 2026-08-26 (3357442f), 10 -> 0 in six commits, so
+      # it is a CEILING that ratchets down the way the suite's floor
+      # ratchets up.
+      #
+      # Deliberately a STRICT target, and deliberately not the lane the
+      # suite runs. `campfire-suite` emits `--target ruby
+      # --allow-unsupported`, where the same findings come out as
+      # `gradual_untyped` / `unresolved_type` warnings and the error
+      # count is 0 for a reason that means nothing — which is exactly
+      # the confusion the published summary page carries today
+      # (rubys/roundhouse#71). This step is the run the ledger's
+      # "zero errors" invariant is actually about.
+      #
+      # Same profile as the suite's own `cargo run`, so the build is
+      # shared rather than paid twice.
+      - name: Enforce the strict-emit ceiling
+        env:
+          CEILING_ERRORS: 0
+        run: |
+          set -uo pipefail
+          cargo run --quiet --bin roundhouse -- \
+            --target spinel /tmp/campfire -o /tmp/campfire-spinel \
+            > /tmp/campfire-strict.log 2>&1
+          errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
+          echo "campfire strict emit (spinel, no --allow-unsupported): $errors errors"
+          echo "ceiling: $CEILING_ERRORS"
+          grep 'error\[' /tmp/campfire-strict.log || true
+          if [ "$errors" -gt "$CEILING_ERRORS" ]; then
+            echo "::error::campfire strict emit regressed: $errors > $CEILING_ERRORS (each line above is a modelling gap, not app breakage)"
+            exit 1
+          fi
+          if [ "$errors" -lt "$CEILING_ERRORS" ]; then
+            echo "::notice::ceiling is stale — lower CEILING_ERRORS to $errors"
+          fi
       # --json is what the published page is rendered from; --fail-log is
       # what makes its ranking honest. Without the fail log every unpassed
       # test in a file is charged to that file's FIRST error, which reads
