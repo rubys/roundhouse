@@ -20,8 +20,52 @@ pub(in crate::analyze) fn register(
     // model methods resolve. Method-by-method registration with
     // proper signatures is a follow-up; for now an empty ClassInfo
     // is enough to type the constructor reference.
+    // Modules at least one MODEL mixes in — campfire's
+    // `User::Transferable`, `User::Avatar`, `Message::Searchable`.
+    // A concern's body is typed as a library class, with `self_ty` set
+    // to the MODULE (`analyze/mod.rs`, the `library_classes` loop), so a
+    // bare self-send inside one dispatches against the module's own
+    // surface and nothing else. ActiveRecord's instance methods are not
+    // on that surface, so every `save` / `errors` / `signed_id` written
+    // bare in a concern resolved to nothing.
+    //
+    // Measured on campfire: `User::Transferable#transfer_id` is a
+    // one-line `signed_id(purpose: :transfer, expires_in: D)`, and
+    // harvested `untyped`. The view's
+    // `session_transfer_url(user.transfer_id)` then carried no evidence
+    // for `routes_to_library::string_segment_demand`, so that route's
+    // `id` segment kept its name-based Integer default and the emitted
+    // signature contradicted its only call site — which is where spinel
+    // stopped the build.
+    //
+    // `diagnose` never walks `library_classes`, which is why a gap this
+    // broad stayed invisible: the strict emit reported zero errors while
+    // the AOT compiler would not accept the tree.
+    let model_concerns: std::collections::HashSet<ClassId> = app
+        .models
+        .iter()
+        .flat_map(crate::analyze::model_includes)
+        .collect();
+
     for lc in &app.library_classes {
         let cls = classes.entry(lc.name.clone()).or_default();
+        // The AR instance surface a concern inherits from its includer.
+        // `or_insert`, so a name the module DEFINES always wins, and so
+        // this can never overwrite what the return harvest establishes.
+        // Only catalog entries that carry a return type: an entry with
+        // `return_kind: None` is not neutral — it lands in the same
+        // place an unknown name does.
+        if lc.is_module && model_concerns.contains(&lc.name) {
+            for entry in crate::catalog::AR_CATALOG {
+                if entry.receiver != crate::catalog::ReceiverContext::Instance {
+                    continue;
+                }
+                let Some(kind) = entry.return_kind else { continue };
+                if let Some(ty) = ar_instance_ty(kind) {
+                    cls.instance_methods.entry(Symbol::from(entry.name)).or_insert(ty);
+                }
+            }
+        }
         // A helper module's own `include`s carry transitively to
         // any class that includes it; record them so dispatch can
         // chase nested mixins.
@@ -294,5 +338,44 @@ pub(in crate::analyze) fn register(
                     .or_insert(Ty::Str);
             }
         }
+    }
+}
+
+/// The type an AR instance method answers when the receiver is a
+/// CONCERN rather than a model — `None` for the kinds that are only
+/// meaningful relative to a concrete model.
+///
+/// A module does not know which model includes it (and several may), so
+/// `Self`-relative answers cannot be instantiated here: `#reload`
+/// returns `SelfType` and there is no honest `Self` to name. Answering
+/// them as the module's own class would be a LIE the type system acts
+/// on, and answering them `Untyped` would be worse than silence — an
+/// `Untyped` arm absorbs dispatch, so it would mask real gaps in every
+/// chain built on it. Leaving them out keeps those calls exactly where
+/// they are today: unresolved, and honest about it.
+///
+/// The kinds that ARE model-independent — `#save` is a Bool whoever
+/// mixes it in, `#signed_id` a String — carry through.
+fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
+    use crate::catalog::ReturnKind;
+    match kind {
+        ReturnKind::Int => Some(Ty::Int),
+        ReturnKind::Bool => Some(Ty::Bool),
+        ReturnKind::Str => Some(Ty::Str),
+        ReturnKind::HashSymStr => {
+            Some(Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) })
+        }
+        ReturnKind::ArrayOfSym => Some(Ty::Array { elem: Box::new(Ty::Sym) }),
+        ReturnKind::ArrayOfInt => Some(Ty::Array { elem: Box::new(Ty::Int) }),
+        ReturnKind::ClassRef(path) => {
+            Some(Ty::Class { id: ClassId(Symbol::from(path)), args: vec![] })
+        }
+        // Self-relative, or a deliberate gradual escape.
+        ReturnKind::SelfType
+        | ReturnKind::ArrayOfSelf
+        | ReturnKind::SelfOrNil
+        | ReturnKind::RelationOfSelf
+        | ReturnKind::ArrayOfUntyped
+        | ReturnKind::Untyped => None,
     }
 }

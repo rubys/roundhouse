@@ -95,3 +95,88 @@ fn an_id_call_site_keeps_the_integer_default() {
         params[0].ty
     );
 }
+
+/// The evidence chain the campfire spinel lane actually needed, end to
+/// end: a signed id minted in a model CONCERN reaches a route helper's
+/// signature as a String.
+///
+/// Three things have to hold at once, and each was broken:
+///   * `signed_id` has to be AR catalog surface, so it answers `Str`.
+///     `lower::signed_id` rewrites the call to
+///     `ActiveRecord::SignedId.generate` — whose runtime RBS already
+///     says `-> String` — but that pass runs POST-analyze, long after
+///     the method wrapping it was typed.
+///   * a module a MODEL includes has to see the AR instance surface at
+///     all. A concern's body is typed as a library class with `self_ty`
+///     set to the MODULE, so a bare self-send inside one dispatches
+///     against the module and nothing else.
+///   * only then does the existing call-site rule above have a `Ty::Str`
+///     to read.
+///
+/// campfire's shape exactly: `User::Transferable#transfer_id` is a
+/// one-line `signed_id(purpose: :transfer)`, and the view writes
+/// `session_transfer_url(user.transfer_id)`. Typed `untyped`, the
+/// segment kept its name-based Integer default and spinel refused the
+/// build — with the emitted code correct and the CRuby lane green.
+#[test]
+fn a_signed_id_from_a_concern_retypes_the_segment() {
+    const ROUTES: &str = "Rails.application.routes.draw do\n  \
+        resources :transfers, only: :show\nend\n";
+    let tree = vec![
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  \
+             create_table :users do |t|\n    t.string :name\n  end\nend\n",
+        ),
+        ("config/routes.rb", ROUTES),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  include Transferable\nend\n",
+        ),
+        (
+            "app/models/user/transferable.rb",
+            r#"module User::Transferable
+  extend ActiveSupport::Concern
+
+  def transfer_id
+    signed_id(purpose: :transfer)
+  end
+end
+"#,
+        ),
+        (
+            "app/helpers/transfer_helper.rb",
+            r#"
+module TransferHelper
+  # The receiver has to be TYPED for the call-site rule to have
+  # anything to read. campfire's real site is a view local whose
+  # partial declares it; an untyped helper parameter reproduces
+  # nothing, and an earlier draft of this fixture used one and failed
+  # for that reason rather than the one under test.
+  def transfer_link
+    user = User.new
+    transfer_path(user.transfer_id)
+  end
+end
+"#,
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest tree");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let sig = lower_routes_to_library_functions(&app)
+        .into_iter()
+        .find(|f| f.name.as_str() == "transfer_path")
+        .expect("transfer_path not generated")
+        .signature
+        .expect("helper signature");
+    let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
+    assert_eq!(params[0].name.as_str(), "id");
+    assert!(
+        matches!(params[0].ty, Ty::Str),
+        "a segment filled by a concern's signed id must type Str, got {:?}",
+        params[0].ty
+    );
+}

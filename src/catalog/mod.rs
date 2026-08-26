@@ -896,6 +896,30 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Str),
     },
+    // Rails' `SignedId#signed_id(purpose:, expires_in:)` — a signed
+    // token, and a String however it is produced.
+    //
+    // Registered here because `lower::signed_id` runs POST-ANALYZE: it
+    // rewrites the call to `ActiveRecord::SignedId.generate(...)`,
+    // whose runtime RBS already says `-> String`, but by then the
+    // analyzer has typed the method that wraps it. campfire's
+    // `User::Transferable#transfer_id` is a one-line `signed_id(purpose:
+    // :transfer, expires_in: D)`, so it harvested `untyped`, and the
+    // view's `session_transfer_url(user.transfer_id)` carried no
+    // evidence for `string_segment_demand` — leaving that route's
+    // `id` segment on its name-based Integer default and the emitted
+    // signature contradicting its only call site.
+    //
+    // Not a lowering detail leaking into the catalog: `signed_id` is
+    // ActiveRecord's own instance method and returns a String in Rails
+    // too. The catalog was simply missing it.
+    CatalogedMethod {
+        name: "signed_id",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
     // ---- Relation-context surface ----
     // The methods callable on a relation-shaped receiver — a
     // `Ty::Relation` (scope results, relation-returning class
