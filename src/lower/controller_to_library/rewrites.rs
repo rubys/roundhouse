@@ -2143,7 +2143,7 @@ fn records_a_model(arg: &Expr) -> bool {
     arg.ty.as_ref().is_some_and(is_record)
 }
 
-fn const_path(segments: &[&str], span: Span) -> Expr {
+pub(crate) fn const_path(segments: &[&str], span: Span) -> Expr {
     Expr::new(
         span,
         ExprNode::Const {

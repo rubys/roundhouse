@@ -230,6 +230,12 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // avatar_img(...)` + helper modules become module-functions (no-op when
     // the app ships no non-empty helpers).
     library::apply_helper_lowering(&mut lcs, app);
+    // A bare `<x>_path` that `apply_helper_lowering` did not claim and
+    // the route table DOES answer is a route helper called somewhere
+    // nothing qualifies — `rails_blob_path` in a `data:` hash, or in a
+    // helper module that `delegate`s it. It gets the same
+    // `RouteHelpers.` receiver every other call site gets.
+    crate::lower::route_helper_receiver::qualify_lcs(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);
@@ -631,6 +637,11 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // model, so only the call-site rewrite arm runs.
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    // Whatever `apply_helper_lowering` did not claim as an app helper
+    // and the route table DOES answer is a route helper called outside
+    // URL position — `rails_blob_path` in a `data:` hash. It gets the
+    // same `RouteHelpers.` receiver `link_to`'s URL argument gets.
+    crate::lower::route_helper_receiver::qualify_lcs(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);

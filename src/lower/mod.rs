@@ -85,6 +85,7 @@ pub mod enum_symbols;
 pub mod has_json;
 pub mod update_writer_check;
 pub mod route_format_suffix;
+pub mod route_helper_receiver;
 pub mod config_reader;
 pub mod exists_conditions;
 pub mod destroy_by;

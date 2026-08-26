@@ -119,6 +119,14 @@ pub fn lower_views_to_library_classes(
         }
     }
 
+    // A bare `<x>_path` that is NOT in URL position — campfire's
+    // `rails_blob_path` inside a `data:` hash — never met
+    // `route_helperize`, and reached the emit calling a method nothing
+    // defines. Here, after every pass that pattern-matches the bare
+    // shape in URL position, is the last moment the two spellings can
+    // be made one.
+    crate::lower::route_helper_receiver::qualify_lcs(&mut lcs, app);
+
     let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
         std::collections::HashMap::new();
     for lc in &mut lcs {

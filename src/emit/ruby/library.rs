@@ -23,6 +23,12 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
+    // A bare `<x>_path` that `apply_helper_lowering` did not claim and
+    // the route table DOES answer is a route helper called somewhere
+    // nothing qualifies — campfire's `Messages::AttachmentPresentation`
+    // `delegate`s `rails_blob_path` to its context, which leaves three
+    // calls to a method the emitted tree defines nowhere.
+    crate::lower::route_helper_receiver::qualify_lcs(&mut lcs, app);
     apply_route_param_lowering(&mut lcs, app);
     apply_raw_helper_monomorphization(&mut lcs, app);
     // send→case grounding, update-kwargs inlining, mailer class-side
