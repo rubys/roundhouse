@@ -132,11 +132,18 @@ fn including_types_the_to_a_it_synthesizes() {
 }
 
 /// The other half of the `including` rule, and the reason the stamp is
-/// conditional: a receiver whose surface the analyzer cannot see is one
-/// the pass cannot claim `to_a` for. campfire's
-/// `params.fetch(:user_ids, []).including(…)` types as `Str | Nil`
-/// today, and stamping an Array over that would launder a receiver the
-/// emit genuinely cannot lower into a clean ledger entry.
+/// conditional: a receiver with no arm that can answer `to_a` is one
+/// the pass cannot claim `to_a` for, and stamping an Array over it
+/// would launder a receiver the emit genuinely cannot lower into a
+/// clean ledger entry.
+///
+/// The fixture used to be campfire's
+/// `params.fetch(:user_ids, []).including(…)`. That shape is no longer
+/// an example of the rule: `fetch` now reads the `[]` default, so the
+/// receiver is `Array[…] | Str` and the Array arm answers — see
+/// `tests/params_fetch_array_default.rs`. A bare `params[:user_ids]`
+/// still types `Str | Nil`, which is what "no arm can answer" looks
+/// like, so the invariant keeps a fixture that actually exercises it.
 #[test]
 fn including_leaves_an_unknown_receiver_on_the_ledger() {
     let found = errors(vec![
@@ -146,7 +153,7 @@ fn including_leaves_an_unknown_receiver_on_the_ledger() {
             "app/controllers/users_controller.rb",
             "class UsersController < ApplicationController\n  \
                def index\n    \
-                 @ids = params.fetch(:user_ids, []).including(1)\n  \
+                 @ids = params[:user_ids].including(1)\n  \
                end\nend\n",
         ),
     ]);

@@ -935,7 +935,7 @@ impl<'a> BodyTyper<'a> {
                 let elem = Ty::Class { id: of.clone(), args: vec![] };
                 array_method(method, &elem, block_ret)
             }
-            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
+            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Sym) => sym_method(method),
@@ -1476,6 +1476,7 @@ pub(super) fn hash_method(
     key: &Ty,
     value: &Ty,
     block_ret: Option<&Ty>,
+    args: &[Expr],
 ) -> Ty {
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
@@ -1510,16 +1511,31 @@ pub(super) fn hash_method(
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
         "keys" => Ty::Array { elem: Box::new(key.clone()) },
-        // `Hash#fetch(k, default)` returns the value at k or `default`
-        // when missing. The default can be any value (including nil)
-        // — Ruby's idiomatic `hash.fetch(k, nil)` produces
-        // `Union<value, Nil>`. Conservatively widen to that shape so
-        // emit can decide between `.get().cloned()` (Option<V>) and
-        // `.get().cloned().unwrap_or(default)` (V) at the call site.
-        // The per-target emit's fetch bridge already returns
-        // Option-shaped Rust expressions for the nil-default case;
-        // typing as Union<V, Nil> here matches that contract.
-        "fetch" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        // `Hash#fetch(k, default)` answers `default` when the key is
+        // missing, so the result is `value | typeof(default)` — a Nil
+        // arm appears only when the default IS nil. Reading the
+        // default is often the ONLY evidence about a key's shape:
+        // campfire's `params.fetch(:user_ids, [])` is an Array, and
+        // the params model types every value `Str` because
+        // `Roundhouse::ParamValue` is not a type the analyzer carries
+        // — the `[]` is the app's own statement of what that key
+        // holds. Union dispatch then resolves
+        // `…including(Current.user.id)`'s lowered `to_a` off the Array
+        // arm and lets the Str arm decline, which is exactly right.
+        //
+        // This is the analyzer catching up to the emit, not diverging
+        // from it: the rust fetch bridge already renders the two-arg
+        // non-nil form as `.get(k).cloned().unwrap_or(default)` — a
+        // `V`, not an `Option` (`emit/rust/expr/send/index.rs:414`).
+        //
+        // The one-arg form raises `KeyError` rather than answering
+        // nil, so `value` alone would be right; it stays `value | Nil`
+        // because the extra arm only costs a nil-check and every
+        // target's one-arg path is written against it.
+        "fetch" => match args.get(1).and_then(|a| a.ty.clone()) {
+            Some(default) if !default.is_open() => union_of(value.clone(), default),
+            _ => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        },
         "merge" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),

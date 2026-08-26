@@ -73,18 +73,12 @@ fn rewrite(expr: &mut Expr) {
         return;
     }
     let span = expr.span;
-    // The type `to_a` lands on, read off the receiver we are rewriting.
-    // Identity on an Array, materialization on a Relation — the two
-    // shapes the header names — and NOTHING otherwise: a receiver whose
-    // surface we cannot see is a receiver we cannot claim `to_a` for,
-    // and leaving it unstamped keeps it on the ledger where it belongs.
-    let materialized = match recv.ty.as_ref() {
-        Some(t @ Ty::Array { .. }) => Some(t.clone()),
-        Some(Ty::Relation { of }) => Some(Ty::Array {
-            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
-        }),
-        _ => None,
-    };
+    // The type `to_a` lands on, read off the receiver we are rewriting
+    // (`materialized_to_a` below). `None` when no arm of the receiver
+    // can answer — a receiver whose surface we cannot see is one we
+    // cannot claim `to_a` for, and leaving it unstamped keeps it on the
+    // ledger where it belongs.
+    let materialized = recv.ty.as_ref().and_then(materialized_to_a);
     let elem_ty = match &materialized {
         Some(Ty::Array { elem }) => (**elem).clone(),
         _ => Ty::Untyped,
@@ -115,4 +109,24 @@ fn rewrite(expr: &mut Expr) {
         parenthesized: false,
     };
     expr.ty = materialized;
+}
+
+/// The type `to_a` lands on, or `None` when the receiver's surface
+/// doesn't say. A union answers from whichever arm can — the same
+/// policy the body-typer's union dispatch uses, where arms that decline
+/// are dropped and one resolving arm answers. campfire's
+/// `params.fetch(:user_ids, []).including(Current.user.id)` types
+/// `Array[…] | Str` because the params model calls every value a `Str`
+/// (`Roundhouse::ParamValue` is the runtime type, not one the analyzer
+/// carries); the Array arm is the one that answers, and leaving the
+/// whole union unstamped put a `to_a` error on working code.
+fn materialized_to_a(t: &Ty) -> Option<Ty> {
+    match t {
+        Ty::Array { .. } => Some(t.clone()),
+        Ty::Relation { of } => Some(Ty::Array {
+            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+        }),
+        Ty::Union { variants } => variants.iter().find_map(materialized_to_a),
+        _ => None,
+    }
 }
