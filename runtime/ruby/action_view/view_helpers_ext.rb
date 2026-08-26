@@ -89,6 +89,44 @@ module ActionView
       out
     end
 
+    # `hidden_field_tag "boost[content]", "\u{1F389}"` →
+    # `<input type="hidden" name="boost[content]" id="boost_content" value="\u{1F389}" />`
+    #
+    # The bare (builder-less) hidden field — campfire carries a quick
+    # boost's emoji in one, eight per message. Sits here rather than in
+    # the universal file because it derives its id with
+    # `sanitize_to_id` above, which is ruby-family for the reasons that
+    # file's header gives; it joins the universal one when
+    # `sanitize_to_id` does.
+    #
+    # Three details measured against Rails 8.1 rather than guessed: the
+    # `id` is the name run through `sanitize_to_id`; `value` is OMITTED
+    # entirely when nil rather than rendered empty; and the tag closes
+    # ` />`, the legacy `tag()` spelling the field helpers share —
+    # `image_tag` beside it closes `>`, and they genuinely differ.
+    #
+    # Options ride `render_attrs`, which already drops a nil value and
+    # expands a nested hash into `data-*`. That is what makes campfire's
+    # two option spellings work without either being special-cased:
+    # `data: { sessions_target: "x" }` becomes ` data-sessions-target="x"`,
+    # and `id: nil` OVERWRITES the derived id with nil, which
+    # `render_attrs` then drops — which is how Rails suppresses it too.
+    # A rewritten key keeps its original insertion slot in Ruby, so the
+    # attribute ORDER stays type/name/id/value whatever the caller
+    # passes.
+    def self.hidden_field_tag(name, value = nil, opts = {})
+      name_s = name.to_s
+      attrs = {}
+      attrs[:type] = "hidden"
+      attrs[:name] = name_s
+      attrs[:id] = sanitize_to_id(name_s)
+      attrs[:value] = value.to_s unless value.nil?
+      opts.to_h.each do |k, v|
+        attrs[k] = v
+      end
+      "<input#{render_attrs(attrs)} />"
+    end
+
     # `number_with_precision(4.5678, precision: 2)` → "4.57" — the
     # overlay number-helper's exact shape; here so the spinel tree
     # carries it (users/show renders karma averages). On CRuby the

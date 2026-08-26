@@ -1065,7 +1065,21 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActionText::Content`) and coerces first; typing the parameter
     // `String` would make the corpus's actual call site a type error,
     // and there is no union that names "anything with to_s".
-    const CEILING: usize = 325;
+    //
+    // 325 -> 329: `ActionView::ViewHelpers.hidden_field_tag`, moved off
+    // the spinel CRuby overlay into the ruby-family runtime so both
+    // lanes render it from one body. FOUR sites, and each names a type
+    // the corpus itself refuses to make narrower:
+    //   `name` — `"boost[content]"` at one call site and
+    //     `:push_subscription_endpoint` at another. Declaring `String`
+    //     would make the Symbol call a seed contradiction, which is
+    //     exactly the class of error this move was made to clear.
+    //   `value` — a String, an `Integer` id, a `Bool` predicate and
+    //     `nil` across the six corpus call sites.
+    //   the two `opts` reads — `Hash[Symbol, untyped]` by declaration,
+    //     the same contract (and the same cost) `image_tag` and
+    //     `mail_to` already pay beside it.
+    const CEILING: usize = 329;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

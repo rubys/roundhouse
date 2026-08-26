@@ -410,3 +410,17 @@ fn action_text_test_passes_under_spinel() {
         "action_text",
     );
 }
+
+/// The ruby-family ViewHelpers extensions — `hidden_field_tag` and the
+/// `sanitize_to_id` it derives its id with. Ruby-family lanes only, for
+/// the same reason `view_helpers_ext.rb` itself is: it sits outside the
+/// strict-target runtime tables, so the expectations cannot ride
+/// `view_helpers_test.rb`, which crystal/kotlin/typescript also run.
+#[test]
+#[ignore]
+fn view_helpers_ext_test_passes_spinel() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/view_helpers_ext_test.rb"),
+        "view_helpers_ext",
+    );
+}
