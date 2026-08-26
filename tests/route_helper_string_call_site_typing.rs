@@ -180,3 +180,127 @@ end
         params[0].ty
     );
 }
+
+/// A `direct` helper's body is a CALL SITE too — and the only one some
+/// routes have.
+///
+/// campfire declares
+///
+///     direct :fresh_user_avatar do |user, options|
+///       route_for :user_avatar, user.avatar_token, v: …
+///     end
+///
+/// and `user_avatar_path` is reached from nowhere else. `avatar_token`
+/// is a `signed_id`, so that segment is a String; the controller agrees
+/// (`User.from_avatar_token(params[:user_id])`). Two things had to
+/// change for the rule above to see it: these bodies live in
+/// `config/routes.rb` and were never analyzed, so every node carried
+/// `ty: None`; and `route_for` names its target with a SYMBOL rather
+/// than calling the helper, so the walk did not recognise it as a call
+/// site at all.
+///
+/// The block parameter is seeded from the helper's own call sites,
+/// which is the same evidence rule — and the same reason — as the
+/// segment typing it feeds.
+#[test]
+fn a_direct_helpers_route_for_is_a_call_site() {
+    let params = direct_helper_params(
+        "module AvatarHelper\n  \
+           def avatar_link\n    \
+             user = User.new\n    \
+             fresh_user_avatar_path(user)\n  \
+           end\nend\n",
+    );
+    assert_eq!(params[0].name.as_str(), "user_id");
+    assert!(
+        matches!(params[0].ty, Ty::Str),
+        "a segment a `direct` block fills with a signed id must type Str, got {:?}",
+        params[0].ty
+    );
+}
+
+/// The seed's other half: an UNTYPED call site is absence of evidence,
+/// not evidence of untyped. Unioning it in poisons the parameter — an
+/// `Untyped` arm ABSORBS dispatch, so `User | Untyped` answers
+/// `Untyped` for `avatar_token` and the segment silently keeps its
+/// name-based default.
+///
+/// campfire has exactly this mix — five typed callers and two untyped
+/// — and before the filter the untyped ones won. The gradual shape is
+/// its `_direct.html.erb`: `members = membership.room.users
+/// .without(…).presence || [ membership.user ]`, then
+/// `fresh_user_avatar_path(members.first)`. A `.presence ||` over a
+/// collection is what types Untyped, and this fixture mirrors it —
+/// an untyped METHOD PARAMETER does not reproduce it, because that
+/// types `Var`, which the `is_open` guard already skips. An earlier
+/// draft used one and passed with the filter ablated.
+#[test]
+fn an_untyped_call_site_does_not_poison_the_direct_seed() {
+    let params = direct_helper_params(
+        "module AvatarHelper\n  \
+           def typed_link\n    \
+             user = User.new\n    \
+             fresh_user_avatar_path(user)\n  \
+           end\n  \
+           def group_link(room)\n    \
+             members = room.users.presence || [ User.new ]\n    \
+             fresh_user_avatar_path(members.first)\n  \
+           end\nend\n",
+    );
+    assert!(
+        matches!(params[0].ty, Ty::Str),
+        "an untyped caller must not outvote the typed ones, got {:?}",
+        params[0].ty
+    );
+}
+
+/// `user_avatar_path`'s parameters, with `helper` as the app's only
+/// helper module. The route is `resources :users do resource :avatar
+/// end`, so the segment is named `user_id` and the name-based rule
+/// answers Int for it — which is what the direct body has to overrule.
+fn direct_helper_params(helper: &str) -> Vec<roundhouse::ty::Param> {
+    let tree = vec![
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  \
+             create_table :users do |t|\n    t.string :name\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  \
+               resources :users do\n    resource :avatar, only: :show\n  end\n  \
+               direct :fresh_user_avatar do |user, options|\n    \
+                 route_for :user_avatar, user.avatar_token\n  \
+               end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  include Avatar\nend\n",
+        ),
+        (
+            "app/models/user/avatar.rb",
+            r#"module User::Avatar
+  extend ActiveSupport::Concern
+
+  def avatar_token
+    signed_id(purpose: :avatar)
+  end
+end
+"#,
+        ),
+        ("app/helpers/avatar_helper.rb", helper),
+    ]
+    .into_iter()
+    .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest tree");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let sig = lower_routes_to_library_functions(&app)
+        .into_iter()
+        .find(|f| f.name.as_str() == "user_avatar_path")
+        .expect("user_avatar_path not generated")
+        .signature
+        .expect("helper signature");
+    let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
+    params
+}

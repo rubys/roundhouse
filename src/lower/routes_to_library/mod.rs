@@ -1023,7 +1023,66 @@ fn string_segment_demand(
         walk(e, helpers, &mut out);
     };
     for_each_route_call_site(app, &mut collect);
+
+    // `direct :name do |…| route_for :target, arg… end` — a call site
+    // for `<target>_path` that no walk above reaches, because it lives
+    // in `config/routes.rb` and names its target with a SYMBOL rather
+    // than calling the helper.
+    //
+    // campfire's is the whole reason this arm exists:
+    //
+    //     direct :fresh_user_avatar do |user, options|
+    //       route_for :user_avatar, user.avatar_token, v: …
+    //     end
+    //
+    // `avatar_token` is a `signed_id`, so `user_avatar_path`'s `user_id`
+    // segment is a String — and this is its ONLY filling call site. The
+    // controller agrees: `User.from_avatar_token(params[:user_id])`.
+    // Left unread, the segment kept its name-based Integer default and
+    // spinel refused the build on a signature contradicting the one call
+    // that fills it.
+    //
+    // The argument types come from `Analyzer::type_direct_helper_bodies`,
+    // which types these bodies with the block parameters seeded from the
+    // helper's own call sites — without it every node here is `ty: None`
+    // and this walk finds nothing.
+    for helper in &app.routes.direct_helpers {
+        route_for_string_segments(&helper.body, helpers, &mut out);
+    }
     out
+}
+
+/// Record the segments a `route_for :target, arg…` fills with a String.
+/// Mirrors `direct::rewrite_route_for`'s reading of the same node — the
+/// symbol names the target, the trailing kwargs hash is the query half
+/// and never a segment.
+fn route_for_string_segments(
+    e: &Expr,
+    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+    out: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+        if method.as_str() == "route_for" && !args.is_empty() {
+            if let ExprNode::Lit { value: crate::expr::Literal::Sym { value: target } } =
+                &*args[0].node
+            {
+                let helper = format!("{}_path", target.as_str());
+                if let Some((segments, _)) = helpers.get(&helper) {
+                    for (i, arg) in args[1..]
+                        .iter()
+                        .filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. }))
+                        .enumerate()
+                    {
+                        let Some(seg) = segments.get(i) else { break };
+                        if matches!(arg.ty, Some(Ty::Str)) {
+                            out.entry(helper.clone()).or_default().insert(seg.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    e.node.for_each_child(&mut |c| route_for_string_segments(c, helpers, out));
 }
 
 fn query_param_demand(

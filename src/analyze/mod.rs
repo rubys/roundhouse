@@ -747,7 +747,140 @@ impl Analyzer {
                 eprintln!("DBG class {name} NOT REGISTERED");
             }
         }
+        // Direct-helper bodies last: they are the one app-authored
+        // expression the fixpoint above never touches, and typing them
+        // needs the registry it produces.
+        self.type_direct_helper_bodies(app);
+
         self.stamp_inferred_library_signatures(app);
+    }
+
+    /// Type the bodies of `direct :name do |…| … end` helpers, with the
+    /// block parameters seeded from the helper's own CALL SITES.
+    ///
+    /// These bodies are app source — campfire's is `route_for
+    /// :user_avatar, user.avatar_token, v: user.updated_at.to_fs(:number)`
+    /// — but they live in `config/routes.rb`, so nothing in the fixpoint
+    /// above reaches them and every node came out with `ty: None`. The
+    /// generated helper then read `(untyped user, ?untyped options) ->
+    /// untyped`, and, more expensively, `routes_to_library::
+    /// string_segment_demand` had no type to read for the `route_for`
+    /// argument: `user_avatar_path`'s `user_id` segment kept its
+    /// name-based Integer default while the only thing that ever fills
+    /// it is a signed token, and spinel refused the build.
+    ///
+    /// The seed is the call site because that is the only evidence there
+    /// is — a `direct` block declares no types, and its parameter is
+    /// whatever the views hand it (`fresh_user_avatar_path(@user)`,
+    /// `(Current.user)`, `(member)`: all `User`). Same rule, and the
+    /// same reason, as the `string_segment_demand` this feeds.
+    ///
+    /// Runs AFTER the fixpoint: the call sites are in views and helper
+    /// bodies, and their types are exactly what the fixpoint spent its
+    /// rounds establishing.
+    fn type_direct_helper_bodies(&mut self, app: &mut App) {
+        if app.routes.direct_helpers.is_empty() {
+            return;
+        }
+        // stem -> positional argument types, by index, unioned across
+        // call sites. `_path` and `_url` are the same helper.
+        let stems: Vec<Symbol> =
+            app.routes.direct_helpers.iter().map(|d| d.name.clone()).collect();
+        let mut seeds: HashMap<Symbol, Vec<Ty>> = HashMap::new();
+        {
+            let mut collect = |e: &crate::expr::Expr| {
+                fn walk(
+                    e: &crate::expr::Expr,
+                    stems: &[Symbol],
+                    out: &mut HashMap<Symbol, Vec<Ty>>,
+                ) {
+                    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+                        let m = method.as_str();
+                        let stem = m
+                            .strip_suffix("_path")
+                            .or_else(|| m.strip_suffix("_url"))
+                            .unwrap_or("");
+                        if let Some(s) = stems.iter().find(|s| s.as_str() == stem) {
+                            let slot = out.entry(s.clone()).or_default();
+                            // Positionals only — a trailing kwargs hash
+                            // is the options half the block takes last.
+                            for (i, a) in args
+                                .iter()
+                                .filter(|a| {
+                                    !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. })
+                                })
+                                .enumerate()
+                            {
+                                let Some(t) = a.ty.clone() else { continue };
+                                // An UNTYPED call site is absence of
+                                // evidence, not evidence of untyped.
+                                // Unioning it in would poison the seed:
+                                // an `Untyped` arm ABSORBS dispatch, so
+                                // `User | Untyped | Nil` answers
+                                // `Untyped` for every method — which is
+                                // exactly what campfire produced.
+                                // MEASURED there: of eight call sites,
+                                // five carry a clean `User`/`User | Nil`
+                                // and two carry `Untyped`
+                                // (`_direct.html.erb`'s `members =
+                                // ….presence || [ … ]`), and unfiltered
+                                // those two decided the whole seed.
+                                // Same predicate the refined action
+                                // bindings use.
+                                if t.is_open() || !is_clean_binding(&t) {
+                                    continue;
+                                }
+                                if slot.len() <= i {
+                                    slot.resize(i + 1, Ty::Bottom);
+                                }
+                                slot[i] = crate::analyze::body::union_of(slot[i].clone(), t);
+                            }
+                        }
+                    }
+                    e.node.for_each_child(&mut |c| walk(c, stems, out));
+                }
+                walk(e, &stems, &mut seeds);
+            };
+            crate::lower::for_each_hook_body_ref(app, &mut collect);
+            for view in &app.views {
+                collect(&view.body);
+            }
+        }
+
+        let mut helpers = std::mem::take(&mut app.routes.direct_helpers);
+        for helper in &mut helpers {
+            let mut local_bindings: HashMap<Symbol, Ty> = HashMap::new();
+            // The LAST parameter is Rails' always-supplied options hash,
+            // never one of the helper's own arguments — see
+            // `dialect::DirectHelper`. Bind it as the hash it is so a
+            // body that reads it dispatches, and map the rest
+            // positionally onto what the call sites pass.
+            let arity = helper.params.len();
+            for (i, p) in helper.params.iter().enumerate() {
+                if i + 1 == arity {
+                    local_bindings.insert(
+                        p.clone(),
+                        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                    );
+                    continue;
+                }
+                if let Some(t) = seeds.get(&helper.name).and_then(|v| v.get(i)) {
+                    if !matches!(t, Ty::Bottom) {
+                        local_bindings.insert(p.clone(), t.clone());
+                    }
+                }
+            }
+            let ctx = Ctx {
+                self_ty: None,
+                ivar_bindings: HashMap::new(),
+                local_bindings,
+                constants: HashMap::new(),
+                annotate_self_dispatch: false,
+                in_view: false,
+            };
+            self.body_typer().analyze_expr(&mut helper.body, &ctx);
+        }
+        app.routes.direct_helpers = helpers;
     }
 
     /// Post-fixpoint: write what inference discovered into the
