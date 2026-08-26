@@ -88,6 +88,7 @@ pub mod route_format_suffix;
 pub mod config_reader;
 pub mod exists_conditions;
 pub mod destroy_by;
+pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
 pub mod tag_builder;
@@ -157,6 +158,7 @@ pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
 pub use destroy_by::apply_destroy_by_lowering;
+pub use has_one_builder::apply_has_one_builder_lowering;
 pub use inquiry::apply_inquiry_lowering;
 pub use literal_append::apply_literal_append_lowering;
 pub use html_safe::apply_html_safe_lowering;
@@ -325,6 +327,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Rails' own definition. Same placement and same reasons as
     // `exists_conditions`: before the arel rewrite that folds the chain.
     ("destroy_by", &[]),
+    // `owner.create_<assoc>!(…)` → `Target.create!(fk: owner.id, …)` for
+    // a `has_one`. Runs after `destroy_by` and before the arel rewrite,
+    // like the other call-site rewrites: what it produces is an ordinary
+    // `Model.create!` that the AR catalog already types, so nothing
+    // downstream needs to know this pass ran.
+    ("has_one_builder", &[]),
     // `Rails.application.config.<key>` → `Rails.application.<key>`, the
     // read half of the config lift; no ordering constraints (no other
     // pass produces or consumes the `config` hop).
@@ -568,6 +576,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("exists_conditions");
     destroy_by::apply_destroy_by_lowering(app);
     ran!("destroy_by");
+    has_one_builder::apply_has_one_builder_lowering(app);
+    ran!("has_one_builder");
     config_reader::apply_config_reader_lowering(app);
     ran!("config_reader");
     arel_attribute::apply_arel_attribute_lowering(app);
