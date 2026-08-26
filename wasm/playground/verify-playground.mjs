@@ -43,6 +43,31 @@ page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
 
+// A FAILURE THAT PRODUCES NO SIGNAL OF ITS OWN READS AS A MYSTERY.
+// This script is top-level-await ESM, so an unexpected throw — the page
+// dying under a `page.evaluate`, say — surfaces as an uncaught
+// exception and exits BEFORE the console tail at the bottom of this
+// file is ever printed. CI hit exactly that on 2026-08-26 and reported
+// only `page.evaluate: Execution context was destroyed, most likely
+// because of a navigation` with nothing about what the page was doing;
+// nothing here navigates (the deep-link sync is `history.replaceState`,
+// playground.js:276), so the interesting evidence was the part that
+// went unprinted. Dump what we collected, then exit non-zero.
+//
+// `crash` is listened for for the same reason: Playwright reports a
+// dead renderer as a destroyed context at whatever call was in flight,
+// which names the symptom and not the cause.
+page.on("crash", () => logs.push("[crash] the page's renderer process died (OOM?)"));
+const bail = (label) => (err) => {
+  console.error(`\n=== ${label} — last 30 page log lines ===`);
+  logs.slice(-30).forEach((l) => console.error(l));
+  console.error(`\n=== ${label} ===`);
+  console.error(err);
+  process.exit(1);
+};
+process.on("uncaughtException", bail("uncaught exception"));
+process.on("unhandledRejection", bail("unhandled rejection"));
+
 await page.goto(PAGE_URL, { waitUntil: "load" });
 await page.waitForSelector("#status.ok", { timeout: 30000 });
 await page.waitForFunction(() => window.__playground && window.__playground.ready, { timeout: 30000 });
