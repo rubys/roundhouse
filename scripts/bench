@@ -1234,6 +1234,75 @@ RUBY
 
 ok "summary written to $OUT_DIR/summary.md"
 
+# ---------------------------------------------------------------------
+# Publish the emitted spinel tree as a per-run tarball beside the numbers
+# it was measured with. Mirrors bench-lobsters' pack_tree.
+#
+# The REPRODUCE.md names the roundhouse revision that emitted the tree and
+# the spinel it was built against. Without that stamp a downloaded archive
+# is a moving target: matz/spinel#4100 lost a reproduction to exactly this
+# ("that may have been a roundhouse revision difference"), because the
+# Pages copy at browse/spinel.tgz is regenerated on every push and carries
+# no revision of its own. Per-run directories under bench/results are
+# dated and are not overwritten, so this copy is citable from an issue.
+#
+# `fail` rather than `warn`: scripts/bench has no warn (bench-lobsters
+# defined one only after pack_tree called it and aborted the lane). A
+# missing tree is not fatal to the run — the numbers are already written —
+# so this returns 0 either way.
+# ---------------------------------------------------------------------
+pack_spinel_tree() {
+    local dir="$SP_OUT"
+    [[ -d "$dir" && -f "$dir/main.rb" ]] || {
+        fail "no spinel tree at $dir — not packed"
+        return 0
+    }
+    local rh sp
+    rh="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    sp="$(command -v spinel >/dev/null 2>&1 && spinel --version 2>/dev/null || echo 'not on PATH')"
+
+    cat > "$dir/REPRODUCE.md" <<REPRO
+# blog — spinel tree, as benchmarked
+
+Emitted by roundhouse \`$rh\` from the reference Rails blog fixture. This is
+the tree the published numbers were measured on, minus build output.
+
+    roundhouse : $rh
+    spinel     : $sp
+    packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Build it
+
+    # needs spinel + spinel_rbs_extract on PATH
+    make build
+
+That compiles \`main.rb\` (plus its whole require graph) to \`build/blog\`.
+The \`sig/\` tree ships with the archive and the Makefile passes it as
+\`--rbs sig\` automatically; building without it exercises a different and
+much less exercised path.
+
+## What it is
+
+A whole-program Rails emit in the spinel subset: the application, its
+views desugared into methods, and the framework runtime reified as plain
+Ruby. Nothing here is hand-written — regenerating it from the same
+roundhouse revision reproduces it byte for byte.
+
+Static assets under \`static/assets/\` are checked in as built. The seed
+database is excluded; \`make db\` recreates it.
+REPRO
+
+    tar czf "$OUT_DIR/spinel-tree.tgz" -C "$(dirname "$dir")" \
+        --exclude=build --exclude=bench-work --exclude=storage \
+        --exclude='*.sqlite3' --exclude='*.o' --exclude='*.log' \
+        --exclude=spin.lock --exclude=node_modules \
+        "$(basename "$dir")" 2>/dev/null \
+      && ok "packed spinel tree -> $OUT_DIR/spinel-tree.tgz ($(du -h "$OUT_DIR/spinel-tree.tgz" 2>/dev/null | cut -f1))" \
+      || fail "could not pack the spinel tree"
+    rm -f "$dir/REPRODUCE.md"
+}
+pack_spinel_tree
+
 # Atomically repoint bench/results/latest at this run. Symlink because
 # POSIX doesn't permit hard-linking directories. -n keeps `ln -f` from
 # dereferencing the existing symlink and creating a nested link inside.
