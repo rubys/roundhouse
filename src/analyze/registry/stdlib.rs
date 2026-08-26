@@ -146,6 +146,65 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str),
         ("octets", Ty::Array { elem: Box::new(Ty::Int) }),
     ]);
+    // `Net::HTTP` — a real client on BOTH lanes: CRuby's own stdlib, and
+    // spinel's `packages/net` (HTTPS included, since the openssl package
+    // landed). So there is nothing to port here, unlike IPAddr — only the
+    // types, plus the `require "net/http"` that `project::BUNDLED` writes.
+    //
+    // ONLY THE SURFACE BOTH LANES IMPLEMENT IS REGISTERED. spinel's
+    // client is a declared subset — no keep-alive, no proxy, no redirect
+    // following, and no STREAMING body (`#request` with a block,
+    // `#read_body` with a block) — so those names are deliberately absent
+    // here even though CRuby has them. Registering them would make
+    // `Opengraph::Fetch` type clean and fail at run time on spinel, which
+    // is worse than the honest gap it currently reports. Same rule as
+    // IPAddr: a call beyond the implemented surface stays a gap.
+    let http_response = Ty::Class {
+        id: ClassId(Symbol::from("Net::HTTPResponse")),
+        args: vec![],
+    };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    register_stdlib_class(classes, "Net::HTTP", &[
+        ("get", Ty::Str),
+        ("get_response", http_response.clone()),
+        ("post_form", http_response.clone()),
+    ], &[
+        // Writers answer the value assigned. `use_ssl=` really is a bool
+        // (`uri.scheme == "https"`); the timeouts take whatever the app
+        // hands them — campfire assigns an ActiveSupport::Duration — so
+        // asserting Int there would be a narrower answer than the truth.
+        ("use_ssl=", Ty::Bool),
+        ("open_timeout=", Ty::Untyped),
+        ("read_timeout=", Ty::Untyped),
+        ("use_ssl?", Ty::Bool), ("started?", Ty::Bool),
+        ("address", Ty::Str), ("port", Ty::Int),
+        ("finish", Ty::Nil),
+        ("request", http_response.clone()),
+        ("get", http_response.clone()),
+        ("post", http_response.clone()),
+    ]);
+    // The response. `code` is a String here as it is in CRuby ("200",
+    // not 200) — campfire compares `response.code == "200"`, which folds
+    // to a constant false against an Int.
+    register_stdlib_class(classes, "Net::HTTPResponse", &[], &[
+        ("code", Ty::Str), ("body", Ty::Str), ("message", Ty::Str),
+        ("http_version", Ty::Str),
+        ("content_type", str_or_nil.clone()),
+        ("[]", str_or_nil.clone()),
+        ("key?", Ty::Bool),
+    ]);
+    // The request family. CRuby builds these as `Net::HTTP::Post.new(…)`
+    // and the surface lives on a shared parent; the registry does no
+    // inheritance for stdlib classes, so each verb carries it.
+    for verb in ["Get", "Post", "Put", "Delete", "Head"] {
+        register_stdlib_class(classes, &format!("Net::HTTP::{verb}"), &[], &[
+            ("body=", Ty::Str), ("body", Ty::Str),
+            ("[]=", Ty::Str), ("[]", str_or_nil.clone()),
+            ("content_type=", Ty::Str),
+            ("set_form_data", Ty::Str),
+            ("method", Ty::Str), ("path", Ty::Str),
+        ]);
+    }
     // `Mime::Type` — the class `runtime/ruby/mime.rb` ports from
     // actionpack. `lookup` is deliberately NON-nilable: upstream answers
     // a Type for any well-formed string (symbol nil when unregistered)

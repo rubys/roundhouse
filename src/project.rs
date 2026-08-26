@@ -2644,7 +2644,7 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 10] = [
+const BUNDLED: [(&str, &str); 11] = [
     ("Base64", "base64"),
     ("CSV", "csv"),
     ("Digest", "digest"),
@@ -2655,6 +2655,14 @@ const BUNDLED: [(&str, &str); 10] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
+    // is nothing for roundhouse to port: CRuby resolves this to its own
+    // stdlib and spinel to `packages/net`, which speaks the same
+    // spelling (and, since 58b7c592/6a7107d6, HTTPS over the system
+    // libssl). `names_constant` needs the name followed by `::`/`.`/`(`,
+    // so `Net::HTTP` and `rescue Net::OpenTimeout` both anchor it and a
+    // constant like `NetworkGuard` does not.
+    ("Net", "net/http"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,

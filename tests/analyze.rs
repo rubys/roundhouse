@@ -3309,3 +3309,63 @@ end
          {unresolved:?}",
     );
 }
+
+/// `Net::HTTP` is a real client on both lanes — CRuby's stdlib and
+/// spinel's `packages/net` — so roundhouse registers its types and lets
+/// `project::BUNDLED` write the `require`. These four setters were four
+/// of campfire's ten strict-emit errors: the constant resolved (the
+/// source names it) but every method on it was a gap.
+///
+/// The fixture is an AR MODEL on purpose. A bare `class Hook` is not a
+/// shape `diagnose` walks, so `send_dispatch_failures` comes back empty
+/// for it whatever the registry says — the first version of this test
+/// passed with the whole registration ablated. `bogus_never_registered`
+/// is the positive control that keeps it honest: if the fixture ever
+/// stops being walked, the control fails and the negatives cannot go
+/// quietly vacuous. It is called on a STRING, deliberately not on the
+/// response: a control riding the Net chain goes silent exactly when
+/// that chain breaks, which is the one case it exists to detect.
+#[test]
+fn net_http_client_surface_dispatches() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/hook.rb",
+            r#"class Hook < ApplicationRecord
+  def deliver(url, payload)
+    uri = URI(url)
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.open_timeout = 7
+    http.read_timeout = 7
+    request = Net::HTTP::Post.new(uri)
+    request.body = payload
+    response = http.request(request)
+    "control".bogus_never_registered
+    response.code
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+
+    // Positive control: proves the fixture IS walked.
+    assert!(
+        failures.iter().any(|f| f == "bogus_never_registered"),
+        "control failed — this fixture is not being walked, so the negative \
+         assertions below would be vacuous; failures = {failures:?}",
+    );
+
+    for name in ["use_ssl=", "open_timeout=", "read_timeout=", "body=", "request", "code"] {
+        assert!(
+            !failures.iter().any(|f| f == name),
+            "`{name}` is implemented by BOTH lanes' net/http and must dispatch; \
+             failures = {failures:?}",
+        );
+    }
+}
