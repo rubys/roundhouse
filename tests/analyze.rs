@@ -2059,6 +2059,91 @@ end
 }
 
 #[test]
+fn block_return_escapes_to_the_enclosing_method() {
+    // `return` inside a `do…end` block exits the enclosing METHOD, so
+    // its type is part of that method's return — even when the call
+    // carrying the block diverges on its own. campfire's
+    // `Opengraph::Fetch#fetch_document` is exactly this shape:
+    // `request(url, Get, ip:) { |r| return body_if_acceptable(r) }`
+    // over a `request` that ends in `raise TooManyRedirectsError`.
+    // Harvesting only the call's own type gave `Bottom`, and the
+    // caller's `read_html.force_encoding` failed dispatch on `Nil`.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def with_each_attempt
+    raise "out of attempts"
+  end
+  def lookup
+    with_each_attempt do |attempt|
+      return({ "found" => "yes" })
+    end
+  end
+  def use
+    lookup["found"]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    assert!(
+        !failures.iter().any(|f| f == "[]"),
+        "`lookup[...]` should resolve — the block's `return` is the \
+         method's return, not the diverging `with_each_attempt` call's; \
+         failures = {failures:?}"
+    );
+}
+
+#[test]
+fn a_return_of_unknown_shape_is_not_divergence() {
+    // Every `return` in the method carries a value we can't name, and
+    // the tail diverges. `Bottom` would claim the method never returns
+    // — a lie dispatch acts on: `Bottom | Nil` folds to exactly `Nil`,
+    // so a caller's `&.downcase` has nothing left after the safe-nav
+    // strips the Nil arm. campfire's
+    // `Opengraph::Fetch#fetch_content_type` returns
+    // `response["Content-Type"]` off an untyped `response`.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def with_each_attempt
+    raise "out of attempts"
+  end
+  def content_type
+    with_each_attempt do |attempt|
+      return attempt["Content-Type"]
+    end
+  end
+  def maybe_content_type
+    content_type if @ready
+  end
+  def use
+    maybe_content_type&.downcase
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    assert!(
+        !failures.iter().any(|f| f == "downcase"),
+        "`maybe_content_type&.downcase` should resolve — content_type \
+         returns something unknown, not nothing; failures = {failures:?}"
+    );
+}
+
+#[test]
 fn datetime_columns_type_as_time() {
     // A schema datetime column is a `Time` at the Ruby level, so
     // `created_at.strftime` / `.to_i` / `.after?` / `>=` all resolve.

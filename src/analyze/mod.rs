@@ -3787,7 +3787,8 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// Collect the returns and union them with the non-`Bottom` tail.
 fn effective_return_ty(body: &Expr) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
-    collect_return_types(body, &mut tys);
+    let mut saw_return = false;
+    collect_return_types(body, &mut tys, &mut saw_return);
     // Tail (implicit return). Drop `Bottom` so an all-diverging tail
     // doesn't poison the union; keep everything else.
     if let Some(t) = &body.ty {
@@ -3796,6 +3797,18 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
         }
     }
     if tys.is_empty() {
+        // A method that reaches a `return` does not diverge, whatever
+        // the returned value's shape. Harvesting `Bottom` here is not
+        // a gap but a LIE, and dispatch acts on it: campfire's
+        // `Fetch#fetch_content_type` is `request(url, Head, ip:) { |r|
+        // return r["Content-Type"] }` over an untyped `r`, so every
+        // collected type was open and the tail (`raise`) was `Bottom`
+        // — the caller's `…&.downcase` then saw a receiver typed
+        // exactly `Nil` and failed dispatch. Answer `unknown` instead,
+        // which is what "it returns something we can't name" means.
+        if saw_return && matches!(body.ty, Some(Ty::Bottom)) {
+            return Some(crate::analyze::body::unknown());
+        }
         // Nothing usable collected — preserve prior behavior so the
         // `Var`/`Bottom`/`None` fallbacks downstream are unchanged.
         return body.ty.clone();
@@ -3805,53 +3818,79 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
 
 /// Collect the value type of every `return X` reachable from `expr`
 /// without crossing a closure boundary. `Bottom`/`Var` values are
-/// skipped (no usable shape). Does not descend into `Lambda`: a stabby
-/// `-> { return }` returns from the lambda, not the method (block
-/// `do…end` returns do exit the method, but the two share the same IR
-/// node, so skipping is the safe under-approximation).
-fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>) {
+/// skipped (no usable shape).
+///
+/// A block attached to a call is NOT such a boundary. `return` inside
+/// `do…end` / `{ }` exits the enclosing METHOD, and that is how a
+/// value escapes a yielding helper: campfire's
+/// `Opengraph::Fetch#fetch_document` is `request(url, Get, ip:) { |r|
+/// return body_if_acceptable(r) }`, and `request` itself ends in
+/// `raise TooManyRedirectsError`. Reading only the call's own type
+/// harvested `Bottom`, so `location.read_html.force_encoding` and
+/// `…fetch_content_type&.downcase` both failed dispatch on `Nil`.
+///
+/// The boundary is a `Lambda` in VALUE position (`scope :x, -> { … }`,
+/// an argument, an assignment) — a stabby lambda's `return` returns
+/// from the lambda. Blocks and lambdas share one IR node, so the
+/// distinction is structural: a `Lambda` reached as a call's `block`
+/// is a block; a `Lambda` reached any other way is a closure. Two
+/// receivers make a `{ }` block a closure anyway and are named:
+/// `lambda` (a lambda's `return` is lambda-local) and `define_method`
+/// (the `return` belongs to the method being defined).
+fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
     match &*expr.node {
         ExprNode::Return { value } => {
+            *saw = true;
             if let Some(t) = &value.ty {
                 if !t.is_open() {
                     out.push(t.clone());
                 }
             }
-            collect_return_types(value, out);
+            collect_return_types(value, out, saw);
         }
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                collect_return_types(e, out);
+        // A `Lambda` reached here is in value position — a closure
+        // boundary. The `Send`/`Apply` arms below step past the node
+        // for the block case, so this arm never sees a block.
+        ExprNode::Lambda { .. } => {}
+
+        ExprNode::Send { recv, args, block, method, .. } => {
+            if let Some(r) = recv {
+                collect_return_types(r, out, saw);
+            }
+            for a in args {
+                collect_return_types(a, out, saw);
+            }
+            // `lambda { return }` is lambda-local, and
+            // `define_method(:x) { return }` belongs to the method
+            // being defined. Every other block's `return` is ours.
+            if !matches!(method.as_str(), "lambda" | "define_method") {
+                if let Some(b) = block {
+                    collect_block_return_types(b, out, saw);
+                }
             }
         }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            collect_return_types(cond, out);
-            collect_return_types(then_branch, out);
-            collect_return_types(else_branch, out);
-        }
-        ExprNode::Case { arms, .. } => {
-            for arm in arms {
-                collect_return_types(&arm.body, out);
+        ExprNode::Apply { fun, args, block } => {
+            collect_return_types(fun, out, saw);
+            for a in args {
+                collect_return_types(a, out, saw);
+            }
+            if let Some(b) = block {
+                collect_block_return_types(b, out, saw);
             }
         }
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            collect_return_types(body, out);
-            for r in rescues {
-                collect_return_types(&r.body, out);
-            }
-            if let Some(e) = else_branch {
-                collect_return_types(e, out);
-            }
-            if let Some(e) = ensure {
-                collect_return_types(e, out);
-            }
-        }
-        ExprNode::BoolOp { left, right, .. }
-        | ExprNode::RescueModifier { expr: left, fallback: right } => {
-            collect_return_types(left, out);
-            collect_return_types(right, out);
-        }
-        ExprNode::While { body, .. } => collect_return_types(body, out),
+
+        _ => expr.node.for_each_child(&mut |c| collect_return_types(c, out, saw)),
+    }
+}
+
+/// Walk a call's block body for `return`s that belong to the enclosing
+/// method. Steps past the `Lambda` node deliberately: reaching the body
+/// through `collect_return_types` would hit the closure-boundary arm.
+fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
+    match &*block.node {
+        ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw),
+        // A block passed as `&blk` (or any non-literal block operand)
+        // has no body here.
         _ => {}
     }
 }
