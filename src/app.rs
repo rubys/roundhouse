@@ -183,6 +183,27 @@ pub struct App {
     /// the app walk; empty for apps without concerns.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_filters: HashMap<ClassId, Vec<Filter>>,
+    /// Provenance for concern METHODS spliced into a controller:
+    /// controller → (method name → the module it was cut from).
+    /// `splice_concerns_into_controllers` copies a concern's methods
+    /// into every includer; the copy is then typed against THAT
+    /// controller's ivar environment, which is wrong when the concern
+    /// is included high in the chain. campfire puts
+    /// `include TrackedRoomVisit` on ApplicationController, whose
+    /// `remember_last_room_visited` reads `@room` — a ivar
+    /// ApplicationController never sets, because the concern's method
+    /// runs as a before_action on the Rooms controllers below it. The
+    /// honest seed is the union across includers, which
+    /// `concern_ivar_env` already computes; this map is what lets the
+    /// seeding site find it. Filters carry the same fact in
+    /// `Filter::from_concern`; methods had nowhere to put it.
+    ///
+    /// Analysis-only, so it lives beside the app rather than on
+    /// `Action`: no emitter needs it (the splice is already a verbatim
+    /// copy by the time one runs), and a field on `Action` would touch
+    /// every construction site including a dozen in tests.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_spliced_actions: HashMap<ClassId, HashMap<Symbol, ClassId>>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -368,6 +389,7 @@ impl App {
             time_formats: BTreeMap::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
+            concern_spliced_actions: HashMap::new(),
             concern_model_items: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),

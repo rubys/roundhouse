@@ -3234,3 +3234,78 @@ fn missing_preload_stays_silent_when_preloaded_or_opaque() {
     );
     assert_eq!(missing_preload_diags(&app), vec![], "opaque chain stays silent");
 }
+
+/// A concern's method spliced into a class that never sets the ivar it
+/// reads must be typed against the CONCERN's environment — the union
+/// across includers — not the includer's own.
+///
+/// campfire's shape exactly: `include TrackedRoomVisit` sits on
+/// ApplicationController, whose `remember_last_room_visited` reads
+/// `@room`. ApplicationController never sets it; the method runs as a
+/// before_action on the Rooms controllers BELOW it, and those do. Before
+/// the Phase B′ reseed the spliced copy typed `@room` as nothing and
+/// `diagnose` reported an `ivar_unresolved` at the concern's own source
+/// line — which reads as a compiler bug rather than the seeding gap it is.
+///
+/// ABLATION-CHECKED: deleting the Phase B′ block in `analyze::mod` puts
+/// "room" back in `ivar_unresolved_names`. Two earlier gates for this
+/// area passed under the ablation that removed their fix; this one does
+/// not.
+#[test]
+fn concern_method_spliced_high_in_the_chain_types_against_the_concern_env() {
+    let app = app_from_files(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"rooms\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/concerns/tracked_room_visit.rb",
+            r#"module TrackedRoomVisit
+  extend ActiveSupport::Concern
+
+  def remember_last_room_visited
+    @room.name
+  end
+end
+"#,
+        ),
+        (
+            // The includer. It has no `@room` of its own — that is the
+            // whole point of the fixture.
+            "app/controllers/application_controller.rb",
+            r#"class ApplicationController < ActionController::Base
+  include TrackedRoomVisit
+end
+"#,
+        ),
+        (
+            // The subclass that actually sets it.
+            "app/controllers/rooms_controller.rb",
+            r#"class RoomsController < ApplicationController
+  before_action :set_room
+
+  def show
+  end
+
+  private
+    def set_room
+      @room = Room.find(params[:id])
+    end
+end
+"#,
+        ),
+    ]);
+
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "room"),
+        "@room in a concern spliced onto ApplicationController must take the \
+         concern's env (RoomsController's `set_room` answer), got unresolved: \
+         {unresolved:?}",
+    );
+}

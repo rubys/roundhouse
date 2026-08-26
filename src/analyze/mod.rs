@@ -1884,6 +1884,83 @@ impl Analyzer {
                 entry.insert(k, v);
             }
         }
+
+        // ── Phase B′: re-type the concern methods spliced into each
+        // ── includer, against the CONCERN's ivar environment.
+        //
+        // `splice_concerns_into_controllers` copies a concern's methods
+        // into the class that includes it, and Phase B above typed each
+        // copy against THAT class's environment. For a concern included
+        // high in the chain that is the wrong environment: campfire puts
+        // `include TrackedRoomVisit` on ApplicationController, and its
+        // `remember_last_room_visited` reads `@room` — which
+        // ApplicationController never sets, because the method runs as a
+        // before_action on the Rooms controllers BELOW it. The copy typed
+        // `@room` as nothing and `diagnose` reported it at the concern's
+        // own source line, which reads as a compiler bug rather than the
+        // seeding gap it is.
+        //
+        // The honest seed is the union across includers — exactly what
+        // `concern_ivar_env_of` computes, and it is available only HERE:
+        // it is derived from `controller_ivar_env`, which the Phase B loop
+        // is still filling until the line above. So this is a separate
+        // pass rather than an overlay inside Phase B, and it is additive:
+        // the controller's own binding still wins wherever it has one, and
+        // only names the includer lacks are filled from the concern.
+        if !app.concern_spliced_actions.is_empty() {
+            let concern_env =
+                concern_ivar_env_of(app, &controller_ivar_env, &module_includes);
+            let origins = app.concern_spliced_actions.clone();
+            for controller in &mut app.controllers {
+                let Some(by_method) = origins.get(&controller.name) else { continue };
+                let own_env = controller_ivar_env.get(&controller.name).cloned()
+                    .unwrap_or_default();
+                let self_ty = Ty::Class { id: controller.name.clone(), args: vec![] };
+                let ctrl_name = controller.name.clone();
+                // The same constants Phase B typed this controller's
+                // bodies with. Passing an empty map here would make the
+                // re-type LOSE a constant binding Phase B had already
+                // established — this pass must only ever add.
+                let mut class_constants = global_constants.clone();
+                class_constants
+                    .extend(extract_controller_const_assignments(&controller.body));
+                for action in controller.actions_mut() {
+                    let Some(module) = by_method.get(&action.name) else { continue };
+                    let Some(from_concern) = concern_env.get(module) else { continue };
+                    let mut seed = own_env.clone();
+                    let mut filled = false;
+                    for (k, v) in from_concern {
+                        // The includer's own answer wins; the concern only
+                        // fills what that environment has nothing to say
+                        // about. An `is_open` arm is nothing to say.
+                        let vacant = seed.get(k).is_none_or(|t| t.is_open());
+                        if vacant {
+                            seed.insert(k.clone(), v.clone());
+                            filled = true;
+                        }
+                    }
+                    if !filled {
+                        continue;
+                    }
+                    let base_ctx = Ctx {
+                        self_ty: Some(self_ty.clone()),
+                        ivar_bindings: seed,
+                        local_bindings: HashMap::new(),
+                        constants: class_constants.clone(),
+                        annotate_self_dispatch: false,
+                        in_view: false,
+                    };
+                    let inner_ctx = self.seed_action_params(
+                        &base_ctx,
+                        &ctrl_name,
+                        &action.name,
+                        &action.params,
+                    );
+                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    action.effects = self.collect_effects(&mut action.body, &inner_ctx);
+                }
+            }
+        }
         for model in &mut app.models {
             // Seed class ivars for the body-typer. Three shapes in play:
             // 1. `@attributes` — the legacy Hash-storage access path
@@ -2060,6 +2137,9 @@ impl Analyzer {
                 .collect()
         };
 
+        let concern_ivar_env =
+            concern_ivar_env_of(app, &controller_ivar_env, &module_includes);
+
         // A `CurrentAttributes` ivar is written from OUTSIDE the class,
         // through the class-level forwarder `ingest::current_attributes`
         // synthesizes (`Current.session = session`). The syntactic
@@ -2073,61 +2153,6 @@ impl Analyzer {
         // Survey the app for those writes and let their VALUE types be
         // the seed. This is evidence, not convention: the type is
         // whatever the app actually assigns.
-        // module → the union of every including controller's ivar
-        // environment. Includes close transitively, the same closure
-        // Phase A's splice walks.
-        let concern_ivar_env: HashMap<ClassId, HashMap<Symbol, Ty>> = {
-            let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-            let by_name: HashMap<&ClassId, &Controller> =
-                app.controllers.iter().map(|c| (&c.name, c)).collect();
-            for controller in &app.controllers {
-                let Some(env) = controller_ivar_env.get(&controller.name) else { continue };
-                // The includer may be an ANCESTOR. campfire puts
-                // `include TrackedRoomVisit` on ApplicationController,
-                // which has no `@room` — but the concern's
-                // `remember_last_room_visited` is a before_action on
-                // the Rooms controllers, which do. A concern included
-                // high in the chain runs on every controller below it,
-                // so every one of those environments is a source.
-                let mut queue: Vec<ClassId> = controller_includes(controller);
-                {
-                    let mut cursor = controller.parent.clone();
-                    for _ in 0..32 {
-                        let Some(pid) = cursor else { break };
-                        let Some(parent) = by_name.get(&pid) else { break };
-                        queue.extend(controller_includes(parent));
-                        cursor = parent.parent.clone();
-                    }
-                }
-                let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
-                let mut qi = 0;
-                while qi < queue.len() {
-                    let m = queue[qi].clone();
-                    qi += 1;
-                    if let Some(nested) = module_includes.get(&m) {
-                        for n in nested {
-                            if seen.insert(n.clone()) {
-                                queue.push(n.clone());
-                            }
-                        }
-                    }
-                    let entry = out.entry(m).or_default();
-                    for (k, v) in env {
-                        if v.is_open() {
-                            continue;
-                        }
-                        let merged = match entry.remove(k) {
-                            Some(prev) if prev == *v => prev,
-                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                            None => v.clone(),
-                        };
-                        entry.insert(k.clone(), merged);
-                    }
-                }
-            }
-            out
-        };
-
         let current_attribute_writes: HashMap<ClassId, HashMap<Symbol, Ty>> = {
             let targets: std::collections::HashSet<&ClassId> =
                 app.current_attribute_classes.iter().collect();
@@ -4617,4 +4642,69 @@ mod rbs_ingestion_tests {
             .classes
             .contains_key(&ClassId(Symbol::from("ActiveModel::Errors"))));
     }
+}
+
+/// module → the union of every INCLUDING controller's ivar environment,
+/// closed transitively over nested includes (the same closure the Phase A
+/// splice walks).
+///
+/// One copy, called from two places: the concern module's own body typing,
+/// and the reseed of the copies `splice_concerns_into_controllers` cut into
+/// each includer. A second copy is how the rule drifts — and the two
+/// callers genuinely need the same answer, because the module body and its
+/// spliced copies are the same code.
+fn concern_ivar_env_of(
+    app: &App,
+    controller_ivar_env: &HashMap<ClassId, HashMap<Symbol, Ty>>,
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+) -> HashMap<ClassId, HashMap<Symbol, Ty>> {
+            let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+        let by_name: HashMap<&ClassId, &Controller> =
+            app.controllers.iter().map(|c| (&c.name, c)).collect();
+        for controller in &app.controllers {
+            let Some(env) = controller_ivar_env.get(&controller.name) else { continue };
+            // The includer may be an ANCESTOR. campfire puts
+            // `include TrackedRoomVisit` on ApplicationController,
+            // which has no `@room` — but the concern's
+            // `remember_last_room_visited` is a before_action on
+            // the Rooms controllers, which do. A concern included
+            // high in the chain runs on every controller below it,
+            // so every one of those environments is a source.
+            let mut queue: Vec<ClassId> = controller_includes(controller);
+            {
+                let mut cursor = controller.parent.clone();
+                for _ in 0..32 {
+                    let Some(pid) = cursor else { break };
+                    let Some(parent) = by_name.get(&pid) else { break };
+                    queue.extend(controller_includes(parent));
+                    cursor = parent.parent.clone();
+                }
+            }
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if let Some(nested) = module_includes.get(&m) {
+                    for n in nested {
+                        if seen.insert(n.clone()) {
+                            queue.push(n.clone());
+                        }
+                    }
+                }
+                let entry = out.entry(m).or_default();
+                for (k, v) in env {
+                    if v.is_open() {
+                        continue;
+                    }
+                    let merged = match entry.remove(k) {
+                        Some(prev) if prev == *v => prev,
+                        Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                        None => v.clone(),
+                    };
+                    entry.insert(k.clone(), merged);
+                }
+            }
+        }
+    out
 }

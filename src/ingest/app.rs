@@ -1210,6 +1210,16 @@ fn splice_concerns_into_controllers(app: &mut App) {
         module_includes.insert(lc.name.clone(), lc.includes.clone());
     }
 
+    // controller -> (spliced method -> the module it came from). Built
+    // alongside the splice and stored on the App: the copy is typed
+    // against the includer's ivar environment, which is the wrong
+    // environment when the concern sits high in the chain, and the
+    // seeding site needs to know which module to ask about instead.
+    let mut spliced_origin: HashMap<
+        crate::ident::ClassId,
+        HashMap<crate::ident::Symbol, crate::ident::ClassId>,
+    > = HashMap::new();
+
     for controller in &mut app.controllers {
         let includes = crate::analyze::controller_includes(controller);
         if includes.is_empty() {
@@ -1271,6 +1281,10 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         }
                     }
                 }
+                spliced_origin
+                    .entry(controller.name.clone())
+                    .or_default()
+                    .insert(method.name.clone(), module.clone());
                 methods.push(ControllerBodyItem::Action {
                     action: Action {
                         name: method.name.clone(),
@@ -1307,6 +1321,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
         filters.extend(methods);
         controller.body = filters;
     }
+    app.concern_spliced_actions = spliced_origin;
 }
 
 /// Qualify the bare constant references in a body being lifted out of
