@@ -1,0 +1,31 @@
+module Mime
+  class Type
+    class InvalidMimeType < StandardError
+    end
+
+    CANONICAL: Hash[String, String]
+    SYMBOLS: Hash[String, Symbol]
+    EXTENSIONS: Hash[String, String]
+
+    @string: String
+    @symbol: Symbol?
+
+    def initialize: (String string, ?Symbol? symbol) -> void
+    def symbol: () -> Symbol?
+    def to_s: () -> String
+    def to_str: () -> String
+    def to_sym: () -> Symbol?
+    def ==: (untyped other) -> bool
+    def eql?: (untyped other) -> bool
+    def hash: () -> Integer
+    def inspect: () -> String
+
+    # Non-nilable on purpose: upstream's `lookup` answers a Type for any
+    # well-formed string and raises for the rest. See the note in mime.rb.
+    def self.lookup: (String string) -> Mime::Type
+    def self.lookup_by_extension: (String extension) -> Mime::Type?
+    def self.valid?: (String? string) -> bool
+  end
+
+  def self.[]: (String extension) -> Mime::Type?
+end

@@ -1954,6 +1954,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "params",
         "action_text",
         "active_storage",
+        // actionpack's MIME registry, ported (see runtime/ruby/mime.rb).
+        // Every target: nothing else in a tree defines `Mime`.
+        "mime",
         // The stdlib class the strict targets have no stdlib for. The
         // ruby family reaches Ruby's own through a bare `require`, so
         // this one only has to exist where that does not.

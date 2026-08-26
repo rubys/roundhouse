@@ -5379,6 +5379,11 @@ fn require_path_for_body_const(
         // stdlib's own `initialize` and leave the predicates reading a
         // slot nobody filled. One IPAddr per tree, and it is ours.
         "IPAddr" => Some("runtime/ipaddr".to_string()),
+        // `Mime::Type` — actionpack's registry, ported into
+        // `runtime/ruby/mime.rb`. Anchored for every target: the
+        // constant is actionpack's, not the stdlib's, so no bare
+        // `require` reaches it on the ruby family either.
+        "Mime" => Some("runtime/mime".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),
         // Gem façades — typed raising stand-ins for write-path-only

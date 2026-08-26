@@ -146,6 +146,25 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str),
         ("octets", Ty::Array { elem: Box::new(Ty::Int) }),
     ]);
+    // `Mime::Type` — the class `runtime/ruby/mime.rb` ports from
+    // actionpack. `lookup` is deliberately NON-nilable: upstream answers
+    // a Type for any well-formed string (symbol nil when unregistered)
+    // and raises for the rest, which is what makes
+    // `if t = Mime::Type.lookup(ct)` a safe guard in app code. Giving it
+    // a `| Nil` arm here would be a lie the type system can act on.
+    let mime_type = Ty::Class { id: ClassId(Symbol::from("Mime::Type")), args: vec![] };
+    register_stdlib_class(classes, "Mime::Type", &[
+        ("lookup", mime_type.clone()),
+        ("lookup_by_extension", Ty::Union {
+            variants: vec![mime_type.clone(), Ty::Nil],
+        }),
+        ("valid?", Ty::Bool),
+    ], &[
+        ("symbol", Ty::Union { variants: vec![Ty::Sym, Ty::Nil] }),
+        ("to_sym", Ty::Union { variants: vec![Ty::Sym, Ty::Nil] }),
+        ("to_s", Ty::Str), ("to_str", Ty::Str), ("inspect", Ty::Str),
+        ("hash", Ty::Int), ("==", Ty::Bool), ("eql?", Ty::Bool),
+    ]);
     // `URI.parse` returns a URI object we don't model; `Untyped` lets
     // chained `.scheme` / `.host` flow gradually instead of erroring.
     register_stdlib_class(classes, "URI", &[
