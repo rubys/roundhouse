@@ -129,13 +129,32 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
     }
 }
 
-/// Ruby-family pre-emit pass: `render partial:` in a LIBRARY-CLASS body
+/// Ruby-family pre-emit pass: a partial render in a LIBRARY-CLASS body
 /// (lobsters' ApplicationHelper#link_post renders a partial from a
 /// helper). A helper's render RETURNS the string, so the rewrite is the
 /// bare `Views::<Mod>.<stem>(record, closure…, extras…)` call — locals
 /// bind by name against the partial's contract, everything else nil
 /// (a module body has no controller ivars to thread). Slashed partial
 /// names only; a bare name has no module context here.
+///
+/// BOTH spellings Rails accepts: `render partial: "x/y", locals: {…}`
+/// and the SHORTHAND `render "x/y"` (locals, if any, ride a trailing
+/// hash). campfire's `MessagesHelper#message_tag` uses the shorthand in
+/// a `rescue` body — `render "messages/unrenderable"` is what a message
+/// row renders when building it raised — and unclaimed it emitted as a
+/// bare `render` call, which is a method a helper module does not
+/// have.
+///
+/// A name the locals do not bind falls back to the enclosing method's
+/// own PARAMETER of that name before it falls back to nil. Same policy
+/// as the controller-side rewrite ("a same-named local wins"), and here
+/// it is what keeps the call type-correct: the partial's record
+/// parameter is typed as its record (`unrenderable(Message message,
+/// …)`), so a nil there is a seed contradiction that stops a strict
+/// build. The divergence it buys is bounded and in the safe direction —
+/// Rails supplies no local at all for a shorthand render, so a partial
+/// that reads one raises there; ours renders with the caller's
+/// same-named value.
 pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], app: &App) {
     let contracts = crate::lower::view_to_library::partial_call_contracts(
         &app.views,
@@ -147,9 +166,27 @@ pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], ap
     }
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            rewrite_library_partial_render(&mut m.body, &contracts);
+            let in_scope: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
+            rewrite_library_partial_render(&mut m.body, &contracts, &in_scope);
         }
     }
+}
+
+/// Symbol-keyed entries of a hash ARG, as partial locals. Rails lets a
+/// shorthand render carry its locals in a trailing hash (`render
+/// "messages/message", message: m`), which is the same map `locals:`
+/// spells one level down.
+fn hash_locals(arg: Option<&Expr>) -> Vec<(Symbol, Expr)> {
+    use crate::expr::Literal;
+    let Some(arg) = arg else { return Vec::new() };
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return Vec::new() };
+    entries
+        .iter()
+        .filter_map(|(k, v)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some((value.clone(), v.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn rewrite_library_partial_render(
@@ -158,40 +195,50 @@ fn rewrite_library_partial_render(
         (String, String),
         crate::lower::view_to_library::PartialCallContract,
     >,
+    in_scope: &[Symbol],
 ) {
     use crate::expr::Literal;
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_library_partial_render(c, contracts));
+        .for_each_child_mut(&mut |c| rewrite_library_partial_render(c, contracts, in_scope));
     let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return };
     if method.as_str() != "render" && method.as_str() != "render_to_string" {
         return;
     }
     let Some(first) = args.first() else { return };
-    let ExprNode::Hash { entries, kwargs: true } = &*first.node else { return };
     let mut partial: Option<String> = None;
     let mut locals: Vec<(Symbol, Expr)> = Vec::new();
-    for (k, v) in entries {
-        let key = match &*k.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
-            _ => "",
-        };
-        match key {
-            "partial" => {
-                if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
-                    partial = Some(value.clone());
-                }
-            }
-            "locals" => {
-                if let ExprNode::Hash { entries: le, .. } = &*v.node {
-                    for (lk, lv) in le {
-                        if let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node {
-                            locals.push((value.clone(), lv.clone()));
+    match &*first.node {
+        // The shorthand — the string IS the partial name.
+        ExprNode::Lit { value: Literal::Str { value } } => {
+            partial = Some(value.clone());
+            locals = hash_locals(args.get(1));
+        }
+        ExprNode::Hash { entries, kwargs: true } => {
+            for (k, v) in entries {
+                let key = match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                    _ => "",
+                };
+                match key {
+                    "partial" => {
+                        if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                            partial = Some(value.clone());
                         }
                     }
+                    "locals" => {
+                        if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                            for (lk, lv) in le {
+                                if let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node {
+                                    locals.push((value.clone(), lv.clone()));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
+        _ => return,
     }
     let Some(pname) = partial else { return };
     let Some((dir, base)) = pname.rsplit_once('/') else { return };
@@ -201,7 +248,15 @@ fn rewrite_library_partial_render(
     let span = expr.span;
     let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
     let lookup = |name: &str| -> Option<Expr> {
-        locals.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone())
+        locals
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| {
+                in_scope.iter().find(|p| p.as_str() == name).map(|p| {
+                    Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
+                })
+            })
     };
     let mut view_args: Vec<Expr> = Vec::new();
     view_args.push(lookup(&contract.record).unwrap_or_else(nil));
@@ -2199,6 +2254,13 @@ fn is_framework_view_helper(name: &str) -> bool {
             // is a raising stub; unqualified it was a bare call NOTHING
             // defines, which stops a strict build outright.
             | "polymorphic_url"
+            // `polymorphic_url(record, only_path: true)` — beside
+            // `url_for`, which is the same question asked of a value
+            // the lowerings could answer statically. campfire's
+            // `BroadcastsHelper` asks it of an Active Storage
+            // representation, so the runtime member it now resolves to
+            // is a raising stub; unqualified it was a bare call NOTHING
+            // defined, which stops a strict build outright.
             | "submit_tag"
             // The bare (builder-less) hidden field, beside its
             // `label_tag`/`submit_tag` siblings in the same overlay
