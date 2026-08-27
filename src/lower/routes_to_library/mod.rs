@@ -716,7 +716,22 @@ fn build_helper_function(
         params.push(Param::keyword(sym.clone(), Some(keyword_default(p))));
         segment_keyword_sig.push(crate::ty::Param {
             name: sym,
-            ty: param_ty(p, slug_params.contains(p.as_str())),
+            // `Str`, NOT `param_ty` — the type has to follow the DEFAULT
+            // this same loop just emitted, and `keyword_default` always
+            // builds a `Literal::Str` because a route table stores its
+            // defaults as text (`defaults: { user_id: "me" }`).
+            //
+            // `param_ty` answers a different question — it types a
+            // SEGMENT, and anything ending `_id` is an Int unless a
+            // call site proved otherwise. For a keyworded segment those
+            // two answers were computed independently and disagreed:
+            // `user_push_subscription_test_notifications_path(id,
+            // user_id: "me")` declared `user_id` an `sp_int` and
+            // defaulted it to a `char *`, so every call that let the
+            // default apply failed the C build with an int-conversion.
+            // One description, and the default is the one that is
+            // always present.
+            ty: crate::ty::Ty::Str,
             kind: crate::ty::ParamKind::Keyword { required: false },
         });
     }

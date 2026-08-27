@@ -337,9 +337,45 @@ impl<'a> BodyTyper<'a> {
                 if let Some(e) = ensure {
                     self.analyze_expr(e, ctx);
                 }
-                // Union of body type and rescue body types; approximate
-                // as body's type for now.
-                body.ty.clone().unwrap_or_else(unknown)
+                // Ruby's value here is the ELSE branch when there is
+                // one (it runs on the no-exception path and its value
+                // wins over the begin body's), otherwise the begin
+                // body's — unioned with every rescue body, which is the
+                // value on the handled path. `ensure` never contributes
+                // a value.
+                //
+                // Dropping the rescue arms — what this did before —
+                // makes `uri.to_s … rescue nil` infer `String` where it
+                // answers `String?`, and the emitted RBS then
+                // OVER-CLAIMS. campfire's
+                // `Metadata.replace_twitter_domain_for_opengraph_support`
+                // is exactly that shape: signed `-> String`, returning
+                // nil from `rescue URI::InvalidURIError`, and the C
+                // build stopped on `returning 'sp_RbVal' from a
+                // function with incompatible result type 'const char *'`.
+                //
+                // `Bottom` arms are SKIPPED rather than unioned: a
+                // `rescue` that only re-raises diverges and must not
+                // drag the whole expression to Bottom. Same rule
+                // `effective_return_ty` applies to a diverging tail.
+                let mut arms: Vec<Ty> = Vec::new();
+                let primary = else_branch
+                    .as_ref()
+                    .and_then(|e| e.ty.clone())
+                    .or_else(|| body.ty.clone());
+                if let Some(t) = primary {
+                    if !matches!(t, Ty::Bottom) {
+                        arms.push(t);
+                    }
+                }
+                for rc in rescues.iter() {
+                    if let Some(t) = &rc.body.ty {
+                        if !matches!(t, Ty::Bottom) {
+                            arms.push(t.clone());
+                        }
+                    }
+                }
+                if arms.is_empty() { unknown() } else { union_many(arms) }
             }
 
             ExprNode::Hash { entries, .. } => {

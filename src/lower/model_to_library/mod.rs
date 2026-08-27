@@ -1660,10 +1660,36 @@ fn type_method_body(
 /// exits the method, so the walk counts those too). If/Case bodies
 /// union their branches, so divergent shapes fail the scalar gate on
 /// their own. Param types stay untyped — this pins only the return.
+/// A scalar, or a scalar unioned with nil — `String?` and friends.
+///
+/// The nullable arm matters because a `rescue` contributes one: a body
+/// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
+/// backfill that leaves the method `-> untyped`, i.e. a boxed return
+/// where a flat nullable scalar was available. Spinel stores `String?`
+/// as a NULL `char *` and `Integer?` as a sentinel, so nullability
+/// costs nothing here — widening to `untyped` does.
+fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
+    fn is_scalar(t: &Ty) -> bool {
+        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+    }
+    match ty {
+        t if is_scalar(t) => true,
+        Ty::Union { variants } => {
+            variants.iter().any(is_scalar)
+                && variants.iter().all(|v| is_scalar(v) || matches!(v, Ty::Nil))
+                // One scalar kind only: `Str | Int | Nil` has no single
+                // flat representation, and guessing one would be the
+                // bag this whole rule exists to avoid.
+                && variants.iter().filter(|v| is_scalar(v)).count() == 1
+        }
+        _ => false,
+    }
+}
+
 fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
     if method.signature.is_some()
         || method.block_param.is_some()
-        || !matches!(body_ty, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        || !scalar_or_nullable_scalar(&body_ty)
         || contains_return(&method.body)
     {
         return;
