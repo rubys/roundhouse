@@ -134,7 +134,7 @@ module ActionCable
 
   module Channel
     class Base
-      # The four methods the base itself owns. Each is reachable only
+      # The five methods the base itself owns. Each is reachable only
       # from a subscription callback, and no subscription callback runs
       # yet — see the header. They raise because the alternative is a
       # `subscribed` that appears to succeed.
@@ -148,6 +148,24 @@ module ActionCable
         raise NotImplementedError,
               "ActionCable::Channel#stream_for: channel subscriptions are not " \
               "dispatched yet (Turbo streams subscribe through Cable directly)"
+      end
+
+      # The PUBLISH half of the channel API — `broadcast_to @room,
+      # action: :start` in campfire's TypingNotificationsChannel.
+      # `ActionCable.server.broadcast` works, so it is fair to ask why
+      # this raises: because the stream it would publish to is
+      # `broadcasting_for(record)`, and the only thing that ever
+      # subscribes to that name is `stream_for` — which raises three
+      # methods up. Nothing is listening, so a publish here is the
+      # silent-success failure, not a working broadcast.
+      #
+      # Reachable only from an inbound channel action, and inbound
+      # actions are not dispatched either (`Cable.handle_message` acts
+      # on `subscribe` and returns 0 for everything else).
+      def broadcast_to(_record, _message)
+        raise NotImplementedError,
+              "ActionCable::Channel#broadcast_to: channel subscriptions are not " \
+              "dispatched yet, so `broadcasting_for(record)` has no subscribers"
       end
 
       def reject
