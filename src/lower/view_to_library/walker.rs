@@ -12,7 +12,7 @@ use crate::lower::view::{
 };
 
 use super::form_builder::{
-    emit_button_tag, emit_check_box_tag, emit_form_builder_block_inline, emit_form_builder_inline, emit_label_tag,
+    emit_button_tag, emit_button_tag_block, emit_check_box_tag, emit_form_builder_block_inline, emit_form_builder_inline, emit_label_tag,
     emit_submit_tag,
 };
 use super::form_with::{
@@ -674,6 +674,16 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // (filters page); the open tag inlines, the body splices.
         if method.as_str() == "label_tag" {
             if let Some(out) = emit_label_tag(sa, Some(block), ctx) {
+                return out;
+            }
+        }
+        // `<%= button_tag(opts) do %>…<% end %>` — block-content
+        // button (campfire's message editor). Must be caught HERE:
+        // the blockless dispatch below matches `block: None`, and the
+        // generic block-helper arm captures the body to `_cap` while
+        // leaving the `button_tag` call itself bare.
+        if method.as_str() == "button_tag" {
+            if let Some(out) = emit_button_tag_block(sa, block, ctx) {
                 return out;
             }
         }

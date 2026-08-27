@@ -838,6 +838,45 @@ pub(super) fn emit_button_tag(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     emit_button(positional.first().copied(), opts.as_slice(), ctx)
 }
 
+/// `<%= button_tag(opts) do %> … <% end %>` — the BLOCK spelling of the
+/// builder-less button, where the label is template markup rather than a
+/// string argument.
+///
+/// The blockless sibling above rides the dispatch that matches
+/// `block: None`; the block form fell past it, and past the generic
+/// block-helper arm too, surviving into the emit as a literal
+/// `button_tag(…) do _cap = … end` — a call no target defines. campfire
+/// writes it at four sites (the message editor's save and delete
+/// buttons, the direct-room composer), and it is where the spinel build
+/// stopped.
+///
+/// Open tag from [`button_open_parts`], the same owner the blockless
+/// spelling and the tag builder's helper-body form both call, so the
+/// three cannot disagree about Rails' `name`/`type` defaults. The body
+/// is template buffer ops, so it is WALKED against the outer accumulator
+/// rather than captured — the same open/walk/close splice
+/// `emit_form_builder_block_inline`'s Button arm uses.
+///
+/// Rails reads a Hash first argument as the OPTIONS when a block is
+/// given, which is what `split_args` already does with every Hash it
+/// sees; no corpus site passes button content BOTH ways.
+pub(super) fn emit_button_tag_block(
+    args: &[Expr],
+    block: &Expr,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return None;
+    };
+    let (_positional, opts) = split_args(args);
+    let mut out =
+        vec![accumulator_append_call(string_interp(button_open_parts(opts.as_slice())), ctx)];
+    let inner = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+    out.extend(walk_body(body, &inner));
+    out.push(accumulator_append_call(lit_str("</button>".to_string()), ctx));
+    Some(out)
+}
+
 /// Bare `<%= check_box_tag name[, value[, checked]][, opts] %>` — the
 /// model-less checkbox: `<input type="checkbox" name="N" id="I"
 /// value="V"[ checked="checked"][opts]>` in Rails' attr order. The
@@ -1003,20 +1042,53 @@ fn sanitize_to_id_static(name: &str) -> String {
 /// defaults its type to `submit` unless the caller gave one. Shared by
 /// the inline form and the BLOCK form below so the two spellings can't
 /// drift in their attribute rendering.
+/// Rails builds the open tag as `{ "name" => "button", "type" =>
+/// "submit" }.merge!(options.stringify_keys)` (actionview 8.1.3,
+/// `form_tag_helper.rb:578`), and that ONE line decides two things this
+/// used to get wrong, because Ruby's `merge!` keeps the RECEIVER's slot
+/// for a key that already exists:
+///
+/// * a caller's `type:` REPLACES `"submit"` IN PLACE, so `type` renders
+///   second however the caller ordered it. Appending options in caller
+///   order gave campfire's `button_tag class: …, type: "submit"` the
+///   markup `name="button" class="…" type="submit"` against Rails'
+///   `name="button" type="submit" class="…"` — same attributes, wrong
+///   order, invisible to a tag tally and visible to a byte compare.
+/// * a caller's `name:` REPLACES `"button"` the same way. Appending it
+///   emitted the attribute TWICE: campfire's sign-in button rendered
+///   `<button name="button" … name="log_in">`, and a browser takes the
+///   first, so that form posted `button=` where Rails posts `log_in=`.
+///   A behaviour divergence, not a cosmetic one.
+///
+/// So the merge is MODELLED rather than approximated: seed the two
+/// defaults, let a caller key overwrite its own slot, append the rest in
+/// caller order.
 pub(crate) fn button_open_parts(opts: &[(Expr, Expr)]) -> Vec<InterpPart> {
-    let has_type = opts.iter().any(|(k, _)| {
-        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-            if value.as_str() == "type")
-    });
-    let mut parts: Vec<InterpPart> = Vec::new();
-    parts.push(InterpPart::Text {
-        value: if has_type {
-            "<button name=\"button\"".to_string()
-        } else {
-            "<button name=\"button\" type=\"submit\"".to_string()
-        },
-    });
-    append_attr_parts(&mut parts, opts);
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let sym = |name: &str| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } },
+        )
+    };
+    let mut merged: Vec<(Expr, Expr)> = vec![
+        (sym("name"), lit_str("button".to_string())),
+        (sym("type"), lit_str("submit".to_string())),
+    ];
+    for (k, v) in opts {
+        let slot = key_of(k).and_then(|name| {
+            merged.iter().position(|(mk, _)| key_of(mk).as_deref() == Some(name.as_str()))
+        });
+        match slot {
+            Some(i) => merged[i] = (k.clone(), v.clone()),
+            None => merged.push((k.clone(), v.clone())),
+        }
+    }
+    let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: "<button".to_string() }];
+    append_attr_parts(&mut parts, &merged);
     parts.push(InterpPart::Text { value: ">".to_string() });
     parts
 }
@@ -2048,4 +2120,70 @@ fn simplify_class_array(v: &Expr) -> Expr {
             value: Literal::Str { value: composed },
         },
     )
+}
+
+#[cfg(test)]
+mod button_open_parts_tests {
+    use super::*;
+
+    fn opt(key: &str, value: &str) -> (Expr, Expr) {
+        (
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Sym { value: Symbol::from(key) } },
+            ),
+            lit_str(value.to_string()),
+        )
+    }
+
+    /// The attribute NAMES the open tag renders, in order. Values are
+    /// interpolation parts, so only the literal text carries them.
+    fn attr_names(opts: &[(Expr, Expr)]) -> Vec<String> {
+        let text: String = button_open_parts(opts)
+            .iter()
+            .map(|p| match p {
+                InterpPart::Text { value } => value.clone(),
+                InterpPart::Expr { .. } => "\u{0}".to_string(),
+            })
+            .collect();
+        let mut out = Vec::new();
+        for chunk in text.split('=') {
+            if let Some(name) = chunk.rsplit(|c: char| c == '"' || c == '\u{0}' || c == ' ' || c == '<').next() {
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Rails seeds `{ "name" => "button", "type" => "submit" }` and
+    /// merges the caller's options into it.
+    #[test]
+    fn the_defaults_lead_when_the_caller_names_neither() {
+        assert_eq!(attr_names(&[opt("class", "btn")]), vec!["name", "type", "class"]);
+    }
+
+    /// `merge!` keeps the RECEIVER's slot for a key already present, so
+    /// `type` renders SECOND however the caller ordered it. campfire
+    /// writes `class:` before `type:` at three sites.
+    #[test]
+    fn a_caller_type_keeps_rails_slot_rather_than_its_own_position() {
+        assert_eq!(
+            attr_names(&[opt("class", "btn"), opt("type", "submit")]),
+            vec!["name", "type", "class"],
+            "a caller-supplied `type` replaces the default in place, it does not append"
+        );
+    }
+
+    /// The same rule for `name`, and here it is a BEHAVIOUR difference:
+    /// appending emitted the attribute twice and a browser takes the
+    /// first, so campfire's sign-in form posted `button=` where Rails
+    /// posts `log_in=`.
+    #[test]
+    fn a_caller_name_replaces_the_default_instead_of_duplicating_it() {
+        let names = attr_names(&[opt("class", "btn"), opt("name", "log_in")]);
+        assert_eq!(names.iter().filter(|n| n.as_str() == "name").count(), 1, "{names:?}");
+        assert_eq!(names, vec!["name", "type", "class"]);
+    }
 }
