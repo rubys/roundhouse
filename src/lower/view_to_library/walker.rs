@@ -16,7 +16,7 @@ use super::form_builder::{
     emit_submit_tag,
 };
 use super::form_with::{
-    emit_form_tag_inline, emit_form_with_inline, emit_tag_builder_inline, emit_tag_builder_void_or_content, is_errors_each,
+    emit_form_tag_inline, emit_form_with_blockless, emit_form_with_inline, emit_tag_builder_inline, emit_tag_builder_void_or_content, is_errors_each,
     rewrite_errors_each_body,
 };
 use super::helpers::{emit_inline_helper_block, emit_view_helper_call};
@@ -702,6 +702,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // nothing joins the accumulator.
         if let Some(out) = emit_turbo_drive_directive(method.as_str(), sa, inner.span) {
             return out;
+        }
+        // `<%= form_with url: …, method: :delete, id: … %>` with no
+        // block — Rails' empty `<form>`, written to be targeted by a
+        // detached `button_tag form: …`. The block-form inliner above
+        // matches `block: Some(block)` and never sees it.
+        if method.as_str() == "form_with" {
+            if let Some(out) = emit_form_with_blockless(sa, ctx) {
+                return out;
+            }
         }
         if method.as_str() == "submit_tag" {
             return emit_submit_tag(sa, ctx);

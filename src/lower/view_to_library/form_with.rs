@@ -94,6 +94,89 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
     out
 }
 
+/// `<%= form_with url: …, method: :delete, id: … %>` with NO block.
+///
+/// Rails renders an EMPTY `<form>` — open tag, `_method` override, CSRF
+/// input, close tag — and that form exists to be TARGETED: campfire's
+/// message editor writes one with `id: dom_id(@message, :delete_form)`
+/// so the `button_tag form: dom_id(@message, :delete_form)` a few lines
+/// above submits it. The detached-submit-button pattern; the form has no
+/// body by design, which is exactly why it has no block.
+///
+/// `emit_form_with_inline` matches `block: Some(block)` and
+/// `emit_form_tag_inline` takes its action positionally, so this
+/// spelling fell past both and reached the emit as a bare `form_with`
+/// call no target defines — the wall behind `button_tag` on the same
+/// template.
+///
+/// Same pieces the block form emits, minus the body walk, and from the
+/// same owners (`emit_open_form_tag`, `method_override_input`,
+/// `csrf_token_hidden_input`) so the two cannot drift. `url` and
+/// `method` need no filtering out of the attributes: `form_tag_attributes`
+/// admits only `id` / `class` / `data` plus an `html:` merge.
+///
+/// **NO `</form>`, and that is Rails, not an omission.** The block form
+/// goes through `form_tag_with_body`, which wraps the content with
+/// `content_tag`; the blockless one goes through `form_tag_html`, which
+/// is `tag(:form, html_options, true) + extra_tags` — an OPEN tag plus
+/// the hidden inputs and nothing else (actionview 8.1.3,
+/// `form_tag_helper.rb:1051`). The HTML parser closes it at the
+/// enclosing element, and since this form is empty either way the DOM is
+/// the same; emitting a closing tag Rails does not would show up as an
+/// extra token against a tag-for-tag oracle. `prevent_content_exfiltration`
+/// wraps both paths alike and is opt-in, so it changes nothing here.
+///
+/// DECLINES on a `model:` form — that one derives its action, its field
+/// prefix and its method from the record and wants the builder
+/// `emit_form_with_inline` binds. Leaving it loud beats guessing.
+pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let entries = args.iter().find_map(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => Some(entries.clone()),
+        _ => None,
+    })?;
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let value_for = |name: &str| {
+        entries
+            .iter()
+            .find(|(k, _)| key_of(k).as_deref() == Some(name))
+            .map(|(_, v)| v.clone())
+    };
+    if value_for("model").is_some() {
+        return None;
+    }
+    let url = value_for("url")?;
+    let method = value_for("method").unwrap_or_else(|| lit_sym(Symbol::from("post")));
+
+    let route_helpers = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+        )
+    };
+    let comps = FormWithComponents {
+        model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        model_name: String::new(),
+        action: route_helperize(url, &route_helpers, ctx),
+        method: method.clone(),
+        opts_entries: entries,
+        id_prefix: String::new(),
+    };
+    Some(vec![
+        emit_open_form_tag(&comps, ctx),
+        accumulator_append_call(
+            view_helpers_call("method_override_input", vec![method]),
+            ctx,
+        ),
+        accumulator_append_call(
+            view_helpers_call("csrf_token_hidden_input", Vec::new()),
+            ctx,
+        ),
+    ])
+}
+
 /// Inline-expand `<%= form_with(opts) do |form| ...inner... %>` at
 /// lower time. Returns a Vec of statements the caller splices into
 /// the outer accumulator's statement list. Walks the inner block body
@@ -1239,6 +1322,96 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
+
+    fn kw(entries: Vec<(&str, Expr)>) -> Expr {
+        let pairs = entries
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(k) } },
+                    ),
+                    v,
+                )
+            })
+            .collect();
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries: pairs, kwargs: true })
+    }
+
+    /// Flatten the emitted statements into the literal text they append,
+    /// with non-literal parts marked.
+    fn emitted_text(stmts: &[Expr]) -> String {
+        fn walk(e: &Expr, out: &mut String) {
+            match &*e.node {
+                ExprNode::Lit { value: Literal::Str { value } } => out.push_str(value),
+                ExprNode::StringInterp { parts } => {
+                    for p in parts {
+                        match p {
+                            InterpPart::Text { value } => out.push_str(value),
+                            InterpPart::Expr { .. } => out.push('\u{0}'),
+                        }
+                    }
+                }
+                ExprNode::Send { method, .. } => {
+                    out.push('<');
+                    out.push_str(method.as_str());
+                    out.push('>');
+                    e.node.for_each_child(&mut |c| walk(c, out));
+                }
+                _ => e.node.for_each_child(&mut |c| walk(c, out)),
+            }
+        }
+        let mut out = String::new();
+        for s in stmts {
+            walk(s, &mut out);
+        }
+        out
+    }
+
+    /// campfire's message editor writes an EMPTY form purely so the
+    /// detached `button_tag form: dom_id(@message, :delete_form)` above
+    /// it has something to submit.
+    #[test]
+    fn a_blockless_form_with_emits_the_open_tag_and_the_hidden_inputs() {
+        let ctx = ctx_with(&[], &[]);
+        let args = vec![kw(vec![
+            ("url", bare_local("path")),
+            ("method", lit_sym(Symbol::from("delete"))),
+            ("id", bare_local("form_id")),
+        ])];
+        let out = emit_form_with_blockless(&args, &ctx).expect("url-only form_with lowers");
+        let text = emitted_text(&out);
+        assert!(text.contains("<form action="), "{text}");
+        assert!(text.contains("method_override_input"), "{text}");
+        assert!(text.contains("csrf_token_hidden_input"), "{text}");
+    }
+
+    /// Rails' blockless path is `form_tag_html` = `tag(:form, opts,
+    /// true) + extra_tags` — an OPEN tag and the hidden inputs, with no
+    /// closing tag (actionview 8.1.3, form_tag_helper.rb:1051), which a
+    /// live render confirms. Emitting one Rails does not would be an
+    /// extra token against a tag-for-tag oracle.
+    #[test]
+    fn a_blockless_form_with_emits_no_closing_tag() {
+        let ctx = ctx_with(&[], &[]);
+        let args = vec![kw(vec![("url", bare_local("path"))])];
+        let out = emit_form_with_blockless(&args, &ctx).expect("url-only form_with lowers");
+        assert!(!emitted_text(&out).contains("</form>"), "{}", emitted_text(&out));
+    }
+
+    /// A `model:` form derives its action, field prefix and method from
+    /// the record and wants the builder the BLOCK form binds. Declining
+    /// leaves the site loud instead of guessing.
+    #[test]
+    fn a_model_form_with_is_declined_rather_than_guessed() {
+        let ctx = ctx_with(&[], &[]);
+        let args = vec![kw(vec![
+            ("model", bare_local("message")),
+            ("url", bare_local("path")),
+        ])];
+        assert!(emit_form_with_blockless(&args, &ctx).is_none());
+    }
 
     fn ctx_with_slugs(
         model_singulars: &[&str],
