@@ -140,3 +140,7 @@ class UserAgent
   def platform: () -> String
   def version: () -> String
 end
+
+module WebPush
+  def self.payload_send: (message: String, endpoint: String, p256dh: String, auth: String, vapid: Hash[Symbol, String], ?connection: untyped, ?urgency: String) -> String
+end

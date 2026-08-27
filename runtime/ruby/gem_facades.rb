@@ -418,3 +418,24 @@ class UserAgent
     ""
   end
 end
+
+# WebPush — the `web-push` gem, campfire's push-notification delivery.
+#
+# `payload_send` is the whole gem in one call: it derives a shared
+# secret from the subscription's P-256 key (ECDH), encrypts the JSON
+# body with AES128GCM, signs a VAPID JWT with the server's private key,
+# and POSTs the result to the endpoint the browser handed out. None of
+# those three primitives exists in this runtime, and a stand-in that
+# returned success would report notifications as delivered that no
+# browser will ever see — the failure that looks like success.
+#
+# The app REOPENS this namespace (`WebPush::Notification`,
+# `WebPush::Pool` are campfire's own classes), so this is a reopen too:
+# the module-function half is the gem's, the classes under it are the
+# app's, exactly as they sit at runtime.
+module WebPush
+  def self.payload_send(message:, endpoint:, p256dh:, auth:, vapid:, connection: nil, urgency: nil)
+    GemFacade.fail!("WebPush.payload_send")
+    ""
+  end
+end
