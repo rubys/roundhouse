@@ -56,6 +56,7 @@ pub mod bool_fold;
 pub mod spliced_concern_bodies;
 pub mod pathname_ctor;
 pub mod class_body_new;
+pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
@@ -262,6 +263,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // every later pass already reads; consumes nothing any pass
     // produces, so no ordering constraints.
     ("sti_scope", &[]),
+    // `room.is_a?(Rooms::Open)` → the inheritance-column read it stands
+    // for. Beside `sti_scope` because it asks that pass the same
+    // question (which classes are STI subclasses of which base); it
+    // reads a name that pass does not produce and writes a `type`
+    // comparison it does not consume, so no ordering constraint.
+    ("sti_is_a", &[]),
     // Folds an STI subclass's callback declarations into hook methods
     // on that subclass. Reads `unknown_calls` on a library class and
     // writes methods on the same class; no other pass produces or
@@ -555,6 +562,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("enumerable_ext");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
+    sti_is_a::apply_sti_is_a_lowering(app);
+    ran!("sti_is_a");
     sti_subclass_callbacks::apply_sti_subclass_callbacks(app);
     ran!("sti_subclass_callbacks");
     job_test_only::apply_job_test_only_lowering(app);
