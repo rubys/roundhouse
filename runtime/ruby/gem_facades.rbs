@@ -52,6 +52,7 @@ module Nokogiri
 
   class Document
     def css: (String _selector) -> NodeSet
+    def meta_encoding: () -> String?
     def at_css: (String _selector) -> Element?
     def create_element: (String _name) -> Element
   end

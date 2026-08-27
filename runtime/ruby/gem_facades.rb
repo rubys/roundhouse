@@ -164,6 +164,19 @@ module Nokogiri
       NodeSet.new
     end
 
+    # The encoding the document DECLARED (`<meta charset>` /
+    # `<meta http-equiv="Content-Type">`), not the encoding it was
+    # parsed as — nil when it declared none. The optionality is the
+    # whole point of the member: campfire's
+    # `Opengraph::Document#sanitize_content` uses it as a condition,
+    # and a String-typed answer would fold that branch to always-taken.
+    # `String?` therefore lives in gem_facades.rbs, the same split
+    # `Element#[]` already uses (a `""` tail here, optional there).
+    def meta_encoding
+      GemFacade.fail!("Nokogiri::Document#meta_encoding")
+      ""
+    end
+
     def at_css(_selector)
       GemFacade.fail!("Nokogiri::Document#at_css")
       Element.new
