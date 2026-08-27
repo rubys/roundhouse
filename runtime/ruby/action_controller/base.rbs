@@ -25,6 +25,7 @@ module ActionController
     def session: () -> ActionDispatch::Session
     def session=: (ActionDispatch::Session) -> ActionDispatch::Session
     def reset_session: () -> ActionDispatch::Session
+    def assign_http_session: (ActionDispatch::Session value) -> ActionDispatch::Session
     def flash: () -> ActionDispatch::Flash
     def flash=: (ActionDispatch::Flash) -> ActionDispatch::Flash
     def request_method: () -> String

@@ -165,7 +165,7 @@ module Main
     # keys to the same hash.
     session_cookie = Rails.application.session_cookie_key
     session_in = cookies[session_cookie.to_sym].to_s
-    controller.session = ActionDispatch::Session.from_cookie(session_in)
+    controller.assign_http_session(ActionDispatch::Session.from_cookie(session_in))
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
     # below as Set-Cookie). CookieJar is the CRuby-only overlay class.

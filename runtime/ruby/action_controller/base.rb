@@ -151,6 +151,28 @@ module ActionController
       @session
     end
 
+    # The dispatcher's seat for the inbound cookie session.
+    #
+    # NOT `controller.session = …`, and the reason is a name collision
+    # the app owns. `Main.instantiate_controller` returns one of N
+    # controllers, which spinel represents as a fully-poly value rather
+    # than a union of those N — so a `session=` send there dispatches
+    # over EVERY class in the program defining that name. campfire's
+    # `class Current < ActiveSupport::CurrentAttributes` declares
+    # `attribute :session`, and ITS `session=` takes the app's `Session`
+    # RECORD (it reads `session.user`). The switch therefore had an arm
+    # passing an `ActionDispatch::Session` into a `Session *`, and the C
+    # build stopped.
+    #
+    # A name only the framework writes sidesteps it: every arm of this
+    # dispatch is a controller, and they all store the same type.
+    # `request=`/`user=` collide with the same `Current` attributes and
+    # do NOT fail only because those types happen to agree today.
+    def assign_http_session(value)
+      @session = value
+      @session
+    end
+
     # Subclasses override. Error message omits `self.class.name` —
     # `.name`-style reflection forks across targets and the runtime
     # stack trace already identifies the receiver's class.

@@ -337,7 +337,7 @@ module Main
     # request.
     session_cookie = Rails.application.session_cookie_key
     session_in = req.cookies.fetch(session_cookie, "")
-    controller.session = ActionDispatch::Session.from_cookie(session_in)
+    controller.assign_http_session(ActionDispatch::Session.from_cookie(session_in))
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
     # request's parsed cookies (String-keyed Tep.str_hash); the CookieJar
