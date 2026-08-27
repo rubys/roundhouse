@@ -586,18 +586,45 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         return vec![accumulator_append_call(emit_yield(ya, ctx), ctx)];
     }
 
-    // `<%= expr if cond %>` — modifier-if (no else). Rails renders the
-    // expr only when cond is truthy, nothing otherwise. Emit a GUARDED
-    // append so the then-branch goes through the same render/helper/escape
-    // classifiers and a nil/false cond yields no output — instead of
+    // `<%= expr if cond %>` / `<%= expr unless cond %>` — modifier
+    // conditional with only ONE live branch. Rails renders the expr only
+    // when the guard passes, nothing otherwise. Emit a GUARDED append so
+    // that branch goes through the same render/helper/escape classifiers
+    // and a nil/false cond yields no output — instead of
     // `html_escape(<If>)`, which both wrongly escapes html_safe render
     // output and crashes on `html_escape(nil)`. Full if/else and ternaries
-    // (`a ? b : c`, non-nil else) fall through to the default escape path.
+    // (`a ? b : c`, both branches live) fall through to the default
+    // escape path.
+    //
+    // BOTH modifiers matter, and reading only the `if` shape is what left
+    // campfire's `accounts/edit.html.erb:110` — `<%= render
+    // "accounts/users/next_page_container", page: @page.next_param unless
+    // @page.last? %>` — emitting a bare `render` that no view module
+    // defines, which is where the spinel build stopped. `unless`
+    // normalizes to `if cond then nil else <expr>`: the same node with
+    // the live branch on the other side, not a different node.
     if let ExprNode::If { cond, then_branch, else_branch } = &*inner.node {
-        let no_else = matches!(&*else_branch.node, ExprNode::Lit { value: Literal::Nil })
-            || matches!(&*else_branch.node, ExprNode::Seq { exprs } if exprs.is_empty());
-        if no_else {
-            let then_stmts = emit_io_append(then_branch, ctx);
+        let is_empty = |e: &Expr| {
+            matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+                || matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+        };
+        // An `if` with a dead ELSE keeps its live branch in `then`; an
+        // `unless` with a dead THEN keeps it in `else`. Either way the
+        // guard's own shape is preserved — negating the condition to
+        // normalize the two would change what a nil cond means.
+        let live = if is_empty(else_branch) {
+            Some(false)
+        } else if is_empty(then_branch) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(live_is_else) = live {
+            let branch = if live_is_else { else_branch } else { then_branch };
+            let stmts = seq(emit_io_append(branch, ctx));
+            let dead = Expr::new(inner.span, ExprNode::Lit { value: Literal::Nil });
+            let (then_branch, else_branch) =
+                if live_is_else { (dead, stmts) } else { (stmts, dead) };
             let guarded = Expr::new(
                 inner.span,
                 ExprNode::If {
@@ -610,8 +637,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                         &ctx.reference_reads,
                         &ctx.nilable_scalar_reads,
                     ),
-                    then_branch: seq(then_stmts),
-                    else_branch: Expr::new(inner.span, ExprNode::Lit { value: Literal::Nil }),
+                    then_branch,
+                    else_branch,
                 },
             );
             return vec![guarded];
@@ -1490,6 +1517,95 @@ mod tests {
             strict_locals: Default::default(),
             ivar_models: Default::default(),
         }
+    }
+
+    fn nil_lit() -> Expr {
+        Expr::new(Span::default(), ExprNode::Lit { value: Literal::Nil })
+    }
+
+    /// `render "accounts/users/next_page_container", page: p`
+    fn render_partial_call() -> Expr {
+        let key = Expr::new(
+            Span::default(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("page") } },
+        );
+        let kwargs = Expr::new(
+            Span::default(),
+            ExprNode::Hash { entries: vec![(key, var("p"))], kwargs: true },
+        );
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("render"),
+                args: vec![str_lit("accounts/users/next_page_container"), kwargs],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    fn modifier(then_branch: Expr, else_branch: Expr) -> Expr {
+        send_to_s(Expr::new(
+            Span::default(),
+            ExprNode::If { cond: var("done"), then_branch, else_branch },
+        ))
+    }
+
+    fn renders_a_view_module(e: &Expr) -> bool {
+        let mut found = false;
+        fn walk(e: &Expr, found: &mut bool) {
+            if let ExprNode::Send { recv: Some(r), .. } = &*e.node {
+                if let ExprNode::Const { path } = &*r.node {
+                    if path.first().is_some_and(|s| s.as_str() == "Views") {
+                        *found = true;
+                    }
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, found));
+        }
+        walk(e, &mut found);
+        found
+    }
+
+    /// `<%= render "…" if cond %>` — the shape that already worked.
+    #[test]
+    fn a_modifier_if_render_reaches_the_partial_classifier() {
+        let out = emit_io_append(&modifier(render_partial_call(), nil_lit()), &test_ctx());
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&*out[0].node, ExprNode::If { .. }),
+            "a one-branch modifier emits a GUARDED append, not html_escape(<If>)"
+        );
+        assert!(renders_a_view_module(&out[0]), "the render must reach a Views:: module");
+    }
+
+    /// `<%= render "…" unless cond %>` — the MIRROR, and the shape that
+    /// stopped campfire's spinel build. `unless` normalizes to `if cond
+    /// then nil else <expr>`: the same node with the live branch on the
+    /// other side, so a rule that reads only "no else" walks past it and
+    /// leaves a bare `render` no view module defines.
+    #[test]
+    fn a_modifier_unless_render_reaches_the_partial_classifier_too() {
+        let out = emit_io_append(&modifier(nil_lit(), render_partial_call()), &test_ctx());
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&*out[0].node, ExprNode::If { .. }),
+            "the `unless` mirror must be guarded exactly as the `if` form is"
+        );
+        assert!(renders_a_view_module(&out[0]), "the render must reach a Views:: module");
+    }
+
+    /// A real two-branch conditional is NOT a modifier and must keep
+    /// falling through to the default escape path.
+    #[test]
+    fn a_two_branch_conditional_is_not_treated_as_a_modifier() {
+        let out = emit_io_append(&modifier(str_lit("a"), str_lit("b")), &test_ctx());
+        assert_eq!(out.len(), 1);
+        assert!(
+            !matches!(&*out[0].node, ExprNode::If { .. }),
+            "both branches live — this is a ternary, not a guard"
+        );
     }
 
     fn block_helper_call(method: &str) -> Expr {
