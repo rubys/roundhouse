@@ -482,6 +482,25 @@ module ActionView
       "/assets/#{source}"
     end
 
+    # `asset_path` — the GENERAL one. In Rails `image_path` is
+    # `asset_path(source, type: :image)`, so the body above is this body
+    # with a type that only ever picked a subdirectory in the
+    # sprockets-era layout; under Propshaft (and under the
+    # no-manifest benchmark posture both share) the answer is the same
+    # `/assets/<source>`, so the two are spelled out separately rather
+    # than one delegating and paying a kwarg forward.
+    #
+    # campfire reaches it for the /sounds/*.mp3 a `/play` message
+    # renders — `asset_path(sound.asset_path)` inside
+    # `MessagesHelper#message_sound_presentation`, where the argument is
+    # the sound's own file name and not an image at all.
+    def self.asset_path(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      "/assets/#{source}"
+    end
+
     # `url_for` STRING case — identity passthrough (Rails: a String
     # url_for argument is already a URL). Record arguments resolve at
     # COMPILE time (route_helperize's model-gated lowering emits the

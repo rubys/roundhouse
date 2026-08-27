@@ -2237,6 +2237,9 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "image_path"
             // The general asset helper beside the image one — same
             // body, and campfire asks it for an mp3.
+            | "asset_path"
+            // The general asset helper beside the image one — same
+            // body, and campfire asks it for an mp3.
             | "image_url"
             | "path_to_javascript"
             | "javascript_path"
