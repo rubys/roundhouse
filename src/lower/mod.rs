@@ -53,6 +53,7 @@ pub mod first_or_create;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
+pub mod spliced_concern_bodies;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
@@ -219,6 +220,10 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // Deletes a spliced controller concern's own copy of its instance
+    // methods — bodies with no caller and no includer — before any pass
+    // rewrites inside them or ledgers residue for them.
+    ("spliced_concern_bodies", &[]),
     // Deletes provably-dead `false && …` tails before any pass can
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
@@ -513,6 +518,8 @@ pub fn apply_post_analyze_lowerings(
     macro_rules! ran {
         ($name:expr) => {};
     }
+    spliced_concern_bodies::apply_spliced_concern_body_prune(app);
+    ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
     let mut diags = blank::apply_blank_lowering(app);
