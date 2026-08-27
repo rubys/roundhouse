@@ -2191,6 +2191,14 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "class_names"
             | "label_tag"
             | "url_for"
+            // `polymorphic_url(record, only_path: true)` — beside
+            // `url_for`, which is the same question asked of a value
+            // the lowerings could answer statically. campfire's
+            // `BroadcastsHelper` asks it of an Active Storage
+            // representation, so the runtime member it now resolves to
+            // is a raising stub; unqualified it was a bare call NOTHING
+            // defines, which stops a strict build outright.
+            | "polymorphic_url"
             | "submit_tag"
             // The bare (builder-less) hidden field, beside its
             // `label_tag`/`submit_tag` siblings in the same overlay

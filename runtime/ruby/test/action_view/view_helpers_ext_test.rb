@@ -70,4 +70,24 @@ class ViewHelpersExtTest < Minitest::Test
     assert_equal "a-b:c.d", ViewHelpers.sanitize_to_id("a-b:c.d")
     assert_equal "a_b", ViewHelpers.sanitize_to_id("a b")
   end
+  # `capture` answers the block's own value — Rails' `buffer.presence ||
+  # value`, and the only half an emitted block can reach (a `concat`
+  # that would have filled the buffer is inlined into an append by
+  # `capture_inline` long before this runs).
+  def test_capture_answers_the_blocks_value
+    assert_equal "<b>hi</b>", ViewHelpers.capture { "<b>hi</b>" }
+  end
+
+  # A non-String block value is NOT the capture: Rails answers the empty
+  # buffer there rather than stringifying whatever the block ended on.
+  def test_capture_answers_empty_for_a_non_string_value
+    assert_equal "", ViewHelpers.capture { 42 }
+  end
+
+  # Loud beats silently dropped output: emitted views buffer through
+  # `io <<`, so a concat has nowhere to append.
+  def test_concat_raises
+    err = assert_raises(RuntimeError) { ViewHelpers.concat("x") }
+    assert_match(/concat outside capture/, err.message)
+  end
 end

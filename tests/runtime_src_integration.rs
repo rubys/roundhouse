@@ -1079,7 +1079,23 @@ fn every_runtime_method_body_concretely_typed() {
     //   the two `opts` reads — `Hash[Symbol, untyped]` by declaration,
     //     the same contract (and the same cost) `image_tag` and
     //     `mail_to` already pay beside it.
-    const CEILING: usize = 329;
+    //
+    // 329 -> 332: `ActionView::ViewHelpers.capture`, moved off the
+    // spinel CRuby overlay for the same reason `hidden_field_tag` was —
+    // one body, both lanes. THREE sites, and they are one fact: what a
+    // BLOCK returns. `value = yield` and the two reads of it
+    // (`value.is_a?(String)`, `value.to_s`) are the whole method, and
+    // no signature can name the type — the blocks that reach it are
+    // emitted helper bodies whose value is a String, and Rails' own
+    // contract is to answer "" for anything else, which is a decision
+    // taken ON the untyped value rather than around it. The buffer
+    // STACK the overlay carried did NOT move (it would have added ten
+    // more, all `Fiber[:k]` reads): every `concat` the corpus has is
+    // already inlined into an accumulator by `lower::capture_inline`,
+    // so nothing can push to it. `polymorphic_url`, landing in the same
+    // file in the same change, adds NONE — its body raises and never
+    // reads its parameter.
+    const CEILING: usize = 332;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

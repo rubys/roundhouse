@@ -5,6 +5,9 @@ module ActionView
     def self.class_names: (*untyped args) -> String
     def self.number_with_delimiter: (Integer value) -> String
     def self.sanitize_to_id: (String name) -> String
+    def self.capture: () { () -> untyped } -> String
+    def self.concat: (String string) -> String
+    def self.polymorphic_url: (untyped record, ?only_path: bool) -> String
     def self.hidden_field_tag: (untyped name, ?untyped value, ?Hash[Symbol, untyped] opts) -> String
     def self.number_with_precision: (untyped value, ?precision: Integer) -> String
     def self.number_to_human: (Integer value, ?format: String) -> String

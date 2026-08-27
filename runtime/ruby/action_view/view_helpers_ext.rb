@@ -431,5 +431,82 @@ module ActionView
       return 0 unless s[j, 1].to_s == ";"
       j + 1 - i
     end
+    # Rails' CaptureHelper, for the block a helper FORWARDS rather than
+    # writes. `src/lower/capture_inline.rs` claims the LITERAL-block
+    # shape (`capture { concat(a); … }`) and inlines it into an
+    # accumulator — buffer, `concat` sites and all. What reaches here is
+    # the other shape: campfire's `ClipboardHelper
+    # .button_to_copy_to_clipboard(url, &)` forwards its caller's block
+    # into `tag.button`, and the lowered tag calls `capture(&__blk)`
+    # with a block it cannot see. There is nothing to inline, so the
+    # call has to land on a real method.
+    #
+    # It answers the block's own value when that value is a String —
+    # Rails' `buffer.presence || value`, of which this is the second
+    # half. The first half cannot arrive: an emitted block builds its
+    # markup and RETURNS it (`_cap` in a view, `a + b` in a helper), and
+    # a `concat` that would have filled a buffer instead was rewritten
+    # into an append by the pass above. A non-String value is NOT
+    # stringified — Rails answers the empty buffer there, and a helper
+    # block ending on an Integer means its markup went somewhere else.
+    #
+    # MOVED here from the CRuby overlay (`ruby_overlay/runtime/
+    # action_view_capture_helper.rb`, deleted) rather than copied: the
+    # overlay ships alongside this file on the CRuby lane, so two
+    # definitions would mean two lanes rendering different HTML with
+    # require order deciding which. The overlay's buffer STACK did not
+    # come with it — `Thread.current` is not a shape every ruby-family
+    # lane types, and a stack no `concat` can push to is state the
+    # corpus has zero call sites for (`ViewHelpers.concat` appears
+    # nowhere in campfire's or lobsters' emit).
+    def self.capture
+      value = yield
+      value.is_a?(String) ? value.to_s : ""
+    end
+
+    # Rails appends to the view's output buffer; emitted views write
+    # through `io <<` and have none, so there is nothing to append to.
+    # Kept as the loud failure the CRuby overlay made it — a call site
+    # that does appear says which one it is, instead of vanishing into a
+    # NameError (or, on a strict target, an unresolved-call build wall
+    # with no explanation attached).
+    def self.concat(string)
+      raise "concat outside capture — emitted views buffer through io<<, not concat"
+    end
+    # `polymorphic_url(record, only_path: true)` — Rails' "the route for
+    # whatever this record is", resolved at RUNTIME from the record's
+    # class. Nothing here can answer that: it needs a class-to-route
+    # registry, which is exactly the dynamic dispatch the strict targets
+    # cannot carry, and a record whose class IS known statically never
+    # arrives — the url/form lowerings rewrite that site to the
+    # generated `<model>_path` helper at compile time, which is where a
+    # polymorphic route belongs.
+    #
+    # So it RAISES, in the same voice and for the same reason as
+    # `RouteHelpers.rails_blob_path`: the one call site the corpus has
+    # (campfire's `BroadcastsHelper.broadcast_image_path`) hands it an
+    # Active Storage representation, and the bytes half of Active
+    # Storage — service, processor, signed ids — is unmodeled. A
+    # plausible-looking URL would be a page that renders a broken image,
+    # the failure that looks like success. What changes is that the gap
+    # has ONE named home instead of a method NOTHING defines: a
+    # NameError on CRuby, and `unsupported call: (CallNode
+    # 'polymorphic_url')` that stops the whole spinel build.
+    #
+    # HERE rather than in the universal `view_helpers.rb` for this
+    # file's own reason: a `raise <Class>, "msg"` body is emitter
+    # surface the rust lane does not carry in a RUNTIME unit — its
+    # transpiled `src/view_helpers.rs` has no `use crate::errors_ext::
+    # {raise, NotImplementedError}` in its header the way a controller
+    # unit does, so the stub compiled everywhere else and took
+    # `rust_toolchain` from green to two E0425s. It joins the universal
+    # file when that header does.
+    def self.polymorphic_url(record, only_path: false)
+      raise NotImplementedError,
+            "ActionView::ViewHelpers.polymorphic_url: a record's route is " \
+            "resolved at transpile time — no runtime record-to-route " \
+            "mapping is modeled; for the Active Storage case see " \
+            "ActiveStorage::Attached#url"
+    end
   end
 end
