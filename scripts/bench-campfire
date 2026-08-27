@@ -535,6 +535,112 @@ end
 File.write(sm, md)
 RUBY
 
+# ---------------------------------------------------------------------
+# Publish the emitted SPINEL tree alongside the run. Campfire has no
+# spinel lane — it does not compile yet — so nothing above produces this
+# tree and nothing below measures it. It is packed for provenance: a
+# dated, stamped record of what we emitted on a given day, so that when
+# the tree does become useful to point an upstream issue at, the history
+# is already there. It cannot be created retroactively.
+#
+# Strict on purpose (no --allow-unsupported): campfire's strict emit is
+# at 0 errors and CI holds that ceiling, so a regression should be loud
+# here rather than silently packed.
+#
+# The status recorded is what a CONSUMER sees — a plain `spinel -c`, no
+# SP_COLLECT_ERRORS. The emit's own error count is the wrong number to
+# stamp an archive with: it is 0 today while spinel still refuses the
+# tree, so recording it would mark as clean something that does not
+# build. Under SP_COLLECT_ERRORS spinel does write C, but the gap sites
+# are recovered from, so that output is truncated units rather than a
+# program -- also not a status worth recording.
+# ---------------------------------------------------------------------
+SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
+pack_spinel_tree() {
+    step "transpiling campfire → spinel (archive only, not benchmarked)"
+    if ! cargo run --quiet --release --bin roundhouse -- --target spinel "$APP" \
+            -o "$SP_EMIT" > "$LOG_DIR/emit-spinel.log" 2>&1; then
+        fail "strict spinel emit failed (see $LOG_DIR/emit-spinel.log) — tree not packed"
+        return 0
+    fi
+
+    local rh sp build_status
+    rh="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    sp="$(command -v spinel >/dev/null 2>&1 && spinel --version 2>/dev/null || echo 'not on PATH')"
+
+    # One plain front-end run. Non-fatal either way: this records the
+    # state, it does not gate on it.
+    if command -v spinel >/dev/null 2>&1; then
+        if (cd "$SP_EMIT" && spinel -c --rbs . main.rb -o /dev/null) \
+                > "$LOG_DIR/spinel-front-end.log" 2>&1; then
+            build_status="front end: OK (emitted C)"
+        else
+            # spinel prints warnings on the same `spinel: <file>:<line>:`
+            # shape as errors, so a prefix match picks up the first
+            # warning rather than the refusal. Filter on the marker.
+            build_status="front end: REFUSED — $(grep -E '^spinel: ' "$LOG_DIR/spinel-front-end.log" | grep -v ': warning: ' | head -1 | sed 's/^spinel: //' | cut -c1-160)"
+        fi
+    else
+        build_status="front end: not checked (spinel not on PATH)"
+    fi
+
+    cat > "$SP_EMIT/REPRODUCE.md" <<REPRO
+# campfire — spinel tree, as emitted
+
+Emitted by roundhouse \`$rh\` from once-campfire. Strict emit, no
+\`--allow-unsupported\`.
+
+    roundhouse : $rh
+    spinel     : $sp
+    packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    $build_status
+
+## What this is, and is not
+
+This tree is NOT benchmarked and, at the time of writing, does not
+compile: campfire is the third application we emit for spinel and the
+walls in front of it are ours, not spinel's. The status line above says
+where it stood on the day it was packed.
+
+It is published so the history exists. When a wall here turns out to be
+spinel's rather than ours, this is the tree to point the issue at, and
+the dated copy is the one that will not have moved underneath it.
+
+## Build it
+
+    # needs spinel + spinel_rbs_extract on PATH
+    spinel -c --rbs . main.rb -o out.c    # front end only
+    make build                            # through to a binary
+
+Binary media (images, sounds, test fixture files) is excluded — 61 MB of
+campfire's emit, none of it read by the compiler. Re-emit from the
+roundhouse revision above if you need the assets.
+
+\`SP_COLLECT_ERRORS=1\` on the first command reports every gap in one run
+rather than stopping at the first — useful while the count is still
+falling, but note it recovers from each gap, so the C it writes is
+truncated units and not a program.
+REPRO
+
+    # Binary media is 61 MB of campfire's emit and none of it is the
+    # subject: a 46 MB test fixture (earth.png), a .mov, the sound
+    # library. The spinel compile reads .rb and .rbs only, so the
+    # archive carries the source tree and says it left the assets out.
+    tar czf "$OUT_DIR/spinel-tree.tgz" -C "$(dirname "$SP_EMIT")" \
+        --exclude=build --exclude=bench-work --exclude=storage \
+        --exclude='*.sqlite3' --exclude='*.o' --exclude='*.log' \
+        --exclude=spin.lock --exclude=node_modules \
+        --exclude='*.png' --exclude='*.jpg' --exclude='*.jpeg' \
+        --exclude='*.gif' --exclude='*.webp' --exclude='*.ico' \
+        --exclude='*.svg' --exclude='*.mp3' --exclude='*.mov' \
+        --exclude='*.mp4' --exclude='*.woff' --exclude='*.woff2' \
+        "$(basename "$SP_EMIT")" 2>/dev/null \
+      && ok "packed spinel tree -> $OUT_DIR/spinel-tree.tgz ($(du -h "$OUT_DIR/spinel-tree.tgz" 2>/dev/null | cut -f1)) [$build_status]" \
+      || fail "could not pack the spinel tree"
+    rm -f "$SP_EMIT/REPRODUCE.md"
+}
+pack_spinel_tree
+
 ok "results in $OUT_DIR"
 echo
 cat "$OUT_DIR/summary.md"
