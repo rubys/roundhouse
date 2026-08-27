@@ -59,6 +59,8 @@ module ActiveRecord
     def to_ary: () -> Array[untyped]
     def ==: (untyped other) -> bool
     def filter: () { (untyped) -> bool } -> Array[untyped]
+    def map: () { (untyped) -> untyped } -> untyped
+    def collect: () { (untyped) -> untyped } -> untyped
     def +: (Array[untyped] other) -> Array[untyped]
     def &: (Array[untyped] other) -> Array[untyped]
     def |: (Array[untyped] other) -> Array[untyped]
@@ -67,8 +69,14 @@ module ActiveRecord
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Array[untyped]
-    def map: () { (untyped) -> untyped } -> Array[untyped]
-    def collect: () { (untyped) -> untyped } -> Array[untyped]
+    # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
+    # element type is whatever the BLOCK returns, which this RBS has no
+    # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so
+    # it declared the receiving local `sp_PolyArray *` while the inlined
+    # body built an `sp_IntArray *` for `{ |a| a.id }` — and the C build
+    # stopped with no diagnostic naming the seed. The two agreed only for
+    # as long as every id was boxed. Widen to `untyped` so the body
+    # decides the shape; `Array[U]` waits on Relation[T].
     def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]
     def partition: () { (untyped) -> bool } -> Array[Array[untyped]]
     def detect: () { (untyped) -> bool } -> untyped

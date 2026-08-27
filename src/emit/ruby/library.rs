@@ -3432,6 +3432,15 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         .map(|h| format!("{}_path", h.name.as_str()))
         .collect();
     let class_method_targets = record_answering_class_methods(app);
+    // The route helpers' OWN lowered signatures — read off the slice we
+    // are rewriting, not re-derived from the route table. `param_ty`
+    // decides a segment's type from CALL-SITE evidence (a String
+    // reaching it makes it a slug), and this pass decides a record's
+    // projection from whether the model overrides `to_param`. Those are
+    // two different questions and campfire answers them differently for
+    // the same helper, so the projection has to read what the signature
+    // actually says.
+    let helper_param_tys = route_helper_param_types(app);
     let mut sig = RecordSignals {
         all_models: &all_models,
         slug_models: &slug_models,
@@ -3439,6 +3448,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         collection_targets: &collection_targets,
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
+        helper_param_tys: &helper_param_tys,
         self_returns: std::collections::HashMap::new(),
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
@@ -3638,6 +3648,37 @@ fn singular_association_targets(app: &App) -> std::collections::HashMap<String, 
 /// class's own method names to the model each one answers, so a bare
 /// `room_path(last_room_visited)` can resolve through the method it
 /// names. The other four are App-wide.
+/// `<helper>_path` -> the declared type of each positional parameter.
+///
+/// Read off the SAME builder the emit ships
+/// (`lower_routes_to_library_functions`), not re-derived from the route
+/// table: `param_ty`'s slug rule reads call-site evidence, and a second
+/// copy of that reasoning here would drift the first time either moved.
+/// The route helpers are `LibraryFunction`s and never appear in the
+/// `lcs` slice this pass rewrites, so they have to be asked for.
+///
+/// Called BEFORE this pass mutates anything — the builder surveys the
+/// IR to size each helper, which is the ordering constraint
+/// `route_helper_receiver` already documents.
+fn route_helper_param_types(
+    app: &App,
+) -> std::collections::HashMap<String, Vec<crate::ty::Ty>> {
+    let mut out = std::collections::HashMap::new();
+    for f in crate::lower::routes_to_library::lower_routes_to_library_functions(app) {
+        if f.module_path.last().map(|s| s.as_str()) != Some("RouteHelpers") {
+            continue;
+        }
+        let Some(crate::ty::Ty::Fn { params, .. }) = &f.signature else {
+            continue;
+        };
+        out.insert(
+            f.name.as_str().to_string(),
+            params.iter().map(|p| p.ty.clone()).collect(),
+        );
+    }
+    out
+}
+
 pub(crate) struct RecordSignals<'a> {
     all_models: &'a std::collections::HashSet<String>,
     slug_models: &'a std::collections::HashSet<String>,
@@ -3648,6 +3689,8 @@ pub(crate) struct RecordSignals<'a> {
     /// names only.
     class_method_targets: &'a std::collections::HashMap<String, String>,
     direct_helpers: &'a std::collections::HashSet<String>,
+    /// `<helper>_path` -> declared type per positional parameter.
+    helper_param_tys: &'a std::collections::HashMap<String, Vec<crate::ty::Ty>>,
     self_returns: std::collections::HashMap<String, String>,
 }
 
@@ -3664,24 +3707,69 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
     if !is_helper_call {
         return;
     }
-    let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
-    for arg in args.iter_mut() {
+    let ExprNode::Send { args, method: helper, .. } = &mut *expr.node else { unreachable!() };
+    let declared = sig.helper_param_tys.get(helper.as_str()).cloned();
+    for (idx, arg) in args.iter_mut().enumerate() {
+        let wants_str_here = matches!(
+            declared.as_ref().and_then(|tys| tys.get(idx)),
+            Some(crate::ty::Ty::Str)
+        );
         let Some(model) = arg_record_model(arg, sig) else {
+            // The record may ALREADY be projected: the view lowerer's
+            // `rewrite_path_arg` turns a local record into `<local>.id`
+            // long before this pass runs, so by here the argument is a
+            // bare `id` read and `arg_record_model` sees no record at
+            // all. Same defect, later in the pipeline — coerce it the
+            // same way.
+            if wants_str_here && is_bare_id_read(arg) {
+                let span = arg.span;
+                let inner =
+                    std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+                let mut to_s = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(inner),
+                        method: Symbol::from("to_s"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                to_s.ty = Some(crate::ty::Ty::Str);
+                *arg = to_s;
+            }
             continue;
         };
         // A model that overrides `to_param` answers its slug there and
         // the segment is declared `Str`. Every other model's `to_param`
-        // IS `id`, and `param_ty` declares that segment `Int` — so call
-        // `id` rather than a `to_param` the emitted model doesn't have.
+        // IS `id`, and `param_ty` USUALLY declares that segment `Int` —
+        // so call `id` rather than a `to_param` the emitted model
+        // doesn't have.
+        //
+        // …unless the SIGNATURE says otherwise, which is a different
+        // question from the one this pass asks. `param_ty` reads
+        // CALL-SITE evidence: campfire's `direct :fresh_user_avatar`
+        // hands `user.avatar_token` to `:user_avatar`, so that segment
+        // is a slug and declared `Str` — while `User` overrides no
+        // `to_param`, and the other call site is
+        // `user_avatar_path(@user)`. A bare `id` there hands an Int to
+        // a String slot. Rails renders a plain record with the DEFAULT
+        // `to_param`, which IS `id.to_s`; emit that, and both call
+        // sites agree on a text segment.
+        //
+        // This stayed invisible for as long as `@id` was boxed — a poly
+        // interpolates into a path either way. Pinning it (da9c5d89) is
+        // what made the contradiction reachable.
         let slug = sig.slug_models.contains(&model);
+        let wants_str = wants_str_here;
+        let span = arg.span;
+        let record = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
         let (method, ty) = if slug {
             ("to_param", crate::ty::Ty::Str)
         } else {
             ("id", crate::ty::Ty::Int)
         };
-        let span = arg.span;
-        let record = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
-        *arg = Expr::new(
+        let mut projected = Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(record),
@@ -3691,8 +3779,31 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                 parenthesized: false,
             },
         );
-        arg.ty = Some(ty);
+        projected.ty = Some(ty);
+        if !slug && wants_str {
+            let mut to_s = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(projected),
+                    method: Symbol::from("to_s"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            to_s.ty = Some(crate::ty::Ty::Str);
+            projected = to_s;
+        }
+        *arg = projected;
     }
+}
+
+/// A bare `<recv>.id` read with no arguments — what the view lowerer
+/// leaves behind for a record handed to a path helper.
+fn is_bare_id_read(arg: &Expr) -> bool {
+    matches!(&*arg.node,
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+            if method.as_str() == "id" && args.is_empty())
 }
 
 fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
