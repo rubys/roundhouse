@@ -4729,6 +4729,22 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    // The one chokepoint every library-shape file goes through, and the
+    // only place that knows which class is being emitted — the send
+    // emitter is a free function reached from a dozen callers. A reopen
+    // of a core class needs its `self.` receivers kept (see the elision
+    // in `expr.rs`); everything else is emitted exactly as before.
+    super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
+        emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+    })
+}
+
+fn emit_library_class_decl_inner(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+    synthesized_siblings: &[(String, String)],
+) -> EmittedFile {
     let name = lc.name.0.as_str();
     let out_dir = out_path
         .parent()

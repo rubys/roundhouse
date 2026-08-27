@@ -10,6 +10,29 @@ use crate::ty::Ty;
 
 use super::shared::indent_lines;
 
+use std::cell::Cell;
+
+thread_local! {
+    /// True while emitting the body of a CORE-CLASS REOPEN (`class
+    /// String` in campfire's `lib/rails_ext/string.rb`, `class Integer`,
+    /// …). Inside one, the `self.` receiver on a send that carries
+    /// arguments is NOT cosmetic and must survive the elision below —
+    /// see the comment there. Off everywhere else, so ordinary app and
+    /// library bodies keep reading the way they always have.
+    static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `f` while emitting a core-class reopen's body (or not). The
+/// library emitter wraps each file, restoring the previous setting
+/// after — nested emits (a synthesized sibling rendered mid-file) do
+/// not leak their answer to the enclosing one.
+pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
+    let prev = IN_CORE_CLASS_REOPEN.with(|c| c.replace(yes));
+    let r = f();
+    IN_CORE_CLASS_REOPEN.with(|c| c.set(prev));
+    r
+}
+
 pub fn emit_expr(e: &Expr) -> String {
     emit_node(&e.node)
 }
@@ -864,6 +887,22 @@ pub(super) fn emit_send_base(
         // zero-arg reads keep the explicit `self.` (unconditionally
         // safe — since Ruby 2.7 explicit self reaches private methods).
         && !args_s.is_empty()
+        // …EXCEPT inside a core-class reopen, where the receiver is the
+        // thing being said. campfire's `lib/rails_ext/string.rb` is
+        // `class String; def all_emoji?; self.match?(/…/); end; end` —
+        // the author wrote `self.`, and elided to a bare `match?` the
+        // call no longer resolves to `String#match?` on a strict target
+        // (`spinel: unsupported call: CallNode 'match?' recv=-`). CRuby
+        // reaches the same method either way, which is why this was
+        // invisible until the emitted tree was compiled rather than run.
+        //
+        // The rule is the ENCLOSING CLASS and not the method name: what
+        // makes the bareword ambiguous is being inside a reopen of a
+        // class whose other methods are the interpreter's, so a name the
+        // reopen does not define may still answer. Keeping `self.` is
+        // always valid Ruby, so the ruby lane is unchanged bar the
+        // spelling.
+        && !IN_CORE_CLASS_REOPEN.with(Cell::get)
     {
         if parenthesized {
             return format!("{method}({})", args_s.join(", "));
