@@ -2235,6 +2235,8 @@ fn is_framework_view_helper(name: &str) -> bool {
         name,
         "image_tag"
             | "image_path"
+            // The general asset helper beside the image one — same
+            // body, and campfire asks it for an mp3.
             | "image_url"
             | "path_to_javascript"
             | "javascript_path"
@@ -5038,12 +5040,29 @@ pub(super) fn emit_library_class_decl_with_synthesized(
 /// Split a class's constants into the ones that can be initialized
 /// before its methods exist and the ones that can't. A constant defers
 /// when its initializer dispatches to this class — a bare `new(…)` or a
-/// receiverless call naming one of its own methods — or when it reads a
+/// receiverless call naming one of its own methods, or either of those
+/// SPELLED WITH THE CLASS NAME (`Sound.new(…)`) — or when it reads a
 /// constant that already deferred. A self-dispatch inside a STORED
 /// closure doesn't count: that body runs on call, not on load. Returns
 /// index lists so both groups keep source order.
+///
+/// The class-name spelling is not hypothetical: `lower::class_body_new`
+/// gives a class body's bare `new` its receiver (a receiverless call is
+/// unresolvable on a strict target), and a rule that keyed on the bare
+/// spelling alone stopped seeing campfire's `Sound::BUILTIN` the moment
+/// it did. That emitted fifty-six constructor calls ABOVE the
+/// `initialize` they call — `BasicObject#initialize: wrong number of
+/// arguments (given 1, expected 0)` at load, on every one of the
+/// suite's 52 files. The fact the rule is about is "does this
+/// initializer dispatch to this class", and both spellings are that
+/// fact.
 fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
-    fn calls_self(expr: &Expr, own: &std::collections::HashSet<&str>, deferred_names: &std::collections::HashSet<String>) -> bool {
+    fn is_own_class(recv: &Option<Expr>, class_name: &str) -> bool {
+        let Some(r) = recv else { return false };
+        let ExprNode::Const { path } = &*r.node else { return false };
+        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::") == class_name
+    }
+    fn calls_self(expr: &Expr, own: &std::collections::HashSet<&str>, deferred_names: &std::collections::HashSet<String>, class_name: &str) -> bool {
         match &*expr.node {
             // A closure that is STORED rather than run — `proc { … }`,
             // `lambda { … }`, `Proc.new { … }`, `->() { … }` — executes
@@ -5061,7 +5080,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
             // stored literal.
             ExprNode::Lambda { .. } => false,
             ExprNode::Send { recv, method, args, block, .. } => {
-                if recv.is_none()
+                if (recv.is_none() || is_own_class(recv, class_name))
                     && (method.as_str() == "new" || own.contains(method.as_str()))
                 {
                     return true;
@@ -5075,13 +5094,13 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
                         ));
                 recv.iter()
                     .chain(args.iter())
-                    .any(|e| calls_self(e, own, deferred_names))
+                    .any(|e| calls_self(e, own, deferred_names, class_name))
                     || (!stores_block
                         && block.as_ref().is_some_and(|b| match &*b.node {
                             ExprNode::Lambda { body, .. } => {
-                                calls_self(body, own, deferred_names)
+                                calls_self(body, own, deferred_names, class_name)
                             }
-                            _ => calls_self(b, own, deferred_names),
+                            _ => calls_self(b, own, deferred_names, class_name),
                         }))
             }
             ExprNode::Const { path }
@@ -5092,7 +5111,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
             _ => {
                 let mut found = false;
                 expr.node.for_each_child(&mut |child| {
-                    if !found && calls_self(child, own, deferred_names) {
+                    if !found && calls_self(child, own, deferred_names, class_name) {
                         found = true;
                     }
                 });
@@ -5106,7 +5125,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
     let mut deferred_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let (mut eager, mut deferred) = (Vec::new(), Vec::new());
     for (i, (name, value)) in lc.constants.iter().enumerate() {
-        if calls_self(value, &own, &deferred_names) {
+        if calls_self(value, &own, &deferred_names, lc.name.0.as_str()) {
             deferred_names.insert(name.as_str().to_string());
             deferred.push(i);
         } else {

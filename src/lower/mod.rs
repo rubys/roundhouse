@@ -55,6 +55,7 @@ pub mod group_count;
 pub mod bool_fold;
 pub mod spliced_concern_bodies;
 pub mod pathname_ctor;
+pub mod class_body_new;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
@@ -236,6 +237,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // no other pass produces or consumes into a Const-receiver send of
     // a name no other pass reads, so no ordering constraints.
     ("pathname_ctor", &[]),
+    // A class body's bare `new` gets the class as its receiver. Reads a
+    // receiverless send no other pass produces and writes a
+    // Const-receiver one nothing else keys on, so no ordering
+    // constraints.
+    ("class_body_new", &[]),
     // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
     // method under a byte source that exists. Rewrites a receiver
     // Const no pass produces and writes a name no pass consumes, so
@@ -537,6 +543,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     pathname_ctor::apply_pathname_ctor_lowering(app);
     ran!("pathname_ctor");
+    class_body_new::apply_class_body_new_lowering(app);
+    ran!("class_body_new");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");
     to_json::apply_to_json_lowering(app);
