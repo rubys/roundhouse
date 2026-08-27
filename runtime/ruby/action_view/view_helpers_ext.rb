@@ -431,6 +431,401 @@ module ActionView
       return 0 unless s[j, 1].to_s == ";"
       j + 1 - i
     end
+
+    # ── auto_link ────────────────────────────────────────────────────
+
+    # Rails' `auto_link` — the `rails_autolink` gem, PORTED as a scanner
+    # so every target compiles it. campfire renders EVERY message body
+    # through it (`MessagesHelper#message_presentation` is
+    # `auto_link h(...), html: { target: "_blank" }`), so unlike
+    # `sanitize` this is on the read path and a refusing stub is not an
+    # option.
+    #
+    # The gem is TWO REGEXES AND A RULE TABLE, and the rule table is the
+    # part that matters: which schemes count, which characters end a
+    # URL, which trailing punctuation is the sentence's rather than the
+    # link's, what an e-mail local part may contain. Ported, not derived
+    # — deriving one of these from taste is how you link half a URL.
+    # The gem's own source, for the record:
+    #
+    #   AUTO_LINK_RE = %r{
+    #     (?: ((?:ed2k|ftp|http|https|irc|mailto|news|gopher|nntp|telnet|
+    #            webcal|xmpp|callto|feed|svn|urn|aim|rsync|tag|ssh|sftp|
+    #            rtsp|afs|file):)// | www\.\w )
+    #     [^\s< "]+
+    #   }ix
+    #   AUTO_EMAIL_LOCAL_RE = /[\w.!#\$%&'*\/=?^`{|}~+-]/
+    #   AUTO_EMAIL_RE = /(?<!#{LOCAL})[\w.!#\$%+-]\.?#{LOCAL}*@
+    #                    [\w-]+(?:\.[\w-]+)+/
+    #
+    # WHY A SCANNER AND NOT THOSE REGEXES. Two reasons, and only the
+    # second is spinel's:
+    #
+    #   * `\p{Word}` in the trailing-punctuation strip and the lookbehind
+    #     in the e-mail pattern are not a portable regex subset;
+    #     matz/spinel#4143 rejects `\p{...}` at compile time outright.
+    #   * The gem drives them with `gsub` + `$&` / `$'` / `` $` `` and
+    #     decides from the text on either side of the match whether it is
+    #     already inside a tag or inside an `<a>`. A left-to-right scan
+    #     that carries that state is the same answer without the globals,
+    #     which no strict target models.
+    #
+    # DIVERGENCE, and it is a SECURITY one, so it is stated here and
+    # ledgered in docs/pipeline/runtime.md. Rails' `auto_link`
+    # safe-list-sanitizes the whole body first. This does NOT: the
+    # safe-list pass is HTML5 tree construction rather than filtering
+    # (see the header of `ruby_overlay/runtime/action_view_sanitize.rb`
+    # and the note on `sanitize` above), so the shared runtime refuses it
+    # rather than approximate it, and refusing is not available on the
+    # read path. The body therefore passes through as given.
+    #
+    # What that does and does not cost:
+    #
+    #   * The links this helper CREATES are still safe by the rule table
+    #     above — the scheme list has no `javascript:` in it and the
+    #     `www.` branch is prefixed `http://`, so `auto_link` cannot
+    #     manufacture a scripting URL out of text.
+    #   * What is lost is Rails' SECOND layer over markup that was
+    #     already in the body. campfire's is ActionText content that
+    #     arrived through `h`, so the first layer is the one doing the
+    #     work — but an app that feeds `auto_link` raw user HTML and
+    #     leans on this pass to clean it gets no cleaning here.
+    #
+    # The CRuby lane does better and does not use this: the overlay
+    # serves `auto_link` from the real gem chain, which is why the two
+    # are pinned against each other in `tests/overlay_sanitize_autolink.rb`.
+    #
+    # `sanitize:` is ACCEPTED AND HAS NO EFFECT, which is a stronger
+    # statement than it looks and was measured rather than assumed. In
+    # the gem the flag does two things: it runs the body pass (skipped
+    # here), and it is forwarded as `content_tag`'s fourth argument,
+    # `escape`. That second one never bites — `escape` is true only when
+    # the sanitize ran, and a sanitized value is an html_safe buffer,
+    # which `content_tag` splices raw regardless. All three settings
+    # (unset, `false`, `true`) therefore produce the same anchor text in
+    # the gem, and all three produce it here. Kept on the signature so a
+    # call site that passes it still compiles.
+    #
+    # NOT MODELLED: the block form (`auto_link(text) { |url| ... }`,
+    # which rewrites the link TEXT). No corpus call site passes one, and
+    # a block argument through the strict targets is a shape this file
+    # has no other use for. `sanitize_options:` likewise: it configures
+    # a pass that does not run here.
+    def self.auto_link(text, html: {}, link: :all, sanitize: false)
+      s = text.to_s
+      return "" if s.empty?
+      do_urls = link != :email_addresses
+      do_emails = link != :urls
+      out = +""
+      i = 0
+      n = s.length
+      # `auto_linked?` in the gem, carried forward instead of looked
+      # back for. Both of its clauses are reproduced EXACTLY, and the
+      # first one is cruder than "skip over tags" — which is the whole
+      # reason it is spelled out here:
+      #
+      #   pre =~ /<[^>]+$/ && post =~ /^[^>]*>/
+      #
+      # is "the last `<` is unclosed, has at least ONE character after
+      # it, and a `>` comes later". So the character immediately after a
+      # `<` is NOT inside a tag as far as this helper is concerned, and
+      # `addr <foo@bar.com>` gets its e-mail linked where a tag-skipping
+      # scanner would swallow the lot. `open_lt` is that last unclosed
+      # `<`; `open_lt_closes` is the `post` half, decided once when the
+      # `<` is passed because no later position can change the answer.
+      open_lt = -1
+      open_lt_closes = false
+      in_anchor = false
+      while i < n
+        c = s[i, 1].to_s
+        if c == "<"
+          open_lt = i
+          open_lt_closes = !s.index(">", i).nil?
+          out = out + c
+          i = i + 1
+        elsif c == ">" && open_lt >= 0
+          # The anchor state turns over HERE and not at the `<`: the
+          # gem's second clause is `pre.rindex(/<a\b.*?>/i)`, which
+          # needs the whole opening tag to be behind the position.
+          tag = s[open_lt, i - open_lt + 1].to_s
+          in_anchor = true if auto_link_anchor_open?(tag)
+          in_anchor = false if auto_link_anchor_close?(tag)
+          open_lt = -1
+          open_lt_closes = false
+          out = out + c
+          i = i + 1
+        elsif in_anchor || (open_lt >= 0 && open_lt_closes && i >= open_lt + 2)
+          out = out + c
+          i = i + 1
+        else
+          len = do_urls ? auto_link_url_length(s, i) : 0
+          if len > 0
+            out = out + auto_link_url(s[i, len].to_s, html)
+            i = i + len
+          else
+            len = do_emails ? auto_link_email_length(s, i) : 0
+            if len > 0
+              out = out + mail_to(s[i, len].to_s, "", html)
+              i = i + len
+            else
+              out = out + c
+              i = i + 1
+            end
+          end
+        end
+      end
+      out
+    end
+
+    # `<a`, `<A`, `<a href=...` — but not `<abbr`. The gem's test is
+    # `/<a\b.*?>/i`, so the character after the name must not be a word
+    # one.
+    def self.auto_link_anchor_open?(tag)
+      return false unless tag[0, 2].to_s.downcase == "<a"
+      c = tag[2, 1].to_s
+      c == ">" || !auto_link_word_char?(c)
+    end
+
+    def self.auto_link_anchor_close?(tag)
+      tag.downcase == "</a>"
+    end
+
+    # Length of the URL match starting at `i`, or 0. Two openings, the
+    # gem's: a listed scheme followed by `://`, or `www.` and a word
+    # character. Both are case-insensitive (`/i`), and both are then
+    # followed by one or more characters that are not whitespace, `<` or
+    # `"` — which is what stops a link at the tag that follows it.
+    def self.auto_link_url_length(s, i)
+      n = s.length
+      j = auto_link_url_prefix_end(s, i)
+      return 0 if j == 0
+      k = j
+      while k < n && auto_link_url_char?(s[k, 1].to_s)
+        k = k + 1
+      end
+      return 0 if k == j
+      k - i
+    end
+
+    # Index just past `scheme://` or `www.` + one word char, or 0 if
+    # neither opens at `i`.
+    def self.auto_link_url_prefix_end(s, i)
+      if s[i, 4].to_s.downcase == "www." && auto_link_word_char?(s[i + 4, 1].to_s)
+        return i + 5
+      end
+      colon = s.index(":", i)
+      return 0 if colon.nil?
+      return 0 unless s[colon, 3].to_s == "://"
+      return 0 unless auto_link_scheme?(s[i, colon - i].to_s.downcase)
+      colon + 3
+    end
+
+    # The gem's scheme list, delimited so a prefix cannot match a longer
+    # name (`ftp` must not answer for `sftp`). Inline literal rather than
+    # a module const: a module-const receiver reads as an unresolved
+    # class in the strict typer, the same reason `tag_open_at?` above
+    # spells its alphabet out.
+    def self.auto_link_scheme?(name)
+      return false if name.empty?
+      "|ed2k|ftp|http|https|irc|mailto|news|gopher|nntp|telnet|webcal|" \
+      "xmpp|callto|feed|svn|urn|aim|rsync|tag|ssh|sftp|rtsp|afs|file|"
+        .include?("|" + name + "|")
+    end
+
+    # `[^\s< "]` — Ruby's `\s` is exactly `[ \t\r\n\f\v]` here.
+    def self.auto_link_url_char?(c)
+      return false if c == ""
+      return false if c == " " || c == "\t" || c == "\r" || c == "\n"
+      return false if c == "\f" || c == "\v"
+      c != "<" && c != "\""
+    end
+
+    # `\p{Word}` — Unicode letters, marks, numbers and connector
+    # punctuation. ASCII is spelled out; everything above it is TAKEN as
+    # a word character, which is where this parts company with the gem.
+    # A URL ending in a non-ASCII letter (the common case) agrees; one
+    # ending in non-ASCII PUNCTUATION (`»`, `。`) keeps the character
+    # here and drops it there. Ledgered with the rest.
+    def self.auto_link_word_char?(c)
+      return false if c == ""
+      return true if c.ord >= 128
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".include?(c)
+    end
+
+    # Build the anchor for one URL match, trailing punctuation and all.
+    #
+    #   while href.sub!(/[^\p{Word}\/\-=;]$/, "")
+    #     punctuation.push($&)
+    #     opening = BRACKETS[punctuation.last]
+    #     if opening && href.scan(opening).size > href.scan($&).size
+    #       href << punctuation.pop
+    #       break
+    #     end
+    #   end
+    #
+    # is the gem, and the bracket clause is the whole point of it: a
+    # sentence's full stop is not part of the URL, but the `)` that
+    # closes a Wikipedia title IS, and the two are told apart by whether
+    # the URL opened one.
+    def self.auto_link_url(matched, html)
+      href = matched
+      punctuation = []
+      while href.length > 0 && !auto_link_url_tail_char?(href[href.length - 1, 1].to_s)
+        last = href[href.length - 1, 1].to_s
+        href = href[0, href.length - 1].to_s
+        punctuation.push(last)
+        opening = auto_link_bracket_opening(last)
+        if opening != "" && auto_link_count(href, opening) > auto_link_count(href, last)
+          # `href << punctuation.pop` in the gem. Split, and the pop is a
+          # STATEMENT: used as a value it types as an Option on the
+          # strict targets, and `last` is the same character anyway.
+          punctuation.pop
+          href = href + last
+          break
+        end
+      end
+      # `&gt;` survives the loop above (`;` is a keeper) and is not part
+      # of the URL either — it is the escaped `>` of the markup around
+      # it.
+      trailing_gt = ""
+      if href.length >= 4 && href[href.length - 4, 4].to_s == "&gt;"
+        trailing_gt = "&gt;"
+        href = href[0, href.length - 4].to_s
+      end
+      # The LABEL is the text as written; the `http://` prefix the `www.`
+      # branch needs goes only into the href. Getting this backwards
+      # rewrites the user's text.
+      label = href
+      # The gem's condition is `if scheme.nil?`, and scheme is nil for
+      # exactly the `www.` branch — no listed scheme name is "www".
+      href = "http://" + href if href[0, 4].to_s.downcase == "www."
+      # The gem runs `href` and the label through `sanitize` here, and
+      # then hands `content_tag` an `escape` flag. NEITHER is reproduced,
+      # and neither needs to be:
+      #
+      #   * `sanitize` on this text is not a filtering question — the
+      #     match is `[^\s< "]+`, so there is no markup in it — it is an
+      #     ENTITY question, and the gem never sees a bare `&` here
+      #     because the body pass already turned it into `&amp;`. With
+      #     that pass skipped, one follows from the other: a bare `&` in
+      #     the input reaches the href as written where Rails would have
+      #     `&amp;`. campfire's body arrives through `h`, so its `&` is
+      #     already an entity. Ledgered with the body pass.
+      #   * `escape` is `content_tag`'s fourth argument, and it is a
+      #     no-op in the gem for the reason above: it is true only when
+      #     the sanitize ran, and a sanitized value is html_safe, which
+      #     `content_tag` splices raw. Confirmed against the gem on all
+      #     three settings of the flag.
+      auto_link_anchor(href, label, html) + punctuation.reverse.join("") + trailing_gt
+    end
+
+    # `[^\p{Word}\/\-=;]$` inverted: the characters a URL may END on.
+    def self.auto_link_url_tail_char?(c)
+      auto_link_word_char?(c) || c == "/" || c == "-" || c == "=" || c == ";"
+    end
+
+    # `{ "]" => "[", ")" => "(", "}" => "{" }`, as a lookup with "" for
+    # "not a closing bracket".
+    def self.auto_link_bracket_opening(c)
+      return "[" if c == "]"
+      return "(" if c == ")"
+      return "{" if c == "}"
+      ""
+    end
+
+    def self.auto_link_count(s, c)
+      count = 0
+      i = 0
+      n = s.length
+      while i < n
+        count = count + 1 if s[i, 1].to_s == c
+        i = i + 1
+      end
+      count
+    end
+
+    # `content_tag(:a, text, attrs.merge("href" => href))`, spelled out
+    # because both halves of that call diverge from the shared helpers:
+    # `content_tag` ESCAPES its content and `render_attrs` escapes its
+    # values, and here the label and the href are already escaped text
+    # from the body (Rails reaches the same place by way of html_safe).
+    # `merge` also REPLACES an `href` the caller passed rather than
+    # appending after it, which is the attribute order the golden values
+    # in `tests/overlay_sanitize_autolink.rb` pin.
+    def self.auto_link_anchor(href, text, html)
+      attrs = +""
+      placed = false
+      html.each do |k, v|
+        if k.to_s == "href"
+          attrs = attrs + " href=\"" + href + "\""
+          placed = true
+        else
+          attrs = attrs + " " + k.to_s + "=\"" + html_escape(v.to_s) + "\""
+        end
+      end
+      attrs = attrs + " href=\"" + href + "\"" unless placed
+      "<a" + attrs + ">" + text + "</a>"
+    end
+
+    # Length of the e-mail match starting at `i`, or 0. The gem's
+    # pattern, left to right: a lookbehind that refuses a start in the
+    # MIDDLE of a local part, one starting character from the narrower
+    # set, an optional dot, the rest of the local part, `@`, and a
+    # domain of two or more `[\w-]` labels.
+    def self.auto_link_email_length(s, i)
+      n = s.length
+      return 0 if i > 0 && auto_link_email_local_char?(s[i - 1, 1].to_s)
+      return 0 unless auto_link_email_start_char?(s[i, 1].to_s)
+      j = i + 1
+      j = j + 1 if s[j, 1].to_s == "."
+      while j < n && auto_link_email_local_char?(s[j, 1].to_s)
+        j = j + 1
+      end
+      return 0 unless s[j, 1].to_s == "@"
+      j = j + 1
+      k = j
+      while k < n && auto_link_email_domain_char?(s[k, 1].to_s)
+        k = k + 1
+      end
+      return 0 if k == j
+      # `(?:\.[\w-]+)+` — one label is not a domain.
+      labels = 0
+      more = true
+      while more
+        more = false
+        if s[k, 1].to_s == "."
+          m = k + 1
+          while m < n && auto_link_email_domain_char?(s[m, 1].to_s)
+            m = m + 1
+          end
+          if m > k + 1
+            k = m
+            labels = labels + 1
+            more = true
+          end
+        end
+      end
+      return 0 if labels == 0
+      k - i
+    end
+
+    # `[\w.!#\$%&'*\/=?^`{|}~+-]`
+    def self.auto_link_email_local_char?(c)
+      return false if c == ""
+      auto_link_word_char?(c) || ".!\#$%&'*/=?^`{|}~+-".include?(c)
+    end
+
+    # `[\w.!#\$%+-]` — the narrower set the local part may OPEN with.
+    def self.auto_link_email_start_char?(c)
+      return false if c == ""
+      auto_link_word_char?(c) || ".!\#$%+-".include?(c)
+    end
+
+    # `[\w-]`
+    def self.auto_link_email_domain_char?(c)
+      return false if c == ""
+      auto_link_word_char?(c) || c == "-"
+    end
     # Rails' CaptureHelper, for the block a helper FORWARDS rather than
     # writes. `src/lower/capture_inline.rs` claims the LITERAL-block
     # shape (`capture { concat(a); … }`) and inlines it into an

@@ -1260,6 +1260,78 @@ own difference, not ours: a Rails app on JRuby answers the same way.
 BOTH values, branching on the vendor, so a runner whose nokogiri lacks
 HTML5 reads as the other correct answer rather than as a regression.
 
+### `auto_link` does NOT sanitize the body; Rails does
+
+`ActionView::ViewHelpers.auto_link` on every target except the CRuby
+overlay's finds and wraps the links exactly as `rails_autolink` does,
+and hands back the body around them AS GIVEN. Rails runs the body
+through the safe-list sanitizer first.
+
+```text
+input   a < b > c
+Rails   a &lt; b &gt; c
+here    a < b > c
+
+input   addr <foo@bar.com> ok
+Rails   addr  ok                      (the unknown tag is dropped)
+here    addr <<a href="mailto:foo@bar.com">foo@bar.com</a>> ok
+
+input   <a href='x'>t</a>
+Rails   <a href="x">t</a>             (attributes renormalised)
+here    <a href='x'>t</a>
+```
+
+**Why.** The safe-list pass is HTML5 tree construction, not filtering —
+the argument is in the header of
+`ruby_overlay/runtime/action_view_sanitize.rb` and is the same reason
+the shared `sanitize` REFUSES markup instead of approximating it. That
+refusal is the honest answer where the caller can be told; `auto_link`
+is on campfire's read path, under a `rescue Exception` that returns
+`""`, so raising there is a blank message body rather than an error.
+Linking without the pass is the only remaining option, and it is stated
+here rather than discovered.
+
+**The size of it, measured.** Against `rails_autolink` 1.1.8 on
+`actionview` 8.1.3, over 36 probes:
+
+* **36 / 36** byte-identical to `auto_link(..., :sanitize => false)` —
+  the gem minus this pass. Every linking decision is the gem's: the
+  scheme list, where a URL ends, which trailing punctuation is the
+  sentence's, the bracket rule, the e-mail local part, and both clauses
+  of `auto_linked?`.
+* **30 / 36** identical to the gem's default. All six differences are
+  the three shapes above — escaped angle brackets, a dropped tag,
+  renormalised quotes. Not one is a different link.
+
+**What it costs, and what it does not.** The links this helper CREATES
+are still safe by the gem's own rule table: the scheme list has no
+`javascript:` in it and the `www.` branch is prefixed `http://`, so
+`auto_link` cannot manufacture a scripting URL out of text. What is
+lost is Rails' SECOND layer over markup that was ALREADY in the body.
+campfire's is ActionText content that arrived through `h`, so the first
+layer is the one doing the work — but an app that feeds `auto_link` raw
+user HTML and leans on this pass to clean it gets no cleaning here.
+
+One consequence follows from the same skip: Rails' body pass turns a
+bare `&` into `&amp;` before the URL regex ever runs, so the gem's href
+never carries one. Here it does — `https://x.co/a?b=1&c=2` reaches the
+attribute as written. campfire's body arrives through `h`, so its `&`
+is already an entity.
+
+**A second, unrelated to sanitizing.** The gem strips trailing
+`\p{Word}` — Unicode letters, marks, numbers and connector punctuation.
+The port spells ASCII out and TAKES everything above it as a word
+character. A URL ending in a non-ASCII letter agrees; one ending in
+non-ASCII PUNCTUATION (`»`, `。`) keeps the character here and drops it
+there.
+
+**Where it is pinned.** `tests/shared_autolink.rb`, which asserts the
+30 agreements AND the three divergent shapes, so a future change that
+starts sanitizing says so in that file rather than in the campfire
+suite. The CRuby overlay is unaffected: it redefines `auto_link` on the
+real gem chain and is gated separately by
+`tests/overlay_sanitize_autolink.rb`.
+
 ### `link_to` / `mail_to` put `href` FIRST; Rails puts it LAST
 
 `ActionView::ViewHelpers.link_to("t", "/u", target: "_blank")` renders

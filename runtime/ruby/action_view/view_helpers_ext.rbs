@@ -23,5 +23,25 @@ module ActionView
     def self.tag_open_at?: (String s, Integer i) -> bool
     def self.tag_end_index: (String s, Integer i) -> Integer?
     def self.entity_reference_length: (String s, Integer i) -> Integer
+    # `auto_link` and its scanner. `html` is the caller's attribute hash
+    # (campfire passes `{ target: "_blank" }`) — one element type, not a
+    # bag; `link` is `:all` / `:urls` / `:email_addresses`.
+    def self.auto_link: (String text, ?html: Hash[Symbol, String], ?link: Symbol, ?sanitize: bool) -> String
+    def self.auto_link_anchor_open?: (String tag) -> bool
+    def self.auto_link_anchor_close?: (String tag) -> bool
+    def self.auto_link_url_length: (String s, Integer i) -> Integer
+    def self.auto_link_url_prefix_end: (String s, Integer i) -> Integer
+    def self.auto_link_scheme?: (String name) -> bool
+    def self.auto_link_url_char?: (String c) -> bool
+    def self.auto_link_word_char?: (String c) -> bool
+    def self.auto_link_url: (String matched, Hash[Symbol, String] html) -> String
+    def self.auto_link_url_tail_char?: (String c) -> bool
+    def self.auto_link_bracket_opening: (String c) -> String
+    def self.auto_link_count: (String s, String c) -> Integer
+    def self.auto_link_anchor: (String href, String text, Hash[Symbol, String] html) -> String
+    def self.auto_link_email_length: (String s, Integer i) -> Integer
+    def self.auto_link_email_local_char?: (String c) -> bool
+    def self.auto_link_email_start_char?: (String c) -> bool
+    def self.auto_link_email_domain_char?: (String c) -> bool
   end
 end
