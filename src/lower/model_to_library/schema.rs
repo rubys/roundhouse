@@ -1778,7 +1778,33 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 // slot whole otherwise. Wrapped OUTSIDE the `||` so the
                 // default still decides the absent case; the helper
                 // passes an integer through untouched.
-                enum_label_cast(model, col, defaulted.clone()).unwrap_or(defaulted)
+                let cast = enum_label_cast(model, col, defaulted.clone()).unwrap_or(defaulted);
+                // The PRIMARY KEY is pinned to its column type here, and
+                // it is the one column where that matters beyond this
+                // model: `@id` lives on the shared `ActiveRecord::Base`,
+                // so its slot is the UNION of every model's writes. A
+                // poly reaching it widens the same field on all of them
+                // at once, and spinel then drops the `@id: Integer`
+                // pin on each ("ancestor holds it as poly") — every id
+                // read becomes a boxed dispatch. `attrs` is an untyped
+                // bag, so `attrs[:id]` is poly and `poly || 0` stays
+                // poly; a per-model column like `creator_id` escapes
+                // only because it has no ancestor to union through.
+                //
+                // A `Cast`, NOT a `.to_i` Send — the same seam the
+                // temporal branch above uses to bridge this exact bag.
+                // `.to_i` compiled on the ruby family and took
+                // `rust_toolchain` from green to two E0599s: rust's
+                // untyped value is `serde_json::Value`, which answers
+                // no such method. Cast is what every target lowers.
+                if col.primary_key {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Cast { value: cast, target_ty: col_ty.clone() },
+                    )
+                } else {
+                    cast
+                }
             };
             stmts.push(Expr::new(
                 Span::synthetic(),

@@ -192,13 +192,31 @@ module ActiveRecord
     # legacy `ActiveRecord.adapter.*` shim explicitly (see
     # `BaseTest::Item` in active_record/base_test.rb).
     #
-    # Empty bodies are load-bearing for spinel-AOT: spinel's polymorphic
-    # dispatch generates a class-id switch only when the base method
-    # body is empty (matching the `after_create_commit`/etc. callback
-    # pattern); a concrete base body causes monomorphic inlining to
-    # base, which then no-ops because `ActiveRecord.adapter` isn't
-    # wired under the Level-3 architecture.
-    def _adapter_insert; end
+    # `_adapter_update`/`_adapter_delete` keep EMPTY bodies: spinel's
+    # polymorphic dispatch generates a class-id switch only when the
+    # base body is empty (the `after_create_commit`/etc. callback
+    # pattern), and a concrete base body was believed to force
+    # monomorphic inlining to base, which then no-ops because
+    # `ActiveRecord.adapter` isn't wired under Level-3.
+    #
+    # `_adapter_insert` CANNOT: an empty body returns nil, and this one
+    # RETURNS A VALUE — `@id = _adapter_insert`. That nil widened `@id`
+    # on the shared base, and because a base-class ivar is the union of
+    # every subclass's writes, spinel dropped the `@id: Integer` pin on
+    # all eleven campfire models ("ancestor holds it as poly"), boxing
+    # every id read in the program. Raising types it and keeps the base
+    # honest — nothing should reach it.
+    #
+    # The inlining fear did NOT reproduce: measured at spinel a7a9c994,
+    # the emitted C keeps the full 17-way class-id switch and every
+    # model still dispatches to its own override. Two other shapes also
+    # type it, and BOTH are worse — a `0` tail silently fabricates an id
+    # if the base is ever reached, and `raise` + a typed tail (the
+    # gem_facades pattern) is dead code that `go vet` rejects
+    # (`real_blog_go_vet_passes`: unreachable code).
+    def _adapter_insert
+      raise NotImplementedError, "_adapter_insert: subclasses must override"
+    end
     def _adapter_update; end
     def _adapter_delete; end
 
