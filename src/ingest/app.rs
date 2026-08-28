@@ -1094,6 +1094,7 @@ fn splice_concern_class_methods_into_models(
         return;
     }
 
+    let mut spliced: HashMap<ClassId, HashMap<Symbol, ClassId>> = HashMap::new();
     for model in &mut app.models {
         // Transitive closure of the model's includes, in ancestor order.
         let mut order: Vec<ClassId> = Vec::new();
@@ -1127,12 +1128,14 @@ fn splice_concern_class_methods_into_models(
             .collect();
 
         let mut added: Vec<ModelBodyItem> = Vec::new();
+        let mut provenance: HashMap<Symbol, ClassId> = HashMap::new();
         for concern in &order {
             let Some((methods, consts)) = class_side.get(concern) else { continue };
             for m in methods {
                 if !taken.insert(m.name.clone()) {
                     continue;
                 }
+                provenance.insert(m.name.clone(), concern.clone());
                 let mut m = m.clone();
                 if !consts.is_empty() {
                     qualify_lexical_consts(&mut m.body, concern, consts);
@@ -1145,7 +1148,11 @@ fn splice_concern_class_methods_into_models(
             }
         }
         model.body.extend(added);
+        if !provenance.is_empty() {
+            spliced.insert(model.name.clone(), provenance);
+        }
     }
+    app.concern_spliced_class_methods = spliced;
 }
 
 /// Splice a controller concern's surface into every controller that

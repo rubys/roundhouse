@@ -204,6 +204,19 @@ pub struct App {
     /// every construction site including a dozen in tests.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_actions: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// The MODEL twin of `concern_spliced_actions`: class-side concern
+    /// methods `splice_concern_class_methods_into_models` copied onto a
+    /// model, keyed model → method → the module the `def` came from.
+    ///
+    /// The module keeps its own copy of that `def` (dead there, since
+    /// `include` never carries a singleton method), so ONE method now
+    /// has two `MethodDef`s in two classes. Call sites are recorded
+    /// against the receiver — `User.create_bot!` — and without this map
+    /// nothing connects them to the module's copy, which is the one the
+    /// sidecar beside `app/models/user/bot.rb` is written from. The two
+    /// descriptions then disagree about the parameter types.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_spliced_class_methods: HashMap<ClassId, HashMap<Symbol, ClassId>>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -390,6 +403,7 @@ impl App {
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_spliced_actions: HashMap::new(),
+            concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),

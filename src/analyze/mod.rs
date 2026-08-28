@@ -1800,12 +1800,12 @@ impl Analyzer {
                 // helper that itself calls another ivar-writing helper is
                 // not chased (the direct-call case is what recurs). Own
                 // and before_action assignments already present win.
-                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
+                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
                 // Only own-class sites are consumed below, so helper
                 // attribution is irrelevant — an empty index keeps
                 // this walk exactly as before.
                 self.collect_send_sites(&action.body, Some(&ctrl_name), &HashMap::new(), &mut sites);
-                for (class_id, method, _) in &sites {
+                for (class_id, method, _, _) in &sites {
                     if *class_id != ctrl_name {
                         continue;
                     }
@@ -3052,7 +3052,18 @@ impl Analyzer {
         // the earlier observation has nothing to contribute.
         self.inferred_params.clear();
         let helpers = &app.helper_method_index;
-        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
+        // A CALLEE'S KEYWORD PARAMETER IS NOT ITS KWARGS HASH. The
+        // fourth slot carries a call's trailing `kwargs: true` entries
+        // by NAME so they can be placed on the keyword params they
+        // actually bind to; without it the whole hash lands in the
+        // position the hash occupies, and a `def f(room,
+        // involvement:)` called as `f(room, involvement: str)` is
+        // declared `involvement: Hash[Symbol, String?]` — a second
+        // description of the argument list that disagrees with the
+        // `def`. campfire's `next_involvement_for` emitted exactly
+        // that, and spinel gave the param an `sp_SymPolyHash *`.
+        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+        let params_by_method = Self::param_shapes(app);
         for model in &app.models {
             for method in model.methods() {
                 self.collect_send_sites(&method.body, Some(&model.name), helpers, &mut sites);
@@ -3078,7 +3089,12 @@ impl Analyzer {
             self.collect_send_sites(seeds, None, helpers, &mut sites);
         }
 
-        for (class_id, method, arg_tys) in sites {
+        for (class_id, method, arg_tys, kw_tys) in sites {
+            let arg_tys = Self::place_keyword_args(
+                params_by_method.get(&(class_id.clone(), method.clone())),
+                arg_tys,
+                kw_tys,
+            );
             // Cross-reference against MethodDef.params to know the
             // arity. If the called method's params can't be located,
             // still accumulate up to arg count under the same key —
@@ -3096,6 +3112,176 @@ impl Analyzer {
                 *slot = unify_param_ty(slot.clone(), observed);
             }
         }
+
+        self.fold_concern_param_sites(app);
+    }
+
+    /// The param-table twin of `fold_concern_surfaces`.
+    ///
+    /// `User.create_bot!(bot_params.to_attrs)` records its argument
+    /// under `(User, create_bot!)` — the receiver — while the `def`
+    /// lives in the concern, `(User::Bot, create_bot!)`. Nothing joined
+    /// the two, so campfire emitted `user.rbs` declaring
+    /// `(Hash[Symbol, untyped] attributes)` and `bot.rbs` declaring
+    /// `(untyped attributes)` for THE SAME METHOD — and the sidecar
+    /// beside the body is the one spinel compiles, so `attributes` was
+    /// poly, `attributes.merge(…)` dispatched over every `merge` in the
+    /// program, and `ActionDispatch::Flash#merge`'s `sp_StrStrHash *`
+    /// took a `sp_SymPolyHash *`.
+    ///
+    /// Copies the includer's observations onto the defining module,
+    /// chasing module→module includes the same way the return-type fold
+    /// does. **A method the includer defines ITSELF is skipped**: then
+    /// the call sites are evidence about that def, and the module's
+    /// same-named method is a different one Ruby never reaches.
+    fn fold_concern_param_sites(&mut self, app: &App) {
+        let mut module_methods: HashMap<ClassId, BTreeSet<Symbol>> = HashMap::new();
+        let mut owned: BTreeSet<(ClassId, Symbol)> = BTreeSet::new();
+        for lc in &app.library_classes {
+            let names: BTreeSet<Symbol> = lc.methods.iter().map(|m| m.name.clone()).collect();
+            for n in &names {
+                owned.insert((lc.name.clone(), n.clone()));
+            }
+            if lc.is_module {
+                module_methods.insert(lc.name.clone(), names);
+            }
+        }
+        if module_methods.is_empty() {
+            return;
+        }
+        for model in &app.models {
+            for m in model.methods() {
+                owned.insert((model.name.clone(), m.name.clone()));
+            }
+        }
+
+        let targets: Vec<(ClassId, Vec<ClassId>)> = self
+            .classes
+            .iter()
+            .filter(|(_, c)| !c.includes.is_empty())
+            .map(|(id, c)| (id.clone(), c.includes.clone()))
+            .collect();
+        let mut adds: Vec<((ClassId, Symbol), Vec<Ty>)> = Vec::new();
+        for (id, includes) in targets {
+            let mut queue = includes;
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if let Some(ci) = self.classes.get(&m) {
+                    for n in &ci.includes {
+                        if seen.insert(n.clone()) {
+                            queue.push(n.clone());
+                        }
+                    }
+                }
+                let Some(names) = module_methods.get(&m) else { continue };
+                for name in names {
+                    // The includer's OWN def wins — unless it is this
+                    // module's def, spliced in verbatim
+                    // (`splice_concern_class_methods_into_models`).
+                    // Then it is one method with two `MethodDef`s and
+                    // the observations belong to both.
+                    let spliced_from_here = app
+                        .concern_spliced_class_methods
+                        .get(&id)
+                        .and_then(|per| per.get(name))
+                        == Some(&m);
+                    if !spliced_from_here && owned.contains(&(id.clone(), name.clone())) {
+                        continue;
+                    }
+                    if let Some(tys) = self.inferred_params.get(&(id.clone(), name.clone())) {
+                        adds.push(((m.clone(), name.clone()), tys.clone()));
+                    }
+                }
+            }
+        }
+        for (key, tys) in adds {
+            let entry = self.inferred_params.entry(key).or_default();
+            if entry.len() < tys.len() {
+                entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
+            }
+            for (slot, observed) in entry.iter_mut().zip(tys.into_iter()) {
+                *slot = unify_param_ty(slot.clone(), observed);
+            }
+        }
+    }
+
+    /// Every (class, method) pair's parameter NAMES and whether each
+    /// binds by keyword — the shape `place_keyword_args` needs to put a
+    /// call's kwargs on the right slots.
+    ///
+    /// Keyed the way `inferred_params` is, by (class, method) with no
+    /// receiver distinction, so a class method and an instance method
+    /// of the same name collide. When their shapes differ the entry is
+    /// POISONED rather than picked: placing keywords from the wrong
+    /// `def` is worse than leaving the hash where it sits, which is the
+    /// behaviour that stood before this table existed.
+    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, bool)>> {
+        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, bool)>>> = HashMap::new();
+        let mut record = |class: &ClassId, m: &crate::dialect::MethodDef| {
+            let shape: Vec<(Symbol, bool)> =
+                m.params.iter().map(|p| (p.name.clone(), p.keyword)).collect();
+            out.entry((class.clone(), m.name.clone()))
+                .and_modify(|slot| {
+                    if slot.as_ref() != Some(&shape) {
+                        *slot = None;
+                    }
+                })
+                .or_insert(Some(shape));
+        };
+        for model in &app.models {
+            for m in model.methods() {
+                record(&model.name, m);
+            }
+        }
+        for lc in &app.library_classes {
+            for m in &lc.methods {
+                record(&lc.name, m);
+            }
+        }
+        out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
+    }
+
+    /// Place a call's trailing keyword arguments on the parameter slots
+    /// they bind to, replacing the single slot the kwargs hash occupies.
+    ///
+    /// The gate is that EVERY key names a declared keyword parameter.
+    /// A `**attributes`-style helper — `link_to_room(room, id: …,
+    /// class: …)` binding one Hash to a positional `attributes` — has
+    /// no such parameters, so it is untouched by construction; this is
+    /// the same names-not-types rule `lower::helper_kwargs` applies to
+    /// the call sites themselves.
+    ///
+    /// Keywords the site omits keep their `Var` slot: a call that does
+    /// not pass an optional keyword is no evidence about its type, and
+    /// `unify_param_ty` reads `Var` as exactly that.
+    fn place_keyword_args(
+        shape: Option<&Vec<(Symbol, bool)>>,
+        mut arg_tys: Vec<Ty>,
+        kw_tys: Vec<(Symbol, Ty)>,
+    ) -> Vec<Ty> {
+        if kw_tys.is_empty() {
+            return arg_tys;
+        }
+        let Some(params) = shape else {
+            return arg_tys;
+        };
+        let slot_of = |key: &Symbol| params.iter().position(|(n, kw)| *kw && n == key);
+        if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
+            return arg_tys;
+        }
+        arg_tys.pop();
+        if arg_tys.len() < params.len() {
+            arg_tys.resize(params.len(), Ty::Var { var: crate::ident::TyVar(0) });
+        }
+        for (k, t) in kw_tys {
+            if let Some(i) = slot_of(&k) {
+                arg_tys[i] = t;
+            }
+        }
+        arg_tys
     }
 
     /// Walk one expression tree, collecting (class_id, method, arg_tys)
@@ -3109,7 +3295,7 @@ impl Analyzer {
         expr: &Expr,
         self_class: Option<&ClassId>,
         helpers: &HashMap<Symbol, ClassId>,
-        out: &mut Vec<(ClassId, Symbol, Vec<Ty>)>,
+        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)>,
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
@@ -3157,7 +3343,41 @@ impl Analyzer {
                             }
                         })
                         .collect();
-                    out.push((class_id, method.clone(), arg_tys));
+                    // The trailing `kwargs: true` hash, harvested by
+                    // NAME. Only literal-symbol keys: a `**splat` or a
+                    // computed key says nothing about which parameter
+                    // the value binds to, and one such key disqualifies
+                    // the whole hash (an incomplete map would place
+                    // some keywords and silently drop the rest).
+                    let kw_tys = match args.last().map(|a| &*a.node) {
+                        Some(ExprNode::Hash { entries, kwargs: true }) => {
+                            let mut pairs = Vec::with_capacity(entries.len());
+                            let mut all_sym = true;
+                            for (k, v) in entries {
+                                match &*k.node {
+                                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                                        let t = v
+                                            .ty
+                                            .clone()
+                                            .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                                        let t = if via_helper_index && matches!(t, Ty::Untyped) {
+                                            Ty::Var { var: crate::ident::TyVar(0) }
+                                        } else {
+                                            t
+                                        };
+                                        pairs.push((value.clone(), t));
+                                    }
+                                    _ => {
+                                        all_sym = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_sym { pairs } else { Vec::new() }
+                        }
+                        _ => Vec::new(),
+                    };
+                    out.push((class_id, method.clone(), arg_tys, kw_tys));
                 }
                 if let Some(r) = recv { self.collect_send_sites(r, self_class, helpers, out); }
                 for a in args { self.collect_send_sites(a, self_class, helpers, out); }

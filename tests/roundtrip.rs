@@ -138,6 +138,7 @@ fn tiny_blog_round_trips() {
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
         concern_spliced_actions: std::collections::HashMap::new(),
+        concern_spliced_class_methods: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),
         render_edges: std::collections::HashMap::new(),
         view_feeders: std::collections::HashMap::new(),
