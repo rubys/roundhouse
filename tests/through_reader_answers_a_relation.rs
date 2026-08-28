@@ -169,7 +169,14 @@ fn the_runtime_relation_answers_preloaded() {
     let rbs = std::fs::read_to_string("runtime/ruby/active_record/relation.rbs")
         .expect("runtime relation.rbs");
     assert!(rb.contains("def preloaded(records, loaded)"), "{rb}");
-    assert!(rbs.contains("def preloaded: (Array[untyped] records, bool loaded) -> Relation"));
+    // `records` is `untyped` ON PURPOSE — do not narrow it back to
+    // `Array[untyped]`. That is a REPRESENTATION claim, not "any
+    // array", and `--rbs` seeds are trusted: a caller holding an
+    // `Array[Integer]` (campfire's `@reachable_messages_cache`, seeded
+    // `[]` in the constructor) contradicts it and the build stops.
+    // This method only stores the argument, so it promises nothing
+    // about the array's shape.
+    assert!(rbs.contains("def preloaded: (untyped records, bool loaded) -> Relation"));
     // Chain methods drop the memo, so narrowing a preloaded relation
     // re-queries rather than filtering a stale set.
     assert!(rb.contains("@records = records if loaded"), "{rb}");

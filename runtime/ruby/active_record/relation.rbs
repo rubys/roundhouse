@@ -52,7 +52,15 @@ module ActiveRecord
     def none: () -> Relation
     def reload: () -> Relation
     def load: () -> Relation
-    def preloaded: (Array[untyped] records, bool loaded) -> Relation
+    # `records` is `untyped`, NOT `Array[untyped]`: the body only stores
+    # the argument (`@records = records if loaded`), so it does not care
+    # about the array's REPRESENTATION — and that is all
+    # `Array[untyped]` claims. A seed spinel trusts, so a caller holding
+    # an `Array[Integer]` contradicts it: campfire's
+    # `User#reachable_messages` passes `@reachable_messages_cache`,
+    # seeded `[]` in the constructor and therefore inferred as an int
+    # array. Same over-claim as `map`/`collect` below.
+    def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
 
     def to_a: () -> Array[untyped]

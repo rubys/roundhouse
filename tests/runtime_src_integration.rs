@@ -1095,7 +1095,30 @@ fn every_runtime_method_body_concretely_typed() {
     // so nothing can push to it. `polymorphic_url`, landing in the same
     // file in the same change, adds NONE — its body raises and never
     // reads its parameter.
-    const CEILING: usize = 332;
+    // 332 -> 336: `ActiveRecord::Relation#preloaded`'s `records`
+    // parameter, widened from `Array[untyped]` to `untyped`. FOUR
+    // sites, all in that one method (relation.rb 145 -> 149), and they
+    // are the parameter and its flow into `@records` — the body is
+    // `@records = records if loaded; self`.
+    //
+    // The trade is deliberate and the OTHER side of it is a wall.
+    // `Array[untyped]` is not "any array", it is a REPRESENTATION
+    // claim, and `--rbs` seeds are trusted: campfire's
+    // `User#reachable_messages` passes `@reachable_messages_cache`,
+    // which the constructor seeds `[]` and spinel therefore infers as
+    // an int array, and spinel#4151's new diagnostic named it
+    // (`parameter records of preloaded is declared Array[untyped] but
+    // this call passes Array[Integer]`). This method never inspects
+    // the array's shape, so `untyped` is what it actually promises.
+    //
+    // What would buy the four sites back is NOT a narrower signature
+    // here — no type names "the element type of whatever cache the
+    // caller holds". It is declaring the association-cache ivars in
+    // the generated model RBS: `assoc_cache_ivar_bindings` already
+    // computes `Array[<Target>]` for each, but the model `.rbs` we emit
+    // carries ZERO ivar declarations, so the `[]` seed wins. That needs
+    // ivar types plumbed onto `LibraryClass` and is its own change.
+    const CEILING: usize = 336;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
