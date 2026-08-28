@@ -3112,7 +3112,7 @@ fn view_ivar_models(app: &App, view_name: &Symbol) -> std::collections::HashMap<
         .collect()
 }
 
-fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
+pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     use crate::ty::Ty;
     let cam = camelize_path(&crate::naming::singularize_last(name));
     if known_models.iter().any(|m| m == &cam) {
@@ -3152,7 +3152,7 @@ fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String]) -> crate::
 /// Build a view method's `Ty::Fn` from its typed primary params (record
 /// arg and/or threaded ivars) followed by the nullable extra params
 /// (notice/alert/action_name/…).
-fn build_view_signature_from(
+pub(crate) fn build_view_signature_from(
     typed: &[(String, crate::ty::Ty)],
     extra_params: &[String],
 ) -> Option<crate::ty::Ty> {

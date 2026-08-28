@@ -184,14 +184,30 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         ));
     }
 
-    let signature = build_view_signature(
-        stem,
-        dir,
-        is_partial,
-        &arg_name,
-        &extra_params,
-        &known_models,
-    );
+    // THE SIGNATURE FOLLOWS THE PARAMS, not the stem/dir guess a second
+    // time. `build_view_signature` re-derives the arg from the template
+    // path — `autocompletable/users/index.json.jbuilder` gives
+    // `users: Array[untyped]` — while the params above come from the
+    // ivars the template actually reads (`@page.records` -> `page`). The
+    // emitted `def self.index_json(page)` was declared
+    // `(Array[untyped] users)`, and `Array[untyped]` on a parameter is a
+    // claim about REPRESENTATION: spinel took the controller's
+    // `sp_Page *` and passed it where an `sp_PolyArray *` was declared.
+    // Mirrors what the ERB lowerer already does — one `typed` list feeds
+    // both the params and `build_view_signature_from`.
+    let signature = if ivar_params.is_empty() {
+        build_view_signature(stem, dir, is_partial, &arg_name, &extra_params, &known_models)
+    } else {
+        let typed: Vec<(String, crate::ty::Ty)> = ivar_params
+            .iter()
+            .map(|iv| {
+                let n = iv.as_str().to_string();
+                let t = crate::lower::view_to_library::ivar_ty(&n, &known_models);
+                (n, t)
+            })
+            .collect();
+        crate::lower::view_to_library::build_view_signature_from(&typed, &extra_params)
+    };
 
     let arg_columns = if arg_name.is_empty() {
         std::collections::HashMap::new()
