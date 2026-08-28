@@ -116,15 +116,37 @@ fn is_cable_mount_path(expr: &Expr) -> bool {
         if path.last().is_some_and(|s| s.as_str() == "ActionCable"))
 }
 
+/// THE LONGEST CHAIN WINS, so this walks OUTERMOST-FIRST.
+///
+/// `config.x.vapid.public_key` contains `config.x.vapid`, and since the
+/// group lift both names are now lifted readers. Rewriting children
+/// first replaced the INNER one and left `Rails.application.x_vapid
+/// .public_key` — `undefined method 'public_key' for an instance of
+/// Hash`, on every page whose layout reads the VAPID key. Peeling the
+/// whole node before descending takes the longest key the chain spells,
+/// which is the one the reader was lifted from.
+///
+/// A node that does not peel still recurses, so a chain nested inside
+/// an argument or a block is reached exactly as before; a node that
+/// DOES peel has nothing left to walk but its `Rails` anchor.
 fn rewrite(expr: &mut Expr, lifted: &[(crate::ident::Symbol, Option<crate::ty::Ty>)]) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, lifted));
+    if !rewrite_here(expr, lifted) {
+        expr.node.for_each_child_mut(&mut |c| rewrite(c, lifted));
+    }
+}
 
+/// Rewrite this node if it is a lifted config read; `false` when it is
+/// not, and the caller then descends.
+fn rewrite_here(
+    expr: &mut Expr,
+    lifted: &[(crate::ident::Symbol, Option<crate::ty::Ty>)],
+) -> bool {
     let Some((application, segments)) = peel_config_chain(expr) else {
-        return;
+        return false;
     };
     let key = crate::ident::Symbol::from(segments.join("_"));
     let Some((_, reader_ty)) = lifted.iter().find(|(name, _)| name == &key) else {
-        return;
+        return false;
     };
     let span = expr.span;
     // THE READER'S OWN BODY WINS. What the analyzer stamped on the
@@ -144,6 +166,7 @@ fn rewrite(expr: &mut Expr, lifted: &[(crate::ident::Symbol, Option<crate::ty::T
         },
     );
     expr.ty = ty;
+    true
 }
 
 /// Peel a config READ back to its anchor, returning the
