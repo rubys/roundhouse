@@ -751,6 +751,7 @@ impl Analyzer {
         // expression the fixpoint above never touches, and typing them
         // needs the registry it produces.
         self.type_direct_helper_bodies(app);
+        self.type_rails_application_body(app);
 
         self.stamp_inferred_library_signatures(app);
     }
@@ -778,6 +779,38 @@ impl Analyzer {
     /// Runs AFTER the fixpoint: the call sites are in views and helper
     /// bodies, and their types are exactly what the fixpoint spent its
     /// rounds establishing.
+    /// Type `config/application.rb`'s methods.
+    ///
+    /// `App::rails_application` is a `LibraryClass` that EMITS — the
+    /// app's own `Rails::Application` subclass, reparented at ingest —
+    /// but it is not in `app.library_classes`, so the fixpoint above
+    /// walks every other app-authored body and not this one. Its
+    /// receivers stayed `Var`, and a pass that grounds by receiver type
+    /// had nothing to ground: campfire's
+    /// `ENV["APP_VERSION"].presence || ENV["GIT_REVISION"].presence ||
+    /// "0"` reached spinel with the dynamic `presence` intact and
+    /// compiled to `undefined method 'presence' for an instance of
+    /// String`. Spinel KNEW the receiver was a String; we were the ones
+    /// who had not looked.
+    ///
+    /// Solo, after the fixpoint, for the same reason
+    /// `type_direct_helper_bodies` is: nothing calls these methods from
+    /// inside the app (they are reached through the `Rails.application`
+    /// shim), so there are no call sites to unify and no return the
+    /// registry is waiting on — they need the registry, not the other
+    /// way round.
+    fn type_rails_application_body(&mut self, app: &mut App) {
+        let Some(lc) = &mut app.rails_application else { return };
+        let ctx = Ctx {
+            self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+            ..Ctx::default()
+        };
+        let typer = self.body_typer();
+        for method in &mut lc.methods {
+            typer.analyze_expr(&mut method.body, &ctx);
+        }
+    }
+
     fn type_direct_helper_bodies(&mut self, app: &mut App) {
         if app.routes.direct_helpers.is_empty() {
             return;

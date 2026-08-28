@@ -874,6 +874,25 @@ pub(crate) fn for_each_hook_body(
             f(call);
         }
     }
+    // `config/application.rb`. `App::rails_application` is a
+    // `LibraryClass` that EMITS but is not in `library_classes`, so
+    // every pass driven from here skipped it — and the bodies there are
+    // app-authored Ruby like any other. campfire's
+    // `ENV["APP_VERSION"].presence || …` reached spinel un-grounded and
+    // compiled to `undefined method 'presence' for an instance of
+    // String`: a body that ships has to be walked.
+    if let Some(lc) = &mut app.rails_application {
+        for method in &mut lc.methods {
+            visit_param_defaults(&mut method.params, f);
+            f(&mut method.body);
+        }
+        for (_name, value) in &mut lc.constants {
+            f(value);
+        }
+        for call in &mut lc.unknown_calls {
+            f(call);
+        }
+    }
     for controller in &mut app.controllers {
         for item in &mut controller.body {
             match item {
@@ -941,6 +960,19 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit_param_defaults(&method.params, f);
+            f(&method.body);
+        }
+        for (_name, value) in &lc.constants {
+            f(value);
+        }
+        for call in &lc.unknown_calls {
+            f(call);
+        }
+    }
+    // Same set as the mutable twin — see the note there.
+    if let Some(lc) = &app.rails_application {
         for method in &lc.methods {
             visit_param_defaults(&method.params, f);
             f(&method.body);
