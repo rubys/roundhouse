@@ -873,9 +873,19 @@ jobs:
       # was right, its REPRODUCIBILITY was not. The floor is whatever a
       # runner reaches, and it goes UP by the notice below, never by
       # assertion.
+      #
+      # 219/40 -> 220/41, raised on the notice this step emitted for
+      # `ede6c585`. The test that turned is
+      # `Sessions::TransfersControllerTest#test_show_renders_when_not_signed_in`,
+      # and its file with it: `fb835d02` gave `form_with` a runtime for
+      # the case the view walker's macro-inline cannot reach — one
+      # written inside an `app/helpers/` module, where there is no
+      # accumulator to splice into and the options are a runtime value.
+      # The spinel half of that same gap was an undefined SYMBOL at link
+      # time; this is the CRuby half.
         env:
-          FLOOR_TESTS: 219
-          FLOOR_FILES: 40
+          FLOOR_TESTS: 220
+          FLOOR_FILES: 41
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
