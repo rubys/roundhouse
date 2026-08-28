@@ -362,8 +362,17 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_integer_node().is_some() => {
             let i = n.as_integer_node().unwrap();
-            let v: i32 = i.value().try_into().unwrap_or(0);
-            ExprNode::Lit { value: Literal::Int { value: v as i64 } }
+            // A literal wider than `i64` is REPORTED, not zeroed. The
+            // `unwrap_or(0)` that stood here was silent, and it was
+            // reached: `0xffffffff` does not fit an `i32`, so campfire's
+            // `ipaddr.to_i & 0xffffffff` emitted `& 0`.
+            let Some(v) = super::util::integer_i64(&i.value()) else {
+                return Err(IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: "integer literal does not fit in a 64-bit integer".to_string(),
+                });
+            };
+            ExprNode::Lit { value: Literal::Int { value: v } }
         }
         n if n.as_float_node().is_some() => {
             let f = n.as_float_node().unwrap();

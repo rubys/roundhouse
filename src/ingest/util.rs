@@ -40,9 +40,39 @@ pub(super) fn bool_value(node: &Node<'_>) -> Option<bool> {
 }
 
 pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
-    let i = node.as_integer_node()?;
-    let v: i32 = i.value().try_into().ok()?;
-    Some(v as i64)
+    integer_i64(&node.as_integer_node()?.value())
+}
+
+/// An integer literal's value as `i64`.
+///
+/// **prism only offers `TryInto<i32>`**, and every literal in ingest
+/// used to go through it. `Literal::Int` has always been `i64`, so the
+/// narrow hop was pure loss — and it was SILENT: campfire's
+/// `RestrictedHTTP::PrivateNetworkGuard#embedded_ipv4` writes
+/// `ipaddr.to_i & 0xffffffff` and we emitted `ipaddr.to_i & 0`, a mask
+/// that keeps nothing. Anything above 2^31-1 (a byte size, a
+/// milliseconds timestamp, a bitmask, a snowflake id) became zero and
+/// nothing said so.
+///
+/// Built from `to_u32_digits`, which is the only full-width view prism
+/// exposes: little-endian `u32` limbs plus a sign. Four limbs are
+/// accumulated in `i128` — more than an `i64` can hold, deliberately,
+/// so the range check happens once at the end rather than as an
+/// overflow midway. `None` for a value no `i64` can hold; the caller
+/// reports it rather than inventing one.
+pub(super) fn integer_i64(value: &ruby_prism::Integer<'_>) -> Option<i64> {
+    let (negative, digits) = value.to_u32_digits();
+    let mut acc: i128 = 0;
+    for (idx, limb) in digits.iter().enumerate() {
+        if idx >= 4 {
+            if *limb != 0 {
+                return None;
+            }
+            continue;
+        }
+        acc |= i128::from(*limb) << (32 * idx);
+    }
+    i64::try_from(if negative { -acc } else { acc }).ok()
 }
 
 // ---- Class / constant-path navigators ----------------------------------

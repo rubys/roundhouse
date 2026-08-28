@@ -676,8 +676,7 @@ fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
                     Literal::Str { value: s }
                 } else {
                     let raw = value.as_integer_node()?;
-                    let v: i32 = raw.value().try_into().ok()?;
-                    Literal::Int { value: v as i64 }
+                    Literal::Int { value: super::util::integer_i64(&raw.value())? }
                 };
                 Some((label, lit))
             })
