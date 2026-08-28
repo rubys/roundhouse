@@ -1133,7 +1133,29 @@ fn every_runtime_method_body_concretely_typed() {
     // compile. Nothing here inspects the argument's shape, so `untyped`
     // is what the method actually promises; `index_by` beside it
     // already says so.
-    const CEILING: usize = 339;
+    //
+    // 339 -> 341: blockless `ActionView::ViewHelpers.form_with`, the
+    // runtime fallback for a `form_with` written in a HELPER body (the
+    // view walker macro-inlines the template ones and cannot reach
+    // that). TWO sites, and the split is MEASURED, one change at a time
+    // (view_helpers.rb 25 -> 26 -> 27):
+    //
+    //   * ONE for `form_with`'s own body — it reads its options out of
+    //     an untyped hash, which is the whole reason it exists: a
+    //     helper forwards `attributes.merge(data: data)`, a runtime
+    //     value no lowering can walk.
+    //   * ONE for widening `method_override_input` from `Symbol` to
+    //     `untyped`. Its body is `to_s` and two string comparisons, so
+    //     `Symbol` was an over-claim that made the honest caller the
+    //     illegal one — `form_with` reads the method out of that same
+    //     untyped hash. Third instance of that lesson in as many days,
+    //     after `Relation#preloaded` and `ActiveSupport.many?`.
+    //
+    // What it bought is not a narrower type anywhere — it is a LINKED
+    // BINARY. Unqualified, `form_with` in `FormsHelper` was a bare name
+    // nothing defines: spinel dropped the helper's whole body and the
+    // linker failed on the caller's reference to the vanished symbol.
+    const CEILING: usize = 341;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

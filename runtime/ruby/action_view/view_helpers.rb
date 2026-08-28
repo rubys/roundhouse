@@ -683,6 +683,57 @@ module ActionView
       end
     end
 
+    # Rails' `form_with`, BLOCKLESS ONLY.
+    #
+    # This is the FALLBACK that keeps the macro-inline total. The view
+    # walker expands `form_with` at lower time and that is still the
+    # path every template takes; what it cannot reach is a `form_with`
+    # written inside an `app/helpers/` MODULE, where the options are a
+    # runtime value (campfire's `FormsHelper#auto_submit_form_with`
+    # forwards `attributes.merge(data: data)`) and there is no
+    # accumulator to splice statements into. Unqualified, that call was
+    # a bare name nothing in the tree defines: spinel dropped the
+    # helper's whole body and the LINKER failed on the caller's
+    # reference to it — `undefined symbol
+    # _sp_FormsHelper_s_auto_submit_form_with`. Same hole, and same
+    # answer, as `polymorphic_url` and `content_tag` beside it.
+    #
+    # NO BLOCK FORM. `form_with … do |form|` yields a FormBuilder bound
+    # to a model, which is exactly the thing the macro-inline exists to
+    # resolve statically; a runtime FormBuilder would need the model's
+    # column types at run time. A helper that forwards a block gets the
+    # blockless form's markup and the block is not called — recorded in
+    # docs/pipeline/runtime.md rather than silently approximated.
+    #
+    # ATTRIBUTE ORDER IS RAILS': the caller's own options first, then
+    # `action`, `accept-charset`, `method` — which is what
+    # `html_options_for_form_with` builds and what the compare oracle
+    # would read. `action` is OMITTED when no `url:` is given; Rails
+    # puts the current request path there, and a form with no action
+    # posts to the current URL, so the behaviour matches and the bytes
+    # do not (the divergence is in docs/pipeline/runtime.md).
+    #
+    # The keys deleted below are the ones Rails consumes rather than
+    # renders. Deleting from a `to_h.dup` — never assigning into it —
+    # is the same target-portable shape `button_to` above uses: a
+    # literal Symbol key written into a hash derived from an untyped
+    # one is what the strict emitters reject.
+    def self.form_with(opts = {})
+      attrs = opts.to_h.dup
+      attrs.delete(:method)
+      attrs.delete(:url)
+      attrs.delete(:model)
+      attrs.delete(:scope)
+      attrs.delete(:format)
+      attrs.delete(:builder)
+      url = opts.fetch(:url, nil)
+      action = url.nil? ? "" : %( action="#{html_escape(url.to_s)}")
+      %(<form#{render_attrs(attrs)}#{action} accept-charset="UTF-8" method="post">) +
+        method_override_input(opts.fetch(:method, :post)) +
+        csrf_token_hidden_input +
+        "</form>"
+    end
+
     # Rails' `text_field` (and field helpers) omits the `value`
     # attribute entirely when the record's value is nil or an empty
     # string — only emits ` value="<escaped>"` when there's content.

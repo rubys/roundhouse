@@ -2277,6 +2277,17 @@ fn is_framework_view_helper(name: &str) -> bool {
             // page's `<head>` needs and joins them with it.
             | "safe_join"
             | "form_tag"
+            // Blockless `form_with` written in a HELPER body. The view
+            // walker macro-inlines every `form_with` a TEMPLATE writes;
+            // a helper module has no accumulator to splice into and its
+            // options are a runtime value, so the call fell through
+            // unqualified — a bare name nothing defines. Under CRuby
+            // that was `undefined method 'form_with' for module
+            // FormsHelper`; under spinel the helper's whole body failed
+            // to compile and the LINKER stopped on the caller's
+            // reference to the vanished symbol. Same hole and same
+            // answer as `polymorphic_url` above.
+            | "form_with"
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"
@@ -2359,7 +2370,7 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
         return matches!(
             method.as_str(),
             "raw" | "link_to" | "link_to_raw" | "button_to" | "mail_to" | "image_tag" | "content_tag"
-                | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag"
+                | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag" | "form_with"
                 // The rest of FormTagHelper — the BUILDER-LESS field
                 // tags, which return an element exactly the way
                 // `label_tag` and `submit_tag` beside them do. Listed

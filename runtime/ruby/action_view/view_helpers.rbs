@@ -134,7 +134,15 @@ module ActionView
     # expansions. See view_helpers.rb for the runtime/macro split
     # rationale.
     def self.csrf_token_hidden_input: () -> String
-    def self.method_override_input: (Symbol method) -> String
+    # `untyped`, not `Symbol`: the body's whole use of it is `to_s` and
+    # two string comparisons, and `form_with` below reads the method out
+    # of an untyped options hash. Declaring `Symbol` made the honest
+    # caller the illegal one.
+    def self.method_override_input: (untyped method) -> String
+    # Blockless `form_with` — the runtime fallback for a `form_with`
+    # written in a HELPER body, where the options are a runtime value.
+    # See the .rb for what it deliberately does not do.
+    def self.form_with: (?Hash[Symbol, untyped] opts) -> String
     # `value` accepts the abstract Base#[] return type (the union of
     # all schema column types — Int64/String/Float/Bool plus Nil).
     # Both helper bodies already nil-check and stringify uniformly,
