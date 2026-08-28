@@ -1076,6 +1076,18 @@ fn ruby_runtime_files(
                         require \"ipaddr\"\n"
                 .to_string();
         }
+        // `Zlib`: same swap, and here it is a correctness one as much
+        // as a speed one. The port computes the checksum in Ruby a bit
+        // at a time; CRuby's is zlib's own C. Both answer the same
+        // number by construction (the port IS CRC-32/ISO-HDLC), so the
+        // tree that has the real one should use it.
+        if path == "runtime/zlib.rb" {
+            *content = "# Ruby's own zlib — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/ruby/zlib.rb exists for the targets\n\
+                        # that have no zlib to bind to.\n\
+                        require \"zlib\"\n"
+                .to_string();
+        }
     }
 
     // Same swap as db.rb below: the flat walk picked up BOTH halves of
@@ -1631,6 +1643,10 @@ fn jruby_runtime_files(
         if path == "runtime/ipaddr.rb" {
             *content = "require \"ipaddr\"\n".to_string();
         }
+        // Same for zlib — the JVM tree has Ruby's own.
+        if path == "runtime/zlib.rb" {
+            *content = "require \"zlib\"\n".to_string();
+        }
     }
 
     // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
@@ -1961,6 +1977,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // ruby family reaches Ruby's own through a bare `require`, so
         // this one only has to exist where that does not.
         "ipaddr",
+        // `Zlib.crc32`, same arrangement as ipaddr: ported for the
+        // targets with no zlib to bind to, swapped for Ruby's own on
+        // the CRuby/JRuby trees below.
+        "zlib",
     ] {
         let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
         let content = fs::read_to_string(&rb)

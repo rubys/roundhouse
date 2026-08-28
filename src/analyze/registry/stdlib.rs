@@ -140,6 +140,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // stays an honest gap rather than a method that types and then
     // raises. `IPAddr.new(x)` reaches the universal `.new`, so the
     // predicates are looked up as INSTANCE methods on the result.
+    // `Zlib` — `crc32` is the whole ported surface (see
+    // `runtime/ruby/zlib.rb`); registering only it keeps a call to
+    // `Zlib.deflate` an honest gap instead of a method that types and
+    // then fails to resolve.
+    register_stdlib_class(classes, "Zlib", &[
+        ("crc32", Ty::Int),
+    ], &[]);
     register_stdlib_class(classes, "IPAddr", &[], &[
         ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
         ("loopback?", Ty::Bool), ("private?", Ty::Bool), ("link_local?", Ty::Bool),

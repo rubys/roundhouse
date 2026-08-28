@@ -5604,6 +5604,11 @@ fn require_path_for_body_const(
         // stdlib's own `initialize` and leave the predicates reading a
         // slot nobody filled. One IPAddr per tree, and it is ours.
         "IPAddr" => Some("runtime/ipaddr".to_string()),
+        // `Zlib` — ported into `runtime/ruby/zlib.rb`. Anchored for
+        // every target for the same reason IPAddr is: `zlib` is not in
+        // `project::BUNDLED`, so nothing writes a bare `require "zlib"`
+        // and the constant would resolve to nothing at all.
+        "Zlib" => Some("runtime/zlib".to_string()),
         // `Mime::Type` — actionpack's registry, ported into
         // `runtime/ruby/mime.rb`. Anchored for every target: the
         // constant is actionpack's, not the stdlib's, so no bare

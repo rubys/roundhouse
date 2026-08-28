@@ -1,0 +1,7 @@
+# Typing contract for zlib.rb beside this file. `crc32` is the whole
+# surface the corpus reaches; see the .rb for what is deliberately
+# absent.
+module Zlib
+  def self.crc32: (String str) -> Integer
+  def self.utf8_bytes: (Integer cp) -> Array[Integer]
+end
