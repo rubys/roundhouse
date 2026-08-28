@@ -148,13 +148,25 @@ module RequestDispatch
   # wire; declared wide because a test may pass Symbol keys or a
   # non-String value (`content_length: 1.gigabyte`) and the body
   # `to_s`es both.
-  def get: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
-  def post: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
-  def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
-  def put: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
-  def head: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  #
+  # `env:` is Rails' other spelling of the same thing, and the body
+  # merges the two before handing them on, so it is declared with the
+  # identical element type. It was MISSING here while the `.rb` had it
+  # — a signature describing three parameters for a four-parameter
+  # method — which is drift worth closing on its own.
+  #
+  # It is NOT, however, why `headers.merge(env)` fails to compile under
+  # spinel: adding it left the error ledger byte-identical. That is
+  # spinel#4172 — a `Hash#merge` whose argument is keyed differently
+  # resolves to `ActionDispatch::Flash#merge` instead. Do not "fix" it
+  # from this file.
+  def get: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def post: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def put: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def head: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
   def follow_redirect!: () -> ActionResponse
-  def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
 
   def dispatch_request: (
     String method,
