@@ -446,18 +446,72 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     }
                 }
             }
+            let mut assignments: Vec<(Vec<String>, String)> = Vec::new();
             for (path, bytes) in sources {
-                for (name, value) in extract_config_assignments(&bytes, &path) {
+                assignments.extend(extract_config_assignments(&bytes, &path));
+            }
+            for (segments, value) in &assignments {
+                let name = segments.join("_");
+                if FRAMEWORK_CONFIG_KEYS.contains(&name.as_str())
+                    || methods.iter().any(|m| m.name.as_str() == name)
+                {
+                    continue;
+                }
+                // The value rides verbatim: it is app code, and
+                // campfire's reads `ENV` — which nothing here can
+                // fold and nothing needs to.
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def {name}\n  {value}\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+            // AN INTERMEDIATE NODE IS READ AS A WHOLE, and until now
+            // nothing answered it. `config.x.vapid.private_key = …`
+            // lifted a reader for the LEAF; campfire then writes
+            // `Rails.configuration.x.vapid.symbolize_keys` and asks for
+            // the group. In Rails that is an `OrderedOptions` whose keys
+            // are its leaves, so the honest reader is a symbol-keyed
+            // Hash of exactly those.
+            //
+            // Only a prefix whose children are ALL leaves gets one. `x`
+            // itself has both a leaf (`x.web_push_pool`) and a subtree
+            // (`x.vapid.*`) under it, and a Hash naming half of what is
+            // there would be worse than the gap — a read of `config.x`
+            // stays unlifted and fails visibly, which is the rule the
+            // framework keys already follow.
+            {
+                use std::collections::BTreeMap;
+                let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+                for (segments, _) in &assignments {
+                    if segments.len() >= 2 {
+                        groups
+                            .entry(segments[..segments.len() - 1].to_vec())
+                            .or_default()
+                            .push(segments[segments.len() - 1].clone());
+                    }
+                }
+                let prefixes: Vec<Vec<String>> = groups.keys().cloned().collect();
+                for (prefix, leaves) in &groups {
+                    let has_subgroup = prefixes
+                        .iter()
+                        .any(|p| p.len() > prefix.len() && p.starts_with(prefix));
+                    if has_subgroup {
+                        continue;
+                    }
+                    let name = prefix.join("_");
                     if FRAMEWORK_CONFIG_KEYS.contains(&name.as_str())
                         || methods.iter().any(|m| m.name.as_str() == name)
                     {
                         continue;
                     }
-                    // The value rides verbatim: it is app code, and
-                    // campfire's reads `ENV` — which nothing here can
-                    // fold and nothing needs to.
+                    let pairs: Vec<String> = leaves
+                        .iter()
+                        .map(|leaf| format!("{leaf}: {name}_{leaf}"))
+                        .collect();
                     if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
-                        "def {name}\n  {value}\nend\n"
+                        "def {name}\n  {{ {} }}\nend\n",
+                        pairs.join(", ")
                     )) {
                         methods.append(&mut synth);
                     }
@@ -2687,8 +2741,15 @@ enum TimeFormatSource {
     Lambda { param: String, body: String },
 }
 
-fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)> {
-    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(String, String)>) {
+/// Each assignment as its PATH SEGMENTS plus the value's source text —
+/// `config.x.vapid.private_key = …` is `(["x", "vapid", "private_key"],
+/// "ENV.fetch(…)")`. The path rather than the joined reader name because
+/// the caller synthesizes a reader for an intermediate node too
+/// (`config.x.vapid` read as a whole is an OrderedOptions in Rails), and
+/// `x_vapid_private_key` cannot be split back into its segments — the
+/// leaf has an underscore of its own.
+fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
+    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(Vec<String>, String)>) {
         for stmt in stmts {
             // Config lines sit at the top level of an initializer and
             // inside the Application class body; descend through both
@@ -2728,10 +2789,10 @@ fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)
             let Some(args) = call.arguments() else { continue };
             let Some(value) = args.arguments().iter().next() else { continue };
             let loc = value.location();
-            let mut reader = prefix;
-            reader.push(base.to_string());
+            let mut path = prefix;
+            path.push(base.to_string());
             out.push((
-                reader.join("_"),
+                path,
                 src[loc.start_offset()..loc.end_offset()].to_string(),
             ));
         }

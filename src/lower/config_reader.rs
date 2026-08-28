@@ -41,8 +41,20 @@ const CABLE_MOUNT_PATH: &str = "/cable";
 
 pub fn apply_config_reader_lowering(app: &mut App) {
     ground_cable_mount_path(app);
-    let lifted: Vec<crate::ident::Symbol> = match &app.rails_application {
-        Some(lc) => lc.methods.iter().map(|m| m.name.clone()).collect(),
+    // Reader name -> the type of the value it answers, from the lifted
+    // method's own body. Stamped onto each rewritten read for the same
+    // reason the synthesized `application` hop below is stamped: this
+    // node is BORN after the analyzer has run, so nothing else will ever
+    // type it, and a later pass that grounds by receiver type would see
+    // nothing where the source plainly names a Hash.
+    // `Analyzer::type_rails_application_body` is what puts a type on
+    // those bodies at all.
+    let lifted: Vec<(crate::ident::Symbol, Option<crate::ty::Ty>)> = match &app.rails_application {
+        Some(lc) => lc
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), body_ty(&m.body)))
+            .collect(),
         None => return,
     };
     if lifted.is_empty() {
@@ -53,6 +65,16 @@ pub fn apply_config_reader_lowering(app: &mut App) {
     for view in &mut app.views {
         rewrite(&mut view.body, &lifted_for_views);
     }
+}
+
+/// The type a reader answers: its body's, or its last statement's when
+/// the body is a sequence.
+fn body_ty(body: &Expr) -> Option<crate::ty::Ty> {
+    let last = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => body,
+    };
+    last.ty.clone().filter(|t| !matches!(t, crate::ty::Ty::Var { .. } | crate::ty::Ty::Untyped))
 }
 
 fn ground_cable_mount_path(app: &mut App) {
@@ -94,18 +116,23 @@ fn is_cable_mount_path(expr: &Expr) -> bool {
         if path.last().is_some_and(|s| s.as_str() == "ActionCable"))
 }
 
-fn rewrite(expr: &mut Expr, lifted: &[crate::ident::Symbol]) {
+fn rewrite(expr: &mut Expr, lifted: &[(crate::ident::Symbol, Option<crate::ty::Ty>)]) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, lifted));
 
     let Some((application, segments)) = peel_config_chain(expr) else {
         return;
     };
     let key = crate::ident::Symbol::from(segments.join("_"));
-    if !lifted.contains(&key) {
+    let Some((_, reader_ty)) = lifted.iter().find(|(name, _)| name == &key) else {
         return;
-    }
+    };
     let span = expr.span;
-    let ty = expr.ty.clone();
+    // THE READER'S OWN BODY WINS. What the analyzer stamped on the
+    // `config` chain is what it could say about a chain of unmodeled
+    // hops — `Untyped` — while the reader's body is the value this now
+    // calls. Keeping the chain's answer would leave the rewritten node
+    // saying `untyped` about a method that plainly returns a Hash.
+    let ty = reader_ty.clone().or_else(|| expr.ty.clone());
     *expr = Expr::new(
         span,
         ExprNode::Send {

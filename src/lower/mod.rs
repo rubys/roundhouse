@@ -91,6 +91,7 @@ pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod route_helper_receiver;
 pub mod config_reader;
+pub mod symbolize_keys;
 pub mod exists_conditions;
 pub mod destroy_by;
 pub mod has_one_builder;
@@ -361,6 +362,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // read half of the config lift; no ordering constraints (no other
     // pass produces or consumes the `config` hop).
     ("config_reader", &[]),
+    // `hash.symbolize_keys` → `hash`, when the keys are already
+    // Symbols. Runs AFTER `config_reader` because the receiver that
+    // makes it fire — a lifted config group reader — does not exist
+    // until that pass has rewritten the `config` chain and stamped its
+    // type.
+    ("symbolize_keys", &["config_reader"]),
     ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
@@ -612,6 +619,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("has_one_builder");
     config_reader::apply_config_reader_lowering(app);
     ran!("config_reader");
+    symbolize_keys::apply_symbolize_keys_grounding(app);
+    ran!("symbolize_keys");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
