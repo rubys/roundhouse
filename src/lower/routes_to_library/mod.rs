@@ -311,6 +311,25 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
     funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat));
+    // The `**hash` half of the query string. `query_keys` above covers
+    // every key a call site NAMES; a call site that splats a runtime
+    // Hash names none, and there is nothing static to read them off —
+    // campfire's bot pagination is
+    // `room_bot_messages_url(@room, params[:bot_key], **next_page)`
+    // where `next_page` is `{after: id}` on one branch and
+    // `{before: id}` on the other. So the keys are rendered at run
+    // time instead, by the one function below, and the call site is
+    // split into `<helper>(segments…) + RouteHelpers.query_suffix(h)`
+    // (`controller_to_library::rewrites::rewrite_route_helpers`).
+    //
+    // DEMAND-GATED, like the format variants above: an app with no such
+    // call site emits no such function, which matters because its
+    // parameter is a `Hash[Symbol, untyped]` — the one shape
+    // `feedback_types_are_performance` says to keep out of a tree that
+    // does not need it.
+    if app_splats_into_a_route_helper(app) {
+        funcs.push(build_query_suffix_helper(&module_path));
+    }
     // These bodies carry APP source (a `direct` block's expressions —
     // campfire's `v: Current.account&.updated_at&.to_fs(:number)`), but
     // they are synthesized HERE, after the post-analyze hook has already
@@ -1612,6 +1631,205 @@ fn parts_to_expr(parts: Vec<InterpPart>) -> Expr {
             Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
             Ty::Str,
         ),
+    }
+}
+
+/// Does any call site hand a route helper one positional argument more
+/// than its route has segments, with something that is not a keyword
+/// hash? That is an erased `**splat`: `ingest_hash_literal` rewrites a
+/// double splat into the merge chain it is defined to be, which drops
+/// the `kwargs` flag, so by the time a lowering runs `f(**h)` and
+/// `f(h)` are the same tree (see `lower::kwsplat`, which recovers the
+/// same shape for app methods). A route helper takes only segments
+/// positionally, so an extra one could not have been written any other
+/// way.
+fn app_splats_into_a_route_helper(app: &App) -> bool {
+    let shapes = crate::lower::routes::helper_id_segments(app);
+    let mut found = false;
+    let mut look = |e: &Expr| {
+        if !found {
+            found = expr_splats_into_a_route_helper(e, &shapes);
+        }
+    };
+    for_each_route_call_site(app, &mut look);
+    found
+}
+
+fn expr_splats_into_a_route_helper(
+    e: &Expr,
+    shapes: &std::collections::HashMap<String, Vec<bool>>,
+) -> bool {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+        if crate::lower::controller_to_library::rewrites::route_helper_query_splat_index(
+            method.as_str(),
+            args,
+            shapes,
+        )
+        .is_some()
+        {
+            return true;
+        }
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| {
+        if !found {
+            found = expr_splats_into_a_route_helper(c, shapes);
+        }
+    });
+    found
+}
+
+/// ```ruby
+/// def self.query_suffix(params)
+///   parts = params.map { |key, value| "#{key}=#{url_encode(value.to_s)}" }
+///   parts.empty? ? "" : "?" + parts.join("&")
+/// end
+/// ```
+///
+/// `map`+`join` rather than an `each` with a mutable accumulator, the
+/// same choice and the same reason as `emit_array_partial`'s. The value
+/// goes through `to_s` first and then the SAME `url_encode` the named
+/// keys use, so a splatted key and a named one render identically —
+/// Rails runs both through `Hash#to_query`.
+fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
+    let params_ref = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
+        ),
+        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+    );
+    let key_ref = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from("key") },
+    );
+    let value_ref = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from("value") },
+    );
+    let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv,
+                    method: Symbol::from(m),
+                    args,
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            ty,
+        )
+    };
+    let encoded = call(
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const {
+                path: vec![
+                    Symbol::from("ActionView"),
+                    Symbol::from("ViewHelpers"),
+                ],
+            },
+        )),
+        "url_encode",
+        vec![call(Some(value_ref), "to_s", vec![], Ty::Str)],
+        Ty::Str,
+    );
+    let pair = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::StringInterp {
+                parts: vec![
+                    InterpPart::Expr {
+                        expr: call(Some(key_ref), "to_s", vec![], Ty::Str),
+                    },
+                    InterpPart::Text { value: "=".to_string() },
+                    InterpPart::Expr { expr: encoded },
+                ],
+            },
+        ),
+        Ty::Str,
+    );
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            rest_param: None,
+            params: vec![Symbol::from("key"), Symbol::from("value")],
+            block_param: None,
+            body: pair,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let mapped = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(params_ref),
+                method: Symbol::from("map"),
+                args: vec![],
+                block: Some(block),
+                parenthesized: false,
+            },
+        ),
+        Ty::Array { elem: Box::new(Ty::Str) },
+    );
+    let parts_var = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("parts") },
+        ),
+        Ty::Array { elem: Box::new(Ty::Str) },
+    );
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: VarId(0), name: Symbol::from("parts") },
+            value: mapped,
+        },
+    );
+    let joined = call(
+        Some(parts_var.clone()),
+        "join",
+        vec![lit_str("&".to_string())],
+        Ty::Str,
+    );
+    let with_question = call(
+        Some(lit_str("?".to_string())),
+        "+",
+        vec![joined],
+        Ty::Str,
+    );
+    let tail = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: call(Some(parts_var), "empty?", vec![], Ty::Bool),
+                then_branch: lit_str(String::new()),
+                else_branch: with_question,
+            },
+        ),
+        Ty::Str,
+    );
+    LibraryFunction {
+        module_path: module_path.to_vec(),
+        name: Symbol::from("query_suffix"),
+        params: vec![Param {
+            name: Symbol::from("params"),
+            default: None,
+            keyword: false,
+            rest: false,
+        }],
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![assign, tail] }),
+        signature: Some(fn_sig(
+            vec![(
+                Symbol::from("params"),
+                Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+            )],
+            Ty::Str,
+        )),
+        effects: EffectSet::default(),
+        is_async: false,
     }
 }
 

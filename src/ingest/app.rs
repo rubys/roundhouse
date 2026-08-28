@@ -3025,6 +3025,23 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
 /// Copy shared helper methods onto a test class, the test's own
 /// definitions winning on a name collision (Ruby resolves the class
 /// body ahead of an included module).
+///
+/// CONSTANTS COME TOO, and they have to: a helper module's method body
+/// reads its own constants by BARE name (Ruby resolves them lexically,
+/// inside the module), and once the method is spliced onto the test
+/// class that bare name has nowhere to land. campfire's
+/// `DnsTestHelper#stub_web_push_dns_resolution` is one line —
+/// `stub_dns_resolution(WEB_PUSH_PUBLIC_TEST_IP)` — and without the
+/// constant it is a NameError in the SETUP of three test files, 28
+/// tests, none of which ever runs a line of its own.
+///
+/// The test bodies spell the same constant the other way,
+/// `DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP`, because an `include` does
+/// NOT bring a module's constants into the including class's lexical
+/// scope — so both spellings are real Ruby and both have to resolve.
+/// The qualified one is rewritten to the bare one here rather than by
+/// keeping the module around, so there is exactly one definition of the
+/// value in the emitted file.
 fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
     for lc in helpers {
         for m in &lc.methods {
@@ -3041,5 +3058,55 @@ fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
             m.enclosing_class = Some(tm.name.0.clone());
             tm.helpers.push(m);
         }
+        for (name, value) in &lc.constants {
+            if tm.constants.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            tm.constants.push((name.clone(), value.clone()));
+        }
     }
+
+    let qualified: Vec<(Symbol, Symbol)> = helpers
+        .iter()
+        .flat_map(|lc| {
+            lc.constants
+                .iter()
+                .map(|(n, _)| (lc.name.0.clone(), n.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if qualified.is_empty() {
+        return;
+    }
+    for t in &mut tm.tests {
+        unqualify_helper_constants(&mut t.body, &qualified);
+    }
+    if let Some(setup) = tm.setup.as_mut() {
+        unqualify_helper_constants(setup, &qualified);
+    }
+    for h in &mut tm.helpers {
+        unqualify_helper_constants(&mut h.body, &qualified);
+    }
+}
+
+/// `DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP` -> `WEB_PUSH_PUBLIC_TEST_IP`
+/// for every (module, constant) pair `splice_test_helpers` just lifted
+/// onto the test class. Two segments only — a deeper path is some other
+/// module's constant that happens to share a first segment.
+fn unqualify_helper_constants(
+    e: &mut crate::expr::Expr,
+    qualified: &[(Symbol, Symbol)],
+) {
+    if let crate::expr::ExprNode::Const { path } = &mut *e.node {
+        if path.len() == 2
+            && qualified
+                .iter()
+                .any(|(m, c)| m == &path[0] && c == &path[1])
+        {
+            let name = path[1].clone();
+            *path = vec![name];
+        }
+    }
+    e.node
+        .for_each_child_mut(&mut |c| unqualify_helper_constants(c, qualified));
 }

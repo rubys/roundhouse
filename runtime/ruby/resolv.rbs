@@ -1,0 +1,6 @@
+class Resolv
+  class ResolvError < StandardError
+  end
+
+  def self.getaddresses: (String host) -> Array[String]
+end

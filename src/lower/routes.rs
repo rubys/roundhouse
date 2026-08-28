@@ -482,7 +482,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 constraints: vec![],
             });
         }
-        RouteSpec::Resources { name, only, except, nested, singular, as_name } => {
+        RouteSpec::Resources { name, only, except, nested, singular, as_name, controller } => {
             let resource_path = format!("/{name}");
             // `resource :profile` still routes to the *plural*
             // controller (`ProfilesController`), per Rails.
@@ -491,10 +491,25 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             } else {
                 naming::camelize(name.as_str())
             };
-            let controller_class = ClassId(Symbol::from(format!(
-                "{}{}Controller",
-                ctx.module_prefix, controller_stem
-            )));
+            // `controller: "messages/by_bots"` names the class outright
+            // — `Messages::ByBotsController`, still under any enclosing
+            // `scope module:`. Only the class moves; `controller_stem`
+            // above stays the source of the path and the helper names.
+            let controller_class = match controller {
+                Some(c) => ClassId(Symbol::from(format!(
+                    "{}{}",
+                    ctx.module_prefix,
+                    c.split('/')
+                        .map(naming::camelize)
+                        .collect::<Vec<_>>()
+                        .join("::")
+                        + "Controller"
+                ))),
+                None => ClassId(Symbol::from(format!(
+                    "{}{}Controller",
+                    ctx.module_prefix, controller_stem
+                ))),
+            };
             // Snake-preserving singular (`domain_allows` →
             // `domain_allow`): camelize+lowercase would collapse the
             // underscores out of helper names and `:parent_id` params.
@@ -530,9 +545,19 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let path = format!("{resource_path}{suffix}");
-                let (nested_path, mut params) =
+                let (nested_path, nested_params) =
                     nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
+                // A scope PATH can carry a dynamic segment of its own
+                // (`scope path: ":bot_key"`), and it is a helper
+                // argument like any other. `nest_path` only knows the
+                // nesting's params, so read the scope's off `ns_path` —
+                // they sit in FRONT, which is where `prefix_path` just
+                // put them.
+                let mut params: Vec<String> = Vec::new();
+                extract_path_params(&ctx.ns_path, &mut params);
+                params.retain(|p| !nested_params.iter().any(|q| q == p));
+                params.extend(nested_params);
                 if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
                     params.push("id".to_string());
                 }
@@ -601,8 +626,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 collect_flat_routes(child, out, &child_ctx);
             }
         }
-        RouteSpec::Scope { path, module, as_prefix, defaults, entries } => {
+        RouteSpec::Scope { path, module, as_prefix, defaults, nest, entries } => {
             let mut child = ctx.clone();
+            // `nested do … end`: MATERIALIZE the pending parent nesting
+            // now, so this scope's own `path`/`as` land INSIDE it. The
+            // ordinary path below prefixes `ns_path` in FRONT of the
+            // nesting (`scope :extra` in the comment below is
+            // `/extra/users/:user_id/badge`), which is right for a
+            // scope and wrong for a `nested` one — campfire's bot API
+            // is `/rooms/:room_id/:bot_key/messages`, not
+            // `/:bot_key/rooms/:room_id/messages`.
+            if *nest && !child.parents.is_empty() {
+                let (nested_prefix, _) =
+                    nest_path("", &child.parents, ResourceScope::Nested);
+                // `nest_path` slash-prefixes a bare path, so the empty
+                // one comes back with a trailing `/`.
+                let nested_prefix = nested_prefix.trim_end_matches('/');
+                child.ns_path = prefix_path(&child.ns_path, nested_prefix);
+                child.name_prefix =
+                    format!("{}{}", child.name_prefix, child.parent_name_prefix());
+                child.parents.clear();
+            }
             // Resource nesting SURVIVES a scope/namespace boundary —
             // measured against Rails 8.1, which is the only authority
             // here:

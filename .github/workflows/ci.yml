@@ -27,7 +27,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 2aa4141077141335e79cb0eac5a0eec1a57b2772
+  CAMPFIRE_SHA: 94a48aacb65af0fe25c7b850d4ced055e27077a7
 
 jobs:
   # -------------------------------------------------------------------
@@ -883,9 +883,27 @@ jobs:
       # accumulator to splice into and the options are a runtime value.
       # The spinel half of that same gap was an undefined SYMBOL at link
       # time; this is the CRuby half.
+      #
+      # 220/41 -> 253/40 on the CAMPFIRE_SHA bump to `94a48aac`. The
+      # test count is up 33 and the DENOMINATOR is up 48 (240 -> 288):
+      # upstream added a JSON bot API (index/update/destroy for messages,
+      # create/destroy for boosts) and an SSRF guard over push
+      # endpoints, which is two new test files and one existing file
+      # grown from 7 tests to 23.
+      #
+      # THE FILE COUNT GOES DOWN BY ONE, and it is the only floor in
+      # this workflow that ever has. It is not a regression: every one
+      # of the 41 files green at `2aa41410` is still green. The file
+      # that left is `messages/by_bots_controller_test`, which was 7 of
+      # 7 and is 15 of 23 — the same file, tripled, against surface the
+      # compiler does not model yet (an `UploadedFile` reaching
+      # `blank?`, a test helper whose return type is not inferred, and
+      # the whitespace-only `String#blank?` divergence that
+      # `lower::blank`'s header documents and defers). Raising this back
+      # to 41 means closing those, not asserting the number.
         env:
-          FLOOR_TESTS: 220
-          FLOOR_FILES: 41
+          FLOOR_TESTS: 253
+          FLOOR_FILES: 40
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

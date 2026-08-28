@@ -420,14 +420,55 @@ pub(super) fn rewrite_render_to_views(
             } else {
                 view_method.as_str().to_string()
             };
-            let contract = view_ivars.get(&(render_module.clone(), contract_stem));
-            // A non-json render whose target isn't among the emitted
-            // action views means the template doesn't exist in the source
+            let mut contract = view_ivars.get(&(render_module.clone(), contract_stem));
+            // A template that exists ONLY as jbuilder is still a
+            // template, and an explicit `render :show` naming one
+            // carries no `format:` kwarg to key on — the marker the
+            // three qualified stems above rely on is planted by the
+            // respond_to flattener, and nothing plants it here.
+            // campfire's `Messages::Boosts::ByBotsController#create`
+            // ends `render :show, status: :created` and its only `show`
+            // is `show.json.jbuilder`: the bare-stem lookup missed, and
+            // the render became a MissingTemplate raise for a template
+            // that is right there. Same trap the `svg` note above
+            // describes, entered from the other side.
+            let mut json_only = false;
+            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg {
+                let json_stem = format!("{}_json", view_method.as_str());
+                if let Some(c) = view_ivars.get(&(render_module.clone(), json_stem)) {
+                    contract = Some(c);
+                    json_only = true;
+                }
+            }
+            // A render whose target isn't among the emitted action
+            // views means the template doesn't exist in the source
             // tree. Rails raises ActionView::MissingTemplate there — and
             // lobsters' about/privacy actions rescue it as their NORMAL
             // path (hardcoded-fallback pages). Emitting the Views call
             // anyway would be a NoMethodError no rescue catches.
-            if contract.is_none() && !is_json {
+            //
+            // The `!is_json` escape this used to carry was written when
+            // a jbuilder view had NO entry in `view_ivars` to find, so a
+            // json render always missed and always had to be let
+            // through. It has one now — that is what `contract_stem`
+            // qualifies the lookup for — so a json render that finds
+            // nothing under the `_json` stem is naming a template that
+            // really is absent, and letting it through emits a call to a
+            // view method nobody defines. campfire's
+            // `MessagesController#update` gained a `format.json { render
+            // :show }` and `messages/` holds no `show.json.jbuilder`
+            // (only `messages/by_bots/` does), so the emit called
+            // `Views::Messages.show_json` — which spinel refuses at
+            // compile time and CRuby answers with NoMethodError.
+            //
+            // Rails renders it for the SUBCLASS, whose view prefixes
+            // reach `messages/by_bots/show.json.jbuilder` through an
+            // inherited action. That is per-instance template
+            // resolution, and this lowering has one body per DEFINING
+            // controller — so the honest answer here is the raise Rails
+            // gives the defining controller, not a call that resolves
+            // nowhere.
+            if contract.is_none() {
                 return Some(Expr::new(
                     e.span,
                     ExprNode::Raise {
@@ -470,7 +511,7 @@ pub(super) fn rewrite_render_to_views(
             // `_json` variant skips the flash extras below. A
             // turbo_stream template is an ordinary ERB view lowered
             // through the normal path, so it takes them like html does.
-            let json_format = render_kwargs_have_format(args, "json");
+            let json_format = render_kwargs_have_format(args, "json") || json_only;
             let (view_method, content_type) =
                 if is_turbo_stream {
                     (
@@ -1967,6 +2008,17 @@ pub fn rewrite_route_helpers(
             // routes, so a miss means the call is not a route helper
             // and the shape test below is the only signal there is.
             let shape = id_segments.get(dispatch_method.as_str());
+            // An erased `**splat` of query options. Split it off the
+            // positional list and render it at run time — see
+            // `routes_to_library::build_query_suffix_helper` for why the
+            // keys cannot be read statically.
+            let splat_at =
+                route_helper_query_splat_index(raw, args, id_segments);
+            let args_all = args;
+            let args: &[Expr] = match splat_at {
+                Some(i) => &args[..i],
+                None => args.as_slice(),
+            };
             let projected_args: Vec<Expr> = args
                 .iter()
                 .enumerate()
@@ -2007,7 +2059,7 @@ pub fn rewrite_route_helpers(
                     }
                 })
                 .collect();
-            Some(Expr::new(
+            let call = Expr::new(
                 e.span,
                 ExprNode::Send {
                     recv: Some(const_path(&["RouteHelpers"], e.span)),
@@ -2018,10 +2070,71 @@ pub fn rewrite_route_helpers(
                         .map(|b| rewrite_route_helpers(b, shadowed, id_segments)),
                     parenthesized: *parenthesized,
                 },
+            );
+            let Some(i) = splat_at else { return Some(call) };
+            let splat = rewrite_route_helpers(&args_all[i], shadowed, id_segments);
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(call),
+                    method: Symbol::from("+"),
+                    args: vec![Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: Some(const_path(&["RouteHelpers"], e.span)),
+                            method: Symbol::from("query_suffix"),
+                            args: vec![splat],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    )],
+                    block: None,
+                    parenthesized: false,
+                },
             ))
         }
         _ => None,
     })
+}
+
+/// Index of an erased `**splat` in a route-helper call's argument list,
+/// or None when the call has none.
+///
+/// A route helper takes SEGMENTS positionally and everything else as
+/// keywords, so one positional beyond the route's segment count, when it
+/// is not a keyword hash, could only have been written `**h`: the ingest
+/// desugar rewrites a double splat into a merge chain, which loses the
+/// `kwargs` flag and renders as a positional (the same erasure
+/// `lower::kwsplat` recovers for app methods, and by the same argument).
+///
+/// A literal is excluded: an app that really does pass one extra
+/// positional is passing a broken call, and turning a String into a
+/// query string would bury that rather than let it surface.
+///
+/// Returns None when the helper is not in the table — a miss means the
+/// call is not a route helper this app declares, and the shape test is
+/// the only signal there is.
+pub fn route_helper_query_splat_index(
+    method: &str,
+    args: &[Expr],
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> Option<usize> {
+    let dispatch = method
+        .strip_suffix("_url")
+        .map(|stem| format!("{stem}_path"))
+        .unwrap_or_else(|| method.to_string());
+    if !dispatch.ends_with("_path") {
+        return None;
+    }
+    let shape = id_segments.get(dispatch.as_str())?;
+    if args.len() != shape.len() + 1 {
+        return None;
+    }
+    let last = args.last()?;
+    match &*last.node {
+        ExprNode::Hash { kwargs: true, .. } | ExprNode::Lit { .. } => None,
+        _ => Some(args.len() - 1),
+    }
 }
 
 /// A RECORD reaching a route helper projects to its id.

@@ -255,6 +255,22 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             let inner = call.receiver()?;
             return type_of_const_literal(&inner);
         }
+        // `CONST = Klass.new(…)` — a constructed instance is as much a
+        // typed constant as a literal is, and it is the shape a rule
+        // TABLE takes when its entries are objects rather than strings:
+        // `surfguard.rb`'s `NAT64_WELL_KNOWN = IPAddr.new("64:ff9b::/96")`.
+        // Without this the constant fell back to
+        // `Class { <THE CONSTANT'S OWN NAME> }` and every predicate
+        // called on it typed as an unresolved variable.
+        if name == "new" {
+            let recv = call.receiver()?;
+            let konst = recv.as_constant_read_node()?;
+            let name = std::str::from_utf8(konst.name().as_slice()).ok()?;
+            return Some(Ty::Class {
+                id: crate::ident::ClassId(crate::ident::Symbol::new(name)),
+                args: vec![],
+            });
+        }
         return None;
     }
     if let Some(hash) = node.as_hash_node() {
@@ -278,7 +294,12 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         let Some(first) = first else {
             return Some(Ty::Array { elem: Box::new(Ty::Untyped) });
         };
-        let elem_ty = type_of_literal_node(&first)?;
+        // Literal elements first; a `Klass.new(…)` element falls through
+        // to the constructed-instance rule above, which is how a table
+        // of objects (`DISALLOWED_IPV4 = [IPAddr.new("0.0.0.0/8"), …]`)
+        // types as `Array[IPAddr]` rather than not at all.
+        let elem_ty = type_of_literal_node(&first)
+            .or_else(|| type_of_const_literal(&first))?;
         return Some(Ty::Array { elem: Box::new(elem_ty) });
     }
     // Regex literal -> Ty::Class { Regexp }. The body-typer's existing

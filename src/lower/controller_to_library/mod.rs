@@ -656,16 +656,41 @@ fn build_methods(
     // `room_params` on every subclass. Own actions first (a subclass may
     // override), then ancestors nearest-first, deduped by name — Ruby's
     // own lookup order.
+    //
+    // An OVERRIDE the permit recognizer cannot read is REPLACED by the
+    // ancestor's, not shadowed by it. This list feeds nothing but the
+    // helper→spec map, and a subclass helper written as a bare Hash
+    // declares no list of its own — campfire's
+    // `Messages::Boosts::ByBotsController#boost_params` is
+    // `{ content: raw_request_body }`, which mapped to no spec, so
+    // `@message.boosts.create!(boost_params)` was left as a call to
+    // `create!` on the Array the association reader answers with.
+    // `inherited_params_spec` already makes exactly this judgement for
+    // the helper's own BODY (see `lower_overriding_params_helper`); this
+    // is the same judgement for its CALL SITES, which had none.
     let params_privs: Vec<Action> = {
         let chain = ancestor_chain(controller, all_controllers);
-        let mut seen: std::collections::HashSet<Symbol> =
-            privs.iter().map(|a| a.name.clone()).collect();
+        // Settled = this controller's own helper declares a permit list,
+        // so no ancestor can speak for it.
+        let settled: std::collections::HashSet<Symbol> = privs
+            .iter()
+            .filter(|a| self::params::first_permit_in(&a.body).is_some())
+            .map(|a| a.name.clone())
+            .collect();
+        let mut seen: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
         let mut out = privs.clone();
         for c in chain.iter().rev() {
             let (pubs, ancestor_privs) = split_public_private_actions(c);
             for a in ancestor_privs.iter().chain(pubs.iter()) {
-                if a.name.as_str().ends_with("_params") && seen.insert(a.name.clone()) {
-                    out.push(a.clone());
+                if !a.name.as_str().ends_with("_params") {
+                    continue;
+                }
+                if settled.contains(&a.name) || !seen.insert(a.name.clone()) {
+                    continue;
+                }
+                match out.iter().position(|o| o.name == a.name) {
+                    Some(i) => out[i] = a.clone(),
+                    None => out.push(a.clone()),
                 }
             }
         }

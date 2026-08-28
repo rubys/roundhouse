@@ -261,6 +261,21 @@ fn ingest_route_call(
         "resource" => ingest_resources_route(call, file, draws, true).map(Some),
         "namespace" => ingest_namespace_route(call, file, draws).map(Some),
         "scope" => ingest_scope_route(call, file, draws).map(Some),
+        // `nested do … end` — the explicit form of the nesting a
+        // `resources` block already applies to a child `resources` or
+        // verb call. It carries no facets of its own; what it does is
+        // force the ENCLOSING resource's `/parent/:parent_id` prefix to
+        // be materialized before anything inside runs, which is the
+        // only way a `scope path:` lands inside it rather than in front
+        // of it (`scope` is not one of the calls Rails auto-nests).
+        "nested" => Ok(Some(RouteSpec::Scope {
+            path: None,
+            module: None,
+            as_prefix: None,
+            defaults: IndexMap::new(),
+            nest: true,
+            entries: block_entries(call, file, None, draws)?,
+        })),
         "draw" => ingest_draw_route(call, file, draws),
         // `mount SomeEngine, at: "/path"` — the mounted engine is
         // external code (mission_control, sidekiq-web, …), never part
@@ -375,6 +390,7 @@ fn ingest_namespace_route(
         module: Some(name.clone()),
         as_prefix: Some(name),
         defaults: IndexMap::new(),
+        nest: false,
         entries,
     })
 }
@@ -432,7 +448,7 @@ fn ingest_scope_route(
         }
     }
     let entries = block_entries(call, file, None, draws)?;
-    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, entries })
+    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, entries })
 }
 
 /// `draw(:admin)` — Rails loads `config/routes/admin.rb` into the same
@@ -472,6 +488,7 @@ fn ingest_draw_route(
         module: None,
         as_prefix: None,
         defaults: IndexMap::new(),
+        nest: false,
         entries,
     }))
 }
@@ -736,6 +753,7 @@ fn ingest_resources_route(
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
+    let mut controller: Option<String> = None;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -756,8 +774,16 @@ fn ingest_resources_route(
                         .or_else(|| symbol_value(&value))
                         .map(|s| Symbol::from(s.as_str()))
                 }
-                // `path:`, `controller:`, `shallow:` land when a fixture
-                // demands them.
+                // `controller:` moves the CLASS and nothing else — the
+                // path still comes from the resource name and so do the
+                // helpers. campfire's bot API is `resources :messages,
+                // controller: "messages/by_bots"`, and dropping this
+                // pointed five routes at `MessagesController`, which
+                // answers them with the human HTML flow.
+                "controller" => {
+                    controller = string_value(&value).or_else(|| symbol_value(&value))
+                }
+                // `path:` and `shallow:` land when a fixture demands them.
                 _ => {}
             }
         }
@@ -765,7 +791,7 @@ fn ingest_resources_route(
 
     let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;
 
-    Ok(RouteSpec::Resources { name, only, except, nested, singular, as_name })
+    Ok(RouteSpec::Resources { name, only, except, nested, singular, as_name, controller })
 }
 
 /// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.

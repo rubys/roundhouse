@@ -27,10 +27,29 @@
 //!   4. `json.partial! P, V: <expr>`    → inlines a single method call to P
 //!   5. `json.partial! partial: P, collection: C, as: V`
 //!                                       → Jbuilder's own alias for (3)
+//!   6. `json.(obj, :a, :b)`            → Ruby's `.()` spelling of (1)
+//!   7. `json.<key> do … end`           → one pair whose value is a
+//!                                       nested object
+//!   8. `json.<key> obj, partial: P, as: V`
+//!                                       → one pair whose value is a
+//!                                       partial render of ONE object
+//!   9. `json.cache! key do … end`      → transparent: the block's
+//!                                       statements ARE the object's
 //!
-//! Lowerer scope is the real-blog `articles/*.json.jbuilder` set.
-//! Stretch DSL forms (block-form `json.<key> do … end`, `json.merge!`,
-//! `json.cache!` …) are deferred until a benchmark fixture forces them.
+//! (6)-(9) arrived together with campfire's bot API, which is six
+//! jbuilder templates written in exactly that dialect.
+//!
+//! `cache!` is the one with a SEMANTIC gap behind it, so say it plainly:
+//! Jbuilder's is a fragment cache keyed on the record, and the emit has
+//! no fragment cache to put the rendered JSON in. Rendering the block
+//! every time is correct output at the wrong cost, which is the same
+//! trade `<% cache %>` already takes on the ERB side. Reading it as an
+//! ordinary `json.<key>` pair — which is what the classifier did before
+//! this — was neither: it emitted a literal `"cache!"` key holding the
+//! whole record.
+//!
+//! Still deferred: `json.merge!`, `json.key_format!`, `json.ignore_nil!`,
+//! `json.child!`, and the block form of `array!`.
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
@@ -113,6 +132,19 @@ pub fn lower_jbuilder_to_library_classes(
         std::collections::HashMap::new();
     for lc in &mut lcs {
         for method in &mut lc.methods {
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            // A record standing where a route helper wants an id.
+            // `rewrite_path_arg_local` above handles the bare local
+            // (`message` in `room_message_url(message)`) by SHAPE, which
+            // is all the shape there is before typing; an attribute
+            // chain needs the type. campfire's boost partial writes
+            // `room_message_url(boost.message.room, boost.message)` and
+            // both arguments reached the helper whole, so every boost's
+            // `url` read `/rooms/#<Room:0x…>/messages/#<Message:0x…>`.
+            // Same pass the controller and test bodies run, for the
+            // same reason and with the same idempotence.
+            method.body = crate::lower::controller_to_library::rewrites::
+                project_route_helper_ids(&method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
     }
@@ -226,6 +258,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
             .iter()
             .map(|h| h.name.as_str().to_string())
             .collect(),
+        models: known_models.iter().cloned().collect(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -322,6 +355,13 @@ struct Ctx {
     /// member helper wants the `:id` segment. `rewrite_path_arg_local`
     /// asks this before appending `.id`.
     direct_helpers: std::collections::HashSet<String>,
+    /// Every model class the app declares. A route-helper argument
+    /// whose last reader NAMES one is a record standing where an id
+    /// belongs, and the app's own model list is the evidence — the
+    /// alternative is the type, and the ruby emit lowers each jbuilder
+    /// template SOLO, with only framework stubs registered, so
+    /// `boost.message.room` has no type to ask.
+    models: std::collections::HashSet<String>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -346,17 +386,68 @@ enum JbStmt<'a> {
         partial_path: String,
         arg: &'a Expr,
     },
+    /// `json.<key> obj, partial: P, as: V` — one pair whose value is a
+    /// partial render of a SINGLE object. The `array!`/`partial!`
+    /// siblings above render a collection and own the whole template;
+    /// this one is a pair like any other and composes with them.
+    PairPartial {
+        key: Symbol,
+        partial_path: String,
+        arg: &'a Expr,
+    },
+    /// `json.<key> do … end` — one pair whose value is a nested object,
+    /// built by re-entering the object walker on the block's body.
+    Nested { key: Symbol, body: &'a Expr },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
 }
 
 fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
-    let raw_stmts: Vec<&Expr> = match &*body.node {
+    emit_object(&flatten_cache_blocks(stmts_of(body)), ctx)
+}
+
+/// A template body's top-level statements. A one-statement template is
+/// a bare Send rather than a `Seq`.
+fn stmts_of(body: &Expr) -> Vec<&Expr> {
+    match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
-    };
+    }
+}
 
+/// Splice `json.cache! key do … end` blocks open, recursively. The
+/// cache is not modeled (see the module header); its block's statements
+/// belong to the enclosing object, and flattening them here — before
+/// classification — is what keeps `emit_object`'s comma bookkeeping
+/// counting real pairs.
+fn flatten_cache_blocks(stmts: Vec<&Expr>) -> Vec<&Expr> {
+    let mut out: Vec<&Expr> = Vec::new();
+    for stmt in stmts {
+        match cache_block_body(stmt) {
+            Some(body) => out.extend(flatten_cache_blocks(stmts_of(body))),
+            None => out.push(stmt),
+        }
+    }
+    out
+}
+
+/// The block body of a `json.cache! … do … end`, or None for anything
+/// else. `cache!` with no block is not this shape and stays Unknown.
+fn cache_block_body(stmt: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(recv), method, block: Some(block), .. } = &*stmt.node else {
+        return None;
+    };
+    if method.as_str() != "cache!" || !is_json_receiver(recv) {
+        return None;
+    }
+    let ExprNode::Lambda { body, .. } = &*block.node else {
+        return None;
+    };
+    Some(body)
+}
+
+fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
     let classified: Vec<JbStmt<'_>> = raw_stmts.iter().map(|s| classify(s)).collect();
 
     // Whole-template DSL forms (single stmt covers the entire JSON
@@ -463,6 +554,32 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
                 ));
                 emitted += 1;
             }
+            JbStmt::PairPartial { key, partial_path, arg } => {
+                if emitted > 0 {
+                    out.push(io_append_lit(&ctx.accumulator, ","));
+                }
+                out.push(io_append_lit(
+                    &ctx.accumulator,
+                    &format!("\"{}\":", key.as_str()),
+                ));
+                let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
+                out.extend(emit_partial_call(partial_path, &arg, ctx));
+                emitted += 1;
+            }
+            JbStmt::Nested { key, body } => {
+                if emitted > 0 {
+                    out.push(io_append_lit(&ctx.accumulator, ","));
+                }
+                out.push(io_append_lit(
+                    &ctx.accumulator,
+                    &format!("\"{}\":", key.as_str()),
+                ));
+                out.extend(emit_object(
+                    &flatten_cache_blocks(stmts_of(body)),
+                    ctx,
+                ));
+                emitted += 1;
+            }
             JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } => {
                 // These shouldn't appear in an object template, but if
                 // they do (mixed with pair-emitting stmts), drop a
@@ -486,6 +603,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         recv: Some(recv),
         method,
         args,
+        block,
         ..
     } = &*stmt.node
     else {
@@ -495,7 +613,12 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         return JbStmt::Unknown;
     }
     match method.as_str() {
-        "extract!" => {
+        // `json.extract! obj, :a, :b` and its `.()` spelling
+        // `json.(obj, :a, :b)`, which prism parses as a `call` Send.
+        // Jbuilder documents the two as the same thing and campfire's
+        // bot API writes the short one; matching only `extract!` left
+        // every template that used it emitting a `"call"` key.
+        "extract!" | "call" => {
             // First arg = object, rest = attribute symbols.
             let Some((obj, rest)) = args.split_first() else {
                 return JbStmt::Unknown;
@@ -587,12 +710,41 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                 arg,
             }
         }
+        // `json.<key> do … end` — the value is a nested object. No
+        // positional args; the block body is another object template.
+        key if args.is_empty() && block.is_some() => {
+            let Some(block) = block else {
+                return JbStmt::Unknown;
+            };
+            let ExprNode::Lambda { body, .. } = &*block.node else {
+                return JbStmt::Unknown;
+            };
+            JbStmt::Nested { key: Symbol::from(key), body }
+        }
         // `json.<key> <expr>` — single-pair shape. The method name IS
         // the JSON key; the single positional arg is the value.
         key if args.len() == 1 => JbStmt::Pair {
             key: Symbol::from(key),
             value: &args[0],
         },
+        // `json.<key> obj, partial: P, as: V` — one pair rendered
+        // through a partial. Shares its options with `array!` and takes
+        // the same two out; what differs is that the positional is ONE
+        // record, not a collection, so it emits an object where
+        // `array!` emits an array.
+        key if args.len() == 2 => {
+            let arg = &args[0];
+            let Some(opts) = extract_hash(&args[1]) else {
+                return JbStmt::Unknown;
+            };
+            let (Some(partial_path), Some(_)) = (
+                hash_get_string(opts, "partial"),
+                hash_get_symbol(opts, "as"),
+            ) else {
+                return JbStmt::Unknown;
+            };
+            JbStmt::PairPartial { key: Symbol::from(key), partial_path, arg }
+        }
         _ => JbStmt::Unknown,
     }
 }
@@ -930,10 +1082,31 @@ fn rewrite_path_arg_local(arg: &Expr, stem: &str, ctx: &Ctx) -> Expr {
         } if args.is_empty() => Some(method.clone()),
         _ => None,
     };
-    match name {
-        Some(n) => send(Some(var_ref(n)), "id", Vec::new(), None, false),
-        None => arg.clone(),
+    if let Some(n) = name {
+        return send(Some(var_ref(n)), "id", Vec::new(), None, false);
     }
+    // An ATTRIBUTE CHAIN whose last reader names a model —
+    // `boost.message`, `boost.message.room`. Same record-standing-where-
+    // an-id-belongs case the bare local above covers, one link further
+    // out: campfire's boost partial writes
+    // `room_message_url(boost.message.room, boost.message)`, and both
+    // arguments reached the helper whole, so every boost's `url` read
+    // `/rooms/#<Room:0x…>/messages/#<Message:0x…>`.
+    //
+    // The model list is what keeps this from being a blind projection:
+    // `users(:david).bot_key` and `message.room_id` both end in a
+    // reader too, and neither names a model.
+    if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*arg.node {
+        if args.is_empty()
+            && method.as_str() != "id"
+            && ctx
+                .models
+                .contains(&crate::naming::singularize_camelize(method.as_str()))
+        {
+            return send(Some(arg.clone()), "id", Vec::new(), None, false);
+        }
+    }
+    arg.clone()
 }
 
 // ── IR constructors (private; mirror view_to_library's helpers) ─────

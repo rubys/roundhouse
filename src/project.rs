@@ -1088,6 +1088,19 @@ fn ruby_runtime_files(
                         require \"zlib\"\n"
                 .to_string();
         }
+        // `Resolv`: the same swap as ipaddr, and for both of ipaddr's
+        // reasons at once. net/http loads the stdlib's resolver over
+        // here, so a second `Resolv` beside it is a superclass mismatch
+        // at require time; and the app's tests stub
+        // `Resolv.getaddresses`, which only reaches the guard if the
+        // guard dispatches to the class mocha patched.
+        if path == "runtime/resolv.rb" {
+            *content = "# Ruby's own resolv — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/ruby/resolv.rb exists for the targets\n\
+                        # that have no resolver to bind to.\n\
+                        require \"resolv\"\n"
+                .to_string();
+        }
     }
 
     // Same swap as db.rb below: the flat walk picked up BOTH halves of
@@ -1647,6 +1660,12 @@ fn jruby_runtime_files(
         if path == "runtime/zlib.rb" {
             *content = "require \"zlib\"\n".to_string();
         }
+        // …and for resolv, which the JVM tree also has. See
+        // `ruby_runtime_files` for why this one is not optional: the
+        // app's tests stub `Resolv.getaddresses`.
+        if path == "runtime/resolv.rb" {
+            *content = "require \"resolv\"\n".to_string();
+        }
     }
 
     // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
@@ -1977,6 +1996,17 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // ruby family reaches Ruby's own through a bare `require`, so
         // this one only has to exist where that does not.
         "ipaddr",
+        // The one method of Ruby's resolver `surfguard` calls. Swapped
+        // for `require "resolv"` on the CRuby/JRuby trees below, same
+        // as ipaddr — and it has to be, or the app's own
+        // `Resolv.stubs(:getaddresses)` lands on the wrong class.
+        "resolv",
+        // basecamp/surfguard's SSRF address policy, ported over the
+        // IPAddr above. Not swapped for the real gem on the CRuby/JRuby
+        // trees the way ipaddr and zlib are: surfguard is a GIT gem, so
+        // there is no `gem install` to swap TO. One implementation,
+        // every target, ours.
+        "surfguard",
         // `Zlib.crc32`, same arrangement as ipaddr: ported for the
         // targets with no zlib to bind to, swapped for Ruby's own on
         // the CRuby/JRuby trees below.

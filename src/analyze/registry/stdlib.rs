@@ -153,6 +153,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str),
         ("octets", Ty::Array { elem: Box::new(Ty::Int) }),
     ]);
+    // `Surfguard` — basecamp/surfguard's SSRF address policy, ported
+    // into `runtime/ruby/surfguard.rb`. Class methods only: the module
+    // has no instances. Registered to the same rule as IPAddr and
+    // Zlib — ONLY the surface the port implements, so a call to one of
+    // the three URL-taking entry points the port declines
+    // (`enforce_public_ip` and friends) stays an honest gap instead of
+    // typing clean and resolving to nothing.
+    register_stdlib_class(classes, "Surfguard", &[
+        ("resolve_public_ips", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("blocked_address?", Ty::Bool),
+    ], &[]);
     // `Net::HTTP` — a real client on BOTH lanes: CRuby's own stdlib, and
     // spinel's `packages/net` (HTTPS included, since the openssl package
     // landed). So there is nothing to port here, unlike IPAddr — only the

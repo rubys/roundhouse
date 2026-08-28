@@ -5615,6 +5615,22 @@ fn require_path_for_body_const(
         // stdlib's own `initialize` and leave the predicates reading a
         // slot nobody filled. One IPAddr per tree, and it is ours.
         "IPAddr" => Some("runtime/ipaddr".to_string()),
+        // `Resolv` — Ruby's resolver, ported into
+        // `runtime/ruby/resolv.rb` for the targets that have none and
+        // swapped for the stdlib on the ruby family. Anchored for the
+        // same reason IPAddr is: `resolv` is not in `project::BUNDLED`,
+        // so nothing inserts a bare `require "resolv"` of its own.
+        "Resolv" => Some("runtime/resolv".to_string()),
+        // `Surfguard` — basecamp/surfguard's address policy, ported into
+        // `runtime/ruby/surfguard.rb`. Anchored for every target: the
+        // gem is a GIT dependency, so no `gem install` and no bare
+        // `require` reaches it on the ruby family either. campfire's
+        // `RestrictedHTTP::PrivateNetworkGuard` is a two-line shim over
+        // it, and `Push::Subscription` names `Surfguard::Unresolvable`
+        // in a rescue clause — a NameError there took the whole suite
+        // to 0 of 288, because fixtures save through the validation
+        // that reaches it.
+        "Surfguard" => Some("runtime/surfguard".to_string()),
         // `Zlib` — ported into `runtime/ruby/zlib.rb`. Anchored for
         // every target for the same reason IPAddr is: `zlib` is not in
         // `project::BUNDLED`, so nothing writes a bare `require "zlib"`

@@ -1159,6 +1159,13 @@ pub enum RouteSpec {
         /// in would move the path too.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_name: Option<Symbol>,
+        /// `resources :messages, controller: "messages/by_bots"` — the
+        /// controller the actions dispatch to, in Rails' `dir/name`
+        /// spelling. Like `as:` this moves ONE thing and leaves the
+        /// others: the path is still `/messages` and the helpers are
+        /// still `message`/`messages`; only the class changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -1181,6 +1188,17 @@ pub enum RouteSpec {
         /// supplies the segment.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         defaults: IndexMap<Symbol, String>,
+        /// `nested do … end` — Rails' explicit form of the nesting a
+        /// `resources` block applies to a child `resources`/verb call
+        /// automatically. `scope` is NOT one of the calls that gets it,
+        /// so campfire's `nested { scope path: ":bot_key" { … } }` is
+        /// the only way to land a scope segment INSIDE the parent's
+        /// `/rooms/:room_id`. Set here, the flattener materializes the
+        /// pending parent nesting into this scope's path/name prefix
+        /// before applying `path`/`as_prefix`, which is what puts
+        /// `:bot_key` after `:room_id` rather than in front of `/rooms`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        nest: bool,
         entries: Vec<RouteSpec>,
     },
 }

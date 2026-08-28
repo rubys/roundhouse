@@ -1,0 +1,24 @@
+module Surfguard
+  class Violation < StandardError
+  end
+
+  class Unresolvable < StandardError
+  end
+
+  DISALLOWED_IPV4: Array[IPAddr]
+  DISALLOWED_IPV6: Array[IPAddr]
+  NAT64_WELL_KNOWN: IPAddr
+  NAT64_LOCAL_USE: IPAddr
+  IPV4_TRANSLATABLE: IPAddr
+
+  def self.resolve_public_ips: (String host) -> Array[String]
+  # `String`, not the gem's "IPAddr or anything IPAddr.new understands":
+  # the IPAddr arm is `blocked_ipaddr?` below, so neither is polymorphic.
+  def self.blocked_address?: (String ip) -> bool
+  def self.blocked_ipaddr?: (IPAddr ipaddr) -> bool
+  def self.resolve: (String host) -> Array[IPAddr]
+  def self.ip_literal: (String host) -> IPAddr?
+  def self.disallowed_ipv4?: (IPAddr ipaddr) -> bool
+  def self.disallowed_ipv6?: (IPAddr ipaddr) -> bool
+  def self.embedded_ipv4: (IPAddr ipaddr) -> IPAddr
+end
