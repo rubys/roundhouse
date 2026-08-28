@@ -3,18 +3,27 @@ class IPAddr
   end
 
   @octets: Array[Integer]
+  @prefix: Integer
 
   def initialize: (String addr) -> void
   def octets: () -> Array[Integer]
+  def prefix: () -> Integer
   def ipv4?: () -> bool
   def ipv6?: () -> bool
   def ipv4_mapped?: () -> bool
+  def ipv4_compat?: () -> bool
+  # `IPAddr`, not `untyped`: the body reads `other.octets`. The stdlib
+  # also accepts a String here; nothing in the corpus passes one, and
+  # declaring it would mean a shape this file cannot answer.
+  def include?: (IPAddr other) -> bool
   def loopback?: () -> bool
   def private?: () -> bool
   def link_local?: () -> bool
   def to_s: () -> String
 
   def self.parse_octets: (String addr) -> Array[Integer]
+  def self.parse_prefix: (String part, String addr) -> Integer
+  def self.mask: (Array[Integer] octets, Integer prefix) -> Array[Integer]
   def self.parse_v4: (String text) -> Array[Integer]
   def self.parse_dec_octet: (String part, String text) -> Integer
   def self.parse_v6: (String text) -> Array[Integer]
