@@ -10,18 +10,7 @@
 //! analyzer already stamped make the dynamic dispatch unnecessary at
 //! almost every site, so this pass rewrites, per receiver type:
 //!
-//!   String        blank? → `r.empty?` — deliberately NOT the
-//!                 whitespace-aware AS form (`" ".blank?` is true in
-//!                 Rails, false here). Two reasons: it matches the
-//!                 form the view-cond predicate rewrite
-//!                 (`view_to_library::predicates`) has always
-//!                 produced, and the ruby-family nil-safety patch
-//!                 (`apply_nilsafe_empty_lowering`) guards the direct
-//!                 receiver of `empty?` — an interposed `.strip`
-//!                 would put the guard on the wrong level for
-//!                 nullable columns the type layer reads as `Str`.
-//!                 Upgrade to whitespace-aware together with honest
-//!                 column nilability.
+//!   String        blank? → `r.strip.empty?` (see below)
 //!   Array/Hash    blank? → `r.empty?`
 //!   Class w/ own  left as-is when the app class defines the
 //!   definition    predicate itself; grounded via `empty?` when it
@@ -34,6 +23,35 @@
 //!
 //! `present?` is the negation; `presence` is `blank? ? nil : r`
 //! (an `If` node), or just `r` where T is never blank.
+//!
+//! ## Why the String case strips first
+//!
+//! ActiveSupport's `String#blank?` is a whitespace match — the regex is
+//! `\A[[:space:]]*\z` — and not `empty?`, so `" ".blank?` is TRUE in
+//! Rails where a bare `empty?` answers false. campfire's bot API is the
+//! site that priced it: a boost posted with a body of three spaces was
+//! accepted and stored where Rails answers 422.
+//!
+//! `strip` rather than the regex because every target emitter carries
+//! it and a POSIX character class is not a shape every regex backend
+//! shares. The divergence that leaves is NON-ASCII whitespace: Ruby's
+//! `String#strip` takes ASCII space plus NUL, where `[[:space:]]` also
+//! takes U+00A0 and friends. No corpus app has one, and the targets
+//! disagree there among themselves anyway — Python's `.strip()` and
+//! JavaScript's `.trim()` do take them.
+//!
+//! The nil-safety patch this used to be deferred behind
+//! (`emit::ruby::library::rewrite_empty_nilsafe`, which wraps the
+//! receiver of `empty?` as `(r || "")`) now looks THROUGH the `.strip`,
+//! so a nullable column still reads `(r || "").strip.empty?` and not
+//! `(r.strip || "").empty?`, which would have raised on nil before the
+//! guard could answer.
+//!
+//! NOT the same question as the view-cond predicate rewrite
+//! (`view_to_library::predicates`), which still emits a plain `empty?`.
+//! That pass runs with NO receiver type and folds `blank?`, `empty?`
+//! and `none?` onto one form, so a `.strip` there would land on
+//! collections too.
 //!
 //! Residue policy: a receiver the pass can't ground — `untyped`, an
 //! open inference var, a multi-variant union — keeps its dynamic call
@@ -121,8 +139,12 @@ impl AppDefinitions {
 
 /// How a receiver type grounds the predicate.
 enum Grounding {
-    /// `empty?` applies (strings and collections).
-    Container { nilable: bool },
+    /// `empty?` applies (strings and collections). `whitespace` marks
+    /// the STRING case, whose emptiness test is `strip.empty?` — see
+    /// the module header. A collection's is not: `[nil].blank?` is
+    /// false in Rails and `" ".blank?` is true, and one `empty_form`
+    /// for both would have to be wrong about one of them.
+    Container { nilable: bool, whitespace: bool },
     /// Never blank when non-nil (numbers, symbols, times, plain
     /// objects without `empty?`).
     NeverBlank { nilable: bool },
@@ -145,8 +167,9 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
     use Grounding::*;
     let Some(t) = ty else { return Skip("receiver type not inferred") };
     match t {
-        Ty::Str | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } => {
-            Container { nilable: false }
+        Ty::Str => Container { nilable: false, whitespace: true },
+        Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } => {
+            Container { nilable: false, whitespace: false }
         }
         Ty::Int | Ty::Float | Ty::Sym | Ty::Time | Ty::Record { .. } => {
             NeverBlank { nilable: false }
@@ -165,7 +188,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 // transpiled runtime's `errors` reader is an Array).
                 // Folding either to never-blank would render
                 // errors_for-style guards unconditionally.
-                Container { nilable: false }
+                Container { nilable: false, whitespace: false }
             } else if last == "ParamValue" {
                 // Param access wraps possibly-absent input; blankness
                 // is semantic there and needs a runtime predicate on
@@ -182,7 +205,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 return Runtime;
             }
             match classify(Some(non_nil[0]), defs) {
-                Container { .. } => Container { nilable: true },
+                Container { whitespace, .. } => Container { nilable: true, whitespace },
                 NeverBlank { .. } => NeverBlank { nilable: true },
                 // `Bool | Nil`: `!r` and `r ? true : nil` already
                 // treat nil and false alike, so plain BoolLike forms
@@ -487,7 +510,7 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
     // don't.
     let needs_pure = match (&grounding, pred) {
         (Container { .. }, Pred::Presence) => true,
-        (Container { nilable: true }, _) => true,
+        (Container { nilable: true, .. }, _) => true,
         (NeverBlank { nilable: false }, Pred::Blank | Pred::Present) => true,
         (AlwaysNil, _) => true,
         _ => false,
@@ -513,7 +536,9 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
     // pure receiver, the assigned NAME for an assignment receiver.
     let later = assign_handle.unwrap_or_else(|| r.clone());
     let replacement = match grounding {
-        Container { nilable } => rewrite_emptyable(span, r, later, pred, nilable),
+        Container { nilable, whitespace } => {
+            rewrite_emptyable(span, r, later, pred, nilable, whitespace)
+        }
         NeverBlank { nilable } => rewrite_never_blank(span, r, pred, nilable),
         BoolLike => rewrite_bool(span, r, pred),
         AlwaysNil => match pred {
@@ -570,8 +595,8 @@ fn try_rewrite_compact_blank(
         let elem = (**elem).clone();
         (classify(Some(&elem), defs), elem, r.ty.clone())
     };
-    let nilable = match grounding {
-        Grounding::Container { nilable } => nilable,
+    let (nilable, whitespace) = match grounding {
+        Grounding::Container { nilable, whitespace } => (nilable, whitespace),
         _ => {
             diags.push(unlowered(
                 expr,
@@ -599,15 +624,20 @@ fn try_rewrite_compact_blank(
             ty,
         )
     };
+    // The ELEMENT's emptiness test, by the same rule `a.blank?` takes —
+    // `compact_blank` is documented as `reject(&:blank?)`, so an Array
+    // of Strings must reject a whitespace-only one. campfire's
+    // `User#title` is `[ name, bio ].compact_blank.join(" – ")`.
+    let empty_form = if whitespace { blank_str } else { plain_empty };
     let cond = if nilable {
         bool_op(
             span,
             crate::expr::BoolOpKind::Or,
             nil_check(span, param(elem_ty.clone())),
-            plain_empty(span, param(non_nil(&elem_ty))),
+            empty_form(span, param(non_nil(&elem_ty))),
         )
     } else {
-        plain_empty(span, param(elem_ty.clone()))
+        empty_form(span, param(elem_ty.clone()))
     };
     let block = mk(
         span,
@@ -658,8 +688,9 @@ fn rewrite_emptyable(
     later: Expr,
     pred: Pred,
     nilable: bool,
+    whitespace: bool,
 ) -> Expr {
-    let empty_form = plain_empty;
+    let empty_form = if whitespace { blank_str } else { plain_empty };
     let value_ty = non_nil_ty(&r);
     match (pred, nilable) {
         (Pred::Blank, false) => empty_form(span, r),
@@ -778,6 +809,29 @@ fn send0(span: crate::span::Span, recv: Expr, name: &str, ty: Ty) -> Expr {
 
 fn plain_empty(span: crate::span::Span, r: Expr) -> Expr {
     send0(span, r, "empty?", Ty::Bool)
+}
+
+/// `r.strip.empty?` — ActiveSupport's `String#blank?`, which is a
+/// whitespace match and not `empty?`. See the module header for why it
+/// is `strip` rather than the `/\A[[:space:]]*\z/` Rails writes, and
+/// for the one divergence that leaves.
+///
+/// THE RECEIVER'S STAMP IS NARROWED to its non-nil half, because every
+/// nilable form below guards the strip behind a `nil?` test and that is
+/// what makes the narrowing true. Saying it matters to any consumer
+/// that dispatches off the stamped type: the analyzer cannot resolve
+/// `strip` through a `Str | Nil` union, so without this a re-type after
+/// this pass drops the `Ty::Str` put on the strip send below.
+///
+/// It does NOT rescue a receiver the emitter could not type in the
+/// first place. MEASURED on lobsters: the TypeScript emit carries the
+/// same 82 `is_empty` / 56 `.length === 0` split before and after this
+/// change, so a nullable-column ivar that read `x.is_empty` still reads
+/// `x.trim().is_empty` — a pre-existing per-target gap this pass rides
+/// on top of, not one it introduces.
+fn blank_str(span: crate::span::Span, mut r: Expr) -> Expr {
+    r.ty = Some(non_nil_ty(&r));
+    plain_empty(span, send0(span, r, "strip", Ty::Str))
 }
 
 fn nil_check(span: crate::span::Span, r: Expr) -> Expr {

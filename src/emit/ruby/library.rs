@@ -4577,25 +4577,41 @@ fn rewrite_empty_nilsafe(expr: &mut Expr) {
     if method.as_str() != "empty?" || !args.is_empty() {
         return;
     }
+    // THE GUARD GOES ON THE VALUE, NOT ON THE STRIP. `lower::blank`
+    // grounds a String `blank?` as `r.strip.empty?` (ActiveSupport's
+    // is a whitespace match, not `empty?`), so the receiver of
+    // `empty?` is now `r.strip` at half the sites — and `nil.strip`
+    // raises before any guard wrapped around it could answer. Descend
+    // one link so a nullable column still reads `(r || "").strip.empty?`.
+    // This is the interaction the whitespace form used to be deferred
+    // behind; four lines is the whole of it.
+    let target: &mut Expr = match &mut *r.node {
+        ExprNode::Send { recv: Some(inner), method, args, .. }
+            if method.as_str() == "strip" && args.is_empty() =>
+        {
+            inner
+        }
+        _ => r,
+    };
     // Idempotence: an already-guarded `(x || "").empty?` keeps its shape.
-    if matches!(&*r.node, ExprNode::BoolOp { right, .. }
+    if matches!(&*target.node, ExprNode::BoolOp { right, .. }
         if matches!(&*right.node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
     {
         return;
     }
     let guarded = Expr::new(
-        r.span,
+        target.span,
         ExprNode::BoolOp {
             op: crate::expr::BoolOpKind::Or,
             surface: crate::expr::BoolOpSurface::Symbol,
-            left: r.clone(),
+            left: target.clone(),
             right: Expr::new(
-                r.span,
+                target.span,
                 ExprNode::Lit { value: Literal::Str { value: String::new() } },
             ),
         },
     );
-    *r = guarded;
+    *target = guarded;
 }
 
 /// True when a reader body is exactly `@<name>` — the untouched

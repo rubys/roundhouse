@@ -20,13 +20,26 @@
 # Semantics are Rails', not an approximation — nil, false, and an empty
 # String/Array/Hash are blank; `0` and `:sym` are present. Verified shape
 # by shape against `Object#blank?`.
+#
+# The STRING tail is `strip.empty?`, not `empty?`: ActiveSupport's
+# `String#blank?` is `/\A[[:space:]]*\z/`, so `" ".blank?` is true.
+# `lower::blank` grounds the typed String sites the same way and for the
+# same reason — the two must agree, because which of them serves a given
+# call is a fact about type INFERENCE, not about the program. campfire's
+# bot API is what priced it: `raw_request_body.blank?` reaches this
+# function (the reader's type is not inferred), and a boost posted with
+# a body of three spaces was accepted where Rails answers 422.
+#
+# `to_s` first, so the tail is one branch for every remaining shape: an
+# Integer's `"0"` is not blank, a Symbol's `"sym"` is not blank, and a
+# String is itself.
 module ActiveSupport
   def self.blank?(value)
     return true if value.nil?
     return true if value == false
     return value.empty? if value.is_a?(Array)
     return value.empty? if value.is_a?(Hash)
-    value.to_s.empty?
+    value.to_s.strip.empty?
   end
 
   def self.present?(value)

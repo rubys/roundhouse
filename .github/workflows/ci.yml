@@ -891,19 +891,22 @@ jobs:
       # endpoints, which is two new test files and one existing file
       # grown from 7 tests to 23.
       #
-      # THE FILE COUNT GOES DOWN BY ONE, and it is the only floor in
-      # this workflow that ever has. It is not a regression: every one
-      # of the 41 files green at `2aa41410` is still green. The file
-      # that left is `messages/by_bots_controller_test`, which was 7 of
-      # 7 and is 15 of 23 — the same file, tripled, against surface the
-      # compiler does not model yet (an `UploadedFile` reaching
-      # `blank?`, a test helper whose return type is not inferred, and
-      # the whitespace-only `String#blank?` divergence that
-      # `lower::blank`'s header documents and defers). Raising this back
-      # to 41 means closing those, not asserting the number.
+      # The file count DIPPED to 40 on the bump and is back at 41: the
+      # file that had left was `messages/by_bots_controller_test`, and
+      # `messages/boosts/by_bots_controller_test` replaced it in the
+      # green set once `String#blank?` became whitespace-aware
+      # (`lower::blank`, which had deferred it). A boost posted with a
+      # body of three spaces was being accepted and stored where Rails
+      # answers 422 — the emit was WRONG there, not merely short a test.
+      #
+      # `by_bots_controller_test` itself is still 16 of 23: an
+      # `UploadedFile` reaching `blank?`, and a test helper whose return
+      # type is not inferred (so a local bound from it is not projected
+      # to its id at a route helper). Raising this floor further means
+      # closing those, not asserting the number.
         env:
-          FLOOR_TESTS: 253
-          FLOOR_FILES: 40
+          FLOOR_TESTS: 255
+          FLOOR_FILES: 41
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
