@@ -1118,7 +1118,22 @@ fn every_runtime_method_body_concretely_typed() {
     // computes `Array[<Target>]` for each, but the model `.rbs` we emit
     // carries ZERO ivar declarations, so the `[]` seed wins. That needs
     // ivar types plumbed onto `LibraryClass` and is its own change.
-    const CEILING: usize = 336;
+    //
+    // 336 -> 339: `ActiveSupport.many?`'s `list` parameter, widened
+    // from `Array[untyped]` to `untyped` — the same trade as
+    // `preloaded` above, in a method whose whole body is
+    // `list.length > 1`. THREE sites (active_support_ext.rb 16 -> 19,
+    // MEASURED at the old tree, not derived): the parameter, the
+    // `length` receiver, and the comparison.
+    //
+    // The wall on the other side: campfire's `directs/edit` asks
+    // `many?(room.users)` and hands it an ASSOCIATION. `Array[untyped]`
+    // is a representation claim and spinel acts on it — it coerced the
+    // `sp_Relation *` to `sp_PolyArray *` at the call and the C did not
+    // compile. Nothing here inspects the argument's shape, so `untyped`
+    // is what the method actually promises; `index_by` beside it
+    // already says so.
+    const CEILING: usize = 339;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

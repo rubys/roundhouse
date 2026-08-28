@@ -16,5 +16,13 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
-  def self.many?: (Array[untyped] list) -> bool
+  # `untyped`, not `Array[untyped]`: the body reads `length` and
+  # nothing else, and campfire calls it on an ASSOCIATION —
+  # `many?(room.users)` hands it a Relation. A container element type
+  # on a parameter is a claim about the argument's REPRESENTATION, and
+  # spinel acts on it: the Relation was coerced to `sp_PolyArray *` at
+  # the call. Same over-claim `Relation#preloaded`'s `records` carried
+  # (5592abe8); `index_by` above already says `untyped` for the same
+  # reason.
+  def self.many?: (untyped list) -> bool
 end
