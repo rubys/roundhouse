@@ -4,12 +4,13 @@
 # Loads the overlay files directly, in boot.rb's order — no emit, no
 # server: `ruby tests/overlay_cable_identity.rb .` reproduces it by hand.
 #
-# The app connection below is campfire's, verbatim from
-# `app/channels/application_cable/connection.rb` plus the
-# `Authentication::SessionLookup` it includes. That is the point of the
-# test: `Cable.identify` must work by RUNNING THE APP'S `connect`, so
-# the fixture has to be the app's code rather than a restatement of what
-# the runtime happens to do.
+# The app connection below is campfire's `app/channels/application_cable/
+# connection.rb` AS EMITTED, plus the `Authentication::SessionLookup` it
+# includes. That is the point of the test: `Cable.identify` must work by
+# RUNNING THE APP'S `connect`, so the fixture has to be the app's code
+# rather than a restatement of what the runtime happens to do — and it
+# has to be the code that actually reaches the tree, which is not quite
+# the source (see the note above the class).
 root = ARGV[0] or abort "usage: overlay_cable_identity.rb <repo-root>"
 root = File.expand_path(root)
 
@@ -82,11 +83,16 @@ module Authentication
   end
 end
 
+# THE EMITTED FORM, not campfire's source, and the difference is the one
+# that matters here: ingest drops `identified_by :current_user` (it
+# defines an accessor from a computed name), so the emitted connection
+# has no `current_user=` of its own and the runtime has to supply it.
+# A fixture carrying the source's `identified_by` line defines the
+# accessor itself and passes against a runtime that provides nothing —
+# which is exactly what happened, until a real socket found it.
 module ApplicationCable
   class Connection < ActionCable::Connection::Base
     include Authentication::SessionLookup
-
-    identified_by :current_user
 
     def connect
       self.current_user = find_verified_user

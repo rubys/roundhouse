@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# scripts/campfire-cable-walk — the two-connection fan-out walk.
+#
+# Transpiles ONCE Campfire for the `ruby` target, boots it under Puma,
+# and drives the socket milestone: sign in, open two /cable connections,
+# subscribe both through the app's own channel, post a message over HTTP,
+# and require that BOTH sockets receive the turbo-stream frame.
+# See scripts/campfire-cable-drive.rb for the probes.
+#
+# WHY A SERVER AND NOT A UNIT TEST. `tests/overlay_cable_identity.rb` and
+# `tests/overlay_cable_dispatch.rb` drive the runtime objects directly and
+# run in the unit job with no gems; they are the fast feedback and they
+# stay. What they cannot see is the tree as it is EMITTED — the first
+# handshake against a real Puma found `undefined method 'current_user='`,
+# because ingest drops the `identified_by :current_user` line that the
+# unit fixture (campfire's source) still carried. Both layers, on purpose.
+#
+# BACKGROUND JOBS ARE HELD, and that is the shipped runtime's other
+# posture rather than a stub. `ActiveJob.perform_later` runs INLINE by
+# default here (`runtime/ruby/active_job.rb`: "Empty is the default...
+# their jobs still run at the call site"), so campfire's
+# `after_create_commit -> { room.receive(self) }` reaches
+# `Room::PushMessageJob` inside the request. Rails does not: `perform_later`
+# enqueues and a worker runs it. Inline, the job dies on `uninitialized
+# constant Net::HTTP::Persistent` and the POST 500s before any broadcast
+# — a web-push gap standing in front of a WebSocket milestone it has
+# nothing to do with. `ActiveJob.enqueue_without_running` is the seam the
+# emitted test harness already uses for the same reason, and it is CLOSER
+# to Rails' request path than inline is. Both divergences are in
+# docs/pipeline/runtime.md; neither is fixed by this script.
+#
+# Usage:  scripts/campfire-cable-walk [options] [APP_PATH]
+#
+#   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
+#
+# Options:
+#   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
+#   --keep       Keep the temp emit and print its path.
+#   --reuse DIR  Skip transpiling; run against an emit prepared earlier.
+#   --port N     Serve on N (default: an OS-assigned free port).
+#
+# Requires: cargo, ruby, the sqlite3 CLI, and the puma / nio4r /
+# websocket-driver gems. The last three are the CRuby target's own
+# serving dependencies, declared in the emitted Gemfile.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$HOME/git/once-campfire"
+OUT=""
+KEEP=0
+REUSE=""
+PORT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)   OUT="$2"; KEEP=1; shift 2 ;;
+        --keep)  KEEP=1;   shift ;;
+        --reuse) REUSE="$2"; shift 2 ;;
+        --port)  PORT="$2"; shift 2 ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        *)       APP="$1"; shift ;;
+    esac
+done
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
+fail() { printf '\033[1;31m%s\033[0m\n' "$1"; exit 1; }
+
+SERVER_PID=""
+cleanup() {
+    # By PID, and only the one this script started.
+    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$OUT" && $KEEP -eq 0 && -z "$REUSE" ]]; then rm -rf "$OUT"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -n "$REUSE" ]]; then
+    OUT="$REUSE"
+    [[ -d "$OUT" ]] || fail "no such emit: $OUT"
+    step "reusing emit at $OUT"
+else
+    [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-cable.XXXXXX)"
+    step "transpiling $APP → $OUT (target: ruby)"
+    rm -rf "$OUT"
+    # `--allow-unsupported` for the same reason the suite uses it:
+    # campfire is a ledger app, and the point is to run what DOES work.
+    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    echo "  emit diagnostics: $OUT.log"
+
+    step "preparing storage/development.sqlite3 from db/seed.sql"
+    mkdir -p "$OUT/storage"
+    rm -f "$OUT/storage/development.sqlite3"
+    sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
+fi
+
+# The job posture, spliced once and printed so the run says what it did.
+if ! grep -q "enqueue_without_running" "$OUT/config.ru"; then
+    step "holding background jobs (see this script's header)"
+    python3 - "$OUT/config.ru" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+marker = "Main.configure_default_adapter!"
+assert marker in s, "config.ru has no adapter marker to splice after"
+s = s.replace(marker, marker + """
+
+# Spliced by scripts/campfire-cable-walk. `perform_later` runs INLINE in
+# this runtime; Rails enqueues and lets a worker run it. Holding jobs is
+# the closer of the two to Rails' request path, and it keeps a ledgered
+# web-push gap (`Net::HTTP::Persistent`) from standing in front of a
+# WebSocket milestone it has nothing to do with.
+ActiveJob.enqueue_without_running""", 1)
+open(p, "w").write(s)
+PY
+fi
+
+if [[ -z "$PORT" ]]; then
+    PORT="$(ruby -rsocket -e 's = TCPServer.new("127.0.0.1", 0); print s.addr[1]; s.close')"
+fi
+
+step "starting the emit on :$PORT"
+LOG="$OUT/cable-walk-server.log"
+(
+  cd "$OUT"
+  RAILS_ENV=development \
+  SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
+  exec ruby -S puma -p "$PORT" config.ru
+) >"$LOG" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 60); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/first_run" 2>/dev/null; then break; fi
+    kill -0 "$SERVER_PID" 2>/dev/null || { cat "$LOG"; fail "the server exited during boot"; }
+    sleep 0.5
+done
+curl -fsS -o /dev/null "http://127.0.0.1:$PORT/first_run" 2>/dev/null \
+    || { tail -30 "$LOG"; fail "the server never answered /first_run"; }
+echo "  up (log: $LOG)"
+
+set +e
+ruby "$REPO_ROOT/scripts/campfire-cable-drive.rb" "http://127.0.0.1:$PORT"
+STATUS=$?
+set -e
+
+# A 500 in the emit is reported by the driver as a failed probe; the
+# server log is where the exception is, so surface it on failure.
+if [[ $STATUS -ne 0 ]]; then
+    step "server-side exceptions"
+    grep -E "Rack app|Error|error" "$LOG" | tail -20 || echo "  (none logged)"
+fi
+
+[[ $KEEP -eq 1 ]] && echo && echo "emit retained at $OUT"
+exit $STATUS

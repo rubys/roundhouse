@@ -325,12 +325,23 @@ module ActionCable
     end
 
     class Base
-      # `identified_by :current_user` is a CLASS-BODY call, so it runs at
-      # LOAD time. A Connection that cannot answer it does not merely
-      # fail to identify anybody — the file fails to define.
-      def self.identified_by(*names)
-        names.each { |name| attr_accessor name }
-      end
+      # WHAT `identified_by :current_user` WOULD HAVE WRITTEN.
+      #
+      # Ingest DROPS that line — it defines an accessor from a computed
+      # name, which is the shape a strict target cannot compile — so the
+      # emitted `ApplicationCable::Connection` has no `current_user=` of
+      # its own and campfire's `connect` (`self.current_user =
+      # find_verified_user`) is a `NoMethodError` on the first handshake.
+      # Declared here instead, exactly as the spinel sibling declares it.
+      # One name, because one is what `identified_by` has ever been given.
+      #
+      # This file used to answer it the other way, with a class method
+      # that defined accessors from the argument list — correct for an
+      # app whose `identified_by` call survived to the emit, and no app's
+      # does. It was never reached, and the unit test did not notice
+      # because its fixture was campfire's SOURCE, which still has the
+      # line the emit does not. The fixture is the emitted form now.
+      attr_accessor :current_user
 
       # THE COOKIE JAR OF THE HANDSHAKE REQUEST, and the whole reason
       # identity works: a WebSocket upgrade is an ordinary HTTP GET, so

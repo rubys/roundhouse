@@ -870,6 +870,17 @@ guarded call sit in statement position instead of forcing a
 `perform_now` is ungated in both environments: its Rails semantics is
 already "run now".
 
+**AND A SERVED APP IS THE THIRD ENVIRONMENT, which this framing missed.**
+Rails' production adapter does not run the job in the request either — it
+enqueues, and a worker runs it. Inline dispatch is therefore closest to
+Rails only for an app with no queue at all; for campfire it puts
+`Room::PushMessageJob` inside `POST /rooms/:id/messages`, where it dies on
+`uninitialized constant Net::HTTP::Persistent` and 500s a request whose
+broadcast had already gone out. `scripts/campfire-cable-walk` splices
+`ActiveJob.enqueue_without_running` for that reason and says so in its
+header. What this runtime does not have is the third option Rails
+actually uses: enqueue now, run elsewhere, later.
+
 ### ActiveJob's test helpers count NAMES, and `perform_enqueued_jobs` re-enters inline
 
 `ActiveJob::PERFORMED` is the queue-inspection seam, appended by the
@@ -1340,6 +1351,105 @@ resubscribe is refused. The disconnect that would FORCE that replay is
 what does not happen, so an already-open socket keeps delivering to a
 user whose membership was just revoked, until they reconnect for some
 other reason.
+
+### A bare `new` in a class method builds the LEXICAL class, not the receiver
+
+campfire's `lib/rails_ext/filter.rb`:
+
+```ruby
+class ActionText::Content::Filter
+  class << self
+    def apply(content)
+      filter = new(content)
+      filter.applicable? ? ActionText::Content.new(filter.apply, ...) : content
+    end
+  end
+  def applicable? = raise NotImplementedError
+end
+```
+
+`new` there is a call on `self`, and `self` at call time is whichever
+SUBCLASS was asked — `ContentFilters::RemoveSoloUnfurledLinkText.apply`
+builds a `RemoveSoloUnfurledLinkText`. The emit grounds it to the class
+the method is lexically inside:
+
+```ruby
+filter = ::ActionText::Content::Filter.new(content)
+```
+
+so every subclass's `apply` constructs the ABSTRACT BASE, and the base's
+`applicable?` raises `NotImplementedError`.
+
+**What it costs, in campfire.** Every message body renders EMPTY — in the
+page and in the broadcast frame alike. `MessagesHelper
+#message_presentation` wraps the filter chain in the app's own `rescue
+Exception` and returns `""`, so there is no error anywhere: the record
+has the text, the database has the text, and
+`<div id="presentation_message_N">` is blank. `scripts/campfire-cable-walk`
+is what surfaced it; the suite does not, because its message assertions
+do not go through this partial.
+
+**The shape, generally.** A class-side template method — a base whose
+class method constructs and then calls overridable instance methods — is
+the pattern this breaks, and it is not rare. Any inherited `def self.x`
+containing a bare `new` builds the wrong object.
+
+**Why it is not simply `self.new`.** On the ruby family it is exactly
+that. On a strict target, class-side late binding needs the class itself
+to carry a dispatch table, which is the thing those targets do not have —
+so the fix has a ruby-family half that is a one-line change and a
+strict-target half that is a design question. Ledgered rather than
+half-fixed.
+
+### An association reader is not an arel chain root
+
+`room.memberships.pluck(:user_id)` (campfire's
+`Message::Broadcasts#broadcast_unread_room`) hydrates every `Membership`
+row into an Array and then calls `pluck` on it — `NoMethodError:
+undefined method 'pluck' for an instance of Array`.
+
+**Why.** `lower::arel::build` recognizes `pluck` layered on a CHAIN
+(`Room.where(...).pluck(:id)`) and on a model CONST, and both paths end
+at `const_to_class_id(recv)`. An association reader is an instance-method
+call on a record, not a Const, so the chain builder declines and the call
+falls through to the hydrating reader the model already has.
+
+**What it costs.** A 500 on `POST /rooms/:id/messages` in a served app.
+The broadcast is not lost — `after_create_commit` fans the turbo-stream
+out before this runs — so the message reaches subscribers and the
+request that created it then fails. The suite does not see it: under the
+test adapter the job that reaches this line is enqueued rather than run.
+
+This is the association-proxy case the Relation specialization work
+already names as its starting point; the fix belongs there rather than
+as another arm on the chain builder.
+
+### `config.x.<key> = <expr>` is re-evaluated on every read
+
+`config.x.web_push_pool = WebPush::Pool.new(...)` in an initializer is an
+ASSIGNMENT: Rails evaluates the right-hand side once at boot and every
+`Rails.configuration.x.web_push_pool` reads that one object. Ingest lifts
+it to a reader on the Application reopen:
+
+```ruby
+def x_web_push_pool
+  WebPush::Pool.new(invalid_subscription_handler: ->(id) { ... })
+end
+```
+
+which re-runs the expression on every read.
+
+**What it costs.** For a literal (`config.x.vapid.public_key = "…"`, the
+common case) nothing at all. For a constructor it is a new object per
+read, and campfire's is the bad kind: `WebPush::Pool.new` builds a
+50-thread executor, a 1-thread pool and a 150-connection HTTP pool, and
+the `shutdown` the app's `at_exit` calls reaches only the last one. One
+per message created.
+
+**Not the reason campfire's push path fails today** — that is
+`uninitialized constant Net::HTTP::Persistent`, which the pool's
+constructor hits first. Memoizing the reader would not fix that; it is a
+separate entry because it would still be wrong once the constant exists.
 
 ### An initializer's `prepend` is not performed on the spinel target
 
