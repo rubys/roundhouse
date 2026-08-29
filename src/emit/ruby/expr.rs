@@ -513,6 +513,23 @@ fn emit_bool_op_operand(
         ExprNode::Assign { .. } | ExprNode::OpAssign { .. } => {
             return format!("({s})");
         }
+        // A CONDITIONAL AS AN OPERAND, same argument one construct over.
+        // The modifier form binds looser than every boolean operator, so
+        // `x.m if c || fallback` re-parses as `x.m if (c || fallback)` —
+        // the `||` is swallowed INTO the condition and the whole
+        // expression answers nil instead of the fallback. `lower::
+        // try_guard` is what produced one: `s.try(:to_gid_param) || s`
+        // became `s.to_gid_param if s.is_a?(…) || s`, which is campfire's
+        // broadcast assertion reading a nil stream name.
+        //
+        // The multi-line `if/else/end` form has the same problem for the
+        // same reason (`|| x` lands inside the else branch), and `case`
+        // with it, so all three are wrapped rather than only the shape
+        // that bit. `recv_needs_parens` makes the identical call for a
+        // receiver.
+        ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::RescueModifier { .. } => {
+            return format!("({s})");
+        }
         _ => {}
     }
     s

@@ -57,6 +57,7 @@ pub mod bool_fold;
 pub mod spliced_concern_bodies;
 pub mod pathname_ctor;
 pub mod assoc_pluck;
+pub mod try_guard;
 pub mod class_body_new;
 pub mod sti_is_a;
 pub mod dead_default;
@@ -247,6 +248,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("assoc_pluck", &[]),
+    ("try_guard", &[]),
     // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
     // method under a byte source that exists. Rewrites a receiver
     // Const no pass produces and writes a name no pass consumes, so
@@ -569,6 +571,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("class_body_new");
     assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
+    try_guard::apply_try_guard_lowering(app);
+    ran!("try_guard");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");
     to_json::apply_to_json_lowering(app);

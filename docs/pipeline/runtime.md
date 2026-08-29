@@ -1663,38 +1663,65 @@ DOM comparison cannot see it.
 - [`verification.md`](verification.md) — toolchain tests that
   exercise runtime + emitted project end-to-end.
 
-### `try` guards NIL, not `respond_to?`
+### `try` narrows to the classes that answer, and cannot see every one
 
-`recv.try(:name)` is lowered at ingest to `recv && recv.name` — the same
-shape as the `&.` desugar. Rails' definition is
-`respond_to?(name) && public_send(name, …)`, so the two agree whenever
-the receiver either is nil or does respond, and diverge on the one case
-between: **a non-nil receiver that does not define the method raises
-here and answers nil in Rails.**
+`recv.try(:name)` is Rails' `respond_to?(name) && public_send(name, …)`
+— a DEFINEDNESS guard. It used to be grounded at ingest to
+`recv && recv.name`, the `&.` desugar, which is a NILNESS guard: the two
+agree whenever the receiver either is nil or does respond, and diverge on
+the one case between. That cost campfire's own
+`MessagesControllerTest#test_creating_a_message_broadcasts_the_message_to_the_room`,
+where `streamble.try(:to_gid_param) || streamble` over `[room, :messages]`
+raised on the Symbol instead of taking the fallback.
 
-**Why.** `public_send` on a name known only at run time is dynamic
-dispatch, which is what an AOT target cannot resolve. Grounding the
-literal method name at ingest — every corpus site passes a `:symbol` —
-is what makes `try` compile at all; a dynamic method name is left as a
-plain `try` send and reaches nothing.
-
-**What it costs.** The `try(:x) || fallback` idiom, which is how code
-asks "use `x` if this object has one". campfire's own
-`test/test_helpers/turbo_test_helper.rb` writes exactly that:
+`lower::try_guard` now asks the TREE which classes answer the name and
+emits a narrowing over the fewest `is_a?` tests that cover them:
 
 ```ruby
-streamble.try(:to_gid_param) || streamble
+(s.to_gid_param if s.is_a?(ApplicationRecord) ||
+                   s.is_a?(Opengraph::Location) ||
+                   s.is_a?(Opengraph::Metadata)) || s
 ```
 
-A record answers its gid param on both. A `Symbol` — the `:messages` in
-`turbo_stream_from @room, :messages` — answers nil in Rails and raises
-`undefined method 'to_gid_param' for an instance of Symbol` here, which
-costs `MessagesControllerTest
-#test_creating_a_message_broadcasts_the_message_to_the_room`.
+`nil.is_a?(X)` is false, so the narrowing does everything the nil guard
+did and answers nil — rather than raising — for the non-nil receiver
+that does not respond.
 
-**What would close it.** Not a runtime `respond_to?` — the point of the
-grounding is to avoid one. The static answer: when analysis knows the
-receiver's type and that type has no such method, fold the whole `try`
-to `nil` rather than emitting a call that will raise. That is decidable
-exactly when the lowering already has what it needs, and it leaves the
-untyped-receiver case as it is today.
+**WHAT IT STILL CANNOT SEE, and this is the divergence that remains.**
+The pass reads methods DECLARED in the tree plus the short list the
+pipeline synthesizes on every model. It does not see:
+
+* **runtime methods** — `to_param`, `strip`, `id`. A `try(:strip)`
+  therefore keeps the nil guard, because folding to nil would be wrong
+  for exactly the names the runtime supplies.
+* **column accessors**, which are synthesized from the schema after this
+  pass runs. lobsters' 31 `try` sites are all of this shape
+  (`user.try(:username)`), so they keep the nil guard too — correct
+  there, since the receiver is a nilable `User` that does define it, but
+  correct by accident rather than by decision.
+
+So the divergence is narrower than it was and has not gone: a non-nil
+receiver that does not answer a RUNTIME-supplied or COLUMN-backed name
+still raises where Rails answers nil. Closing it means giving the pass
+the schema and the runtime surface, both of which exist and neither of
+which is wired to it.
+
+**The earlier proposal, and why this is not it.** This entry used to say:
+fold to nil when analysis knows the receiver's type has no such method,
+"leaving the untyped-receiver case as it is today". The untyped receiver
+IS the failing case — campfire's site is a block parameter over a mixed
+array — so that plan would have closed nothing. The defining set is
+knowable where the receiver's type is not.
+
+### A conditional as a boolean operand needs its parens
+
+`lower::try_guard` emits `x.m if cond`, and a modifier-`if` binds looser
+than every boolean operator. Rendered bare as the left operand of `||`,
+`x.m if cond || fallback` re-parses with the fallback INSIDE the
+condition — the expression answers nil and the fallback never runs. The
+Ruby emitter parenthesizes an `If` / `Case` / `RescueModifier` operand
+for that reason, the same call `recv_needs_parens` already made for a
+receiver.
+
+Worth knowing because it is invisible in review: the emitted line is
+valid Ruby either way, and only the parse changes.

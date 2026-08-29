@@ -32,15 +32,6 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
 }
 
-/// The method name carried by a `:symbol` or `"string"` literal argument
-/// (e.g. the first arg of `recv.try(:sym)`), if it is a literal.
-fn literal_method_name(expr: &Expr) -> Option<String> {
-    match &*expr.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-        _ => None,
-    }
-}
 
 /// Extract one multi-write target — `a`, `@a`, or `recv[i]`
 /// (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
@@ -234,39 +225,18 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     }
                 }
             }
-            // ActiveSupport `recv.try(:sym[, args])` — a nil-safe method
-            // call. Lower to `recv && recv.sym(args)`, the same shape as
-            // the `&.` desugar below. `try` is not core Ruby, and its
-            // real definition is `respond_to?(name) && public_send(name,
-            // …)` — dynamic dispatch AOT can't resolve — so the literal
-            // method name is grounded here where it's statically known
-            // (every corpus site passes a `:symbol`/`"string"` literal).
-            // A dynamic method name is left as a plain `try` send.
-            if method == "try" && block.is_none() && recv.is_some() {
-                if let Some(name) = args.first().and_then(literal_method_name) {
-                    let r = recv.unwrap();
-                    let rest: Vec<Expr> = args.into_iter().skip(1).collect();
-                    let call = Expr::new(
-                        span,
-                        ExprNode::Send {
-                            recv: Some(r.clone()),
-                            method: Symbol::from(name),
-                            args: rest,
-                            block: None,
-                            parenthesized: true,
-                        },
-                    );
-                    return Ok(Expr::new(
-                        span,
-                        ExprNode::BoolOp {
-                            op: BoolOpKind::And,
-                            surface: BoolOpSurface::Symbol,
-                            left: r,
-                            right: call,
-                        },
-                    ));
-                }
-            }
+            // ActiveSupport `recv.try(:sym[, args])` USED TO BE GROUNDED
+            // HERE, to `recv && recv.sym(args)`. That is the `&.` shape,
+            // and `try` is not `&.`: its definition is
+            // `respond_to?(name) && public_send(name, …)`, so it guards
+            // DEFINEDNESS and the desugar guarded NILNESS. The two agree
+            // exactly when the receiver either is nil or does define the
+            // method — which covers most sites and not all, and the one
+            // it misses raises where Rails answers nil.
+            //
+            // Deciding it needs the whole tree (which classes define the
+            // name), so it moved to `lower::try_guard`. Ingest leaves the
+            // send alone.
             // ActiveSupport `hash.reverse_merge(defaults)` — `defaults`
             // fills in only the keys `hash` lacks (hash's values win). It
             // is exactly `defaults.merge(hash)` in core Ruby, so lower to
