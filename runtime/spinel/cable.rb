@@ -56,6 +56,13 @@ module Cable
 
   # Handle one inbound WebSocket frame. Only the `subscribe` command is
   # acted on; pings/unsubscribes are ignored (teardown drops fds).
+  #
+  # NOT AUTHORIZED, and that is a ledgered divergence — see
+  # docs/pipeline/runtime.md, "A cable subscribe is not authorized, on
+  # either lane". The frame names a channel and nothing routes on it, so
+  # the app's `subscribed` never runs and there is no `current_user` to
+  # test against: whoever can spell the stream name gets its fan-out.
+  # Closing it is #71 items 3 and 4, not stream-name signing.
   def self.handle_message(ws, data)
     cmd = Tep::Json.get_str(data, "command")
     if cmd != "subscribe"

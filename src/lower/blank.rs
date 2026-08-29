@@ -834,6 +834,49 @@ fn blank_str(span: crate::span::Span, mut r: Expr) -> Expr {
     plain_empty(span, send0(span, r, "strip", Ty::Str))
 }
 
+/// The grounded form a LATER pass must synthesize instead of spelling
+/// `blank?` itself, for a blankness guard on a string COLUMN.
+///
+/// THIS PASS HAS ALREADY RUN by the time `model_to_library` synthesizes
+/// a method body, so a `blank?` send built there is never grounded and
+/// never reported either — `blank_unlowered` only names sites this pass
+/// walked. It reaches the emitters as a bare dynamic dispatch: harmless
+/// on the CRuby overlay, which monkey-patches `Object`, and a runtime
+/// `NoMethodError: undefined method 'blank?' for an instance of String`
+/// on spinel, where it compiled fine and failed on the first request
+/// that ran the callback.
+///
+/// Two callers, both guarding a column the schema types `Ty::Str`:
+///
+/// * `lower::secure_token` — `has_secure_token`'s `before_create`.
+/// * `model_to_library::markers::rewrite_column_or_assign` — a
+///   `self.<col> ||= v` on a string column.
+///
+/// ## Why the RUNTIME predicate and not `blank_str`
+///
+/// Because a string column does not mean a String value here. Rails
+/// type-casts on assignment, so `create!(client_message_id: 999)` into
+/// a `t.string` stores `"999"`; this runtime's generated writer is a
+/// bare `@col = value`, so the attribute still holds the Integer when
+/// `before_create` runs. campfire's own suite does exactly that
+/// (`users/sidebars_controller_test.rb:17`), and grounding this guard
+/// to `blank_str`'s `(r || "").strip.empty?` turned that into
+/// `undefined method 'strip' for an instance of Integer` — a test that
+/// had been green.
+///
+/// **A schema type describes the COLUMN, not what the attribute holds
+/// before the INSERT.** The bare `blank?` tolerated the Integer only
+/// because ActiveSupport reopens `Object`; `ActiveSupport.blank?` is
+/// that same value-branching predicate as a call the strict targets can
+/// resolve, and it carries the identical whitespace rule (`" "` is
+/// blank), so a synthesized site and a source-written one still agree.
+///
+/// The uncast attribute is a divergence in its own right and is
+/// ledgered separately — fixing it belongs in the writer, not here.
+pub(crate) fn synthesized_string_blank(span: crate::span::Span, recv: Expr) -> Expr {
+    runtime_predicate(span, recv, Pred::Blank, Ty::Bool)
+}
+
 fn nil_check(span: crate::span::Span, r: Expr) -> Expr {
     send0(span, r, "nil?", Ty::Bool)
 }

@@ -230,6 +230,46 @@ record. The framework never does: `form_with` picks its action from
 `persisted?`, and so does `dom_id`. `record.id.nil?` is `false` here
 where Rails says `true`.
 
+### An attribute writer does not TYPE-CAST to the column's type
+
+Rails casts on assignment: `Message.create!(client_message_id: 999)`
+into a `t.string` column stores the String `"999"`, and
+`record.client_message_id` reads back `"999"` before and after the
+INSERT. The writer this runtime generates is a bare `@col = value`, so
+the attribute holds the Integer `999` until the row is written, and the
+adapter's `escape_string` is what finally renders it.
+
+**Why.** A cast per write means every generated writer carries the
+column's coercion, in every target — and the coercions do not agree
+across them (`999.to_s` is not `String(999)` is not `"" + 999`). The
+value reaches the database through one escaper per column type, which
+is already the single place that knows the column's type, so a write
+that goes straight to storage arrives correct without the writer
+knowing anything.
+
+**What it costs.** Anything that reads the attribute BETWEEN the
+assignment and the INSERT sees the uncast value — which in practice
+means a `before_save`/`before_create` callback, and app code that reads
+back what it just assigned. campfire's suite writes
+`create! client_message_id: 999` into a string column
+(`test/controllers/users/sidebars_controller_test.rb:17`), and its
+`before_create` guard reads that attribute.
+
+**What depends on it.** Any synthesized guard over a string column must
+branch on the VALUE, not on the column type — which is why
+`lower::blank::synthesized_string_blank` grounds to
+`ActiveSupport.blank?` rather than to the String form
+`(r || "").strip.empty?`. The String form raises `undefined method
+'strip' for an instance of Integer` on exactly the case above. **A
+schema type describes the column, not what the attribute holds before
+the INSERT**, and a lowering that reads `attributes.fields` is reading
+the former.
+
+The fix, when it is worth making, belongs in the writer — one cast per
+string column, at the one site that already knows the type — and it
+changes what every reader sees, so it is a change to make deliberately
+rather than as a side effect.
+
 ### An absent UNSIGNED cookie reads as `""`, not `nil`
 
 `cookies[:missing]` answers `""`; Rails answers `nil`.
@@ -1201,17 +1241,81 @@ signature that is real but incompatible would be worse than one that is
 absent and labelled.
 
 **What it costs.** A stream name is tamperable: a client can subscribe
-to any stream whose name it can spell. What that does NOT do is defeat
-a channel that guards its own stream — the name is only its INPUT.
-campfire's `RoomMessagesChannel` re-derives the room from the name and
-then asks `user.rooms.find_by(id: room.id)`, so a forged name buys a
-subscription to a room the user already belongs to. A channel that
-trusted the name alone would be exposed, and none in the corpus does.
+to any stream whose name it can spell. Signing would close that, and
+nothing else — a verified name still carries no expiry and no binding
+to a user, which is why campfire guards its room streams with a channel
+rather than with the signature. That guard is a separate divergence,
+and it is the one below.
 
 Real signing lands in one commit across all three ends —
 `turbo_stream_from`, `decode_stream_name`, and
 `Turbo::Streams::StreamName` — or not at all: two of them agreeing and
 the third not is the failure that looks like it works.
+
+### A cable subscribe is not authorized, on either lane
+
+The subscribe path is the same shape in both runtimes and neither
+instantiates a channel:
+
+- spinel — `Cable.handle_message` (`runtime/spinel/cable.rb`) reads
+  `identifier["signed_stream_name"]`, decodes it, and calls
+  `Tep::Broadcast.subscribe_ws(stream, ws.fd)`.
+- CRuby overlay — `Cable::Connection#handle_message`
+  (`runtime/spinel/scaffold/ruby_overlay/cable.rb`) decodes the same
+  field and calls `Registry.subscribe(stream, self)`.
+
+Between the decode and the subscribe there is no `subscribed` callback,
+no `reject`, and no identity to test: `identified_by` and
+`ApplicationCable::Connection#connect` are not implemented, so
+`current_user` is never established on either lane. **A client that can
+spell a stream name receives that stream's fan-out.**
+
+**Why.** Channel subscription dispatch is unimplemented — the subscribe
+frame names a channel and nothing routes on it (see
+`runtime/spinel/action_cable.rb`, and `Turbo::Streams::StreamName::
+ClassMethods#verified_stream_name_from_params`, whose `params` raises
+for exactly this reason). Bare `signed_stream_name` was implemented
+first because it is the one path Turbo's own
+`<turbo-cable-stream-source>` needs to deliver a fragment.
+
+**What it costs.** The path implemented is precisely the path an app's
+channel guard exists to close. campfire prepends
+`RoomStreamsAreAuthorized` onto `Turbo::StreamsChannel`:
+
+```ruby
+def subscribed
+  if RoomMessagesChannel.guarded_stream?(verified_stream_name_from_params)
+    reject                 # ...so the stock channel isn't a way around
+```
+
+and its comment states the reason — "authorizing room messages only in
+`RoomMessagesChannel` would leave the stock channel as a way around it:
+same signed stream name, no membership check." The stock channel is
+what this runtime implements, so a subscribe to `<gid>:messages`
+delivers a room's messages **with no membership check at all** — not,
+as an earlier revision of this entry claimed, a subscription to a room
+the user already belongs to. `RoomMessagesChannel#subscribed`, which
+does ask `user.rooms.find_by(id: room.id)`, never runs.
+
+The name is not a secret either: it is a GlobalID
+(`GlobalID::Locator.locate gid_param, only: Room`), an identifier
+rather than a capability.
+
+**Not a mitigation, but bounds on the blast radius:** fan-out is
+in-process and single-worker, and the only frames published are those
+an `after_commit` hook records. A subscriber learns nothing about
+streams no hook writes to.
+
+**This is not fixed by signing.** Signing decides whether the name was
+tampered with; authorization decides whether the named stream may be
+joined. campfire's own channel comment makes the point — Turbo's stock
+channel "verifies only the signature on the stream name. That name
+carries no expiry and no binding to a user." Both ends of that need
+closing, and only the first is the entry above.
+
+The fix is connection identity plus named-channel subscribe dispatch —
+items 3 and 4 of rubys/roundhouse#71 — after which the app's own
+`subscribed` runs and this entry is retired rather than qualified.
 
 ### `strip_tags` leaves entity references alone
 

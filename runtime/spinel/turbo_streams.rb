@@ -14,17 +14,29 @@
 # is the third end of the same wire and matches them rather than
 # inventing a fourth spelling.
 #
-# WHAT THAT DOES AND DOES NOT COST. An unsigned name is tamperable: a
-# client can subscribe to any stream it can spell. That is a real
-# divergence and it is ledgered in docs/pipeline/runtime.md. What it
-# does NOT do is defeat campfire's `RoomMessagesChannel`, which is the
-# one channel in the corpus that guards its stream — the name is only
-# the channel's INPUT. It re-derives the room from the name and then
-# asks `user.rooms.find_by(id: room.id)`, so a forged name buys a
-# subscription to a room the user is already a member of. Real HMAC
-# signing belongs here, with `turbo_stream_from` and `decode_stream_name`
-# changed in the same commit, once the key derivation question
-# (message_verifier.rb's iteration count vs Rails') is settled.
+# WHAT THAT COSTS. An unsigned name is tamperable: a client can
+# subscribe to any stream it can spell. Real HMAC signing belongs here,
+# with `turbo_stream_from` and `decode_stream_name` changed in the same
+# commit, once the key derivation question (message_verifier.rb's
+# iteration count vs Rails') is settled.
+#
+# DO NOT READ campfire's `RoomMessagesChannel` AS A MITIGATION FOR THAT.
+# It does guard its stream — it re-derives the room from the name and
+# asks `user.rooms.find_by(id: room.id)` — but it never runs here, and
+# the `ClassMethods` at the bottom of this file are the proof: their
+# `params` raises because channel subscription dispatch is not
+# implemented. The subscribe path this runtime does implement is the
+# bare `signed_stream_name` one, which is precisely the path campfire's
+# `RoomStreamsAreAuthorized` is PREPENDED onto `Turbo::StreamsChannel`
+# to close ("the stock channel as a way around it: same signed stream
+# name, no membership check"). So a subscribe lands with no membership
+# check at all.
+#
+# That is a SECOND divergence, independent of this file's: signing
+# decides whether the name was tampered with, authorization decides
+# whether the named stream may be joined. Ledgered separately in
+# docs/pipeline/runtime.md ("A cable subscribe is not authorized, on
+# either lane"); the fix is rubys/roundhouse#71 items 3 and 4.
 #
 # ONLY WHAT IS REACHED. The module's `signed_stream_name(streamables)`
 # and its `stream_name_from` helper are not here: `turbo_stream_from`

@@ -385,6 +385,12 @@ module Cable
 
     private
 
+    # NOT AUTHORIZED — the same gap as the spinel lane's
+    # `Cable.handle_message`, ledgered together in
+    # docs/pipeline/runtime.md, "A cable subscribe is not authorized, on
+    # either lane". No channel is instantiated between the decode and
+    # the subscribe, and `connect`/`identified_by` are unimplemented, so
+    # there is no `current_user` to test. #71 items 3 and 4.
     def handle_message(raw)
       message = JSON.parse(raw)
       return nil unless message["command"] == "subscribe"

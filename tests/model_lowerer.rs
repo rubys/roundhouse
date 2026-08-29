@@ -914,7 +914,24 @@ end
         .find(|m| m.name.as_str() == "after_initialize")
         .expect("after_initialize lowered");
     let hook_dbg = format!("{:?}", hook.body);
-    assert!(hook_dbg.contains("blank?"), "||= rewritten blank-aware: {hook_dbg}");
+    // GROUNDED, not a `blank?` send. This assertion used to read
+    // `contains("blank?")`, which passed on a bare dynamic dispatch —
+    // the shape that compiled and then raised `NoMethodError` on
+    // spinel. `lower::blank` has already run by the time this rewrite
+    // builds the guard, so it grounds the String itself; see
+    // `blank::synthesized_string_blank` and
+    // tests/synthesized_blank_is_grounded.rs.
+    // GROUNDED to the runtime predicate, not a `blank?` send on the
+    // receiver. This assertion used to read `contains("blank?")`, which
+    // passed on a bare dynamic dispatch — the shape that compiled and
+    // then raised `NoMethodError` on spinel. `lower::blank` has already
+    // run by the time this rewrite builds the guard, so it grounds the
+    // call itself; see `blank::synthesized_string_blank` and
+    // tests/synthesized_blank_is_grounded.rs.
+    assert!(
+        hook_dbg.contains("ActiveSupport"),
+        "||= rewritten blank-aware, and grounded: {hook_dbg}"
+    );
     let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
     assert!(format!("{:?}", init.body).contains("after_initialize"), "hook tail in initialize");
 }

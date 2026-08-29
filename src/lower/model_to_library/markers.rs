@@ -502,16 +502,12 @@ fn rewrite_column_or_assign(e: &mut Expr, model: &Model) {
                 parenthesized: false,
             },
         );
-        let blank = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(self_read),
-                method: Symbol::from("blank?"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
+        // Grounded rather than spelled `blank?`: `lower::blank` runs
+        // before this pass, so a synthesized send is never lowered and
+        // never reported. The match above already established the
+        // column is `Ty::Str`, which is the grounding's precondition.
+        // See `blank::synthesized_string_blank`.
+        let blank = crate::lower::blank::synthesized_string_blank(span, self_read);
         let assign = Expr::new(
             span,
             ExprNode::Send {

@@ -30,9 +30,27 @@ module Tep
   # — because the operator's next question is always "which request?".
   # stderr, not stdout: the access banner owns stdout, and a crash
   # report interleaved into it is the thing you grep past.
+  #
+  # THE FRAMES ARE THE POINT WHEN THE APP IS AOT-COMPILED. A 500 from
+  # the emitted binary used to be one line with no site, so locating it
+  # meant re-deriving the call path by reading the emit — the summary
+  # line names the request, and nothing names the statement. Spinel
+  # captures a native backtrace under `spin build --debug`
+  # (`SPIN_DEBUG=1`), and without this it captured one nobody printed.
+  #
+  # `backtrace` answers nil for an exception that was never raised and
+  # an EMPTY array on a release build (spinel's `backtrace_symbols` is
+  # a no-op stub unless `--debug`), so both are normal and neither is
+  # worth a line. The summary keeps Puma's shape whatever happens.
   def self.log_dispatch_error(verb, path, e)
     $stderr.puts("[tep] 500 " + verb + " " + path + " -- " +
                  e.class.to_s + ": " + e.message)
+    frames = e.backtrace
+    if !frames.nil?
+      frames.each do |frame|
+        $stderr.puts("[tep]        " + frame)
+      end
+    end
   end
 
   class Server

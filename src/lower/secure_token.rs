@@ -118,10 +118,20 @@ pub(crate) fn push_secure_token_methods(
         // runtime's storage defaults a string slot to `""` rather than
         // nil, so a nil test would never fire (the same reasoning
         // `markers::rewrite_column_or_assign` spells out for `||=`).
+        //
+        // GROUNDED HERE, not spelled `blank?`: `lower::blank` has
+        // already run by the time this pass builds a body, so a bare
+        // send would reach the emitters undispatched — see
+        // `blank::synthesized_string_blank`. A token column is a string
+        // column, which is what makes the String grounding the right
+        // one.
         let guarded = Expr::new(
             span,
             ExprNode::If {
-                cond: send(span, Some(column_read(span, &decl.attr)), "blank?", vec![]),
+                cond: crate::lower::blank::synthesized_string_blank(
+                    span,
+                    column_read(span, &decl.attr),
+                ),
                 then_branch: assign_token(span, &decl),
                 else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
             },
