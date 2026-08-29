@@ -183,6 +183,15 @@ module ActionCable
   end
 
   module Connection
+    # What `reject_unauthorized_connection` raises. Rails names it the
+    # same way, and `Cable.upgrade` is the one place that rescues it:
+    # an unauthorized handshake is answered 401 and never hijacked, so
+    # the socket is closed by Puma rather than parked in the reactor.
+    module Authorization
+      class UnauthorizedError < StandardError
+      end
+    end
+
     class Base
       # `identified_by :current_user` is a CLASS-BODY call, so it runs at
       # LOAD time. A Connection that cannot answer it does not merely
@@ -191,10 +200,31 @@ module ActionCable
         names.each { |name| attr_accessor name }
       end
 
+      # THE COOKIE JAR OF THE HANDSHAKE REQUEST, and the whole reason
+      # identity works: a WebSocket upgrade is an ordinary HTTP GET, so
+      # it carries the same `Cookie:` header the app's controllers
+      # authenticate from. campfire's `ApplicationCable::Connection`
+      # includes `Authentication::SessionLookup` and calls
+      # `cookies.signed[:session_token]` — the SAME method object its
+      # controllers use. Handing it a real signed jar is what makes
+      # `connect` the app's code rather than a reimplementation of it.
+      attr_reader :cookies
+
+      def initialize(cookies)
+        @cookies = cookies
+      end
+
+      # Rails' Base does not define `connect`; a subclass that wants
+      # identity does. Defining a no-op here means `Cable.upgrade` can
+      # call it unconditionally, so an app whose Connection declares no
+      # identifiers connects anonymously instead of erroring.
+      def connect
+        nil
+      end
+
       def reject_unauthorized_connection
-        raise NotImplementedError,
-              "ActionCable::Connection#reject_unauthorized_connection: /cable " \
-              "connections are not identified yet"
+        raise Authorization::UnauthorizedError,
+              "ActionCable::Connection: the handshake carried no identified user"
       end
     end
   end

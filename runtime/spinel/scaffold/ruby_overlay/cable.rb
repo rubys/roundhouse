@@ -283,12 +283,19 @@ module Cable
     attr_reader :socket
     attr_accessor :monitor
 
-    def initialize(env, socket)
+    # `identity` is the app's own `ApplicationCable::Connection`,
+    # already `connect`ed on the request thread — or nil for an app that
+    # declares none. Everything a channel asks about the subscriber
+    # (`current_user`) is read off it.
+    attr_reader :identity
+
+    def initialize(env, socket, identity = nil)
       @socket = socket
       @buffer = +""
       @subscriptions = {}   # stream name → identifier JSON, echoed back
       @monitor = nil
       @closed = false
+      @identity = identity
 
       @driver = WebSocket::Driver.rack(EnvAdapter.new(env, self), protocols: PROTOCOLS)
       @driver.on(:open)    { send_json({ "type" => "welcome" }) }
@@ -453,12 +460,65 @@ module Cable
     end
   end
 
+  # Resolve the connection's identity from the handshake, by running the
+  # APP's own `ApplicationCable::Connection#connect`.
+  #
+  # WHY THE APP'S CODE AND NOT A COOKIE LOOKUP HERE: `connect` is where
+  # an app decides who is on the other end, and every app decides it
+  # differently. campfire's reads `cookies.signed[:session_token]` and
+  # loads a `Session`; reimplementing that here would hardcode one app's
+  # authentication into the runtime and silently diverge the moment the
+  # app changed it. The runtime's job is to hand `connect` a real cookie
+  # jar and to honour its verdict.
+  #
+  # Returns the connected instance, or nil when the app rejected the
+  # handshake — which `upgrade` turns into a refusal rather than an
+  # anonymous socket.
+  #
+  # An app with no `ApplicationCable::Connection` at all (nothing in
+  # `app/channels/`) connects ANONYMOUSLY rather than being refused:
+  # Turbo stream fan-out predates identity and must keep working for an
+  # app that never asked for it.
+  def self.identify(env)
+    klass = connection_class
+    return NO_IDENTITY if klass.nil?
+
+    jar = ActionController::CookieJar.new(CgiIo.parse_cookies(env["HTTP_COOKIE"]))
+    connection = klass.new(jar)
+    connection.connect
+    connection
+  rescue ActionCable::Connection::Authorization::UnauthorizedError
+    nil
+  end
+
+  # Sentinel for "this app declares no connection class", kept distinct
+  # from nil so `upgrade` can tell "no identity wanted" from "identity
+  # wanted and refused".
+  NO_IDENTITY = :anonymous
+
+  # `ApplicationCable::Connection` is Rails' fixed convention name — the
+  # same convention `runtime/action_cable.rb` already encodes by giving
+  # `ActionCable::Connection::Base` a body. Guarded because an ingested
+  # app need not have channels at all.
+  def self.connection_class
+    return nil unless defined?(ApplicationCable::Connection)
+    ApplicationCable::Connection
+  end
+
   # Hijack the socket out of Puma and hand it to the reactor. Called
   # from config.ru's Rack lambda on a request thread; returns as soon as
   # the attach is queued.
+  #
+  # NIL when the app refused the handshake. Identity is resolved BEFORE
+  # the hijack on purpose: a refusal then still has an intact Rack
+  # connection to answer 401 on, where a rejected socket already taken
+  # out of Puma could only be closed without a status.
   def self.upgrade(env)
+    identity = identify(env)
+    return nil if identity.nil?
+
     socket = env["rack.hijack"].call
-    conn = Connection.new(env, socket)
+    conn = Connection.new(env, socket, identity == NO_IDENTITY ? nil : identity)
     Reactor.attach(conn)
     conn
   end

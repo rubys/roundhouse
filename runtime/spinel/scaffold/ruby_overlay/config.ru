@@ -40,9 +40,19 @@ app = lambda do |env|
   # from that point on; this returns as soon as the attach is queued.
   # The Rack tuple (-1, {}, []) is Rack's convention for "the response
   # was handled out-of-band" — Puma stops touching the connection.
+  #
+  # `upgrade` runs the app's `ApplicationCable::Connection#connect`
+  # first and answers nil when the app rejected the handshake, so an
+  # unauthenticated client gets a 401 on an intact Rack connection
+  # rather than a socket that opens and then goes quiet. It needs a DB
+  # handle for the same reason a request does — campfire's `connect`
+  # loads a `Session` — so it leases one the same way.
   if env["PATH_INFO"] == "/cable"
-    Cable.upgrade(env)
-    return [-1, {}, []]
+    if Db.with_connection { Cable.upgrade(env) }
+      return [-1, {}, []]
+    else
+      return [401, { "content-type" => "text/plain" }, ["Unauthorized\n"]]
+    end
   end
 
   # Lease one pooled DB connection for the whole request so concurrent
