@@ -1245,12 +1245,14 @@ fn ruby_runtime_files(
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
     apply_runtime_gem_wiring(&mut files);
-    // AGAIN, on purpose. `spinel_files` appended the mixin block to the
-    // spinel tree's boot.rb, and the overlay's own boot.rb then replaced
-    // that file wholesale at `dedupe_last_wins` above — taking the block
-    // with it. Each final tree gets the block exactly once; this is the
-    // ruby family's turn, not a second copy.
-    apply_module_mixins(&mut files, app);
+    // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
+    // appended a commented-out block to the spinel tree's boot.rb (that
+    // target cannot perform a mixin — see `apply_module_mixins`), and the
+    // overlay's own boot.rb then replaced that file wholesale at
+    // `dedupe_last_wins` above, taking the block with it. Each final tree
+    // gets the block exactly once; this is the ruby family's turn, and
+    // the ruby family is the one that can run the lines.
+    apply_module_mixins(&mut files, app, true);
     Ok(files)
 }
 
@@ -1412,19 +1414,42 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
 /// the same ordering from `to_prepare`, which runs after eager load.
 ///
 /// Only mixins `lower::module_mixins` kept reach here — it has already
-/// dropped and reported the ones naming a constant this tree does not
-/// define, so every line written here resolves.
+/// dropped and reported the ones naming a constant no tree defines, so
+/// every line written here resolves.
 ///
 /// Appended rather than spliced at a marker: it is the last thing in the
 /// file, so there is nothing below it to anchor against and nothing a
 /// scaffold edit could shift it away from.
-fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App) {
+///
+/// `perform` IS FALSE FOR THE SPINEL TREE, and the reason is spinel's,
+/// not ours. `X.prepend Y` through an explicit receiver is refused
+/// outright — "the class graph, ancestor chain, and method/ivar layout
+/// are baked at compile time, so a class cannot be restructured through
+/// an explicit receiver" — which stopped the campfire binary building
+/// the moment `Turbo::StreamsChannel` existed for the line to name.
+///
+/// AND THE WORKAROUND ITS DIAGNOSTIC RECOMMENDS IS WORSE THAN THE
+/// REFUSAL. "Move the `prepend` inside `class Greeter ... end`" compiles
+/// as a REOPEN and does nothing: a `Guard#hello` calling `super` prints
+/// `guarded hi` under CRuby and `hi` from the spinel binary, with no
+/// diagnostic. Emitting that form would put campfire's authorization
+/// module back in the tree, tested, and out of the lookup chain — the
+/// exact failure `lower::module_mixins` exists to prevent, minus the
+/// report. Filed upstream; a COMMENT naming the dropped line goes in the
+/// emitted boot.rb instead, so it is visible where someone would look.
+///
+/// It costs nothing on that lane TODAY: spinel's `Cable.handle_message`
+/// does not dispatch a subscribe to a channel at all, so the guard would
+/// not run even if it were installed (docs/pipeline/runtime.md, "A cable
+/// subscribe is not authorized on the SPINEL lane"). It is a gap that
+/// has to close before the other one does.
+fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, perform: bool) {
     use std::fmt::Write;
 
     if app.module_mixins.is_empty() {
         return;
     }
-    let mut block = String::from(
+    let mut block = String::from(if perform {
         "\n# Module mixins the app registers in config/initializers/ \
 (generated —\n\
          # see apply_module_mixins). At the END of boot because a mixin names\n\
@@ -1433,12 +1458,22 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App) {
          #\n\
          # `prepend` inserts AHEAD of the target in the lookup chain, which is\n\
          # what lets the module's method call `super` — an `include` would\n\
-         # never run where the class defines its own.\n",
-    );
+         # never run where the class defines its own.\n"
+    } else {
+        "\n# Module mixins the app registers in config/initializers/, NOT\n\
+         # PERFORMED on this target (generated — see apply_module_mixins).\n\
+         #\n\
+         # Spinel refuses `X.prepend Y` through an explicit receiver: the\n\
+         # ancestor chain is baked at compile time. Its diagnostic suggests\n\
+         # moving the call inside a `class X ... end` reopen, which compiles\n\
+         # and then does nothing at all — so that form is not emitted either.\n\
+         # Each line below would have run on the ruby family:\n"
+    });
     for mixin in &app.module_mixins {
         let _ = writeln!(
             block,
-            "{}.{} {}",
+            "{}{}.{} {}",
+            if perform { "" } else { "#   " },
             mixin.target.as_str(),
             mixin.kind.as_str(),
             mixin.module.as_str()
@@ -2120,7 +2155,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_controller_dispatch(&mut files, app, false);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
-    apply_module_mixins(&mut files, app);
+    apply_module_mixins(&mut files, app, false);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

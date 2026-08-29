@@ -132,42 +132,19 @@ module Broadcasts
   TRANSPORTS[0].broadcast("", "")
 end
 
-# The seam a Rails app's own tests MOCK.
+# `Turbo::StreamsChannel` — the seam a Rails app's own tests MOCK, and
+# the four `broadcast_*_to` methods that reach `record` above — USED TO
+# LIVE HERE. It is one class up in `turbo_streams.rb` now, beside the
+# channel half of the same constant.
 #
-# `Turbo::StreamsChannel.broadcast_replace_to` is where turbo-rails
-# actually sends a stream, and an app that wants to assert "this action
-# broadcast exactly once" stubs it — campfire's `messages_controller_test`
-# does it four times. Against an emitted tree those four could not even
-# reach their assertion: the constant did not exist, so the test died at
-# `uninitialized constant Turbo::StreamsChannel` before the request ran.
+# WHY IT MOVED. turbo-rails has ONE `Turbo::StreamsChannel`: an
+# `ActionCable::Channel::Base` subclass that also carries the class-level
+# broadcast API. Splitting it left this file defining a MODULE by that
+# name and `turbo_streams.rb` trying to open a CLASS by it, which is a
+# `TypeError` at require time — the whole campfire suite went to 0 of 288
+# on it. The definitions had to join, and they joined in the file named
+# after the constant rather than in this one, which is named after
+# `Broadcasts`.
 #
-# RE-DERIVED, because this file used to carry the opposite conclusion:
-# that binding the seam meant a facade in every one of the per-target
-# `Broadcasts` twins. It does not. The seam is only ever reached from a
-# TEST, and the only tests that mock it are the app's own, which run on
-# the ruby family. A strict target has no mocha and no test that names
-# this constant, so its `Broadcasts` twin owes nothing.
-#
-# One hop, and `record` still owns the log: with no stub in place the
-# behaviour is byte-identical to calling `record` directly. With a stub,
-# nothing is logged — which is exactly what Rails does when the channel
-# is mocked out.
-module Turbo
-  module StreamsChannel
-    def self.broadcast_append_to(stream, target:, html:, attributes: "")
-      Broadcasts.record(action: :append, stream: stream, target: target, html: html, attributes: attributes)
-    end
-
-    def self.broadcast_prepend_to(stream, target:, html:, attributes: "")
-      Broadcasts.record(action: :prepend, stream: stream, target: target, html: html, attributes: attributes)
-    end
-
-    def self.broadcast_replace_to(stream, target:, html:, attributes: "")
-      Broadcasts.record(action: :replace, stream: stream, target: target, html: html, attributes: attributes)
-    end
-
-    def self.broadcast_remove_to(stream, target:, attributes: "")
-      Broadcasts.record(action: :remove, stream: stream, target: target, html: "", attributes: attributes)
-    end
-  end
-end
+# This file keeps `Broadcasts.record`, which is what those methods call
+# and what the log belongs to; `turbo_streams.rb` requires it.

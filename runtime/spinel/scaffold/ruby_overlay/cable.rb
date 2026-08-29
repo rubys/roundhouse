@@ -27,20 +27,32 @@
 #   * The heartbeat rides the selector's own select timeout rather than
 #     a Concurrent::TimerTask. One less thread, one less dependency,
 #     same 3-second cadence.
-#   * There is no worker pool. Action Cable hands each inbound frame to
-#     one because a channel action runs arbitrary app code and needs its
-#     own AR connection. Nothing here dispatches to app code yet — a
-#     subscribe is a hash write — so frames are handled inline on the
-#     reactor thread. A worker pool is what this grows when channel
-#     subscription dispatch lands.
+#   * There IS a worker pool, and it is small. A subscribe now runs the
+#     app's own `subscribed` — `RoomMessagesChannel` resolves a GlobalID
+#     and asks `user.rooms.find_by`, campfire's `PresenceChannel` WRITES
+#     — so a subscribe is arbitrary app code holding a database handle,
+#     and running it on the reactor thread would let one slow query stall
+#     every other connection's frames. Ping and delivery stay on the
+#     reactor; only app code moves.
+#   * The pool shares `Db`'s connection pool with Puma's threads, so
+#     `CABLE_WORKERS` above `RAILS_MAX_THREADS` buys queueing inside
+#     `Db.with_connection` rather than concurrency. Against
+#     `default_transaction_mode: immediate` SQLite there is one writer
+#     whatever either number says.
 #   * A connection whose outbound buffer passes MAX_BUFFER_BYTES is
 #     closed. Action Cable buffers without a ceiling; here one client
 #     that stops reading would otherwise be unbounded memory.
 #
 # THREADING CONTRACT, in one line: everything below runs on the reactor
-# thread except `Reactor.post`, `Reactor.attach` and
-# `Registry.broadcast`. That is why SUBS and the connection table carry
-# no mutex — they have exactly one writer.
+# thread except `Reactor.post`, `Reactor.attach`, `Registry.broadcast`
+# and the `Workers` pool. That is why SUBS and the connection table
+# carry no mutex — they have exactly one writer.
+#
+# The pool is the one place that breaks the single-thread rule, and it
+# is fenced: a worker only ever touches the CHANNEL OBJECT it was handed
+# (which nothing else has a reference to yet) and hands its answer back
+# through `Reactor.post`. No worker reads SUBS, the connection table, a
+# driver or a socket.
 #
 # Single-worker only. Clustered Puma (workers > 1) needs an inter-worker
 # pubsub — Redis in campfire's own deployment — behind the same
@@ -48,7 +60,6 @@
 require "nio"
 require "websocket/driver"
 require "json"
-require "base64"
 
 module Cable
   # Action Cable's browser client requires both of these: it refuses a
@@ -218,6 +229,131 @@ module Cable
     end
   end
 
+  # The pool that runs APP code.
+  #
+  # A subscribe frame ends in the app's own `subscribed`, which queries
+  # (and in campfire's `PresenceChannel`, writes) — arbitrary work
+  # holding a database handle. Action Cable hands each inbound frame to a
+  # worker for exactly this reason, and the reason survives the rest of
+  # this file's departures from it: the reactor thread is the one thread
+  # every OTHER connection's frames go through.
+  #
+  # FIXED SIZE, NOT ELASTIC. The bound that matters is `Db`'s connection
+  # pool, not this queue: a fifth worker on a three-handle pool parks
+  # inside `Db.with_connection` instead of doing work. Sized from the
+  # same env var Puma reads, so the two move together, and overridable
+  # for a benchmark that wants to see the difference.
+  #
+  # NO PER-CONNECTION ORDERING, deliberately and like Rails: two
+  # subscribe frames from one client may settle in either order. They
+  # carry different identifiers and register different streams, so the
+  # order is not observable — what WOULD be observable is a subscribe
+  # racing its own unsubscribe, which `Connection#channels` serializes by
+  # only ever being mutated on the reactor thread.
+  #
+  # An exception in app code is caught at the boundary: it becomes a
+  # rejected subscription, not a dead worker. A pool that shrinks by one
+  # every time a channel raises is the failure that takes hours to see.
+  module Workers
+    SIZE = [(ENV["CABLE_WORKERS"] || ENV["RAILS_MAX_THREADS"] || "3").to_i, 1].max
+    START_MUTEX = Mutex.new
+    QUEUE = Queue.new
+
+    @threads = nil
+
+    def self.post(&block)
+      ensure_started
+      QUEUE << block
+      nil
+    end
+
+    def self.ensure_started
+      return if @threads
+
+      START_MUTEX.synchronize do
+        return if @threads
+
+        @threads = Array.new(SIZE) do |i|
+          t = Thread.new { run }
+          t.name = "cable-worker-#{i}" if t.respond_to?(:name=)
+          t
+        end
+      end
+      nil
+    end
+
+    def self.run
+      loop do
+        task = QUEUE.pop
+        begin
+          task.call
+        rescue StandardError
+          # Already reported at the dispatch boundary; swallowed here so
+          # one bad frame cannot cost the pool a thread.
+          nil
+        end
+      end
+    end
+  end
+
+  # Routing a subscribe frame to a channel, and reading back what it
+  # asked for.
+  #
+  # A PLAIN MODULE OVER PLAIN OBJECTS — no socket, no reactor, no
+  # registry. That is what makes the authorization decision testable on
+  # its own (`tests/overlay_cable_dispatch.rb` runs campfire's real
+  # channels through it with no gems installed), and it is also the
+  # thread fence: everything here touches only the channel object the
+  # caller just created.
+  module Dispatch
+    # `channel` is nil for a refusal. `streams` is what `subscribed`
+    # asked for, in the order it asked.
+    Outcome = Struct.new(:channel, :streams, :error)
+
+    def self.rejected?(outcome)
+      outcome.channel.nil?
+    end
+
+    # Run `klass#subscribed` for `identifier` on this connection.
+    #
+    # NOTHING IS REGISTERED HERE. The caller decides what to do with the
+    # answer, on the thread that owns the registry.
+    #
+    # A raise is an outcome, not an escape: campfire's `room_from`
+    # rescues `RecordNotFound` itself, but a channel that hits an
+    # unrescued error must refuse the subscription rather than leave the
+    # client waiting for a confirmation that never comes.
+    def self.subscribe(klass, connection, identifier_json, identifier)
+      channel = klass.new(
+        connection, identifier_json, ActionCable::Channel::Parameters.new(identifier)
+      )
+      channel.subscribed
+      if channel.subscription_rejected?
+        Outcome.new(nil, [], nil)
+      else
+        Outcome.new(channel, channel.streams, nil)
+      end
+    rescue StandardError => e
+      # REPORTED, not just recorded. The client is told "rejected" and
+      # cannot be told why, so stderr is the only place the reason
+      # exists — and a subscription that silently stops working is the
+      # bug that costs an afternoon. Rails logs the same event.
+      warn "[cable] #{klass}#subscribed raised: #{e.class}: #{e.message}"
+      Outcome.new(nil, [], e)
+    end
+
+    # The mirror, for `unsubscribe` and for close. Best-effort: a
+    # teardown callback that raises must not stop the rest of the
+    # teardown, and there is nobody left to tell.
+    def self.unsubscribe(channel)
+      channel.unsubscribed
+      nil
+    rescue StandardError => e
+      warn "[cable] #{channel.class}#unsubscribed raised: #{e.class}: #{e.message}"
+      nil
+    end
+  end
+
   # The `Broadcasts` transport: stream name → subscribed connections.
   # Reactor thread only (see the threading contract above), so no lock.
   module Registry
@@ -249,12 +385,17 @@ module Cable
       frames = {}
 
       conns.dup.each do |conn|
-        identifier = conn.identifier_for(stream)
-        next if identifier.nil?
-
-        frame = frames[identifier] ||=
-          %({"identifier":#{JSON.generate(identifier)},"message":#{message_json}})
-        conn.send_text(frame)
+        # A connection can hold more than one subscription onto the same
+        # stream — two channels whose `subscribed` named it, or the same
+        # channel with different params — and Action Cable delivers one
+        # frame per SUBSCRIPTION, keyed by its identifier. Before channel
+        # dispatch a connection had exactly one, so this read a single
+        # value; the plural is what dispatch makes possible.
+        conn.identifiers_for(stream).each do |identifier|
+          frame = frames[identifier] ||=
+            %({"identifier":#{JSON.generate(identifier)},"message":#{message_json}})
+          conn.send_text(frame)
+        end
       end
       nil
     end
@@ -262,6 +403,14 @@ module Cable
     def self.subscribe(stream, conn)
       list = (SUBS[stream] ||= [])
       list << conn unless list.include?(conn)
+      nil
+    end
+
+    def self.unsubscribe(stream, conn)
+      list = SUBS[stream]
+      return nil if list.nil?
+      list.delete(conn)
+      SUBS.delete(stream) if list.empty?
       nil
     end
 
@@ -292,7 +441,8 @@ module Cable
     def initialize(env, socket, identity = nil)
       @socket = socket
       @buffer = +""
-      @subscriptions = {}   # stream name → identifier JSON, echoed back
+      @subscriptions = {}   # stream name → [identifier JSON], echoed back
+      @channels = {}        # identifier JSON → channel, or :pending
       @monitor = nil
       @closed = false
       @identity = identity
@@ -313,8 +463,8 @@ module Cable
       @driver.start
     end
 
-    def identifier_for(stream)
-      @subscriptions[stream]
+    def identifiers_for(stream)
+      @subscriptions[stream] || []
     end
 
     # websocket-driver's output sink (via EnvAdapter). Registering write
@@ -380,6 +530,15 @@ module Cable
       return nil if @closed
 
       @closed = true
+      # The app's own teardown, before the socket goes: campfire's
+      # `PresenceChannel#absent` marks a membership disconnected, and a
+      # closed browser tab is the ONLY way that method is ever reached.
+      # Off the reactor thread because it writes.
+      live = @channels.values.reject { |c| c == :pending }
+      @channels.clear
+      unless live.empty?
+        Workers.post { Db.with_connection { live.each { |c| Dispatch.unsubscribe(c) } } }
+      end
       Registry.unsubscribe_all(self)
       Reactor.remove(self)
       begin
@@ -390,43 +549,103 @@ module Cable
       nil
     end
 
+    # Reactor thread — the worker's answer coming home.
+    #
+    # RE-CHECKS `@closed`, because everything about this method is late:
+    # the client can be gone by the time a query finishes, and
+    # registering streams for a dead connection would leave entries in
+    # SUBS that `unsubscribe_all` has already run past.
+    def subscribe_settled(identifier_json, outcome)
+      return nil if @closed
+      return nil unless @channels[identifier_json] == :pending
+
+      if Dispatch.rejected?(outcome)
+        @channels.delete(identifier_json)
+        return send_text(
+          %({"identifier":#{JSON.generate(identifier_json)},"type":"reject_subscription"})
+        )
+      end
+
+      @channels[identifier_json] = outcome.channel
+      outcome.streams.each do |stream|
+        list = (@subscriptions[stream] ||= [])
+        list << identifier_json unless list.include?(identifier_json)
+        Registry.subscribe(stream, self)
+      end
+      send_text(
+        %({"identifier":#{JSON.generate(identifier_json)},"type":"confirm_subscription"})
+      )
+    end
+
     private
 
-    # NOT AUTHORIZED — the same gap as the spinel lane's
-    # `Cable.handle_message`, ledgered together in
-    # docs/pipeline/runtime.md, "A cable subscribe is not authorized, on
-    # either lane". No channel is instantiated between the decode and
-    # the subscribe, and `connect`/`identified_by` are unimplemented, so
-    # there is no `current_user` to test. #71 items 3 and 4.
+    # THE FRAME THAT DECIDES WHO HEARS WHAT.
+    #
+    # This used to read `signed_stream_name` straight out of the
+    # identifier and subscribe to whatever it decoded to, skipping the
+    # channel the client had named. That is precisely the bypass
+    # campfire's `RoomStreamsAreAuthorized` exists to close, so the one
+    # app in the corpus that had thought about cable authorization had
+    # its answer discarded. Now the named channel is what runs, and what
+    # it asks for is all that gets registered.
     def handle_message(raw)
       message = JSON.parse(raw)
-      return nil unless message["command"] == "subscribe"
-
       identifier_json = message["identifier"]
       return nil if identifier_json.nil?
 
-      identifier = JSON.parse(identifier_json)
-      stream = decode_stream_name(identifier["signed_stream_name"])
-      return nil if stream.nil?
-
-      @subscriptions[stream] = identifier_json
-      Registry.subscribe(stream, self)
-      send_text(%({"identifier":#{JSON.generate(identifier_json)},"type":"confirm_subscription"}))
+      case message["command"]
+      when "subscribe"   then begin_subscribe(identifier_json)
+      when "unsubscribe" then begin_unsubscribe(identifier_json)
+      else nil
+      end
     rescue JSON::ParserError
       nil
     end
 
-    # Match `turbo_stream_from`'s emit: `<base64-of-JSON>--<sig>`. The
-    # placeholder sig today is "unsigned" (see action_view.rb); once real
-    # HMAC signing lands the signature gets verified here.
-    def decode_stream_name(signed)
-      return nil if signed.nil?
+    # Reactor thread: resolve the channel class and hand the app's code
+    # to a worker. Everything after this returns is asynchronous.
+    def begin_subscribe(identifier_json)
+      identifier = JSON.parse(identifier_json)
+      return nil unless identifier.is_a?(Hash)
 
-      encoded, _sig = signed.split("--", 2)
-      return nil if encoded.nil?
+      # An identifier the client already has a subscription (or a
+      # pending one) for is a duplicate — Action Cable's client replays
+      # its whole table on reconnect, and a reconnect on a socket that
+      # never dropped would otherwise run `subscribed` twice.
+      return nil if @channels.key?(identifier_json)
 
-      JSON.parse(Base64.strict_decode64(encoded))
-    rescue ArgumentError, JSON::ParserError
+      klass = ActionCable::Channel::Base.lookup(identifier["channel"])
+      if klass.nil?
+        # A name no channel registered. Rails logs and drops; refusing
+        # explicitly is better for a client that would otherwise wait
+        # forever for a confirmation.
+        return send_text(
+          %({"identifier":#{JSON.generate(identifier_json)},"type":"reject_subscription"})
+        )
+      end
+
+      @channels[identifier_json] = :pending
+      conn = self
+      Workers.post do
+        outcome = Db.with_connection do
+          Dispatch.subscribe(klass, conn, identifier_json, identifier)
+        end
+        Reactor.post { conn.subscribe_settled(identifier_json, outcome) }
+      end
+    end
+
+    # Reactor thread. The registry entries go NOW — they are ours — and
+    # only the app's `unsubscribed` callback goes to a worker.
+    def begin_unsubscribe(identifier_json)
+      channel = @channels.delete(identifier_json)
+      return nil if channel.nil? || channel == :pending
+
+      @subscriptions.each_value { |list| list.delete(identifier_json) }
+      @subscriptions.each do |stream, list|
+        Registry.unsubscribe(stream, self) if list.empty?
+      end
+      @subscriptions.delete_if { |_stream, list| list.empty? }
+      Workers.post { Db.with_connection { Dispatch.unsubscribe(channel) } }
       nil
     end
   end

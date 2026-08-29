@@ -25,18 +25,28 @@
 #    .stream_name_for(user_id)` is a pure class method, and the model
 #    doing the broadcasting is what calls it.
 #
-# SUBSCRIPTION DISPATCH IS NOT IMPLEMENTED. A client naming a channel
-# (`{"channel":"UnreadRoomsChannel"}`) is not routed to an instance, so
-# `subscribed` never runs and `stream_from` never registers. Turbo's own
-# subscriptions do not come through here at all — they arrive carrying a
-# `signed_stream_name` and `Cable::Connection#handle_message` subscribes
-# them directly, which is why Turbo Stream fan-out works without any of
-# this. Until that lands, a raw broadcast reaches every connection that
-# subscribed to the same stream name by other means, and nobody else.
+# SUBSCRIPTION DISPATCH, and the shape of it. A subscribe frame carries
+# an identifier naming a channel (`{"channel":"RoomMessagesChannel",
+# "signed_stream_name":"…"}`); `Cable::Dispatch` looks the class up in
+# `Channel::Base::REGISTRY`, instantiates it against this connection and
+# those params, and runs the app's own `subscribed`. Whatever that method
+# asked for through `stream_from`/`stream_for` is what gets registered —
+# and if it called `reject`, nothing is.
 #
-# The instance side therefore RAISES rather than returning quietly: a
-# channel that accepts a subscription it will never deliver on is the
-# failure that looks like success.
+# BY REGISTRY, NOT BY `const_get`. The channel name is a string off the
+# wire. Rails resolves it with `safe_constantize` and then checks the
+# result descends from `Channel::Base`; here the only names that resolve
+# are the ones that registered themselves by being defined, so a crafted
+# identifier cannot reach a constant that is not a channel in the first
+# place. It is also the rule this runtime already follows: a name
+# computed at runtime is not statically resolvable, and eight of the
+# targets have no way to honour one.
+#
+# WHAT THIS BUYS, in one line: the app's authorization runs. campfire
+# prepends `RoomStreamsAreAuthorized` onto `Turbo::StreamsChannel` so the
+# stock channel refuses `:messages` streams, leaving
+# `RoomMessagesChannel` — which checks membership — as the only door onto
+# them. Neither ran while subscribes bypassed channels entirely.
 #
 # CRuby/JRuby only, like the `cable.rb` it publishes through. Spinel's
 # Action Cable rides tep and is a separate substrate.
@@ -89,21 +99,21 @@ module ActionCable
     # API. campfire calls it from `User#deactivate` and
     # `User#reset_remote_connections`.
     #
-    # The set it selects is EMPTY here, and that is a fact about this
-    # runtime rather than a stub: a remote connection is identified by
-    # its connection identifiers (`current_user`), and no connection in
-    # this runtime ever registers one. Turbo's streams subscribe by
-    # signed stream name through `Cable::Connection#handle_message`,
-    # and channel subscription dispatch — the half that would run
-    # `identified_by :current_user` — is not implemented (see the
-    # header, and the `Channel::Base` methods below that raise for the
-    # same reason). Disconnecting an empty set is a no-op, so this
-    # returns without raising instead of pretending to disconnect
-    # somebody.
+    # The set it selects is EMPTY here, and that is STILL a divergence
+    # after subscription dispatch: connections now carry an identity and
+    # channels read `current_user` off it, so the selection is finally
+    # expressible — but nothing indexes live connections by user, and
+    # `Cable::Reactor`'s table is keyed by socket. Closing it means an
+    # index the reactor maintains on attach and drops on close, plus a
+    # posted close for each hit.
     #
-    # THE DIVERGENCE THAT COSTS: once subscription dispatch lands, a
-    # deactivated or banned user's live socket must actually be closed,
-    # and this method is where that happens. Recorded in
+    # WHAT IT COSTS UNTIL THEN: a deactivated or banned user's open
+    # socket keeps its subscriptions. The membership check in
+    # `RoomMessagesChannel` runs at SUBSCRIBE time, which is exactly the
+    # window campfire's own comment calls out ("revoking a membership
+    # disconnects the user with reconnect: true, and the client then
+    # replays its subscriptions") — the replay is now authorized, the
+    # disconnect that forces it is not. Recorded in
     # docs/pipeline/runtime.md rather than left as a silent no-op.
     def remote_connections
       RemoteConnections.new
@@ -133,51 +143,173 @@ module ActionCable
   end
 
   module Channel
+    # The base every `app/channels/*.rb` class subclasses, and the half
+    # of a subscription that is not the socket: params, identity, and
+    # the list of streams a `subscribed` asked for.
+    #
+    # NOTHING HERE TOUCHES A SOCKET. `Cable::Dispatch` builds one of
+    # these on a worker thread, runs `subscribed`, and reads
+    # `streams`/`subscription_rejected?` back off it; the reactor thread
+    # is what turns that answer into registry entries and a
+    # `confirm_subscription` frame. So a channel is an ordinary object
+    # with no thread affinity, which is also what makes it testable
+    # without a reactor.
     class Base
-      # The five methods the base itself owns. Each is reachable only
-      # from a subscription callback, and no subscription callback runs
-      # yet — see the header. They raise because the alternative is a
-      # `subscribed` that appears to succeed.
-      def stream_from(_broadcasting)
-        raise NotImplementedError,
-              "ActionCable::Channel#stream_from: channel subscriptions are not " \
-              "dispatched yet (Turbo streams subscribe through Cable directly)"
+      # Channel name -> class, populated by `inherited`. THE ONLY WAY a
+      # name off the wire resolves: see the file header on why this is a
+      # registry and not `const_get`.
+      REGISTRY = {}
+
+      # Ruby assigns the constant before calling `inherited`, so `sub.name`
+      # is already the real name here. An anonymous subclass (there are
+      # none in an ingested tree, but `Class.new(Base)` in a test is one)
+      # has a nil name and simply does not register.
+      def self.inherited(sub)
+        super
+        REGISTRY[sub.name] = sub if sub.name
       end
 
-      def stream_for(_record)
-        raise NotImplementedError,
-              "ActionCable::Channel#stream_for: channel subscriptions are not " \
-              "dispatched yet (Turbo streams subscribe through Cable directly)"
+      # nil for a name nothing defined. The caller answers that with
+      # `reject_subscription`, which is what Action Cable's client
+      # expects for an unknown channel.
+      def self.lookup(channel_name)
+        REGISTRY[channel_name.to_s]
       end
 
-      # The PUBLISH half of the channel API — `broadcast_to @room,
-      # action: :start` in campfire's TypingNotificationsChannel.
-      # `ActionCable.server.broadcast` works, so it is fair to ask why
-      # this raises: because the stream it would publish to is
-      # `broadcasting_for(record)`, and the only thing that ever
-      # subscribes to that name is `stream_for` — which raises three
-      # methods up. Nothing is listening, so a publish here is the
-      # silent-success failure, not a working broadcast.
+      # `RoomChannel` -> `"room"`; `Turbo::StreamsChannel` ->
+      # `"turbo:streams"`. actioncable 8.0:
       #
-      # Reachable only from an inbound channel action, and inbound
-      # actions are not dispatched either (`Cable.handle_message` acts
-      # on `subscribe` and returns 0 for everything else).
-      def broadcast_to(_record, _message)
-        raise NotImplementedError,
-              "ActionCable::Channel#broadcast_to: channel subscriptions are not " \
-              "dispatched yet, so `broadcasting_for(record)` has no subscribers"
+      #   @channel_name ||= name.sub(/Channel$/, "").gsub("::", ":").underscore
+      def self.channel_name
+        @channel_name ||= Base.underscore(name.sub(/Channel\z/, "").gsub("::", ":"))
       end
 
+      # `broadcasting_for([channel_name, record])` — the stream name
+      # `stream_for` subscribes to and `broadcast_to` publishes on, so
+      # the two must be spelled once. actioncable's `serialize_broadcasting`
+      # asks the record for `to_gid_param` and falls back to `to_param`;
+      # every lowered model is given a `to_gid_param` (see
+      # `lower::broadcasts`), so there is nothing to fall back FROM and no
+      # `respond_to?` here.
+      def self.broadcasting_for(record)
+        channel_name + ":" + record.to_gid_param
+      end
+
+      # Class names only — `RoomsController` shapes, never a path or a
+      # word with digits. activesupport's `underscore` also swaps "::"
+      # for "/" and strips inflector acronyms; the caller above has
+      # already replaced "::" and no channel name in the corpus carries
+      # an acronym, so this is the CamelCase-to-snake_case half alone.
+      def self.underscore(text)
+        out = +""
+        i = 0
+        while i < text.length
+          c = text[i]
+          if c >= "A" && c <= "Z"
+            out << "_" unless i.zero? || out.end_with?("_") || out.end_with?(":")
+            out << c.downcase
+          else
+            out << c
+          end
+          i += 1
+        end
+        out
+      end
+
+      attr_reader :connection, :identifier, :params, :streams
+
+      # `identifier` is the identifier JSON STRING exactly as the client
+      # sent it, because every frame back to that client has to echo it
+      # byte for byte — the client keys its subscription table on it.
+      def initialize(connection, identifier, params)
+        @connection = connection
+        @identifier = identifier
+        @params = params
+        @streams = []
+        @rejected = false
+      end
+
+      # The connection identifier campfire's channels read. Spelled out
+      # rather than generated from `identified_by`, for the reason
+      # `runtime/spinel/action_cable.rb` gives one level down: one name
+      # is what `identified_by` has ever been given, and a computed
+      # accessor is not statically resolvable.
+      #
+      # nil on an ANONYMOUS connection (an app with no
+      # `ApplicationCable::Connection` at all). A channel that reads it
+      # will `NoMethodError` on nil — which is the honest outcome: an
+      # app whose channels need a user and whose connection class does
+      # not identify one has a hole, and swallowing it here would hide
+      # the hole rather than the error.
+      def current_user
+        identity = @connection&.identity
+        identity&.current_user
+      end
+
+      def stream_from(broadcasting)
+        @streams << broadcasting.to_s
+        nil
+      end
+
+      def stream_for(record)
+        stream_from(self.class.broadcasting_for(record))
+      end
+
+      # The PUBLISH half. Now that `stream_for` really subscribes,
+      # `broadcasting_for(record)` has subscribers and this delivers to
+      # them — the reason it used to raise is gone.
+      def broadcast_to(record, message)
+        ActionCable.server.broadcast(self.class.broadcasting_for(record), message)
+      end
+
+      # Refusing is a RECORDED decision rather than a raise: campfire's
+      # `PresenceChannel` asks `subscription_rejected?` in an
+      # `on_subscribe … unless:` guard, so the answer has to survive the
+      # call that produced it.
       def reject
-        raise NotImplementedError,
-              "ActionCable::Channel#reject: channel subscriptions are not " \
-              "dispatched yet, so there is nothing to reject"
+        @rejected = true
+        nil
       end
 
-      def params
-        raise NotImplementedError,
-              "ActionCable::Channel#params: no subscription frame is bound to " \
-              "this channel — subscriptions are not dispatched yet"
+      def subscription_rejected?
+        @rejected
+      end
+
+      # Rails' Base defines neither; a channel that wants either does.
+      # Defining them here means the dispatcher can call both
+      # unconditionally.
+      def subscribed
+        nil
+      end
+
+      def unsubscribed
+        nil
+      end
+    end
+
+    # The subscribe frame's identifier, read the way a channel body
+    # reads it: `params[:room_id]`, symbol key, against JSON that has
+    # only string ones.
+    #
+    # A two-method value object rather than
+    # `ActiveSupport::HashWithIndifferentAccess`: the whole demand is
+    # `[]`, and the wide class would arrive with `with_indifferent_access`
+    # on every Hash in the tree for one call site.
+    class Parameters
+      def initialize(raw)
+        @raw = raw
+      end
+
+      def [](key)
+        @raw[key.to_s]
+      end
+
+      def key?(key)
+        @raw.key?(key.to_s)
+      end
+
+      def to_h
+        @raw
       end
     end
   end

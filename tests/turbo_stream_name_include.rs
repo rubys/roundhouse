@@ -62,17 +62,24 @@ fn the_include_carries_a_require_for_the_module_it_names() {
     assert!(src.contains("runtime/turbo_streams"), "{src}");
 }
 
-/// The runtime module and its three ends agree on ONE encoding — the
-/// `--unsigned` suffix `turbo_stream_from` writes and
-/// `Cable::Connection#decode_stream_name` reads. A fourth spelling here
-/// would be the failure that looks like it works.
+/// TWO ends now, where there were three: `turbo_stream_from` writes the
+/// `--unsigned` suffix and `Turbo::Streams::StreamName.verified` reads
+/// it. The overlay's `cable.rb` used to carry a THIRD — its own
+/// `decode_stream_name`, because a subscribe decoded the name itself
+/// instead of routing to the channel that owns it. Channel dispatch
+/// removed that reason, and the decoder with it, so this asserts the
+/// spelling is gone from cable.rb rather than matching there too.
 #[test]
 fn the_runtime_module_shares_the_unsigned_encoding() {
     let module = std::fs::read_to_string("runtime/spinel/turbo_streams.rb").expect("read");
     assert!(module.contains(r#"split("--", 2)"#), "{module}");
     let cable = std::fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/cable.rb")
         .expect("read cable");
-    assert!(cable.contains(r#"split("--", 2)"#), "{cable}");
+    assert!(
+        !cable.contains(r#"split("--", 2)"#),
+        "the overlay decodes a stream name again instead of letting the channel it \
+         dispatched to do it — that is the second spelling coming back:\n{cable}"
+    );
     let helpers =
         std::fs::read_to_string("runtime/ruby/action_view/view_helpers.rb").expect("read helpers");
     assert!(helpers.contains("--unsigned"), "{helpers}");

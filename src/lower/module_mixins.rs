@@ -6,14 +6,21 @@
 //! classes. This pass runs once it does, and answers the only question
 //! that matters about a mixin: **will this line resolve at boot?**
 //!
-//! A mixin whose target or module the tree does not define must not be
-//! emitted. `Turbo::StreamsChannel.prepend RoomStreamsAreAuthorized` in
-//! a tree with no `Turbo::StreamsChannel` is not a partially-working
-//! guard — it is a `NameError` at require time that takes the whole
-//! boot down. Dropping it silently is the other failure, and the worse
-//! one for this particular construct: a prepend that vanishes leaves an
-//! authorization module defined, tested, and absent from the lookup
-//! chain. So an unresolvable mixin is dropped AND reported.
+//! A mixin whose target or module nothing defines must not be emitted.
+//! `WebPush::Request.prepend WebPush::PersistentRequest` in a tree with
+//! no `WebPush::Request` is not a partially-working override — it is a
+//! `NameError` at require time that takes the whole boot down. Dropping
+//! it silently is the other failure, and the worse one for this
+//! particular construct: a prepend that vanishes leaves a module
+//! defined, tested, and absent from the lookup chain. So an
+//! unresolvable mixin is dropped AND reported.
+//!
+//! "Defined" is not the same question as "ingested". A mixin can target
+//! a FRAMEWORK class the runtime ships — campfire's other prepend puts
+//! `RoomStreamsAreAuthorized` onto `Turbo::StreamsChannel`, which is
+//! turbo-rails' own — so `RUNTIME_MIXIN_TARGETS` below names the ones
+//! this pipeline models, and the rule for getting on that list is a
+//! test that runs the override.
 //!
 //! Reported as `unsupported` rather than `lower_residue`: residue is
 //! app code this pipeline chose not to lower, and this is app code it
@@ -86,17 +93,35 @@ pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
     diags
 }
 
-/// Does the emitted tree define this constant?
+/// Framework classes the RUNTIME defines that a mixin may target.
+///
+/// NOT a copy of the runtime's constant list, and the difference is
+/// what keeps this short. The question here is not "does some file
+/// under `runtime/` define this name" — it is "is this a class this
+/// pipeline models well enough that prepending onto it does what the
+/// app meant". A mixin overrides METHODS, so the answer depends on the
+/// runtime class having the method the module calls `super` on, in a
+/// path something actually reaches. Every entry earns its way on by a
+/// test that runs the override.
+///
+/// `Turbo::StreamsChannel` (runtime/spinel/turbo_streams.rb) is the
+/// stock turbo-rails channel. campfire prepends
+/// `RoomStreamsAreAuthorized` onto it to refuse its own `:messages`
+/// streams, and `tests/overlay_cable_dispatch.rb` drives a subscribe
+/// through the prepended `subscribed` to its `super`.
+const RUNTIME_MIXIN_TARGETS: [&str; 1] = ["Turbo::StreamsChannel"];
+
+/// Will this constant be defined when boot.rb reaches the mixin line?
 ///
 /// Models, library classes (which is where an ingested
 /// `app/channels/concerns/` module lands) and controllers are the three
-/// homes an ingested constant has. A runtime-provided class is NOT
-/// counted: the runtime is not in `App`, and crediting it from a list
-/// here would be a second copy of that list to keep in step — the same
-/// trap `apply_test_gem_wiring` avoids by reading the emitted tree.
+/// homes an INGESTED constant has. The runtime is not in `App` at all,
+/// so a runtime-provided target is credited from the short list above
+/// rather than by scanning a tree that does not exist yet.
 fn tree_defines(app: &App, name: &Symbol) -> bool {
     let n = name.as_str();
-    app.models.iter().any(|m| m.name.0.as_str() == n)
+    RUNTIME_MIXIN_TARGETS.contains(&n)
+        || app.models.iter().any(|m| m.name.0.as_str() == n)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == n)
         || app.controllers.iter().any(|c| c.name.0.as_str() == n)
 }

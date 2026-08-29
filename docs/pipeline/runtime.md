@@ -1252,34 +1252,37 @@ Real signing lands in one commit across all three ends —
 `Turbo::Streams::StreamName` — or not at all: two of them agreeing and
 the third not is the failure that looks like it works.
 
-### A cable subscribe is not authorized, on either lane
+### A cable subscribe is not authorized on the SPINEL lane
 
-The subscribe path is the same shape in both runtimes and neither
-instantiates a channel:
+The two runtimes have parted company here, so this entry now describes
+one of them.
 
-- spinel — `Cable.handle_message` (`runtime/spinel/cable.rb`) reads
-  `identifier["signed_stream_name"]`, decodes it, and calls
-  `Tep::Broadcast.subscribe_ws(stream, ws.fd)`.
-- CRuby overlay — `Cable::Connection#handle_message`
-  (`runtime/spinel/scaffold/ruby_overlay/cable.rb`) decodes the same
-  field and calls `Registry.subscribe(stream, self)`.
+- **CRuby overlay — CLOSED.** `Cable::Connection#handle_message`
+  (`runtime/spinel/scaffold/ruby_overlay/cable.rb`) reads the `channel`
+  the identifier names, resolves it through
+  `ActionCable::Channel::Base::REGISTRY`, and runs the app's own
+  `subscribed` on a worker thread holding a database handle. Only what
+  that method asked for through `stream_from`/`stream_for` is
+  registered, and a `reject` registers nothing. `current_user` comes off
+  the identity `Cable.identify` resolved from the handshake.
+- **spinel — OPEN.** `Cable.handle_message` (`runtime/spinel/cable.rb`)
+  still reads `identifier["signed_stream_name"]`, decodes it, and calls
+  `Tep::Broadcast.subscribe_ws(stream, ws.fd)`. No channel is
+  instantiated, so no `subscribed` runs, and
+  `ApplicationCable::Connection#connect` never runs either — there is no
+  `current_user` to test. **A client that can spell a stream name
+  receives that stream's fan-out.**
 
-Between the decode and the subscribe there is no `subscribed` callback,
-no `reject`, and no identity to test: `identified_by` and
-`ApplicationCable::Connection#connect` are not implemented, so
-`current_user` is never established on either lane. **A client that can
-spell a stream name receives that stream's fan-out.**
+**Why the split.** The two lanes share `runtime/spinel/turbo_streams.rb`
+and the channel classes, but not the transport: the overlay rides Puma's
+rack-hijack plus a nio4r reactor, spinel rides tep's fiber-scheduled
+server. Dispatch was built on the overlay first on purpose — if the
+frames do not match between Rails and the Ruby emit they were never
+going to match on spinel, and that is far cheaper to find while
+debugging one runtime instead of two (rubys/roundhouse#71).
 
-**Why.** Channel subscription dispatch is unimplemented — the subscribe
-frame names a channel and nothing routes on it (see
-`runtime/spinel/action_cable.rb`, and `Turbo::Streams::StreamName::
-ClassMethods#verified_stream_name_from_params`, whose `params` raises
-for exactly this reason). Bare `signed_stream_name` was implemented
-first because it is the one path Turbo's own
-`<turbo-cable-stream-source>` needs to deliver a fragment.
-
-**What it costs.** The path implemented is precisely the path an app's
-channel guard exists to close. campfire prepends
+**What it costs on spinel.** The path implemented is precisely the path
+an app's channel guard exists to close. campfire prepends
 `RoomStreamsAreAuthorized` onto `Turbo::StreamsChannel`:
 
 ```ruby
@@ -1290,48 +1293,102 @@ def subscribed
 
 and its comment states the reason — "authorizing room messages only in
 `RoomMessagesChannel` would leave the stock channel as a way around it:
-same signed stream name, no membership check."
-
-**The page now names the right channel; nothing routes on it.** An
-earlier revision of this entry said the stock channel "is what this
-runtime implements", which was true of the emitted page too: the
-`channel:` option was dropped and every `<turbo-cable-stream-source>`
-went out naming `Turbo::StreamsChannel`. It now carries
-`RoomMessagesChannel`, as the app wrote it. That closes a real gap —
-the page had been pointing clients at the door campfire nailed shut —
-but it does not close this one, because **channel subscription dispatch
-is still unimplemented**: `Cable.handle_message` reads
-`signed_stream_name` and subscribes directly, whatever channel the
-identifier names. So a subscribe to `<gid>:messages` still delivers a
-room's messages **with no membership check at all**, and
-`RoomMessagesChannel#subscribed` — which does ask
-`user.rooms.find_by(id: room.id)` — still never runs.
+same signed stream name, no membership check." On spinel that prepend is
+now EMITTED (the constant exists) and still never reached, because
+nothing routes a subscribe frame to a channel.
 
 The name is not a secret either: it is a GlobalID
-(`GlobalID::Locator.locate gid_param, only: Room`), an identifier
-rather than a capability. That is now literally true of the names this
-runtime mints: a record streamable contributes
-`GlobalID.param("Room", id)` — `Base64.urlsafe_encode64` of
-`gid://<app>/Room/<id>`, no padding — which is byte-identical to what
-`to_gid_param` produces in a real Rails process. It is spelled that way
-so the app's own channel code can read it back, the same rule the
-`/cable` handshake follows by running the app's `connect`.
+(`GlobalID::Locator.locate gid_param, only: Room`), an identifier rather
+than a capability. That is literally true of the names this runtime
+mints: a record streamable contributes `GlobalID.param("Room", id)` —
+`Base64.urlsafe_encode64` of `gid://<app>/Room/<id>`, no padding — which
+is byte-identical to what `to_gid_param` produces in a real Rails
+process. It is spelled that way so the app's own channel code can read
+it back, the same rule the `/cable` handshake follows by running the
+app's `connect`.
 
 **Not a mitigation, but bounds on the blast radius:** fan-out is
-in-process and single-worker, and the only frames published are those
-an `after_commit` hook records. A subscriber learns nothing about
-streams no hook writes to.
+in-process and single-worker, and the only frames published are those an
+`after_commit` hook records. A subscriber learns nothing about streams no
+hook writes to.
 
 **This is not fixed by signing.** Signing decides whether the name was
 tampered with; authorization decides whether the named stream may be
 joined. campfire's own channel comment makes the point — Turbo's stock
 channel "verifies only the signature on the stream name. That name
 carries no expiry and no binding to a user." Both ends of that need
-closing, and only the first is the entry above.
+closing; **neither lane signs**, and that half is the entry below.
 
-The fix is connection identity plus named-channel subscribe dispatch —
-items 3 and 4 of rubys/roundhouse#71 — after which the app's own
-`subscribed` runs and this entry is retired rather than qualified.
+### An open socket outlives the authorization that opened it
+
+`ActionCable.server.remote_connections.where(current_user: user)
+.disconnect(reconnect: true)` — campfire's `User#deactivate` and
+`#reset_remote_connections` — selects an empty set and returns.
+
+**Why.** Nothing indexes live connections by user. `Cable::Reactor`'s
+table is keyed by socket, and the identity a connection carries is read
+off it rather than looked up by it. Closing the gap means an index the
+reactor maintains on attach and drops on close, plus a posted close per
+hit.
+
+**What it costs.** Membership is checked at SUBSCRIBE time, which is
+exactly the window campfire's `RoomMessagesChannel` comment calls out:
+"revoking a membership disconnects the user with `reconnect: true`, and
+the client then replays its subscriptions on the fresh socket." The
+replay is now authorized on the CRuby lane — a revoked member's
+resubscribe is refused. The disconnect that would FORCE that replay is
+what does not happen, so an already-open socket keeps delivering to a
+user whose membership was just revoked, until they reconnect for some
+other reason.
+
+### An initializer's `prepend` is not performed on the spinel target
+
+`config/initializers/turbo_streams_authorization.rb` — campfire's
+`Turbo::StreamsChannel.prepend RoomStreamsAreAuthorized` — is emitted as
+a live line at the end of the ruby family's `boot.rb` and as a COMMENT in
+the spinel tree's.
+
+**Why.** Spinel refuses the explicit-receiver form outright: "the class
+graph, ancestor chain, and method/ivar layout are baked at compile time,
+so a class cannot be restructured through an explicit receiver." Its
+diagnostic recommends moving the call inside a `class X ... end` reopen,
+and **that form compiles and does nothing** — a prepended `hello` calling
+`super` prints `guarded hi` under CRuby and `hi` from the binary, with no
+warning. Emitting it would put the guard back in the tree, tested, and
+out of the lookup chain, which is the failure `lower::module_mixins`
+exists to prevent, minus the report. Filed as matz/spinel#4200.
+
+A `prepend` inside the class's ORIGINAL body works on spinel; only a
+reopen is silent. That is no help here — the target class is turbo-rails'.
+
+**What it costs today: nothing, and that is a fact about a second gap
+rather than a defence.** The spinel lane does not dispatch a subscribe
+frame to a channel at all (see above), so `Turbo::StreamsChannel
+#subscribed` never runs and a guard prepended onto it would not run
+either. The two have to close in that order.
+
+**Where it is visible.** The emitted `boot.rb` carries the commented
+line and the reason, so the absence names itself in the file someone
+would read.
+
+### A cable stream name is not signed, on either lane
+
+`turbo_stream_from` writes `<base64-of-JSON>--unsigned` and
+`Turbo::Streams::StreamName.verified` reads it back by splitting on
+`--` and ignoring the suffix. Rails HMAC-signs the value.
+
+**What it costs.** A client can subscribe to any stream it can SPELL,
+and the names are guessable — they are GlobalIDs. On the CRuby lane the
+app's own channel guard is what stands between a spelled name and its
+fan-out (campfire's `RoomMessagesChannel` re-derives the room from the
+name and asks `user.rooms.find_by`), which is a real check but an
+app-supplied one: an app that guards nothing is wide open. On spinel
+nothing stands there at all.
+
+Real HMAC signing belongs in `runtime/spinel/turbo_streams.rb`, with
+`turbo_stream_from` and `verified` changed in the same commit, once the
+key-derivation question (`message_verifier.rb`'s iteration count vs
+Rails') is settled.
 
 ### `strip_tags` leaves entity references alone
 

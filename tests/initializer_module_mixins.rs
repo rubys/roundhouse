@@ -21,11 +21,14 @@
 //! reads as present and does nothing.
 //!
 //! Two things are asserted here and they pull opposite ways. A mixin
-//! whose constants the tree defines must be EMITTED, at the end of boot
-//! where both are loaded. A mixin naming a constant the tree does NOT
-//! define must be DROPPED — the line would `NameError` at require time
-//! and take the whole boot down — and REPORTED, because silently losing
-//! this particular construct is the worse failure of the two.
+//! whose constants WILL BE DEFINED must be EMITTED, at the end of boot
+//! where both are loaded — and "defined" spans the ingested tree and
+//! the framework classes the runtime ships, which is what the campfire
+//! line above needs. A mixin naming a constant nothing defines must be
+//! DROPPED — the line would `NameError` at require time and take the
+//! whole boot down — and REPORTED, because silently losing this
+//! particular construct is the worse failure of the two. campfire's
+//! OTHER prepend, onto the `WebPush::Request` gem class, is that case.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -145,13 +148,13 @@ fn a_resolvable_mixin_reaches_the_end_of_boot() {
     );
 }
 
-/// The gap that exists today: campfire prepends onto
-/// `Turbo::StreamsChannel`, which no tree defines. Emitting that line
-/// would `NameError` at require time and take the boot down, so it is
-/// dropped — and reported, because a silently-vanished authorization
-/// prepend reads as a working guard.
+/// campfire's own line, whose target is a FRAMEWORK class rather than
+/// an ingested one: `Turbo::StreamsChannel` is turbo-rails', supplied by
+/// `runtime/spinel/turbo_streams.rb`. It resolves at boot, so it is
+/// emitted — the tree-only check that used to drop it left campfire's
+/// guard defined, tested, and out of the lookup chain.
 #[test]
-fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
+fn a_mixin_onto_a_runtime_class_is_kept() {
     let mut app = {
         let files = vec![
             ("db/schema.rb", SCHEMA),
@@ -165,6 +168,42 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
         ];
         ingest_app_from_tree(tree(&files)).expect("ingest")
     };
+    assert_eq!(app.module_mixins.len(), 1);
+
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+
+    assert_eq!(
+        app.module_mixins.len(),
+        1,
+        "the guard's target is a class the runtime ships; dropping it \
+         leaves the module out of the lookup chain"
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("Turbo::StreamsChannel")),
+        "a kept mixin must not also be reported as a gap: {:#?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// THE OTHER HALF OF THE SAME FILE, and the reason the lowering reports
+/// at Warning rather than Error: campfire's `web_push.rb` prepends onto
+/// `WebPush::Request`, a GEM class no tree here will ever define.
+/// Emitting it would `NameError` at require time; refusing to emit the
+/// app over it would block the tree forever.
+#[test]
+fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/mixins.rb",
+                "WebPush::Request.prepend WebPush::PersistentRequest\n",
+            ),
+            GUARD,
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
     // Recorded at ingest — resolution is not ingest's question.
     assert_eq!(app.module_mixins.len(), 1);
 
@@ -172,14 +211,34 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
 
     assert!(app.module_mixins.is_empty(), "an unresolvable mixin must not be emitted");
 
+    // Both halves are missing, so the diagnostic names both — the
+    // "neither X nor Y" arm, which carries its own negation.
     let reported = diags.iter().any(|d| {
-        d.message.contains("Turbo::StreamsChannel") && d.message.contains("not defined in this tree")
+        d.message
+            .contains("neither WebPush::Request nor WebPush::PersistentRequest is defined")
     });
     assert!(
         reported,
-        "dropping it silently leaves the guard defined and out of the lookup chain; \
+        "dropping it silently leaves the module defined and out of the lookup chain; \
          diagnostics were:\n{:#?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// THE DRIFT GUARD on `RUNTIME_MIXIN_TARGETS`. That list is the one
+/// place the lowering credits a constant it cannot see — the runtime is
+/// not in `App` — so it is also the one place a rename in
+/// `runtime/spinel/` turns a dropped-and-reported line into an emitted
+/// `NameError` that takes boot down with no diagnostic at all.
+#[test]
+fn every_credited_runtime_mixin_target_is_actually_defined() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("runtime/spinel/turbo_streams.rb"))
+        .expect("runtime/spinel/turbo_streams.rb");
+    assert!(
+        source.contains("class StreamsChannel < ActionCable::Channel::Base"),
+        "`Turbo::StreamsChannel` is credited by lower::module_mixins but no longer \
+         defined in runtime/spinel/turbo_streams.rb"
     );
 }
 
