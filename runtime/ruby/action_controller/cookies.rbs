@@ -3,6 +3,21 @@
 # Symbol constants and String literals both).
 module ActionController
   class CookieJar
+    # THE STORES, DECLARED. Both are seeded `{}` in the constructor, and
+    # an undeclared ivar is inferred from that bare literal — so `to_h`'s
+    # `@inbound.merge(@out)` came out `Hash[String, untyped]` and
+    # OVERRODE the `Hash[String, String]` declared for it three lines
+    # down. campfire's `parsed_cookies` then handed a `sp_StrPolyHash *`
+    # to `CookieJar.build`, whose parameter the same file declares
+    # `Hash[String, String]`: one contract, contradicted by an ivar
+    # nobody had described.
+    #
+    # Honest, not convenient: `raw_set` is `@out[key.to_s] = value.to_s`,
+    # so the store really is String-valued — which is what the `[]=`
+    # comment below already says.
+    @inbound: Hash[String, String]
+    @out: Hash[String, String]
+
     def initialize: (?Hash[String, String] inbound) -> void
     def []: (untyped key) -> String
     # The written value is untyped and the STORE is String: `raw_set`
