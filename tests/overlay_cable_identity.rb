@@ -37,6 +37,26 @@ module Broadcasts
 end
 
 load "#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/action_cable.rb"
+
+# cable.rb requires nio4r and websocket-driver at the top, and the unit
+# job installs neither — they are the REACTOR's dependencies, and the
+# identity path never reaches the reactor: `Cable.identify` resolves a
+# cookie jar and runs the app's `connect`, all before the hijack that
+# would build a Connection.
+#
+# So the features are marked loaded and left EMPTY rather than stubbed.
+# An empty `NIO` has no `Selector` and an empty `WebSocket` has no
+# `Driver`, so a future probe that does reach the reactor dies with a
+# NameError naming the constant, instead of passing against a
+# stand-in that agrees with everything. Installing the gems here would
+# put a native build on every unit run to exercise code this file does
+# not test.
+%w[nio websocket/driver].each do |feature|
+  $LOADED_FEATURES << "#{feature}.rb"
+end
+module NIO; end
+module WebSocket; end
+
 load "#{root}/runtime/spinel/scaffold/ruby_overlay/cable.rb"
 
 puts "vendor ruby #{RUBY_VERSION}"

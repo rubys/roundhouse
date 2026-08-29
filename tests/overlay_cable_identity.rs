@@ -14,6 +14,19 @@
 //! Same shape as `overlay_sanitize_autolink.rs` instead — the driver
 //! loads the overlay files directly, in boot.rb's order, so
 //! `ruby tests/overlay_cable_identity.rb .` reproduces it by hand.
+//!
+//! THE DRIVER MUST NOT NEED nio4r OR websocket-driver. The unit job
+//! installs neither, and a laptop that happens to have them will not
+//! tell you — this test went red on CI for exactly that reason. To run
+//! it the way CI does, hide the gems rather than trusting their
+//! absence:
+//!
+//! ```sh
+//! mkdir -p /tmp/nogems/websocket
+//! echo 'raise LoadError, "cannot load such file -- nio"' > /tmp/nogems/nio.rb
+//! echo 'raise LoadError, "x"' > /tmp/nogems/websocket/driver.rb
+//! RUBYOPT=-I/tmp/nogems ruby tests/overlay_cable_identity.rb .
+//! ```
 
 use std::path::Path;
 use std::process::Command;
