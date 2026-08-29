@@ -49,6 +49,39 @@ end
 # Captured response from a dispatched in-process request. The four
 # attr_readers + `?` query methods are exercised by emitted controller
 # tests via `assert_response` / `assert_redirected_to` / `assert_select`.
+# ActiveJob::TestHelper — Rails' enqueue assertions over the `:test`
+# adapter. Undeclared until the campfire lane found `test_helper.rb:454`
+# ("variable has incomplete type 'void'"): `perform_enqueued_jobs`
+# returns its block's value out of a `begin`/`ensure`, and with no
+# declared return the temp holding it took the block's void type.
+# Declared `-> void` because that is how every call site uses it.
+module ActiveJob
+  module TestHelper
+    # `ActiveJob.performed` is `Array[String]` (runtime/active_job.rbs),
+    # so both the filter and its answer are job NAMES.
+    def capture_enqueued_jobs: (Array[String] only) { () -> void } -> Array[String]
+    def assert_enqueued_jobs: (Integer count, ?only: Array[String]) { () -> void } -> void
+    def assert_no_enqueued_jobs: (?only: Array[String]) { () -> void } -> void
+    def perform_enqueued_jobs: (?only: Array[String]) { () -> void } -> void
+    # `args:` is declared and DELIBERATELY unread by the body — the
+    # divergence is stated in the .rb beside it. A signature that
+    # dropped the parameter would stop the call sites compiling rather
+    # than make the divergence visible.
+    def assert_enqueued_with: (?job: String, ?args: untyped) { () -> void } -> void
+  end
+end
+
+# ActionCable::TestHelper — the DELTA-taking twin of the turbo helpers
+# on TestBase (Action Cable's own helper takes a delta in every
+# version; turbo-rails at campfire's pin does not).
+module ActionCable
+  module TestHelper
+    def capture_broadcasts_on: (String stream) { () -> void } -> Array[Hash[Symbol, untyped]]
+    def assert_broadcasts: (String stream, Integer count) { () -> void } -> void
+    def assert_no_broadcasts: (String stream) { () -> void } -> void
+  end
+end
+
 module ActionDispatch
   module Http
     class UploadedFile
@@ -57,6 +90,10 @@ module ActionDispatch
       def initialize: (String path, String content_type) -> void
       def original_filename: () -> String
       def content_type: () -> String
+  # ASSEMBLED from the fields this response carries (see the .rb), and
+  # lowercase-keyed the way Rack 3 normalizes — the values are the
+  # response's own Strings, not the caller's Hash.
+  def headers: () -> Hash[String, String]
       def read: () -> String
       def size: () -> Integer
       def to_s: () -> String
@@ -103,7 +140,11 @@ class ActionResponse
     cookies: ActionController::CookieJar,
     ?content_type: String,
     ?cache_control_max_age: Integer,
-    ?cache_control_public: bool
+    ?cache_control_public: bool,
+    # The comment above about an OPTIONAL parameter behind a missing
+    # one applies to this entry too: `headers:` was in the Ruby
+    # `initialize` and not here.
+    ?headers: Hash[String, String]
   ) -> void
 
   def redirect?: () -> bool
@@ -127,6 +168,47 @@ class TestBase
   # contract. (`assert_operator` retired — Class-subclass `<` rewritten
   # to direct `assert <Class> < <Class>` form.)
   def assert_match: (Regexp pattern, String? value, ?String? msg) -> void
+
+  # ---- Declared because an UNDECLARED body is not a free pass -----
+  #
+  # spinel infers an undeclared method's body on its own, and where the
+  # body opens a poly slot the inference cannot close it: campfire's
+  # `rooms_controller_test` failed its C compile on
+  # `test_helper.rb:844` — the `end` of `turbo_stream_name`, whose
+  # `streamables.is_a?(Array) ? streamables : [streamables]` assigns an
+  # `sp_PolyArray *` into an `sp_RbVal` slot. One declaration turned
+  # that whole test file. The sidecar had 52 declarations for 70
+  # definitions; these are the ones the campfire lane proved load-
+  # bearing, and the rest are named in the same sweep so the gap does
+  # not reopen one method at a time.
+  def dom_id: (untyped record, ?String? suffix) -> String
+  def turbo_stream_name: (untyped streamables) -> String
+
+  # ActiveSupport::Testing::TimeHelpers. `travel_to` takes an OPTIONAL
+  # block (`return unless block_given?`), which is the shape, not a
+  # convenience — declaring it required would misdescribe every
+  # blockless call the corpus makes.
+  def travel_to: (untyped target) ?{ () -> void } -> void
+  def travel: (untyped duration) -> void
+  def travel_back: () -> void
+
+  # `assert_difference -> { Model.count }, +1 do … end`. The expression
+  # is a Proc whose value is subtracted, so it answers Integer; the
+  # difference is compared against that.
+  def assert_difference: (untyped expression, ?Integer difference, ?String? message) { () -> void } -> void
+  def assert_no_difference: (untyped expression, ?String? message) { () -> void } -> void
+
+  # `assert_changes` compares the expression's value before and after,
+  # so unlike `assert_difference` it is not numeric — `from:`/`to:` are
+  # whatever the expression answers.
+  def assert_changes: (untyped expression, ?String? message, ?from: untyped, ?to: untyped) { () -> void } -> void
+
+  # Turbo::Broadcastable::TestHelper. `capture_` answers the LOG
+  # entries themselves — Symbol-keyed rows carrying action/stream/
+  # target/html, which is the one bag `Broadcasts.log` really is.
+  def capture_turbo_stream_broadcasts: (untyped streamables) { () -> void } -> Array[Hash[Symbol, untyped]]
+  def assert_turbo_stream_broadcasts: (untyped streamables, ?count: Integer) { () -> void } -> void
+  def assert_no_turbo_stream_broadcasts: (untyped streamables) { () -> void } -> void
 end
 
 # ActionDispatch::IntegrationTest parent — emitted controller tests

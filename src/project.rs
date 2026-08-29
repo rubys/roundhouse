@@ -2828,12 +2828,35 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // 2./3./4. Relocate test programs; rewrite requires of anything moved.
     let mut lane: Vec<(String, String, usize)> = Vec::new(); // (path, class, n)
     let mut renames: Vec<(String, String)> = Vec::new(); // old .rb → new .rb
+    let mut orphaned: Vec<String> = Vec::new(); // requires a file this app has no
     for entry in files.iter_mut() {
         if !entry.0.starts_with("test/") || !entry.0.ends_with("_test.rb") {
             continue;
         }
         let base = entry.0.rsplit('/').next().unwrap().to_string();
         let top_level = entry.0 == format!("test/{base}");
+        // A framework test written against the BLOG fixture names its
+        // fixtures by hand (`require_relative "fixtures/articles"`), and
+        // an app without them cannot compile it. `lane_test_class` is
+        // structural and cannot see that: `query_count_test.rb` declares
+        // `< ActionDispatch::IntegrationTest`, so it entered campfire's
+        // lane and then failed on `cannot load such file --
+        // test/fixtures/articles.rb`. Its Minitest-shaped sibling
+        // `relation_find_test.rb`, which requires the same two, was
+        // already safe only by accident — it takes the `test/cruby/`
+        // fork for an unrelated reason.
+        //
+        // Asked as "do this file's own requires resolve in THIS tree?"
+        // rather than by naming the file: `rb_paths` is the same
+        // resolution universe the move rewriter uses, so the next such
+        // test needs no second edit. An APP's emitted test cannot trip
+        // this — `emit::ruby` writes its fixture requires from the
+        // fixtures it just emitted — so what this drops is always a
+        // framework test that does not belong in this app's tree.
+        if unresolvable_require(&entry.1, &entry.0, &rb_paths).is_some() {
+            orphaned.push(entry.0.clone());
+            continue;
+        }
         // A Minitest-shaped file is CRuby-only whatever else it holds;
         // otherwise the lane is decided by the same structural check
         // `test_class_and_count` applies below, so the two cannot
@@ -2859,6 +2882,19 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             let (class, n) = test_class_and_count(&entry.1, &new_path)?;
             lane.push((new_path, class, n));
         }
+    }
+
+    // An orphaned framework test leaves with its sidecar and its
+    // `.expected` snapshot — a snapshot for a program that is not in
+    // the tree is what the next reader would have to explain away.
+    if !orphaned.is_empty() {
+        files.retain(|(p, _)| {
+            !orphaned.iter().any(|o| {
+                p == o
+                    || *p == format!("{}.rbs", o.trim_end_matches(".rb"))
+                    || *p == format!("{o}.expected")
+            })
+        });
     }
 
     // A moved test's own `.rbs` sidecar travels with it: spin's
@@ -3115,6 +3151,28 @@ fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), St
 /// exists under test/, runtime/, app/, or the root. Anything else
 /// (stdlib) is left bare for the require gate to judge. Lines with
 /// trailing comments or non-literal arguments pass through untouched.
+/// The first `require_relative` target in `content` that names no file
+/// in `rb_paths`, or None when every one of them resolves.
+///
+/// `path` is the requiring file's own path — a `require_relative` is
+/// relative to its directory, which is what makes `"fixtures/articles"`
+/// inside `test/query_count_test.rb` mean `test/fixtures/articles.rb`.
+fn unresolvable_require(
+    content: &str,
+    path: &str,
+    rb_paths: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    content.lines().find_map(|line| {
+        let target = line
+            .trim_start()
+            .strip_prefix("require_relative \"")?
+            .strip_suffix('"')?;
+        let canon = vpath_normalize(&format!("{dir}/{target}"));
+        (!rb_paths.contains(&format!("{canon}.rb"))).then(|| canon)
+    })
+}
+
 fn rewrite_requires_for_move(
     content: &str,
     old_dir: &str,
