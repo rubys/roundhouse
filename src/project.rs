@@ -2694,7 +2694,7 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 11] = [
+const BUNDLED: [(&str, &str); 12] = [
     ("Base64", "base64"),
     ("CSV", "csv"),
     ("Digest", "digest"),
@@ -2713,6 +2713,18 @@ const BUNDLED: [(&str, &str); 11] = [
     // so `Net::HTTP` and `rescue Net::OpenTimeout` both anchor it and a
     // constant like `NetworkGuard` does not.
     ("Net", "net/http"),
+    // `SecureRandom` — a Ruby DEFAULT GEM, so the CRuby/JRuby trees
+    // resolve it from their own stdlib, and spinel from
+    // `packages/securerandom`. Nothing for roundhouse to port: the
+    // entropy is a primitive, not something Ruby can compute, and
+    // spinel's package binds its runtime CSPRNG directly.
+    //
+    // A Rails app never writes this require — ActiveSupport loads
+    // securerandom as an implementation detail — so without the entry
+    // here the constant reached spinel undefined and campfire's very
+    // first write (`Account::Joinable#generate_join_code`) raised
+    // `undefined method 'join' for unknown`.
+    ("SecureRandom", "securerandom"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
