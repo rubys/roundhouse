@@ -493,6 +493,32 @@ pub struct Param {
 }
 
 impl Param {
+    /// This parameter's RBS kind.
+    ///
+    /// THE ONE PLACE THIS RULE LIVES. It was written out twice —
+    /// `analyze::stamp_inferred_library_signatures` had it right and
+    /// `lower::test_module_to_library::signature_from_params` had only
+    /// the Optional/Required half, so a test helper's
+    /// `def x(*messages, count: 1)` was declared
+    /// `(untyped messages, untyped count)`. spinel then typed the
+    /// parameter poly while its own codegen, reading the `def`, passed a
+    /// `sp_PolyArray *` — eleven C errors across four campfire test
+    /// binaries from one sentence being said twice.
+    pub fn ty_kind(&self) -> crate::ty::ParamKind {
+        use crate::ty::ParamKind;
+        if self.keyword && self.rest {
+            ParamKind::KeywordRest
+        } else if self.rest {
+            ParamKind::Rest
+        } else if self.keyword {
+            ParamKind::Keyword { required: self.default.is_none() }
+        } else if self.default.is_some() {
+            ParamKind::Optional
+        } else {
+            ParamKind::Required
+        }
+    }
+
     pub fn positional(name: Symbol) -> Self {
         Self { name, default: None, keyword: false, rest: false }
     }

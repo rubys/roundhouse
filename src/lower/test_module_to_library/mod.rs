@@ -451,15 +451,19 @@ fn signature_from_params(
     classes: &HashMap<ClassId, ClassInfo>,
     ret: Ty,
 ) -> Ty {
-    use crate::ty::{Param as TyParam, ParamKind};
+    use crate::ty::Param as TyParam;
     let ty_params: Vec<TyParam> = params
         .iter()
         .map(|p| {
-            let (ty, kind) = match &p.default {
-                Some(d) => (ty_of_expr(d, classes), ParamKind::Optional),
-                None => (Ty::Untyped, ParamKind::Required),
+            // A REST parameter's declared type is its ELEMENT type, and
+            // it never has a default — typing it from one would be
+            // typing the wrong thing. Everything else takes its default's
+            // type when it has one.
+            let ty = match &p.default {
+                Some(d) if !p.rest => ty_of_expr(d, classes),
+                _ => Ty::Untyped,
             };
-            TyParam { name: p.name.clone(), ty, kind }
+            TyParam { name: p.name.clone(), ty, kind: p.ty_kind() }
         })
         .collect();
     Ty::Fn {
@@ -565,12 +569,31 @@ fn build_library_class(
             route_id_segments,
         );
         if m.signature.is_none() {
-            let param_pairs: Vec<(Symbol, Ty)> = m
+            // KIND-AWARE, via `Param::ty_kind`. `fn_sig` makes every
+            // param Required, which is right for the synthesized stubs
+            // it was written for and wrong for a test's own helper:
+            // campfire writes `def ensure_messages_present(*messages,
+            // count: 1)` and this declared
+            // `(untyped messages, untyped count)`. spinel typed the
+            // parameter poly from that, while its own codegen read the
+            // `def` and passed a `sp_PolyArray *` — eleven C errors
+            // across four test binaries, and the `.rb` beside the
+            // `.rbs` said `*messages` the whole time.
+            let ty_params: Vec<crate::ty::Param> = m
                 .params
                 .iter()
-                .map(|p| (p.name.clone(), Ty::Untyped))
+                .map(|p| crate::ty::Param {
+                    name: p.name.clone(),
+                    ty: Ty::Untyped,
+                    kind: p.ty_kind(),
+                })
                 .collect();
-            m.signature = Some(crate::lower::typing::fn_sig(param_pairs, Ty::Nil));
+            m.signature = Some(Ty::Fn {
+                params: ty_params,
+                block: None,
+                ret: Box::new(Ty::Nil),
+                effects: crate::effect::EffectSet::pure(),
+            });
         }
         m.enclosing_class = Some(tm.name.0.clone());
         methods.push(m);

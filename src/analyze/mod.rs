@@ -1008,19 +1008,9 @@ impl Analyzer {
                         // Kind must survive verbatim: the untyped
                         // fallback this replaces is kind-aware, and a
                         // `*streams` rendered positionally makes the
-                        // sig disagree with the def.
-                        let kind = if p.keyword && p.rest {
-                            crate::ty::ParamKind::KeywordRest
-                        } else if p.rest {
-                            crate::ty::ParamKind::Rest
-                        } else if p.keyword {
-                            crate::ty::ParamKind::Keyword { required: p.default.is_none() }
-                        } else if p.default.is_some() {
-                            crate::ty::ParamKind::Optional
-                        } else {
-                            crate::ty::ParamKind::Required
-                        };
-                        crate::ty::Param { name: p.name.clone(), ty, kind }
+                        // sig disagree with the def. `Param::ty_kind` is
+                        // the one copy of that rule.
+                        crate::ty::Param { name: p.name.clone(), ty, kind: p.ty_kind() }
                     })
                     .collect();
                 method.signature = Some(Ty::Fn {
