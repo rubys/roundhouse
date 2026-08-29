@@ -370,12 +370,24 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_turbo_stream_from
-    out = ViewHelpers.turbo_stream_from("articles")
+    out = ViewHelpers.turbo_stream_from("articles", "Turbo::StreamsChannel")
     assert_includes out, %(<turbo-cable-stream-source)
     # signed-stream-name carries base64(JSON("articles")) +
     # `--unsigned` suffix; the compare harness strips the HMAC
     # suffix so this aligns with Rails' signed value.
     assert_includes out, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
+    assert_includes out, %(channel="Turbo::StreamsChannel")
+  end
+
+  # An app that names its own channel is routing the subscription AWAY
+  # from the stock one deliberately — campfire prepends a guard onto
+  # Turbo::StreamsChannel that refuses its `:messages` streams, so the
+  # custom channel is the only door onto them. The attribute used to be
+  # hardcoded, which pointed clients at the door the app had nailed shut.
+  def test_turbo_stream_from_carries_a_custom_channel
+    out = ViewHelpers.turbo_stream_from("gid:messages", "RoomMessagesChannel")
+    assert_includes out, %(channel="RoomMessagesChannel")
+    refute_includes out, %(channel="Turbo::StreamsChannel")
   end
 
   # FormBuilder + form_with tests retired alongside the runtime

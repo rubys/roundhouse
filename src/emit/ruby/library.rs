@@ -774,6 +774,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
+            crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);

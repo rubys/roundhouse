@@ -92,7 +92,7 @@ fn append_lowers_to_a_broadcasts_call_with_the_records_own_partial() {
     let src = find(&lowered(), "broadcasts.rb");
     assert!(
         src.contains(
-            "Broadcasts.append(stream: \"room_#{bc_owner.id}:messages\", \
+            "Broadcasts.append(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", \
              target: \"messages_room_#{bc_owner.id}\", html: Views::Messages.message(self))"
         ),
         "{src}",
@@ -118,7 +118,7 @@ fn remove_defaults_its_target_to_the_record_and_carries_no_html() {
     let src = find(&lowered(), "broadcasts.rb");
     assert!(
         src.contains(
-            "Broadcasts.remove(stream: \"room_#{bc_owner.id}:messages\", target: \"message_#{@id}\")"
+            "Broadcasts.remove(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", target: \"message_#{@id}\")"
         ),
         "{src}",
     );
@@ -169,7 +169,7 @@ end
 /// and nothing arrives — so this pins them to the same spelling.
 #[test]
 fn the_stream_name_matches_what_a_view_subscribes_to() {
-    use roundhouse::expr::{Expr, ExprNode, Literal};
+    use roundhouse::expr::{Expr, ExprNode, InterpPart, Literal};
     use roundhouse::lower::broadcasts::{stream_name, Streamable};
 
     let id = Expr::new(
@@ -183,7 +183,34 @@ fn the_stream_name_matches_what_a_view_subscribes_to() {
     let ExprNode::StringInterp { parts } = &*name.node else {
         panic!("expected an interpolation, got {name:?}");
     };
-    assert_eq!(parts.len(), 3, "{parts:?}");
+    // A record contributes its GLOBALID PARAM, minted at request time
+    // because it carries the id — `GlobalID.param("Room", <id>)` — and
+    // the literal follows after the `:` join. Two parts, not three: a
+    // record in first position has no leading text before it.
+    //
+    // turbo-rails 2.0.16 spells this `s.try(:to_gid_param) || s.to_param`,
+    // and it matters beyond convention: campfire's own
+    // `RoomMessagesChannel.subscribable_room` reads the name back with
+    // `GlobalID::Locator.locate`, which a `room_1` cannot satisfy.
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    let [InterpPart::Expr { expr }, InterpPart::Text { value }] = parts.as_slice() else {
+        panic!("expected <gid expr>:messages, got {parts:?}");
+    };
+    assert_eq!(value, ":messages");
+    let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
+        panic!("expected the gid mint, got {expr:?}");
+    };
+    assert_eq!(method.as_str(), "param");
+    assert!(
+        matches!(recv.as_ref().map(|r| &*r.node),
+                 Some(ExprNode::Const { path }) if path[0].as_str() == "GlobalID"),
+        "{recv:?}",
+    );
+    assert!(
+        matches!(&*args[0].node,
+                 ExprNode::Lit { value: Literal::Str { value } } if value == "Room"),
+        "the model name is camelized from the streamable singular: {args:?}",
+    );
 
     // An all-literal name stays a plain String — the blog's
     // `turbo_stream_from "articles"` has always emitted the literal.

@@ -824,12 +824,25 @@ class TestBase
   # THE STREAM NAME IS THE CONTRACT. `lower::broadcasts::stream_name`
   # spells the publish side and `turbo_stream_from` the subscribe side;
   # a test that spelled it a third way would pass while the app talked
-  # to nobody. `dom_id` is what both use for a record, so this asks the
-  # same module function the views and the lowering ask.
+  # to nobody.
+  #
+  # This paragraph used to end "`dom_id` is what both use for a record",
+  # and it was true until the day the other two moved to a GlobalID and
+  # this did not. The suite went 255/288 to 249/288 in one commit, four
+  # files' worth of `assert_turbo_stream_broadcasts ... got 0` — the
+  # failure the comment predicted, from the direction it did not.
+  #
+  # So this now asks the RECORD, matching turbo-rails 2.0.16's
+  # `streamable.try(:to_gid_param) || streamable.to_param` and campfire's
+  # own `test/test_helpers/turbo_test_helper.rb`, which spells it the
+  # same way. `to_gid_param` is synthesized onto every model by
+  # `lower::broadcasts::push_to_gid_param` and mints through the same
+  # `GlobalID.param` the lowering emits, so there is one spelling again
+  # rather than two that agree by inspection.
   def turbo_stream_name(streamables)
     parts = streamables.is_a?(Array) ? streamables : [streamables]
     parts.map { |part|
-      part.is_a?(Symbol) || part.is_a?(String) ? part.to_s : dom_id(part)
+      part.is_a?(Symbol) || part.is_a?(String) ? part.to_s : part.to_gid_param
     }.join(":")
   end
 

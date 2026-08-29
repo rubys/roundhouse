@@ -127,7 +127,7 @@ module ActionView
     # `stream` is genuinely polymorphic — Rails' turbo_stream_from
     # accepts a String channel name OR an Array (composed channel).
     # JSON.generate handles either, so untyped here.
-    def self.turbo_stream_from: (untyped stream) -> String
+    def self.turbo_stream_from: (untyped stream, String channel) -> String
   
     # ── form_with primitives ───────────────────────────────────────
     # Small typed-scalar helpers callable from macro-inlined form_with

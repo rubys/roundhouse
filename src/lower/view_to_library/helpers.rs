@@ -124,10 +124,10 @@ pub(super) fn emit_turbo_stream_fragment(
 pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) -> Option<Expr> {
     use ViewHelperKind::*;
     match kind {
-        TurboStreamFrom { streamables } => Some(view_helpers_call(
-            "turbo_stream_from",
-            vec![view_stream_name(streamables, ctx)?],
-        )),
+        TurboStreamFrom { streamables } => {
+            let (name, channel) = view_stream_from(streamables, ctx)?;
+            Some(view_helpers_call("turbo_stream_from", vec![name, channel]))
+        }
         DomId { record, prefix } => {
             let mut args = vec![(*record).clone()];
             if let Some(p) = prefix {
@@ -269,6 +269,67 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
 /// subscribing to a name we guessed at; a `channel:` kwarg is dropped
 /// with a ledger line, since our cable transport has no per-channel
 /// classes to route to.
+/// The whole `turbo_stream_from` call: its stream name and the channel
+/// class the subscriber will name.
+///
+/// TWO HALVES OF ONE ATTRIBUTE SET, kept together because the channel
+/// decides whether the stream name is even reachable. turbo-rails 2.0.16
+/// spells the default as
+/// `attributes[:channel]&.to_s || "Turbo::StreamsChannel"`, and an app
+/// naming a custom one is routing the subscription AWAY from the stock
+/// channel deliberately: campfire prepends a guard onto
+/// `Turbo::StreamsChannel` that refuses its `:messages` streams, so
+/// `RoomMessagesChannel` is the only door onto them. Dropping the option
+/// used to point the client at the door the app had nailed shut.
+fn view_stream_from(streamables: &[Expr], ctx: &ViewCtx) -> Option<(Expr, Expr)> {
+    let name = view_stream_name(streamables, ctx)?;
+    let channel = streamables
+        .iter()
+        .find_map(channel_option)
+        .unwrap_or_else(|| "Turbo::StreamsChannel".to_string());
+    Some((name, str_lit(channel)))
+}
+
+/// `channel:` out of a trailing options hash, as a String.
+///
+/// Rails accepts a String or a class name (`channel: RoomChannel`) and
+/// calls `.to_s` on either, so a constant contributes its own spelling.
+/// Anything else — a local, a method call — is a value only the request
+/// knows, and there is nothing to fold at lower time, so it declines and
+/// the default stands.
+fn channel_option(arg: &Expr) -> Option<String> {
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => continue,
+        };
+        if key != "channel" {
+            continue;
+        }
+        return match &*v.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            // `channel: RoomChannel` — a constant path contributes its
+            // own spelling, which is what Rails' `.to_s` on the class
+            // produces. Joined with `::` so a namespaced channel keeps
+            // the name the subscriber will actually send.
+            ExprNode::Const { path } => Some(
+                path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::"),
+            ),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn str_lit(value: String) -> Expr {
+    Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Lit { value: Literal::Str { value } },
+    )
+}
+
 fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
     use crate::lower::broadcasts::Streamable;
     // ONE streamable that is not a bare record name is the app spelling
@@ -293,18 +354,10 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
             ExprNode::Lit { value: Literal::Str { value } } => {
                 parts.push(Streamable::Literal(value.clone()))
             }
-            // The trailing options hash (`channel: "RoomMessagesChannel"`).
-            ExprNode::Hash { .. } => {
-                crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
-                    "turbo_stream_from",
-                    "channel: option",
-                    arg.span,
-                    "custom cable channel not modeled",
-                    "the subscription is emitted on the default channel; a \
-                     per-channel authorization class has no equivalent here"
-                        .to_string(),
-                ));
-            }
+            // The trailing options hash (`channel: "RoomMessagesChannel"`),
+            // read by the caller — it is an attribute of the whole call,
+            // not one more element of the stream name.
+            ExprNode::Hash { .. } => {}
             _ => {
                 let name = streamable_record_name(arg)?;
                 if !ctx.model_singulars.contains(&name) {

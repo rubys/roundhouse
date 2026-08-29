@@ -664,7 +664,9 @@ impl<'a> BodyTyper<'a> {
                     match method.as_str() {
                         "encode64" | "decode64"
                         | "strict_encode64" | "strict_decode64"
-                        | "urlsafe_encode64" | "urlsafe_decode64" => return Ty::Str,
+                        | "urlsafe_encode64" | "urlsafe_decode64"
+                        // The `padding: false` form GlobalID#to_param uses.
+                        | "urlsafe_encode64_nopad" => return Ty::Str,
                         _ => {}
                     }
                 }

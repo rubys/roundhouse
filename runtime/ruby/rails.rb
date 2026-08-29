@@ -234,6 +234,23 @@ module Rails
       "_session"
     end
 
+    # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
+    # <id>` URI this runtime mints. Rails derives it from the
+    # application's railtie name (`campfire_application` minus the
+    # suffix); ingest reads the module wrapping `class Application <
+    # Rails::Application` in config/application.rb and synthesizes an
+    # override here, exactly as it does for `session_cookie_key`.
+    #
+    # The default is deliberately generic: an app whose config/
+    # application.rb ingest could not read still mints well-formed gids,
+    # and since both ends of every gid round trip in a transpiled app are
+    # this runtime, a name that merely stays CONSISTENT is enough to be
+    # correct. It is only comparison against a real Rails process that
+    # wants the app's own name, which is why ingest supplies it.
+    def global_id_app
+      "app"
+    end
+
     # The key every signed message derives from — see the parked slot
     # on `Rails` itself, which the scaffold fills from the environment.
     def secret_key_base
@@ -295,5 +312,46 @@ module Rails
     def config_time_zone
       "UTC"
     end
+  end
+end
+
+# GlobalID — the `gid://<app>/<Model>/<id>` identifier Rails mints for a
+# record, and the shape a turbo stream name is built from.
+#
+# ONE SPELLING, which is the reason this exists at all rather than being
+# interpolated at each call site. A stream name is written by the view
+# (`turbo_stream_from @room, :messages`), written again by the model
+# (`broadcast_append_to room, :messages`), and READ BACK by the channel
+# that authorizes the subscription. Three places, and if any two
+# disagree the message goes to a stream nobody is listening on, silently.
+# The lowering already routes both write sides through one function; this
+# is the same rule one level down, for the part that has to run at
+# request time because it carries an id.
+#
+# Lives beside `Rails::Application#global_id_app` deliberately: the app
+# name is half the URI. A fuller GlobalID — `Locator.locate`, which the
+# subscribe side needs to turn a name back into a record — would earn its
+# own file; minting alone does not.
+module GlobalID
+  # `record.to_gid_param`, spelled from parts the caller already knows.
+  # globalid 1.3.0:
+  #
+  #   def to_gid_param(options = {}) = to_global_id(options).to_param
+  #   def to_param = Base64.urlsafe_encode64(to_s, padding: false)
+  #
+  # The MODEL NAME is a parameter rather than read off the record, the
+  # same rule `ActionText::SignedGlobalId.generate` and
+  # `ActiveRecord::SignedId` state: the caller is a lowering with the
+  # name already baked in, and reflection is what the strict targets do
+  # not have.
+  def self.param(model_name, id)
+    Base64.urlsafe_encode64_nopad(uri(model_name, id))
+  end
+
+  # The unencoded URI, kept separate because it is the readable half —
+  # a wrong app name or a wrong model name is obvious here and opaque
+  # once base64 has been applied.
+  def self.uri(model_name, id)
+    "gid://" + Rails.application.global_id_app + "/" + model_name + "/" + id.to_s
   end
 end

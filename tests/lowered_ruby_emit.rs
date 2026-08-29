@@ -1330,7 +1330,9 @@ fn lowered_index_view_rewrites_view_helpers() {
     let src = find(&files, "app/views/articles/index.rb");
     // `<%= turbo_stream_from "articles" %>` → ViewHelpers call.
     assert!(
-        src.contains("ActionView::ViewHelpers.turbo_stream_from(\"articles\")"),
+        src.contains(
+            "ActionView::ViewHelpers.turbo_stream_from(\"articles\", \"Turbo::StreamsChannel\")"
+        ),
         "expected ViewHelpers.turbo_stream_from rewrite; got:\n{src}",
     );
     // `<% content_for :title, "Articles" %>` → ViewHelpers setter.
@@ -1882,7 +1884,10 @@ fn lowered_show_view_turbo_stream_from_with_string_interp() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("ActionView::ViewHelpers.turbo_stream_from(\"article_#{article.id}_comments\")"),
+        src.contains(
+            "ActionView::ViewHelpers.turbo_stream_from(\"article_#{article.id}_comments\", \
+             \"Turbo::StreamsChannel\")"
+        ),
         "expected turbo_stream_from with interpolated channel; got:\n{src}",
     );
 }

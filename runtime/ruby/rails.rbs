@@ -52,9 +52,15 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def global_id_app: () -> String
     def secret_key_base: () -> String
     def domain: () -> String
     def credentials: () -> Hash[Symbol, untyped]
     def config_time_zone: () -> String
   end
+end
+
+module GlobalID
+  def self.param: (String model_name, Integer id) -> String
+  def self.uri: (String model_name, Integer id) -> String
 end

@@ -646,9 +646,25 @@ module ActionView
     # emit `--unsigned` (matches the other targets' runtimes), and
     # the compare harness's existing ignore rule strips the suffix
     # so the unsigned base64 value matches Rails' signed value.
-    def self.turbo_stream_from(stream)
+    # `channel` is the class the SUBSCRIBER will name in its identifier,
+    # and it is load-bearing rather than decorative. turbo-rails 2.0.16:
+    #
+    #   attributes[:channel] = attributes[:channel]&.to_s || "Turbo::StreamsChannel"
+    #
+    # An app that writes `turbo_stream_from @room, :messages, channel:
+    # "RoomMessagesChannel"` is routing the subscription AWAY from the
+    # stock channel on purpose — campfire prepends a guard onto
+    # Turbo::StreamsChannel that REFUSES its `:messages` streams, so the
+    # custom channel is the only door onto them. Hardcoding the stock
+    # channel here did not merely lose an attribute: it told the client
+    # to knock on the door the app had nailed shut.
+    #
+    # Always passed, never defaulted in this signature — the caller is
+    # the lowering, which knows the answer, and an omitted optional
+    # parameter is its own hazard on the strict targets.
+    def self.turbo_stream_from(stream, channel)
       encoded = Base64.strict_encode64(JSON.generate(stream))
-      %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
+      %(<turbo-cable-stream-source channel="#{channel}" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
     end
   
     # ── form_with primitives ─────────────────────────────────────────

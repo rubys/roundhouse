@@ -390,12 +390,136 @@ pub enum Streamable {
 /// (`broadcast_*_to` on a model) must agree exactly or the message goes
 /// to a stream nobody is listening on, silently.
 ///
-/// Rails signs a list of GlobalIDs here. We have no GlobalID, so the
-/// name is built at LOWER time out of what a record already carries:
-/// `[room, :messages]` becomes `"room_#{room.id}:messages"`. The `:`
-/// join mirrors Rails' own, and building it as a string interpolation
-/// keeps this off every target's runtime — there is no heterogeneous
-/// streamables array to type.
+/// A RECORD CONTRIBUTES ITS GLOBALID PARAM, matching turbo-rails 2.0.16:
+///
+/// ```ruby
+/// streamables.then { |s| s.try(:to_gid_param) || s.to_param }  # joined by ":"
+/// ```
+///
+/// This used to be `"room_#{room.id}"` — a dom_id-shaped name, with a
+/// comment saying "we have no GlobalID". Cheaper, and it worked for as
+/// long as both ends of the wire were ours. It stops working the moment
+/// the APP's own channel code reads the name back: campfire's
+/// `RoomMessagesChannel.subscribable_room` does
+/// `GlobalID::Locator.locate gid_param, only: Room`, and `room_1` is not
+/// something that resolves. The same rule the `/cable` handshake follows
+/// — run the app's code, and hand it inputs in the shape it parses.
+///
+/// A LITERAL still contributes its own text (`:messages` → `messages`),
+/// which is `Symbol#to_param`, so an all-literal name is unchanged and
+/// the blog fixture's byte-for-byte e2e pin is untouched.
+///
+/// The `:` join mirrors Rails' own. The gid is minted by a runtime call
+/// rather than interpolated here, so minting has one spelling for the
+/// subscribe side, the publish side, and eventually the channel that
+/// reads it back.
+///
+/// TARGET REACH, stated: `GlobalID.param` lives in `runtime/ruby/
+/// rails.rb`, which is ruby-family only — it is in no per-target
+/// transpile table. A RECORD streamable therefore needs a `GlobalID`
+/// twin on any strict target that meets one. None does today: the blog
+/// fixture every target builds writes `turbo_stream_from "articles"`
+/// and `"article_#{@article.id}_comments"`, both literals, which take
+/// the unchanged all-literal path; campfire, the only corpus app that
+/// passes a record, emits ruby and spinel. A fixture is what should
+/// force those twins into existence rather than eight speculative
+/// ports of a function nothing calls.
+/// `def to_gid_param; GlobalID.param("Room", @id); end` on every model.
+///
+/// Rails puts this on every `GlobalID::Identification` includer, which
+/// is every Active Record model, and CODE IN THE WILD CALLS IT — not
+/// just ours. campfire's own `test/test_helpers/turbo_test_helper.rb`
+/// builds the expected stream name with
+/// `streamble.try(:to_gid_param) || streamble`, so a model without it
+/// takes that helper down (`undefined method 'to_gid_param' for an
+/// instance of Rooms::Closed`) and every broadcast assertion with it.
+///
+/// EVERY MODEL, not the ones this app happens to stream. A "which
+/// models qualify" analysis would be wrong the moment a new call site
+/// appears, and the call sites are not all ours to see — the app's test
+/// helpers are app code.
+///
+/// The model NAME is a literal rather than `self.class.name`, the same
+/// rule `push_attachable_sgid` and `lower::signed_id` state: it is a
+/// compile-time fact, and baking it keeps the runtime free of
+/// reflection. NOTE the consequence for STI — `Rooms::Closed` mints
+/// `gid://app/Rooms::Closed/3` where Rails mints the same, because
+/// Rails uses the instance's own class too.
+pub fn push_to_gid_param(
+    methods: &mut Vec<crate::dialect::MethodDef>,
+    model: &crate::dialect::Model,
+) {
+    let name = crate::ident::Symbol::from("to_gid_param");
+    if methods
+        .iter()
+        .any(|m| m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance)
+    {
+        return;
+    }
+    let mut model_lit = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Lit { value: Literal::Str { value: model.name.0.as_str().to_string() } },
+    );
+    model_lit.ty = Some(crate::ty::Ty::Str);
+    let mut id_read = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Ivar { name: crate::ident::Symbol::from("id") },
+    );
+    id_read.ty = Some(crate::ty::Ty::Int);
+    let mut body = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                crate::span::Span::synthetic(),
+                ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
+            )),
+            method: crate::ident::Symbol::from("param"),
+            args: vec![model_lit, id_read],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    body.ty = Some(crate::ty::Ty::Str);
+    methods.push(crate::dialect::MethodDef {
+        name,
+        receiver: crate::dialect::MethodReceiver::Instance,
+        params: vec![],
+        body,
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// `GlobalID.param("Room", <id expr>)` — the runtime mint. The model
+/// name is camelized from the streamable's singular, which is the same
+/// name the record's class carries.
+fn gid_param_call(singular: &str, id: &Expr) -> Expr {
+    let model = crate::naming::camelize(singular);
+    let model_lit = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Lit { value: Literal::Str { value: model } },
+    );
+    let recv = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
+    );
+    Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: crate::ident::Symbol::from("param"),
+            args: vec![model_lit, id.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 pub fn stream_name(parts: &[Streamable]) -> Expr {
     let mut interp: Vec<crate::expr::InterpPart> = Vec::new();
     let mut pending = String::new();
@@ -406,18 +530,22 @@ pub fn stream_name(parts: &[Streamable]) -> Expr {
         match part {
             Streamable::Literal(text) => pending.push_str(text),
             Streamable::Record { singular, id } => {
-                pending.push_str(singular);
-                pending.push('_');
                 interp.push(crate::expr::InterpPart::Text {
                     value: std::mem::take(&mut pending),
                 });
-                interp.push(crate::expr::InterpPart::Expr { expr: id.clone() });
+                interp.push(crate::expr::InterpPart::Expr {
+                    expr: gid_param_call(singular, id),
+                });
             }
         }
     }
     if !pending.is_empty() {
         interp.push(crate::expr::InterpPart::Text { value: pending });
     }
+    // A record in first position pushes an EMPTY leading text part (the
+    // separator buffer had nothing in it yet). Harmless to emit and ugly
+    // to read, and it would defeat the all-literal check below.
+    interp.retain(|p| !matches!(p, crate::expr::InterpPart::Text { value } if value.is_empty()));
     // An all-literal name is a plain String, not a one-part interp —
     // `turbo_stream_from "articles"` has always emitted the literal and
     // the blog's e2e pins that byte-for-byte.

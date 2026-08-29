@@ -119,6 +119,25 @@ module Base64
     out
   end
 
+  # The `padding: false` form, which GlobalID#to_param uses:
+  #
+  #   Base64.urlsafe_encode64(to_s, padding: false)   # globalid 1.3.0
+  #
+  # A separate method rather than a keyword on the one above, for the
+  # reason that comment gives about parameterizing the encoder — and
+  # because an omitted optional parameter is its own hazard on the
+  # strict targets. Trailing "=" are what padding means in base64, and
+  # nothing else in the alphabet produces one, so stripping them is the
+  # whole difference.
+  def self.urlsafe_encode64_nopad(s)
+    out = urlsafe_encode64(s)
+    n = out.length
+    while n > 0 && out[n - 1] == "="
+      n = n - 1
+    end
+    out[0, n].to_s
+  end
+
   # The inverse: map the URL-safe pair back and hand off to the standard
   # decoder, which already skips padding and any stray byte.
   def self.urlsafe_decode64(s)

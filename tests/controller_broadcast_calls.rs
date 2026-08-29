@@ -128,7 +128,7 @@ fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
     let src = controller_src();
     assert!(
         src.contains(
-            "Broadcasts.replace(stream: \"user_#{user.id}:rooms\", \
+            "Broadcasts.replace(stream: \"#{GlobalID.param(\"User\", user.id)}:rooms\", \
              target: \"list_room_#{@room.id}\""
         ),
         "{src}",

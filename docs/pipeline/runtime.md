@@ -1290,16 +1290,32 @@ def subscribed
 
 and its comment states the reason — "authorizing room messages only in
 `RoomMessagesChannel` would leave the stock channel as a way around it:
-same signed stream name, no membership check." The stock channel is
-what this runtime implements, so a subscribe to `<gid>:messages`
-delivers a room's messages **with no membership check at all** — not,
-as an earlier revision of this entry claimed, a subscription to a room
-the user already belongs to. `RoomMessagesChannel#subscribed`, which
-does ask `user.rooms.find_by(id: room.id)`, never runs.
+same signed stream name, no membership check."
+
+**The page now names the right channel; nothing routes on it.** An
+earlier revision of this entry said the stock channel "is what this
+runtime implements", which was true of the emitted page too: the
+`channel:` option was dropped and every `<turbo-cable-stream-source>`
+went out naming `Turbo::StreamsChannel`. It now carries
+`RoomMessagesChannel`, as the app wrote it. That closes a real gap —
+the page had been pointing clients at the door campfire nailed shut —
+but it does not close this one, because **channel subscription dispatch
+is still unimplemented**: `Cable.handle_message` reads
+`signed_stream_name` and subscribes directly, whatever channel the
+identifier names. So a subscribe to `<gid>:messages` still delivers a
+room's messages **with no membership check at all**, and
+`RoomMessagesChannel#subscribed` — which does ask
+`user.rooms.find_by(id: room.id)` — still never runs.
 
 The name is not a secret either: it is a GlobalID
 (`GlobalID::Locator.locate gid_param, only: Room`), an identifier
-rather than a capability.
+rather than a capability. That is now literally true of the names this
+runtime mints: a record streamable contributes
+`GlobalID.param("Room", id)` — `Base64.urlsafe_encode64` of
+`gid://<app>/Room/<id>`, no padding — which is byte-identical to what
+`to_gid_param` produces in a real Rails process. It is spelled that way
+so the app's own channel code can read it back, the same rule the
+`/cable` handshake follows by running the app's `connect`.
 
 **Not a mitigation, but bounds on the blast radius:** fan-out is
 in-process and single-worker, and the only frames published are those
@@ -1478,3 +1494,39 @@ DOM comparison cannot see it.
 - [`analyze.md`](analyze.md) — RBS-paired typing of `runtime/ruby/`.
 - [`verification.md`](verification.md) — toolchain tests that
   exercise runtime + emitted project end-to-end.
+
+### `try` guards NIL, not `respond_to?`
+
+`recv.try(:name)` is lowered at ingest to `recv && recv.name` — the same
+shape as the `&.` desugar. Rails' definition is
+`respond_to?(name) && public_send(name, …)`, so the two agree whenever
+the receiver either is nil or does respond, and diverge on the one case
+between: **a non-nil receiver that does not define the method raises
+here and answers nil in Rails.**
+
+**Why.** `public_send` on a name known only at run time is dynamic
+dispatch, which is what an AOT target cannot resolve. Grounding the
+literal method name at ingest — every corpus site passes a `:symbol` —
+is what makes `try` compile at all; a dynamic method name is left as a
+plain `try` send and reaches nothing.
+
+**What it costs.** The `try(:x) || fallback` idiom, which is how code
+asks "use `x` if this object has one". campfire's own
+`test/test_helpers/turbo_test_helper.rb` writes exactly that:
+
+```ruby
+streamble.try(:to_gid_param) || streamble
+```
+
+A record answers its gid param on both. A `Symbol` — the `:messages` in
+`turbo_stream_from @room, :messages` — answers nil in Rails and raises
+`undefined method 'to_gid_param' for an instance of Symbol` here, which
+costs `MessagesControllerTest
+#test_creating_a_message_broadcasts_the_message_to_the_room`.
+
+**What would close it.** Not a runtime `respond_to?` — the point of the
+grounding is to avoid one. The static answer: when analysis knows the
+receiver's type and that type has no such method, fold the whole `try`
+to `nil` rather than emitting a call that will raise. That is decidable
+exactly when the lowering already has what it needs, and it leaves the
+untyped-receiver case as it is today.

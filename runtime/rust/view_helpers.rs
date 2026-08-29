@@ -395,12 +395,18 @@ pub fn field_has_error(errors: &[ValidationError], field: &str) -> bool {
     errors.iter().any(|e| e.field == field)
 }
 
-pub fn turbo_stream_from(channel: &str) -> String {
-    let json = format!("\"{}\"", channel.replace('\\', "\\\\").replace('"', "\\\""));
+/// The first argument is the STREAM NAME; the second is the channel
+/// class the subscriber will name in its identifier. It used to take one
+/// argument called `channel` that was in fact the stream name, and the
+/// real channel was hardcoded to the stock one — which is wrong for any
+/// app routing a subscription away from `Turbo::StreamsChannel` on
+/// purpose (see the ruby twin for why campfire does).
+pub fn turbo_stream_from(stream: &str, channel: &str) -> String {
+    let json = format!("\"{}\"", stream.replace('\\', "\\\\").replace('"', "\\\""));
     let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
     format!(
-        "<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{}--unsigned\"></turbo-cable-stream-source>",
-        encoded,
+        "<turbo-cable-stream-source channel=\"{}\" signed-stream-name=\"{}--unsigned\"></turbo-cable-stream-source>",
+        channel, encoded,
     )
 }
 
