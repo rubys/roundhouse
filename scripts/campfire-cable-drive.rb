@@ -216,12 +216,13 @@ if frame
   html = frame["message"].to_s
   check("it is an append to the room's message list",
         !html[/<turbo-stream action="append" target="messages_room_1">/].nil?, true)
-  check("it carries the message that was posted", html.include?(BODY), true,
-        ledger: "a bare `new` in a class method is grounded to the LEXICAL class, " \
-                "so `Filter.apply`'s `new(content)` builds the abstract base for " \
-                "every subclass and `applicable?` raises NotImplementedError; the " \
-                "helper's own `rescue Exception` turns that into \"\", and every " \
-                "message body renders empty — on the page as well as in the frame")
+  # A MILESTONE probe, and it earned the promotion. It was a ledger probe
+  # for one commit, when an inherited class-side `new` built the abstract
+  # filter and the app's own `rescue Exception` turned the resulting
+  # `NotImplementedError` into `""` — every message body empty behind a
+  # 200 and a green suite. The frame carrying the text is the difference
+  # between fan-out that works and fan-out that delivers blank bubbles.
+  check("it carries the message that was posted", html.include?(BODY), true)
   # The identifier is echoed byte for byte: the client keys its
   # subscription table on it, so a re-spelled one is a frame nobody claims.
   check("the frame echoes the subscription identifier", frame["identifier"], identifier)

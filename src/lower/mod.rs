@@ -563,7 +563,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     pathname_ctor::apply_pathname_ctor_lowering(app);
     ran!("pathname_ctor");
-    class_body_new::apply_class_body_new_lowering(app);
+    diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");

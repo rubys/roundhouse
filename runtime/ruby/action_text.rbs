@@ -18,6 +18,7 @@ module ActionText
   end
 
   class Attachment
+    ATTRIBUTES: Array[String]
     def self.tag_name: () -> String
     def initialize: (Hash[String, String] attributes) -> void
     def attributes: () -> Hash[String, String]
@@ -96,5 +97,17 @@ module ActionText
     def self.indent: (Integer list_depth) -> String
     def self.ends_with_newline: (String text) -> bool
     def self.chomp_newlines: (String text) -> String
+  end
+end
+
+module ActionText
+  module ContentHelper
+    def self.allowed_attributes: () -> nil
+    def self.sanitizer: () -> ActionText::SafeListSanitizer
+  end
+
+  class SafeListSanitizer
+    def self.allowed_attributes: () -> Array[String]
+    def sanitize: (String html, tags: Array[String], attributes: Array[String]) -> String
   end
 end

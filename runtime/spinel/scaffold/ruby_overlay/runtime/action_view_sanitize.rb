@@ -79,6 +79,20 @@ unless RH_SANITIZER_VENDOR.nil?
         SafeString.new(RH_FULL_SANITIZER.sanitize(html.to_s).to_s)
       end
 
+      # The Action Text form: the caller brings its own allow-lists.
+      # `ActionText::ContentHelper.sanitizer` is what reaches this, and
+      # campfire's `ContentFilters::SanitizeAttributes` is what reaches
+      # that — with `ContentFilters::SanitizeTags::ALLOWED_TAGS` and the
+      # gem's own default attributes plus `class`.
+      #
+      # A plain String, not a SafeString: the caller is a content FILTER
+      # building an `ActionText::Content`, not a view splicing a buffer,
+      # and the html-safety marker is the view layer's concern.
+      def self.sanitize_allowing(html, tags, attributes)
+        return nil if html.nil?
+        RH_SAFE_LIST_SANITIZER.sanitize(html.to_s, tags: tags, attributes: attributes).to_s
+      end
+
       # `auto_link` — the `rails_autolink` gem (campfire's Gemfile),
       # PORTED rather than declared: unlike the sanitizer it depends on
       # actionview, which this tree does not have and does not want.

@@ -363,6 +363,30 @@ module ActionView
       s
     end
 
+    # The same sanitizer with the CALLER's allow-lists, which is the form
+    # Action Text uses: `ContentHelper.sanitizer.sanitize(html, tags:,
+    # attributes:)`. Separate entry point rather than an optional
+    # argument on `sanitize` above, because that one's arity is fixed
+    # across every target and an omitted optional parameter is its own
+    # hazard on the strict ones.
+    #
+    # Same honesty and the same limit: tagless input passes, markup
+    # raises. `tags` and `attributes` are accepted and unused HERE — the
+    # overlay's override is where they mean something, because that is
+    # where a real safe-list sanitizer exists to be given them. Naming
+    # them in this signature is what lets the one call site be written
+    # once for both lanes.
+    def self.sanitize_allowing(html, tags, attributes)
+      s = html.to_s
+      if s.include?("<")
+        raise NotImplementedError,
+              "ActionView::ViewHelpers.sanitize_allowing: the safe-list sanitizer " \
+              "is not modelled on this target; only tagless input is served — see " \
+              "runtime/ruby/action_view/view_helpers_ext.rb"
+      end
+      s
+    end
+
     # Does a tag start at `i` (where `s[i]` is "<")? HTML5 opens an
     # element on `<` + letter and closes one on `</` + letter; anything
     # else — `<3`, `< b`, `<>` — is text. `<!` and `<?` are the bogus

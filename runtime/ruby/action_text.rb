@@ -113,6 +113,19 @@ module ActionText
       "action-text-attachment"
     end
 
+    # actiontext 8.1.2, `lib/action_text/attachment.rb:24`, verbatim and
+    # in order. A rule table, ported rather than derived: campfire's
+    # `SanitizeAttributes` adds it to the sanitizer's own allow-list, so
+    # a name missing here is an attribute silently stripped out of every
+    # attachment that carries it.
+    #
+    # A real CONSTANT, unlike `tag_name` above, because the app reads it
+    # as one (`... + ActionText::Attachment::ATTRIBUTES`).
+    ATTRIBUTES = [
+      "sgid", "content-type", "url", "href", "filename", "filesize",
+      "width", "height", "previewable", "presentation", "caption", "content"
+    ]
+
     def initialize(attributes)
       @attributes = attributes
     end
@@ -991,6 +1004,65 @@ module ActionText
         stop = stop - 1
       end
       text[0, stop].to_s
+    end
+  end
+end
+
+# `ActionText::ContentHelper` — the sanitizer Action Text runs rich text
+# through, and the allow-lists it runs it with.
+#
+# WHY IT IS HERE AT ALL. campfire's presentation filter chain ends in
+# `ContentFilters::SanitizeAttributes`, which asks for
+# `ActionText::ContentHelper.sanitizer.class`, `.new`s it, and calls
+# `.sanitize(html, tags:, attributes:)`. Without this the chain raised
+# `uninitialized constant ActionText::ContentHelper` — and campfire wraps
+# the whole chain in its own `rescue Exception` returning `""`, so every
+# message body rendered EMPTY behind a 200. It was the second wall behind
+# the class-side `new` one, found the same way.
+#
+# actiontext 8.0.5, `app/helpers/action_text/content_helper.rb`:
+#
+#   mattr_accessor(:sanitizer, default: Rails::HTML4::Sanitizer.safe_list_sanitizer.new)
+#   mattr_accessor(:allowed_attributes)
+#
+# so `allowed_attributes` is nil until an app sets it, and the caller
+# falls back to `sanitizer_class.allowed_attributes + Attachment::
+# ATTRIBUTES`. Both halves are reproduced rather than guessed.
+module ActionText
+  module ContentHelper
+    # nil, exactly as the bare `mattr_accessor` leaves it. The `||`
+    # branch in the app is the one that runs, and it is the branch that
+    # matters — an app that never configured this gets the sanitizer's
+    # own list plus Action Text's attachment attributes.
+    def self.allowed_attributes
+      nil
+    end
+
+    def self.sanitizer
+      SafeListSanitizer.new
+    end
+  end
+
+  # What `ContentHelper.sanitizer` answers, and what `.class.new` on it
+  # builds again. Thin on purpose: the sanitizing itself belongs to
+  # `ActionView::ViewHelpers`, which is where each lane already decides
+  # whether it has a real safe-list sanitizer (the ruby family binds the
+  # `rails-html-sanitizer` gem; the strict targets raise on markup and
+  # say so). One implementation of that decision, not two.
+  class SafeListSanitizer
+    # rails-html-sanitizer 1.7.1's own default set, sorted as the gem
+    # reports it. PORTED, not derived — the caller adds `class` to this
+    # list and hands the result to the sanitizer, so a name missing here
+    # is an attribute stripped from every message body.
+    def self.allowed_attributes
+      [
+        "abbr", "alt", "cite", "class", "datetime", "height", "href",
+        "lang", "name", "src", "title", "width", "xml:lang"
+      ]
+    end
+
+    def sanitize(html, tags:, attributes:)
+      ActionView::ViewHelpers.sanitize_allowing(html, tags, attributes)
     end
   end
 end

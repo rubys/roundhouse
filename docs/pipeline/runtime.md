@@ -1352,54 +1352,41 @@ what does not happen, so an already-open socket keeps delivering to a
 user whose membership was just revoked, until they reconnect for some
 other reason.
 
-### A bare `new` in a class method builds the LEXICAL class, not the receiver
+### Rich text renders EMPTY on a target with no safe-list sanitizer
 
-campfire's `lib/rails_ext/filter.rb`:
+campfire's message presentation ends in `ContentFilters::SanitizeAttributes`,
+which calls `ActionText::ContentHelper.sanitizer.sanitize(html, tags:,
+attributes:)`. That reaches `ActionView::ViewHelpers.sanitize_allowing`,
+which on the ruby family is the real `rails-html-sanitizer` and on every
+other target raises `NotImplementedError` for input containing markup —
+the same limit `sanitize` above already carries, for the same reason: the
+allow-list is a rule table, and both ways to fake it are wrong in a way
+nobody would see.
 
-```ruby
-class ActionText::Content::Filter
-  class << self
-    def apply(content)
-      filter = new(content)
-      filter.applicable? ? ActionText::Content.new(filter.apply, ...) : content
-    end
-  end
-  def applicable? = raise NotImplementedError
-end
-```
+**What it costs.** campfire wraps its filter chain in its own `rescue
+Exception` and returns `""`, so on those targets a message body renders
+EMPTY: the record has the text, the database has the text, the page
+returns 200, and `<div id="presentation_message_N">` is blank. Nothing is
+logged either — the app's own log line runs through a no-op
+`Rails.logger`.
 
-`new` there is a call on `self`, and `self` at call time is whichever
-SUBCLASS was asked — `ContentFilters::RemoveSoloUnfurledLinkText.apply`
-builds a `RemoveSoloUnfurledLinkText`. The emit grounds it to the class
-the method is lexically inside:
+**Where it bites.** The spinel campfire binary. The ruby lane is correct:
+`scripts/campfire-cable-walk` asserts the posted body arrives in the
+broadcast frame, and the room page carries it too.
 
-```ruby
-filter = ::ActionText::Content::Filter.new(content)
-```
+**How it was found, which is the part worth keeping.** Not here — behind
+it. An inherited class-side `new` was binding to the LEXICAL class, so
+`ContentFilters::*.apply` built the abstract `ActionText::Content::Filter`
+and `applicable?` raised `NotImplementedError`, which the same `rescue
+Exception` turned into the same `""`. Every lane rendered empty bodies,
+under a green 255/288 suite, until a live `GET /rooms/1`. That one is
+fixed (`lower::class_body_new` monomorphizes the method into each
+descendant); this is what was standing behind it.
 
-so every subclass's `apply` constructs the ABSTRACT BASE, and the base's
-`applicable?` raises `NotImplementedError`.
-
-**What it costs, in campfire.** Every message body renders EMPTY — in the
-page and in the broadcast frame alike. `MessagesHelper
-#message_presentation` wraps the filter chain in the app's own `rescue
-Exception` and returns `""`, so there is no error anywhere: the record
-has the text, the database has the text, and
-`<div id="presentation_message_N">` is blank. `scripts/campfire-cable-walk`
-is what surfaced it; the suite does not, because its message assertions
-do not go through this partial.
-
-**The shape, generally.** A class-side template method — a base whose
-class method constructs and then calls overridable instance methods — is
-the pattern this breaks, and it is not rare. Any inherited `def self.x`
-containing a bare `new` builds the wrong object.
-
-**Why it is not simply `self.new`.** On the ruby family it is exactly
-that. On a strict target, class-side late binding needs the class itself
-to carry a dispatch table, which is the thing those targets do not have —
-so the fix has a ruby-family half that is a one-line change and a
-strict-target half that is a design question. Ledgered rather than
-half-fixed.
+**The fix is the sanitizer**, not this seam: port the safe-list rule
+table (42 tags, 13 attributes, per-attribute URL protocols, CSS
+behaviour) the way the inflector tables were ported, rather than deriving
+one.
 
 ### An association reader is not an arel chain root
 

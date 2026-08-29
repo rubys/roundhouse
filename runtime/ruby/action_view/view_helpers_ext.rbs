@@ -20,6 +20,7 @@ module ActionView
     def self.distance_of_time_in_words: (::Time from_time, ::Time to_time, ?include_seconds: bool) -> String
     def self.strip_tags: (String html) -> String
     def self.sanitize: (String html) -> String
+    def self.sanitize_allowing: (String html, Array[String] tags, Array[String] attributes) -> String
     def self.tag_open_at?: (String s, Integer i) -> bool
     def self.tag_end_index: (String s, Integer i) -> Integer?
     def self.entity_reference_length: (String s, Integer i) -> Integer

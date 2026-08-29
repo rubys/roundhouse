@@ -24,10 +24,19 @@ end
 "#;
 
 fn emitted(poro: &str) -> String {
-    let tree: HashMap<PathBuf, Vec<u8>> = vec![
+    emitted_files(&[("app/models/sound.rb", poro)])
+        .into_iter()
+        .find(|(p, _)| p.ends_with("sound.rb"))
+        .map(|(_, c)| c)
+        .expect("sound.rb")
+}
+
+/// Every emitted library file, for the tests that need to look at a
+/// class OTHER than the one they wrote the constructor in.
+fn emitted_files(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut files: Vec<(&str, &str)> = vec![
         ("db/schema.rb", SCHEMA),
         ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
-        ("app/models/sound.rb", poro),
         (
             "app/controllers/application_controller.rb",
             "class ApplicationController < ActionController::Base\nend\n",
@@ -36,17 +45,18 @@ fn emitted(poro: &str) -> String {
             "config/routes.rb",
             "Rails.application.routes.draw do\n  resources :rooms\nend\n",
         ),
-    ]
-    .into_iter()
-    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
-    .collect();
+    ];
+    files.extend_from_slice(extra);
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     let _ = roundhouse::session::analyze_and_lower(&mut app);
     ruby::emit_library(&app)
         .iter()
-        .find(|f| f.path.to_string_lossy().ends_with("sound.rb"))
-        .map(|f| f.content.clone())
-        .expect("sound.rb")
+        .map(|f| (f.path.to_string_lossy().to_string(), f.content.clone()))
+        .collect()
 }
 
 const SOUND: &str = r#"class Sound
@@ -115,5 +125,123 @@ fn a_self_constructing_constant_still_defers_past_the_methods() {
         builtin > init,
         "a constant that constructs its own class must be emitted AFTER \
          the methods it calls:\n{src}"
+    );
+}
+
+/// THE OWNER IS NOT ALWAYS `self`. In a class-side method a SUBCLASS
+/// inherits, `self` at call time is the subclass — the class-side
+/// template method, which campfire writes as
+/// `ActionText::Content::Filter`:
+///
+/// ```ruby
+/// class Filter
+///   def self.apply(content)
+///     filter = new(content)          # `self` is the SUBCLASS
+///     filter.applicable? ? ... : content
+///   end
+///   def applicable? = raise NotImplementedError
+/// end
+/// ```
+///
+/// Binding that to the owner made every subclass's `apply` build the
+/// ABSTRACT BASE, and campfire wraps the chain in its own
+/// `rescue Exception` returning `""` — so every message body rendered
+/// EMPTY behind a 200 and a green suite. The subclass set of an
+/// ingested tree is closed, so the method is COPIED into each
+/// descendant with the receiver bound to that descendant.
+const FILTERS: &str = r#"class Filter
+  def initialize(content)
+    @content = content
+  end
+
+  def self.apply(content)
+    new(content).run
+  end
+
+  def run
+    "base"
+  end
+end
+"#;
+
+const UPCASE: &str = r#"class Upcase < Filter
+  def run
+    "upcase"
+  end
+end
+"#;
+
+fn filter_tree() -> Vec<(String, String)> {
+    emitted_files(&[
+        ("app/models/filter.rb", FILTERS),
+        ("app/models/upcase.rb", UPCASE),
+    ])
+}
+
+fn file_named(files: &[(String, String)], suffix: &str) -> String {
+    files
+        .iter()
+        .find(|(p, _)| p.ends_with(suffix))
+        .map(|(_, c)| c.clone())
+        .unwrap_or_else(|| panic!("no {suffix} in {:?}", files.iter().map(|(p, _)| p).collect::<Vec<_>>()))
+}
+
+#[test]
+fn an_inherited_class_side_constructor_is_copied_into_the_subclass() {
+    let files = filter_tree();
+    let sub = file_named(&files, "upcase.rb");
+    assert!(
+        sub.contains("def self.apply"),
+        "the subclass needs its own copy — inheriting the base's would \
+         build a base:\n{sub}"
+    );
+    assert!(
+        sub.contains("Upcase.new(content)"),
+        "the copy's constructor must name the class it now lives in:\n{sub}"
+    );
+}
+
+/// The base keeps its own, bound to itself: `Filter.apply` in Ruby
+/// builds a `Filter`.
+#[test]
+fn the_base_still_constructs_itself() {
+    let base = file_named(&filter_tree(), "filter.rb");
+    assert!(
+        base.contains("Filter.new(content)"),
+        "the base's own copy is unchanged:\n{base}"
+    );
+}
+
+/// A subclass that DEFINES the name shadows the inherited one, and
+/// everything below it inherits the shadow — so no copy goes there.
+#[test]
+fn a_subclass_that_defines_the_name_is_left_alone() {
+    let files = emitted_files(&[
+        ("app/models/filter.rb", FILTERS),
+        (
+            "app/models/upcase.rb",
+            "class Upcase < Filter\n  def self.apply(content)\n    \"own\"\n  end\nend\n",
+        ),
+    ]);
+    let sub = file_named(&files, "upcase.rb");
+    assert!(
+        sub.contains("\"own\""),
+        "the subclass's own definition must survive:\n{sub}"
+    );
+    assert!(
+        !sub.contains("Upcase.new(content)"),
+        "a class that defines the name gets no copy of the inherited one:\n{sub}"
+    );
+}
+
+/// A class NOTHING subclasses keeps the owner constant — the shape the
+/// rest of this file asserts, and the one every target already
+/// compiles. `Sound` is that class.
+#[test]
+fn an_unsubclassed_class_is_not_monomorphized() {
+    let src = emitted(SOUND);
+    assert!(
+        src.contains("Sound.new(name: \"first\")") && !src.contains("self.new"),
+        "no subclass, no late binding, no copies:\n{src}"
     );
 }
