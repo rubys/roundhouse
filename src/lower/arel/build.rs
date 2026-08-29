@@ -97,6 +97,27 @@ pub fn try_build_arel_with_assocs(
             let op = attach_preloads(op, &owner, args, registry, assocs);
             return Some((op, owner));
         }
+        // `pluck(:col)` / `ids` — a TERMINAL, not a refiner: it swaps
+        // the projection and changes the result shape from
+        // `Array[Model]` to `Array[<column>]`. Recognized here (rather
+        // than in the base arm) because the receiver is nearly always
+        // a chain — campfire's site arrives as
+        // `Room.where(type: "Rooms::Open").pluck(:id)` from `sti_scope`.
+        "pluck" | "ids" => {
+            let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
+            return apply_pluck(op, method, args, schema).map(|op| (op, owner));
+        }
+        // `count` LAYERED on a chain. The base arm already answers
+        // `Model.count`; without this arm `Model.where(…).count`
+        // hydrated every matching row and counted the Array — the right
+        // number, over a whole-row fetch Rails never does. lobsters'
+        // `InvitationRequest.verified_count` is that site. It is the
+        // same missing arm as `pluck` one link over, which is why the
+        // two land together.
+        "count" if args.is_empty() => {
+            let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
+            return apply_count(op).map(|op| (op, owner));
+        }
         _ => {}
     }
 
@@ -227,8 +248,98 @@ fn apply_limit(op: ArelOp, args: &[Expr]) -> Option<ArelOp> {
     Some(ArelOp::Select(sel))
 }
 
+/// `.pluck(:col)` / `.ids` — replace the projection with a single
+/// named column. The column must exist in the schema: a `pluck` of a
+/// name the table doesn't have is a chain we cannot render, and
+/// declining it leaves the site on the runtime Relation rather than
+/// composing SQL that would fail at run time.
+///
+/// Multi-column `pluck` returns None on purpose — see
+/// `ColumnSpec::Pluck`.
+fn apply_pluck(
+    op: ArelOp,
+    method: &Symbol,
+    args: &[Expr],
+    schema: &Schema,
+) -> Option<ArelOp> {
+    let mut sel = match op {
+        ArelOp::Select(s) => s,
+        _ => return None,
+    };
+    // Layering a projection on one that is already a scalar/bool
+    // (`count.pluck`) is not a chain Rails has either.
+    if !matches!(sel.columns, ColumnSpec::All) {
+        return None;
+    }
+    let column = match method.as_str() {
+        // `ids` is `pluck(:id)` with the column named by Rails, not by
+        // the call site — so it takes no args.
+        "ids" if args.is_empty() => Symbol::from("id"),
+        "pluck" if args.len() == 1 => column_name_arg(&args[0])?,
+        _ => return None,
+    };
+    let table = schema.tables.get(&sel.table.0)?;
+    if !table.columns.iter().any(|c| c.name == column) {
+        return None;
+    }
+    sel.columns = ColumnSpec::Pluck(super::ir::ColRef {
+        table: sel.table.clone(),
+        column,
+    });
+    Some(ArelOp::Select(sel))
+}
+
+/// `.count` on an existing chain — swap the projection for `COUNT(*)`.
+///
+/// Declines when a `limit` is in the chain: Rails' `limit(5).count`
+/// answers `min(5, total)`, and `emit_count` renders neither the LIMIT
+/// nor a subquery, so folding it would answer the unlimited total.
+/// Declines on a projection that is already a scalar/bool/pluck for the
+/// same reason `pluck` does.
+fn apply_count(op: ArelOp) -> Option<ArelOp> {
+    let mut sel = match op {
+        ArelOp::Select(s) => s,
+        _ => return None,
+    };
+    if !matches!(sel.columns, ColumnSpec::All) || sel.limit.is_some() {
+        return None;
+    }
+    // A single-record chain (`find_by(…)`) is not something `.count`
+    // rides on.
+    if sel.single_record {
+        return None;
+    }
+    sel.columns = ColumnSpec::Count;
+    Some(ArelOp::Select(sel))
+}
+
+/// A column named at a call site: `:id` or `"id"`. Rails accepts both
+/// spellings for `pluck`, and both name the same column.
+fn column_name_arg(arg: &Expr) -> Option<Symbol> {
+    match arg.node.as_ref() {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        _ => None,
+    }
+}
+
 /// Common destructure for `.order(col: :dir, …)` /
 /// `.where(col: val, …)` — args must be exactly one kwargs hash.
+///
+/// `kwargs` is asked about deliberately, and it is NOT purely a fact
+/// about the program: `analyze::body::send` clears the flag whenever
+/// the callee's signature declares its last parameter as a positional
+/// Hash, and `ActiveRecord::Base.self.where` is declared exactly that
+/// way. Controllers re-type immediately BEFORE this pass and models
+/// re-type immediately AFTER it, so the identical `Model.where(a: 1)`
+/// lifts inside a model and stays on the runtime Relation inside a
+/// controller. Relaxing the check lifts both — and lifting the
+/// controller half surfaces a separate, older gap: a hydrate Seq that
+/// lands in an `if`/`elsif` CONDITION has no statement list to hoist
+/// into (`hoist_value_seqs_in_stmts` walks Seq stmt lists only), and
+/// `if user = Model.find_by(…)` then binds `user` to the prepared
+/// statement handle. Left keyed on the flag until that hoist covers
+/// every statement position.
 fn single_kwargs_hash(args: &[Expr]) -> Option<&Vec<(Expr, Expr)>> {
     if args.len() != 1 {
         return None;

@@ -21,7 +21,7 @@
 //! that haven't migrated.
 
 mod adapter_emit;
-mod schema;
+pub(crate) mod schema;
 pub use schema::col_storage_name;
 pub use schema::shakeable_synthesized_names;
 pub(crate) mod validations;

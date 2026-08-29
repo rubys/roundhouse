@@ -152,6 +152,7 @@ pub struct Assignment {
 /// - `Count`                  → integer scalar
 /// - `Exists`                 → bool from `step?` (projection is the
 ///                              sentinel `1`; column reads skipped)
+/// - `Pluck`                  → array of column scalars (no hydrate)
 #[derive(Clone, Debug)]
 pub enum ColumnSpec {
     /// Every schema column in declaration order. Visitor expands at
@@ -168,6 +169,18 @@ pub enum ColumnSpec {
     /// `_adapter_exists_by_id?` shape and `Model.exists?(...)` at
     /// runtime call sites.
     Exists,
+    /// `pluck(:col)` / `ids` — a ONE-column projection whose rows are
+    /// read as scalars, not hydrated into instances. Distinct from
+    /// `Named`, which is a reserved multi-column projection that still
+    /// describes a row: the difference is the RESULT SHAPE, and it is
+    /// the whole reason `pluck` cannot ride on `Named`. The visitor
+    /// answers `Array[<column ty>]`.
+    ///
+    /// Single column only. Rails' multi-column `pluck` answers an Array
+    /// of Arrays whose element types differ per position — a shape the
+    /// strict targets have no shared vocabulary for — so the builder
+    /// declines those and they stay on the runtime Relation path.
+    Pluck(ColRef),
 }
 
 /// Boolean expression in the WHERE position. Phase 1 is small on

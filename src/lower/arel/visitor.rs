@@ -136,6 +136,7 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
             emit_single_hydrate(sel, table, owner, param)
         }
         ColumnSpec::All => emit_multi_hydrate(sel, table, owner, schema, param),
+        ColumnSpec::Pluck(col) => emit_pluck(sel, table, col, param),
         ColumnSpec::Named(_) => {
             // Reserved — no Phase 1 builder produces Named yet (it's for
             // find_by(<col>)). Degrade instead of crashing: report the
@@ -409,6 +410,80 @@ fn push_preload_stmts(
     out.push(send_block(var_ref(parent_results), "each", each_block));
 }
 
+/// `SELECT <col> FROM <table> [WHERE …]` → `Array[<column ty>]`.
+///
+/// Same statement shape as `emit_multi_hydrate` with the hydrate
+/// swapped for a single positional column read: the projection is one
+/// column, so index 0 is the column, and the reader is the same
+/// schema-driven one the row hydrate uses — `column_read_method_for`,
+/// which is where the nullable `_opt` rule lives. Reusing it is the
+/// point: a second copy of that rule would be a second description of
+/// the same column.
+fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool) -> Expr {
+    let stmt = Symbol::from("stmt");
+    let results = Symbol::from("results");
+    let db = ClassId(Symbol::from(DB_MOD));
+
+    // The builder verified the column is in the table before it built
+    // the Pluck, so this lookup cannot miss.
+    let column = table
+        .columns
+        .iter()
+        .find(|c| c.name == col.column)
+        .unwrap_or_else(|| {
+            panic!(
+                "Arel visitor: pluck column {} not in table {}",
+                col.column.as_str(),
+                table.name.as_str(),
+            )
+        });
+    let read_method = crate::lower::model_to_library::schema::column_read_method_for(column);
+    let elem_ty = crate::lower::model_to_library::ty_of_column_slot(column);
+
+    let mut binds = Vec::new();
+    let sql = compose_sql_select(sel, table, param, &mut binds);
+    let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
+
+    // The element type is carried explicitly for the same reason the
+    // hydrate loop carries `Array<Owner>`: an untyped `[]` types as
+    // `Array<Var>` and the strict targets emit the wrong empty-array
+    // default under it.
+    let results_init = assign_var(
+        &results,
+        crate::lower::typing::with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+            ),
+            crate::ty::Ty::Array { elem: Box::new(elem_ty) },
+        ),
+    );
+
+    // while Db.step?(stmt) ; results << Db.column_*(stmt, 0) ; end
+    let loop_body = vec![send_to(
+        var_ref(&results),
+        "<<",
+        vec![db_call(&db, read_method, vec![var_ref(&stmt), lit_int(0)])],
+        false,
+    )];
+    let while_loop = Expr::new(
+        Span::synthetic(),
+        ExprNode::While {
+            cond: db_call(&db, "step?", vec![var_ref(&stmt)]),
+            body: seq(loop_body),
+            until_form: false,
+        },
+    );
+
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(results_init);
+    stmts.push(while_loop);
+    stmts.push(db_call(&db, "finalize", vec![var_ref(&stmt)]));
+    stmts.push(var_ref(&results));
+    seq(stmts)
+}
+
 /// `SELECT COUNT(*) FROM <table> [WHERE …]` → integer scalar.
 fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
@@ -571,6 +646,7 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
             .join(", "),
         ColumnSpec::Count => "COUNT(*)".to_string(),
         ColumnSpec::Exists => "1".to_string(),
+        ColumnSpec::Pluck(col) => col.column.as_str().to_string(),
     };
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "SELECT {} FROM {}",

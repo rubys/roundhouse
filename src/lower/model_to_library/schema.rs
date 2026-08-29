@@ -1389,7 +1389,7 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
 /// collides row-to-row, and 0 in a nullable fk makes `where(fk: nil)`
 /// match nothing. The primary key is never nullable in practice and is
 /// excluded by `ty_of_column_slot`.
-pub(super) fn column_read_method_for(col: &Column) -> &'static str {
+pub(crate) fn column_read_method_for(col: &Column) -> &'static str {
     let base = ty_of_column(&col.col_type);
     if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
         return column_read_method(&base);
