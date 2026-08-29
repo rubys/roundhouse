@@ -135,6 +135,7 @@ fn tiny_blog_round_trips() {
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),
         time_formats: std::collections::BTreeMap::new(),
+        module_mixins: Vec::new(),
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
         concern_spliced_actions: std::collections::HashMap::new(),

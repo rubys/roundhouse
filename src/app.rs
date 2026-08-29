@@ -162,6 +162,26 @@ pub struct App {
     /// call site from this. Empty for apps that register no formats.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub time_formats: BTreeMap<Symbol, TimeFormat>,
+    /// `X.prepend Y` / `X.include Y` registered by a
+    /// `config/initializers/` file — the one initializer shape that
+    /// CHANGES METHOD LOOKUP, and therefore the one a tree cannot
+    /// silently drop.
+    ///
+    /// campfire's `turbo_streams_authorization.rb` is the case that
+    /// forced this: `Turbo::StreamsChannel.prepend
+    /// RoomStreamsAreAuthorized` is what makes `RoomMessagesChannel`
+    /// the only door onto a room's message stream. The concern itself
+    /// ingests (it lives in `app/channels/concerns/`), so dropping the
+    /// prepend left the guard defined and unreachable — a security
+    /// control present in the tree and not in the lookup chain.
+    ///
+    /// Recorded here rather than executed at ingest because the mixin
+    /// only means something once BOTH constants exist in the emitted
+    /// tree; `lower::module_mixins` drops the ones that cannot resolve
+    /// and reports them, so a tree never carries a line that would
+    /// NameError at boot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_mixins: Vec<ModuleMixin>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -356,6 +376,39 @@ pub enum TimeFormat {
     Lambda { method: MethodDef },
 }
 
+/// One `X.prepend Y` / `X.include Y` an initializer registers.
+///
+/// The receiver is stored as WRITTEN (`Turbo::StreamsChannel`), not
+/// resolved: a mixin onto a constant this tree does not define is a gap
+/// to report, and reporting it needs the app's own spelling.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModuleMixin {
+    /// The constant receiving the module, as the initializer spells it.
+    pub target: Symbol,
+    /// The module being mixed in.
+    pub module: Symbol,
+    pub kind: MixinKind,
+}
+
+/// `prepend` inserts AHEAD of the target in the lookup chain, `include`
+/// behind it. The distinction is the whole point of campfire's
+/// `RoomStreamsAreAuthorized`, whose `subscribed` calls `super` — as an
+/// `include` it would never run, because the class defines its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MixinKind {
+    Prepend,
+    Include,
+}
+
+impl MixinKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MixinKind::Prepend => "prepend",
+            MixinKind::Include => "include",
+        }
+    }
+}
+
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
 /// pin, in declaration order (Rails preserves order for
 /// modulepreload link emission).
@@ -400,6 +453,7 @@ impl App {
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),
             time_formats: BTreeMap::new(),
+            module_mixins: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_spliced_actions: HashMap::new(),

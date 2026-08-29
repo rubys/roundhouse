@@ -21,6 +21,7 @@ pub mod arel;
 pub mod associations;
 pub mod blank;
 pub mod broadcast_calls;
+pub mod module_mixins;
 pub mod broadcasts;
 pub mod chain;
 pub mod controller;
@@ -388,6 +389,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // App. No ordering constraints among the lowerings; the view
     // lowerer reads what it records, and that runs later, at emit.
     ("html_safe", &["tag_builder"]),
+    // Initializer `X.prepend Y` / `X.include Y`: drop the ones naming a
+    // constant this tree does not define, and report them. Reads only
+    // the class lists, which every earlier pass has finished populating,
+    // so it has no ordering constraints of its own.
+    ("module_mixins", &[]),
     ("transaction_ground", &[]),
     ("column_ops", &[]),
     // `signed_id(purpose: :avatar)` → the runtime SignedId call, with
@@ -633,6 +639,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("rails_cache");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
+    diags.extend(module_mixins::apply_module_mixins_lowering(app));
+    ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
     column_ops::apply_column_ops_lowering(app);

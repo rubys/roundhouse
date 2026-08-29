@@ -1245,6 +1245,12 @@ fn ruby_runtime_files(
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
     apply_runtime_gem_wiring(&mut files);
+    // AGAIN, on purpose. `spinel_files` appended the mixin block to the
+    // spinel tree's boot.rb, and the overlay's own boot.rb then replaced
+    // that file wholesale at `dedupe_last_wins` above — taking the block
+    // with it. Each final tree gets the block exactly once; this is the
+    // ruby family's turn, not a second copy.
+    apply_module_mixins(&mut files, app);
     Ok(files)
 }
 
@@ -1397,6 +1403,55 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
 ///
 /// Always emitted (even empty) because main.rb's require is
 /// unconditional.
+/// Append the app's initializer-registered `prepend`/`include` lines to
+/// `boot.rb`.
+///
+/// AT THE END OF BOOT, and that placement is the whole design: a mixin
+/// names two constants and both must already be defined, which is only
+/// guaranteed after `app/models` and `app/views` have loaded. Rails gets
+/// the same ordering from `to_prepare`, which runs after eager load.
+///
+/// Only mixins `lower::module_mixins` kept reach here — it has already
+/// dropped and reported the ones naming a constant this tree does not
+/// define, so every line written here resolves.
+///
+/// Appended rather than spliced at a marker: it is the last thing in the
+/// file, so there is nothing below it to anchor against and nothing a
+/// scaffold edit could shift it away from.
+fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App) {
+    use std::fmt::Write;
+
+    if app.module_mixins.is_empty() {
+        return;
+    }
+    let mut block = String::from(
+        "\n# Module mixins the app registers in config/initializers/ \
+(generated —\n\
+         # see apply_module_mixins). At the END of boot because a mixin names\n\
+         # two constants and both have to be defined: Rails gets the same\n\
+         # ordering from `to_prepare`, which runs after eager load.\n\
+         #\n\
+         # `prepend` inserts AHEAD of the target in the lookup chain, which is\n\
+         # what lets the module's method call `super` — an `include` would\n\
+         # never run where the class defines its own.\n",
+    );
+    for mixin in &app.module_mixins {
+        let _ = writeln!(
+            block,
+            "{}.{} {}",
+            mixin.target.as_str(),
+            mixin.kind.as_str(),
+            mixin.module.as_str()
+        );
+    }
+    for (path, content) in files.iter_mut() {
+        if path == "boot.rb" {
+            content.push_str(&block);
+            return;
+        }
+    }
+}
+
 fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
     use std::fmt::Write;
 
@@ -2065,6 +2120,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_controller_dispatch(&mut files, app, false);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
+    apply_module_mixins(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

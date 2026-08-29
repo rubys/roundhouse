@@ -563,6 +563,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     app.time_formats
                         .insert(crate::ident::Symbol::from(name.as_str()), format);
                 }
+                // Same directory, same read: `X.prepend Y` / `X.include
+                // Y`. Recorded whether or not either constant is in the
+                // tree — `lower::module_mixins` decides that, because it
+                // runs after every class the tree will have exists.
+                app.module_mixins.extend(extract_module_mixins(&bytes, &path_str));
             }
         }
     }
@@ -2732,6 +2737,102 @@ fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSou
         ));
     }
     out
+}
+
+/// `X.prepend Y` / `X.include Y` in a `config/initializers/` file.
+///
+/// THE ONE INITIALIZER SHAPE THAT CHANGES METHOD LOOKUP. Everything
+/// else an initializer does is configuration a lowering reads (time
+/// formats, session store, autoload ignores); this one rewrites an
+/// ancestor chain, so dropping it leaves a module defined and
+/// unreachable. campfire's `turbo_streams_authorization.rb` is the
+/// case: `Turbo::StreamsChannel.prepend RoomStreamsAreAuthorized` is
+/// what makes `RoomMessagesChannel` the only door onto a room's message
+/// stream, and without it the guard is in the tree but not in the
+/// lookup.
+///
+/// TWO NESTINGS, because Rails apps write both: the call bare at the
+/// top level, and wrapped in `Rails.application.config.to_prepare do …
+/// end` (campfire's spelling — reloading in development re-runs it).
+/// `to_run` is the same shape. The block is UNWRAPPED rather than
+/// modeled: its body is a list of statements, and what it means to a
+/// tree that boots once is exactly that list.
+///
+/// Deliberately NOT a general initializer evaluator. A call is
+/// recognized only when the receiver is a constant, the method is
+/// `prepend`/`include`, and the single argument is a constant — three
+/// facts readable off the parse with nothing resolved. Anything else in
+/// the file is ignored, exactly as it is today.
+fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMixin> {
+    use crate::app::{MixinKind, ModuleMixin};
+
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
+
+    // Top-level statements, plus the body of any `to_prepare`/`to_run`
+    // block, flattened into one list. One level of unwrapping is enough:
+    // nesting a second config block inside the first is not a shape
+    // Rails apps write, and guessing at it would be inventing a need.
+    let mut stmts: Vec<Node> = Vec::new();
+    for stmt in program.statements().body().iter() {
+        let mut unwrapped = false;
+        if let Some(call) = stmt.as_call_node() {
+            let name = super::util::constant_id_str(&call.name());
+            if matches!(name, "to_prepare" | "to_run") {
+                if let Some(body) = call
+                    .block()
+                    .and_then(|b| b.as_block_node())
+                    .and_then(|b| b.body())
+                    .and_then(|b| b.as_statements_node())
+                {
+                    stmts.extend(body.body().iter());
+                    unwrapped = true;
+                }
+            }
+        }
+        if !unwrapped {
+            stmts.push(stmt);
+        }
+    }
+
+    let mut out = Vec::new();
+    for stmt in stmts {
+        let Some(call) = stmt.as_call_node() else { continue };
+        let kind = match super::util::constant_id_str(&call.name()) {
+            "prepend" => MixinKind::Prepend,
+            "include" => MixinKind::Include,
+            _ => continue,
+        };
+        // A RECEIVER is required. `include Foo` with none is a mixin
+        // into `main`, which is not a lookup change this tree can carry.
+        let Some(recv) = call.receiver() else { continue };
+        let Some(target) = constant_text(&recv, &src) else { continue };
+
+        // Exactly one argument. `prepend A, B` is legal Ruby and the
+        // corpus has never written it; taking only the single-argument
+        // form keeps the recorded fact unambiguous.
+        let Some(args) = call.arguments() else { continue };
+        let args: Vec<_> = args.arguments().iter().collect();
+        let [arg] = args.as_slice() else { continue };
+        let Some(module) = constant_text(arg, &src) else { continue };
+
+        out.push(ModuleMixin { target: Symbol::from(target), module: Symbol::from(module), kind });
+    }
+    out
+}
+
+/// The source text of a node that is a constant or a constant path
+/// (`Foo`, `Turbo::StreamsChannel`), or None for anything else. Read as
+/// TEXT rather than resolved: the receiver may name a class this tree
+/// does not define, and reporting that gap needs the app's spelling.
+fn constant_text(node: &Node, src: &str) -> Option<String> {
+    if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
+        return None;
+    }
+    let loc = node.location();
+    Some(src[loc.start_offset()..loc.end_offset()].to_string())
 }
 
 /// A registered format as its initializer spells it, before the lambda
