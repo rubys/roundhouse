@@ -196,12 +196,11 @@ BODY = "hello from the cable walk"
 res = req("POST", "/rooms/1/messages",
           { "message[body]" => BODY, "message[client_message_id]" => "cable-walk-1" },
           accept: "text/vnd.turbo-stream.html, text/html")
-# The BROADCAST runs before this raises, so the fan-out below is still
-# real — the message is created, committed and fanned out, and then the
-# unread-room notification walks off the end of a hydrated Array.
-check("POST /rooms/1/messages", res.code, "200",
-      ledger: "`room.memberships.pluck(:user_id)` — an association reader is not " \
-              "an arel chain root, so `pluck` lands on the Array it just hydrated")
+# A MILESTONE probe. It was a ledger probe for one commit, while
+# `room.memberships.pluck(:user_id)` walked off the end of a hydrated
+# Array and 500'd the request AFTER its broadcast had already gone out —
+# fan-out that works attached to a request that does not.
+check("POST /rooms/1/messages", res.code, "200")
 
 def received?(client, before)
   client.until(6) do

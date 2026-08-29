@@ -1388,28 +1388,42 @@ table (42 tags, 13 attributes, per-attribute URL protocols, CSS
 behaviour) the way the inflector tables were ported, rather than deriving
 one.
 
-### An association reader is not an arel chain root
+### A plain has_many reader answers an Array, not a Relation
 
-`room.memberships.pluck(:user_id)` (campfire's
-`Message::Broadcasts#broadcast_unread_room`) hydrates every `Membership`
-row into an Array and then calls `pluck` on it — `NoMethodError:
-undefined method 'pluck' for an instance of Array`.
+`Room#memberships` (`has_many :memberships`) lowers to a reader that runs
+the query and hydrates: it answers `Array[Membership]`. `Room#users`
+(`has_many :users, through: :memberships`) lowers to an
+`ActiveRecord::Relation` over a joins chain. Both are spelled
+`owner.name`, and only the second answers the Relation API.
 
-**Why.** `lower::arel::build` recognizes `pluck` layered on a CHAIN
-(`Room.where(...).pluck(:id)`) and on a model CONST, and both paths end
-at `const_to_class_id(recv)`. An association reader is an instance-method
-call on a record, not a Const, so the chain builder declines and the call
-falls through to the hydrating reader the model already has.
+**What still costs.** Every Relation terminal but `pluck` — `count`,
+`exists?`, `ids`, `where` — is a `NoMethodError` on a plain has_many
+reader, as is any scope (`room.users.without(x)` works only because
+`users` is a `:through`). `pluck` is closed, and closed narrowly:
+`lower::assoc_pluck` expands `room.memberships.pluck(:user_id)` into
+`room.memberships.map { |__pluck| __pluck.user_id }`, which is the
+projection it is. That was a 500 on every `POST /rooms/:id/messages` in
+a served app — the broadcast still went out, because `after_create_commit`
+runs before the line, so the message reached subscribers and the request
+that made it then failed. The suite never saw it: under the test adapter
+the job that reaches the line is enqueued rather than run.
 
-**What it costs.** A 500 on `POST /rooms/:id/messages` in a served app.
-The broadcast is not lost — `after_create_commit` fans the turbo-stream
-out before this runs — so the message reaches subscribers and the
-request that created it then fails. The suite does not see it: under the
-test adapter the job that reaches this line is enqueued rather than run.
+**What the projection costs.** The reader hydrates every row, which is
+what it ALREADY does — the projection is the only new work. Rails reads
+one column. So this is a fix for the crash, not for the query.
 
-This is the association-proxy case the Relation specialization work
-already names as its starting point; the fix belongs there rather than
-as another arm on the chain builder.
+**What would close the rest** is the association proxy: an association
+reader that IS a chain root, so `room.memberships.pluck(:user_id)` folds
+to `SELECT user_id FROM memberships WHERE room_id = ?` and every other
+terminal follows. That is designed and not built. `lower::assoc_pluck`
+is deliberately not a down payment on it — a half-built chain root that
+handles one terminal is worse than none, because the next terminal to
+arrive looks supported until it is not.
+
+**A note on what the type says.** `Ty::Array` does NOT distinguish the
+two: the analyzer types a `:through` reader `Array[Room]` as well, its
+approximation of "a collection". The association KIND is what determines
+which reader gets emitted, and it is what the pass reads.
 
 ### `config.x.<key> = <expr>` is re-evaluated on every read
 
