@@ -1109,13 +1109,20 @@ fn ruby_runtime_files(
     // FFI declarations these trees can't compile.
     files.retain(|(p, _)| p != "runtime/message_digest.rb");
 
-    // The scaffold's tailwind seed only belongs in trees whose SOURCE
-    // app has stylesheets to build (real-blog's Propshaft setup). A
-    // no-stylesheet app (the Roda + Sequel exemplar renders
-    // inline-styled HTML) drops it, and the emitted Rakefile's
-    // existence-conditional `assets` task then skips the whole
+    // The scaffold's tailwind seed only belongs in a tree that actually
+    // BUILDS Tailwind, and the tell is `tailwind` among the app's
+    // stylesheet stems — tailwindcss-rails writes its output to
+    // `app/assets/builds/tailwind.css`, which is one of the two roots
+    // `app.stylesheets` is ingested from.
+    //
+    // Two apps drop it, for different reasons. A no-stylesheet app (the
+    // Roda + Sequel exemplar renders inline-styled HTML) has nothing to
+    // build; campfire has twenty-six stylesheets and writes plain CSS,
+    // and used to get a seed, an npm install and a Tailwind build for a
+    // stylesheet its layout never links. Either way the emitted
+    // Rakefile's existence-conditional `assets` task then skips the
     // npm/tailwind pipeline — `rake dev` boots with no Node at all.
-    if app.stylesheets.is_empty() {
+    if !app.stylesheets.iter().any(|s| s == "tailwind") {
         files.retain(|(p, _)| p != "app/assets/tailwind.css");
     }
     for (path, content) in files.iter_mut() {
@@ -2147,6 +2154,43 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     if js.exists() {
         walk_dir_into(&js, "app/javascript/", &mut files)?;
     }
+    // importmap-rails' OTHER source root, and one the blog fixture does
+    // not have — which is why it went missing until an app that uses it
+    // was emitted. campfire vendors trix, highlight.js, `@rails/request.js`
+    // and twelve language grammars here and pins all sixteen; without this
+    // walk `make assets` had nothing to copy them from and the composer's
+    // imports never resolved.
+    let vendor_js = fixture.join("vendor/javascript");
+    if vendor_js.exists() {
+        walk_dir_into(&vendor_js, "vendor/javascript/", &mut files)?;
+    }
+    // The app's own stylesheets — the two Propshaft roots `app.stylesheets`
+    // is ingested from, so the files and the names the layout links are
+    // read from the same place.
+    //
+    // These are TEXT, which is why they were missing: `collect_binary_assets`
+    // carries `app/assets` but only what is not valid UTF-8, and its doc
+    // comment names this exact gap ("a TEXT asset under these roots that no
+    // emitter produces would still be dropped"). campfire is the app that
+    // needed it — twenty-six hand-written stylesheets, none of which reached
+    // the tree.
+    // ...and `app/assets/images/`, for the same reason and with the same
+    // blind spot: `collect_binary_assets` carries the PNGs and skips the
+    // SVGs, because an SVG is text. campfire draws its entire interface
+    // in SVG — eighty icons, every one of them a `/assets/*.svg` the page
+    // requests and the tree did not have. `walk_dir_into` skips whatever
+    // is not valid UTF-8, so the two mechanisms partition cleanly rather
+    // than emitting a file twice.
+    for root in [
+        "app/assets/stylesheets",
+        "app/assets/builds",
+        "app/assets/images",
+    ] {
+        let dir = fixture.join(root);
+        if dir.exists() {
+            walk_dir_into(&dir, &format!("{root}/"), &mut files)?;
+        }
+    }
     let public = fixture.join("public");
     if public.exists() {
         walk_dir_into(&public, "public/", &mut files)?;
@@ -2171,6 +2215,11 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the rename needs to happen for any of them.
     scaffold_readme_to_specimen(&mut files);
     apply_gemfile_trim(&mut files, app, fixture);
+    // After the two JS walks above and after `dedupe_last_wins`: the
+    // generator sorts each pin by which root actually holds its file, so
+    // it has to read the FINAL file set, not the fixture.
+    apply_makefile_asset_list(&mut files, app);
+    apply_makefile_stylesheet_list(&mut files, app);
     apply_test_gem_wiring(&mut files);
     Ok(files)
 }
@@ -2564,6 +2613,297 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
 /// runtime's own `test/models/*_test.rb` at the same paths (they
 /// `require "models/article"` and are not runnable standalone), and
 /// `article_broadcasts_test` rode along into the blog's list that way.
+/// The prebuilt JS bundles that arrive from a gem rather than from the
+/// app's own tree, keyed by the filename an import map pins them as.
+/// Each is `<gem_dir>/app/assets/javascripts/<file>`, which is why the
+/// generated rule can be a one-liner naming only the gem.
+///
+/// Filename-keyed rather than gem-keyed because that is the direction
+/// the lookup runs: a pin gives a served path, and the question is which
+/// gem — if any — ships it. Both the minified and unminified spellings
+/// are listed for the same reason the `to:` kwarg exists at all: the
+/// blog pins `turbo.min.js` and campfire pins `turbo.js`, and neither
+/// spelling is more canonical than the other.
+const GEM_JS_BUNDLES: &[(&str, &str)] = &[
+    ("turbo.js", "turbo-rails"),
+    ("turbo.min.js", "turbo-rails"),
+    ("stimulus.js", "stimulus-rails"),
+    ("stimulus.min.js", "stimulus-rails"),
+    ("stimulus-loading.js", "stimulus-rails"),
+    ("stimulus-autoloader.js", "stimulus-rails"),
+    ("stimulus-importmap-autoloader.js", "stimulus-rails"),
+    ("actioncable.esm.js", "actioncable"),
+    ("actioncable.js", "actioncable"),
+    ("action_cable.js", "actioncable"),
+    ("actiontext.js", "actiontext"),
+    ("actiontext.esm.js", "actiontext"),
+];
+
+/// De-blog the scaffold Makefile's `ASSET_JS` list and its gem-bundle
+/// rules, the way `apply_makefile_test_list` does for `SPINEL_TESTS`.
+///
+/// The scaffold hard-codes the blog's seven pins, ending in
+/// `controllers/hello_controller.js` — a file no other app has, so
+/// `make assets` in any other tree died on a missing prerequisite
+/// before copying anything. campfire pins ninety-five modules and the
+/// scaffold named none of them; its `static/assets/` came out empty and
+/// its pages served ninety-five 404s, which is a chat application with
+/// no Turbo and no composer.
+///
+/// Derived from `app.importmap` — the same pins `javascript_importmap_tags`
+/// renders into the page — so the list of what the Makefile BUILDS and the
+/// list of what the page ASKS FOR cannot drift apart. Anything else (a
+/// glob of `app/javascript/`, say) would be a second, independently wrong
+/// answer to the same question.
+///
+/// A pin is sorted by where its bytes live, checked against the file set
+/// this emit actually produced rather than against the source app:
+///
+///   * `app/javascript/<rel>` or `vendor/javascript/<rel>` — covered by
+///     the scaffold's two pattern rules, so it needs no rule of its own.
+///   * a gem bundle (`GEM_JS_BUNDLES`) — gets an explicit rule.
+///   * neither — OMITTED from the list, and named in a comment in its
+///     place. Omitting keeps `make assets` runnable (the alternative is a
+///     tree that cannot build its assets at all because one pin is
+///     unresolvable); naming it keeps the gap readable to whoever unpacks
+///     the archive, which a silent drop would not.
+fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
+    const BLOG_LIST: &str = "ASSET_JS := $(ASSETS)/turbo.min.js \\\n\
+                             \x20           $(ASSETS)/stimulus.min.js \\\n\
+                             \x20           $(ASSETS)/stimulus-loading.js \\\n\
+                             \x20           $(ASSETS)/application.js \\\n\
+                             \x20           $(ASSETS)/controllers/application.js \\\n\
+                             \x20           $(ASSETS)/controllers/index.js \\\n\
+                             \x20           $(ASSETS)/controllers/hello_controller.js";
+
+    // Pin order is Rails' order (it drives modulepreload emission), and
+    // duplicates are possible — two names can pin the same file. An app
+    // with no import map at all (the Roda + Sequel exemplar) falls
+    // through with an empty list, which is the point: it used to keep
+    // the blog's seven targets and could not run `make assets` either.
+    let mut rels: Vec<String> = Vec::new();
+    for pin in app.importmap.iter().flat_map(|m| &m.pins) {
+        let Some(rel) = pin.path.strip_prefix("/assets/") else {
+            continue;
+        };
+        if !rel.ends_with(".js") {
+            continue;
+        }
+        if !rels.iter().any(|r| r == rel) {
+            rels.push(rel.to_string());
+        }
+    }
+
+    let has = |p: &str| files.iter().any(|(path, _)| path == p);
+
+    let mut targets: Vec<String> = Vec::new();
+    let mut gems: Vec<(String, String)> = Vec::new();
+    let mut unsourced: Vec<String> = Vec::new();
+    for rel in &rels {
+        if has(&format!("app/javascript/{rel}")) || has(&format!("vendor/javascript/{rel}")) {
+            targets.push(rel.clone());
+        } else if let Some((_, gem)) = GEM_JS_BUNDLES.iter().find(|(file, _)| file == rel) {
+            targets.push(rel.clone());
+            gems.push((rel.clone(), (*gem).to_string()));
+        } else {
+            unsourced.push(rel.clone());
+        }
+    }
+
+    let mut list = String::new();
+    for note in &unsourced {
+        list.push_str(&format!(
+            "# NOT BUILT — `{note}` is pinned by config/importmap.rb and is in\n\
+             # neither app/javascript/, vendor/javascript/, nor a gem this\n\
+             # scaffold knows how to copy from. The page will request it.\n"
+        ));
+    }
+    if targets.is_empty() {
+        // Same posture as an empty SPINEL_TESTS: define the variable so
+        // `assets` is trivially satisfiable rather than leaving a
+        // dangling reference.
+        list.push_str("ASSET_JS :=");
+    } else {
+        list.push_str("ASSET_JS := ");
+        let joined = targets
+            .iter()
+            .map(|t| format!("$(ASSETS)/{t}"))
+            .collect::<Vec<_>>()
+            .join(" \\\n            ");
+        list.push_str(&joined);
+    }
+
+    let rules = gems
+        .iter()
+        .map(|(file, gem)| {
+            format!(
+                "$(ASSETS)/{file}:\n\
+                 \t@mkdir -p $(dir $@)\n\
+                 \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q({gem})).gem_dir')/app/assets/javascripts/{file}\" $@"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    apply_makefile_asset_blocks(files, BLOG_LIST, &list, &rules);
+
+    // The rules above shell out to `bundle exec ruby -e ...find_by_name`,
+    // which answers only for a gem IN THE BUNDLE. The scaffold's
+    // `group :assets` names turbo-rails and stimulus-rails because those
+    // are the blog's two; campfire also pins `actioncable.esm.js` and
+    // `actiontext.js`, and without this the rule for each fails at
+    // `find_by_name` rather than at the copy — an error naming Bundler,
+    // three steps from the import map that actually asked for the file.
+    let mut names: Vec<&str> = Vec::new();
+    for (_, gem) in &gems {
+        if !names.contains(&gem.as_str()) {
+            names.push(gem);
+        }
+    }
+    apply_gemfile_asset_group(files, &names);
+}
+
+/// De-blog the scaffold Makefile's `ASSET_CSS` list, and drop the
+/// Tailwind rule for an app that does not use Tailwind.
+///
+/// Same source as the `<link>` tags themselves — `app.stylesheets`, the
+/// stems under `app/assets/stylesheets/` + `app/assets/builds/` that
+/// `stylesheet_link_tag`'s group expansion renders one tag each for. One
+/// list, two consumers, so a page cannot link a stylesheet the build
+/// does not produce.
+///
+/// The Tailwind half is a separate question from the list. The scaffold
+/// builds `tailwind.css` unconditionally, which for campfire meant
+/// running npm and Tailwind to produce a stylesheet its layout never
+/// links — and, worse, meant `make assets` needed Node at all. An app
+/// uses Tailwind iff `tailwind` is one of its stylesheet stems, which is
+/// exactly what `app/assets/builds/tailwind.css` (tailwindcss-rails'
+/// output path) puts there.
+fn apply_makefile_stylesheet_list(files: &mut [(String, String)], app: &App) {
+    const BLOG_LIST: &str = "ASSET_CSS := $(ASSETS)/application.css \\\n\
+                             \x20            $(ASSETS)/tailwind.css";
+
+    let uses_tailwind = app.stylesheets.iter().any(|s| s == "tailwind");
+
+    // An app with no stylesheets gets an empty variable rather than the
+    // blog's two, for the same reason `SPINEL_TESTS` does: `assets` is
+    // then trivially satisfiable, which is honest (there is nothing to
+    // build) where naming files it does not have was not.
+    let list = if app.stylesheets.is_empty() {
+        "ASSET_CSS :=".to_string()
+    } else {
+        format!(
+            "ASSET_CSS := {}",
+            app.stylesheets
+                .iter()
+                .map(|s| format!("$(ASSETS)/{s}.css"))
+                .collect::<Vec<_>>()
+                .join(" \\\n             ")
+        )
+    };
+
+    for (path, content) in files.iter_mut() {
+        if path != "Makefile" {
+            continue;
+        }
+        if content.contains(BLOG_LIST) {
+            *content = content.replace(BLOG_LIST, &list);
+        }
+        if !uses_tailwind {
+            strip_tailwind_rule(content);
+        }
+    }
+}
+
+/// Remove the Tailwind build rule and its npm sentinel from the scaffold
+/// Makefile, leaving the surrounding comment (which explains why an app
+/// might not have one). Anchored on both recipes; silent if either has
+/// moved, matching the other Makefile rewrites here.
+fn strip_tailwind_rule(makefile: &mut String) {
+    // Bracketed by the two recipe HEADERS rather than matched as one
+    // long literal: the body in between is a Tailwind command line that
+    // will be re-flagged as the CLI changes, and an exact anchor over it
+    // would go stale silently — leaving the rule in place for an app
+    // that has no Tailwind, which is the bug this exists to prevent.
+    const START: &str = "$(ASSETS)/tailwind.css: app/assets/tailwind.css";
+    const LAST: &str = "\t@touch node_modules/.installed\n";
+
+    let Some(at) = makefile.find(START) else { return };
+    let Some(rel_end) = makefile[at..].find(LAST) else { return };
+    let end = at + rel_end + LAST.len();
+    makefile.replace_range(
+        at..end,
+        "# (This app writes plain CSS — no Tailwind rule, and no npm.)\n",
+    );
+}
+
+/// Rewrite the scaffold Gemfile's `group :assets` body to exactly the
+/// gems whose bundles this app's import map pins.
+///
+/// Derived from the same partition that generated the Makefile rules, so
+/// the two cannot disagree — a rule that copies out of a gem dir and a
+/// bundle that has no such gem is the failure this prevents.
+///
+/// Silent when the group is absent: `apply_gemfile_trim` drops it whole
+/// for an app with no importmap JS, and that app reaches here with an
+/// empty gem set anyway.
+fn apply_gemfile_asset_group(files: &mut [(String, String)], gems: &[&str]) {
+    const OPEN: &str = "group :assets do\n";
+    const CLOSE: &str = "end\n";
+
+    let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") else {
+        return;
+    };
+    let Some(open_at) = gemfile.find(OPEN) else {
+        return;
+    };
+    let body_at = open_at + OPEN.len();
+    let Some(rel_close) = gemfile[body_at..].find(CLOSE) else {
+        return;
+    };
+    let body: String = gems.iter().map(|g| format!("  gem \"{g}\"\n")).collect();
+    gemfile.replace_range(body_at..body_at + rel_close, &body);
+}
+
+/// String half of `apply_makefile_asset_list` (separated for unit
+/// testing). Silent when an anchor is missing, matching
+/// `apply_makefile_test_list_stems` — the scaffold Makefile is ours, so
+/// a moved anchor is a repo-side change caught by the emit tests, not
+/// something an ingested app can provoke.
+fn apply_makefile_asset_blocks(
+    files: &mut [(String, String)],
+    list_anchor: &str,
+    list: &str,
+    rules: &str,
+) {
+    const GEM_RULES: &str = "$(ASSETS)/turbo.min.js:\n\
+        \t@mkdir -p $(dir $@)\n\
+        \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(turbo-rails)).gem_dir')/app/assets/javascripts/turbo.min.js\" $@\n\
+        \n\
+        $(ASSETS)/stimulus.min.js:\n\
+        \t@mkdir -p $(dir $@)\n\
+        \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus.min.js\" $@\n\
+        \n\
+        $(ASSETS)/stimulus-loading.js:\n\
+        \t@mkdir -p $(dir $@)\n\
+        \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus-loading.js\" $@";
+
+    for (path, content) in files.iter_mut() {
+        if path != "Makefile" {
+            continue;
+        }
+        if content.contains(list_anchor) {
+            *content = content.replace(list_anchor, list);
+        }
+        if content.contains(GEM_RULES) {
+            // An app pinning no gem bundle leaves the block empty; the
+            // surrounding comment stays, which is the honest thing —
+            // it explains why there are no rules under it.
+            *content = content.replace(GEM_RULES, rules);
+        }
+    }
+}
+
 fn apply_makefile_test_list(files: &mut [(String, String)], app: &App) {
     let mut stems: Vec<String> = emit::ruby::emit_spinel(app)
         .iter()
@@ -3779,6 +4119,109 @@ mod tests {
         // JS-only trim keeps websocket-driver, and vice versa.
         assert!(trim_gemfile(&gemfile, false, true).contains("websocket-driver"));
         assert!(trim_gemfile(&gemfile, true, false).contains("turbo-rails"));
+    }
+
+    /// The asset list, the gem rules and the `:assets` group are three
+    /// views of ONE partition, and the failure this guards is them
+    /// disagreeing: a rule that copies out of a gem dir the bundle does
+    /// not have fails at `find_by_name`, three steps from the import map
+    /// that asked for the file.
+    ///
+    /// Reads the REAL scaffold Makefile and Gemfile, so a moved anchor
+    /// fails here rather than silently shipping the blog's seven targets
+    /// to an app that has none of them.
+    #[test]
+    fn asset_list_gem_rules_and_bundle_agree() {
+        let makefile = fs::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
+        let gemfile = fs::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
+
+        // campfire's shape: an app-side entry, a vendored module three
+        // levels down, and two gem bundles the blog never pins.
+        let mut app = App::new();
+        app.importmap = Some(crate::app::Importmap {
+            pins: ["/assets/application.js",
+                   "/assets/lib/autocomplete/custom_elements/suggestion_option.js",
+                   "/assets/trix.esm.min.js",
+                   "/assets/actioncable.esm.js",
+                   "/assets/actiontext.js",
+                   "/assets/nowhere.js"]
+                .iter()
+                .map(|p| crate::app::ImportmapPin {
+                    name: p.to_string(),
+                    path: p.to_string(),
+                })
+                .collect(),
+        });
+        let mut files = vec![
+            ("Makefile".to_string(), makefile),
+            ("Gemfile".to_string(), gemfile),
+            ("app/javascript/application.js".to_string(), String::new()),
+            (
+                "app/javascript/lib/autocomplete/custom_elements/suggestion_option.js".to_string(),
+                String::new(),
+            ),
+            ("vendor/javascript/trix.esm.min.js".to_string(), String::new()),
+        ];
+        apply_makefile_asset_list(&mut files, &app);
+
+        let mk = &files.iter().find(|(p, _)| p == "Makefile").unwrap().1;
+        let gf = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+
+        // The blog's list is gone, including the file no other app has.
+        assert!(!mk.contains("hello_controller.js"), "blog list survived:\n{mk}");
+        // Both source roots reach the list; neither needs a rule.
+        assert!(mk.contains("$(ASSETS)/lib/autocomplete/custom_elements/suggestion_option.js"));
+        assert!(mk.contains("$(ASSETS)/trix.esm.min.js"));
+        // A gem bundle is listed AND ruled AND bundled — all three.
+        for (file, gem) in [("actioncable.esm.js", "actioncable"), ("actiontext.js", "actiontext")] {
+            assert!(mk.contains(&format!("$(ASSETS)/{file}")), "{file} not listed");
+            assert!(mk.contains(&format!("$(ASSETS)/{file}:\n")), "{file} has no rule");
+            assert!(mk.contains(&format!("%q({gem})")), "{gem} rule names the wrong gem");
+            assert!(gf.contains(&format!("gem \"{gem}\"")), "{gem} not in the bundle");
+        }
+        // A gem this app does not pin loses its rule with its listing.
+        // Matched on the RECIPE and the `gem` line, not on the word:
+        // both files carry prose above these naming the blog's two.
+        assert!(!mk.contains("$(ASSETS)/stimulus-loading.js:"), "unpinned gem rule survived");
+        assert!(!gf.contains("\n  gem \"stimulus-rails\""), "unpinned gem stayed in the bundle");
+        // An unsourceable pin is omitted and SAID SO, rather than listed
+        // (make would stop on it) or dropped silently.
+        assert!(!mk.contains("$(ASSETS)/nowhere.js"), "unsourceable pin was listed");
+        assert!(mk.contains("NOT BUILT — `nowhere.js`"), "unsourceable pin went unnamed:\n{mk}");
+    }
+
+    /// An app with no Tailwind gets neither the build rule nor the npm
+    /// install behind it — `make assets` there needs no Node at all.
+    /// campfire writes twenty-six plain stylesheets and used to build a
+    /// Tailwind file its layout never links.
+    #[test]
+    fn stylesheet_list_tracks_the_app_and_tailwind_is_conditional() {
+        let makefile = fs::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
+
+        let mut plain = App::new();
+        plain.stylesheets = vec!["base".into(), "messages".into()];
+        let mut files = vec![("Makefile".to_string(), makefile.clone())];
+        apply_makefile_stylesheet_list(&mut files, &plain);
+        let mk = &files[0].1;
+        assert!(mk.contains("ASSET_CSS := $(ASSETS)/base.css \\\n             $(ASSETS)/messages.css"));
+        // The RECIPE, not the word — the file's header comment and the
+        // block's own explanation both still name @tailwindcss/cli.
+        assert!(
+            !mk.contains("$(ASSETS)/tailwind.css: app/assets/tailwind.css"),
+            "tailwind rule survived:\n{mk}"
+        );
+        assert!(!mk.contains("node_modules/.installed:\n"), "npm sentinel survived");
+        assert!(mk.contains("This app writes plain CSS"), "no note left in its place");
+        // The copy patterns are what build them, and they stay.
+        assert!(mk.contains("$(ASSETS)/%.css: app/assets/stylesheets/%.css"));
+
+        // The blog does build Tailwind, and keeps the rule.
+        let mut tw = App::new();
+        tw.stylesheets = vec!["application".into(), "tailwind".into()];
+        let mut files = vec![("Makefile".to_string(), makefile)];
+        apply_makefile_stylesheet_list(&mut files, &tw);
+        assert!(files[0].1.contains("$(ASSETS)/tailwind.css: app/assets/tailwind.css"));
+        assert!(files[0].1.contains("node_modules/.installed:\n"));
     }
 
     /// Both dispatchers reset the app's `CurrentAttributes` subclass.

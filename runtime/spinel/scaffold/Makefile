@@ -47,10 +47,21 @@ all: assets test lint
 # overlay's config.ru serves the identical layout via Rack::Static.
 # Root icons land at static/<icon> to match the layout's /icon.* hrefs.
 
-# App-side JS copied verbatim from app/javascript/: the importmap entry
-# `application.js` (`import "@hotwired/turbo-rails"` — this is what
-# boots Turbo, and with it the <turbo-cable-stream-source> connection
-# to /cable) plus the Stimulus controllers it pulls in.
+# One target per module the import map pins.
+#
+# GENERATED — `project.rs::apply_makefile_asset_list` rewrites this list
+# (and the gem rules below it) from the ingested app's own
+# `config/importmap.rb`. The blog fixture pins seven modules; campfire
+# pins ninety-five, three directory levels deep. The list below is the
+# blog's, and it is also the anchor the generator matches on: editing it
+# by hand edits a generated file.
+#
+# Each pin's bytes come from one of three roots, and the generator sorts
+# every pin into one: the app's `app/javascript/`, its
+# `vendor/javascript/` (importmap-rails' other source root), or a gem
+# that ships a prebuilt bundle. The first two are served by the pattern
+# rules further down; a gem asset needs an explicit rule, because only
+# `bundle` can say where the gem dir is.
 ASSET_JS := $(ASSETS)/turbo.min.js \
             $(ASSETS)/stimulus.min.js \
             $(ASSETS)/stimulus-loading.js \
@@ -59,24 +70,56 @@ ASSET_JS := $(ASSETS)/turbo.min.js \
             $(ASSETS)/controllers/index.js \
             $(ASSETS)/controllers/hello_controller.js
 
-assets: $(ASSETS)/application.css $(ASSETS)/tailwind.css $(ASSET_JS) \
+# One target per stylesheet on the app's Propshaft load path.
+#
+# GENERATED, the same way ASSET_JS is, and from the same list the
+# `stylesheet_link_tag` group expansion renders `<link>` tags from — so
+# the page cannot ask for a stylesheet the build does not produce. The
+# blog fixture has two (a manifest and a Tailwind build); campfire has
+# twenty-six hand-written files and no Tailwind at all.
+ASSET_CSS := $(ASSETS)/application.css \
+             $(ASSETS)/tailwind.css
+
+# Images, discovered rather than generated. There is no manifest to
+# derive this from — `image_tag "add.svg"` is an ordinary call in a view,
+# not a declaration — so the tree itself is the list, and it stays
+# correct without a generator. `find` at make-time also picks up the
+# BINARY images, which arrive by a different route (`write_binary_assets`,
+# after the text file set is assembled) and so are not visible to one.
+#
+# campfire draws its interface in SVG and needs all eighty; the blog
+# fixture has an empty images dir and gets an empty list.
+ASSET_IMG := $(patsubst app/assets/images/%,$(ASSETS)/%,\
+               $(shell find app/assets/images -type f 2>/dev/null))
+
+assets: $(ASSET_CSS) $(ASSET_JS) $(ASSET_IMG) \
         $(STATIC)/icon.png $(STATIC)/icon.svg
 
-# Two stylesheet outputs to match Rails' Propshaft asset shape:
-#   - application.css: empty placeholder, mirrors a Rails app's
-#     app/assets/stylesheets/application.css (typically just a
-#     manifest comment with no rules of its own).
-#   - tailwind.css: the Tailwind v4 build, scanning views + helpers
-#     for utility classes. Tailwind needs both `tailwindcss` (engine)
-#     and `@tailwindcss/cli` (binary) resolvable in node_modules — npx
-#     alone fetches only the CLI. Sentinel file gates the install so
-#     it runs once per checkout, not on every build.
-$(ASSETS)/application.css:
-	@mkdir -p $(ASSETS)
-	@touch $@
+# Stylesheets copied verbatim out of the app's two Propshaft roots,
+# both walked into the emitted tree. `app/assets/builds/` is where a CSS
+# *build* lands (tailwindcss-rails writes tailwind.css there), so it is
+# tried second — and an app that really builds its Tailwind gets the
+# explicit rule below instead, which beats both patterns.
+$(ASSETS)/%.css: app/assets/stylesheets/%.css
+	@mkdir -p $(dir $@)
+	cp $< $@
 
+$(ASSETS)/%.css: app/assets/builds/%.css
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+# The Tailwind v4 build, scanning the emitted Ruby for utility classes.
+# Tailwind needs both `tailwindcss` (engine) and `@tailwindcss/cli`
+# (binary) resolvable in node_modules — npx alone fetches only the CLI.
+# The sentinel gates the install so it runs once per checkout.
+#
+# GENERATED: present only for an app whose stylesheet list actually
+# includes `tailwind`. An app that writes plain CSS gets neither this
+# rule nor the npm install behind it, which is the difference between
+# `make assets` needing Node and not — campfire does not, and used to
+# build a Tailwind stylesheet it never links.
 $(ASSETS)/tailwind.css: app/assets/tailwind.css $(RUBY_SRC) node_modules/.installed
-	@mkdir -p $(ASSETS)
+	@mkdir -p $(dir $@)
 	npx @tailwindcss/cli \
 	  --input app/assets/tailwind.css \
 	  --output $@ \
@@ -88,30 +131,52 @@ node_modules/.installed:
 	npm install --silent --no-save tailwindcss @tailwindcss/cli
 	@touch node_modules/.installed
 
-# JS bundles copied out of the turbo-rails / stimulus-rails gem dirs
-# (Gemfile :assets group). Paths are queried at make-time so version
-# bumps don't require Makefile edits.
+# JS bundles copied out of the gems that ship them. Paths are queried at
+# make-time so version bumps don't require Makefile edits. GENERATED
+# alongside ASSET_JS above — only the bundles this app's import map
+# actually pins get a rule, and each names the gem it comes from.
 $(ASSETS)/turbo.min.js:
-	@mkdir -p $(ASSETS)
+	@mkdir -p $(dir $@)
 	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(turbo-rails)).gem_dir')/app/assets/javascripts/turbo.min.js" $@
 
 $(ASSETS)/stimulus.min.js:
-	@mkdir -p $(ASSETS)
+	@mkdir -p $(dir $@)
 	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus.min.js" $@
 
 $(ASSETS)/stimulus-loading.js:
-	@mkdir -p $(ASSETS)
+	@mkdir -p $(dir $@)
 	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus-loading.js" $@
 
-# App-side JS — copied verbatim from app/javascript/ (emitted into the
-# tree from the source app). controllers/ land under
-# static/assets/controllers/ to match the `controllers/*` importmap pins.
-$(ASSETS)/application.js: app/javascript/application.js
-	@mkdir -p $(ASSETS)
+# App-side and vendored JS, copied verbatim out of the source app's
+# `app/javascript/` and `vendor/javascript/` — both walked into the
+# emitted tree, both roots importmap-rails resolves `pin_all_from`
+# against.
+#
+# `%` spans slashes in GNU make, so ONE rule per root covers every depth
+# a recursive `pin_all_from` can reach. That matters: campfire pins
+# `lib/autocomplete/custom_elements/suggestion_option` three levels down,
+# and the per-directory rules this replaced would have needed a new line
+# per directory per app.
+#
+# Two rules rather than one because make takes the first pattern whose
+# prerequisite exists, which resolves a pin against `app/javascript/`
+# first and `vendor/javascript/` second — importmap-rails' own
+# precedence. Gem bundles never reach either: their explicit rules above
+# win outright, as explicit rules always do.
+$(ASSETS)/%.js: app/javascript/%.js
+	@mkdir -p $(dir $@)
 	cp $< $@
 
-$(ASSETS)/controllers/%.js: app/javascript/controllers/%.js
-	@mkdir -p $(ASSETS)/controllers
+$(ASSETS)/%.js: vendor/javascript/%.js
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+# Images — SVG, PNG and the animated GIFs campfire's `/play` command
+# serves out of `images/sounds/`. One rule, any extension, any depth:
+# unlike JS and CSS these have no import map or load path to enumerate
+# them, so the pattern has to be as wide as `image_tag` is.
+$(ASSETS)/%: app/assets/images/%
+	@mkdir -p $(dir $@)
 	cp $< $@
 
 # Root-level icons from the source app's public/ (when present in the

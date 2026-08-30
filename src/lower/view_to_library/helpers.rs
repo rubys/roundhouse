@@ -206,15 +206,31 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             Some(view_helpers_call("javascript_importmap_tags", vec![pins, entry]))
         }
         // `<%= stylesheet_link_tag :app, "data-turbo-track":
-        // "reload" %>` — first arg is the stylesheet group. When the
-        // arg is the `:app` symbol AND the app has multiple stylesheets
-        // ingested from `app/assets/stylesheets/` + `app/assets/builds/`,
-        // expand to one call per stylesheet (matching Rails' Propshaft
-        // resolution). Otherwise pass through with the symbol→string
-        // conversion the runtime expects.
+        // "reload" %>` — first arg is the stylesheet group. A SYMBOL
+        // names a group rather than a file, and Propshaft resolves a
+        // group to one `<link>` per stylesheet on the load path
+        // (`app/assets/stylesheets/` + `app/assets/builds/`, which is
+        // what `ctx.stylesheets` holds); we mirror that expansion so the
+        // rendered head matches structurally. A STRING names one file
+        // and passes through.
+        //
+        // Any symbol, not a hard-coded `:app`. The blog fixture writes
+        // `:app` and campfire writes `:all` — Propshaft's own spelling
+        // for the same thing — and keying on the blog's spelling meant
+        // campfire's twenty-six stylesheets collapsed to a single
+        // `<link href="/assets/all.css">` that nothing produced: a chat
+        // application served entirely unstyled, at 200.
+        //
+        // Excluded: a symbol that IS one of the app's stylesheet stems.
+        // An app with `all.css` writing `stylesheet_link_tag :all` means
+        // that one file, and expanding it would be wrong in the
+        // direction that is hard to notice (every stylesheet still
+        // arrives, just also the others).
         StylesheetLinkTag { name, opts } => {
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*name.node {
-                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
+                if !ctx.stylesheets.is_empty()
+                    && !ctx.stylesheets.iter().any(|s| s == value.as_str())
+                {
                     let mut calls: Vec<Expr> = Vec::new();
                     for sheet in &ctx.stylesheets {
                         let mut args = vec![lit_str(sheet.clone())];
