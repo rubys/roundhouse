@@ -484,6 +484,29 @@ impl<'a> BodyTyper<'a> {
                 // `Union<Option<T>, T>`. The lt-narrowed form lets
                 // the rust emit's Family 4 (String → &str) fire.
                 let lt_peeled = if matches!(op, crate::expr::BoolOpKind::Or) {
+                    // Two `||` shapes are not unions at all, and saying
+                    // union anyway is what cost campfire's spinel BINARY
+                    // a link. `ActionText::ContentHelper.allowed_attributes
+                    // || (…).to_a` has a left arm that can only be one
+                    // thing; the union dragged the right arm's
+                    // `Array[untyped]` into a list declared
+                    // `Array[String]` further down.
+                    //
+                    //   * a left that can NEVER be falsy short-circuits
+                    //     every time, so the result is exactly its type.
+                    //     Ruby's falsy set is `nil` and `false` and
+                    //     nothing else, so this reads off the type.
+                    //   * a left that is exactly `Nil` never wins, so the
+                    //     result is exactly the RIGHT arm's type —
+                    //     `remove_nil` leaves a bare `Nil` alone (it peels
+                    //     from a union), and the union then re-added the
+                    //     nil the operator had just ruled out.
+                    if never_falsy(&lt) {
+                        return lt;
+                    }
+                    if matches!(lt, Ty::Nil) {
+                        return rt;
+                    }
                     narrowing::remove_nil(&lt)
                 } else {
                     lt
@@ -2687,5 +2710,33 @@ mod tests {
             other => panic!("expected a union, got {other:?}"),
         };
         assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
+    }
+}
+
+/// Can this type NEVER be Ruby-falsy?
+///
+/// Ruby's falsy set is exactly `nil` and `false`; every other object,
+/// `0` and `""` included, is truthy. So a type that admits neither
+/// makes `x || y` short-circuit on every run, and the result is `x`'s
+/// type rather than a union with `y`'s.
+///
+/// A whitelist, not a blacklist: `Untyped`, `Var` and anything else the
+/// enum grows must fall through to the union, because being wrong here
+/// drops a real arm from a real type.
+fn never_falsy(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int
+        | Ty::Float
+        | Ty::Str
+        | Ty::Sym
+        | Ty::Time
+        | Ty::Array { .. }
+        | Ty::Hash { .. }
+        | Ty::Relation { .. }
+        | Ty::Class { .. } => true,
+        // `Bool` is the whole point of the exclusion — it is the one
+        // scalar that carries `false`.
+        Ty::Union { variants } => variants.iter().all(never_falsy),
+        _ => false,
     }
 }

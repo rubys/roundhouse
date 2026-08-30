@@ -1030,12 +1030,28 @@ end
 # ATTRIBUTES`. Both halves are reproduced rather than guessed.
 module ActionText
   module ContentHelper
-    # nil, exactly as the bare `mattr_accessor` leaves it. The `||`
-    # branch in the app is the one that runs, and it is the branch that
-    # matters — an app that never configured this gets the sanitizer's
-    # own list plus Action Text's attachment attributes.
+    # The list Action Text sanitizes with — the sanitizer's own set plus
+    # the attachment attributes, which is what `sanitizer_allowed_
+    # attributes` computes in `actiontext/app/helpers/action_text/
+    # content_helper.rb` and what campfire's `SanitizeAttributes` copies
+    # verbatim as its `||` fallback.
+    #
+    # A DELIBERATE DIVERGENCE, ledgered in docs/pipeline/runtime.md:
+    # Rails' `mattr_accessor(:allowed_attributes)` has no default, so
+    # this reader answers nil in an app that never configured it, and
+    # every caller reaches its own `||` fallback. We answer the list
+    # that fallback computes.
+    #
+    # Why: the fallback goes through `sanitizer.class`, and a method
+    # call on a CLASS OBJECT is dynamic for us and for spinel alike —
+    # `Array[untyped]`, handed to a `sanitize` that takes
+    # `Array[String]` twelve lines down. Answering nil made the two
+    # descriptions of one list contradict, and the campfire binary
+    # failed to LINK on it. The VALUES are identical either way, so no
+    # app that uses the list can tell; only one that asks whether it is
+    # nil can, and none does.
     def self.allowed_attributes
-      nil
+      SafeListSanitizer.allowed_attributes + Attachment::ATTRIBUTES
     end
 
     def self.sanitizer

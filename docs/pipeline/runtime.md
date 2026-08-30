@@ -1853,3 +1853,52 @@ with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
 `:` alone. The generated helper reuses the `url_encode` its query keys
 use, which percent-encodes them. Every anchor the corpus writes is a
 slug, a tag or a `dom_id`, so nothing can tell the difference today.
+
+### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
+
+Rails declares it `mattr_accessor(:allowed_attributes)` with no default
+(actiontext 8.1.3, `app/helpers/action_text/content_helper.rb:11`), so
+in an app that never configured it the reader answers `nil` and every
+caller falls through its own `||`. Ours answers the list that fallback
+computes — the sanitizer's own set plus `ActionText::Attachment::
+ATTRIBUTES`, which is exactly what Rails' `sanitizer_allowed_attributes`
+builds from the same two pieces.
+
+**Why, and it is a type problem rather than a behaviour one.** campfire's
+`ContentFilters::SanitizeAttributes` copies Rails' expression verbatim:
+
+```ruby
+ActionText::ContentHelper.allowed_attributes ||
+  (sanitizer_class.allowed_attributes + ActionText::Attachment::ATTRIBUTES).to_a
+```
+
+`sanitizer_class` is `ActionText::ContentHelper.sanitizer.class` — a
+CLASS OBJECT. Neither we nor spinel can dispatch statically on one: our
+`Ty` has no singleton variant (`analyze::body::send` collapses
+`instance.class` onto the instance's own `Ty::Class`), and spinel's
+`sp_Class` is a dynamic receiver. So the right arm is `Array[untyped]`
+whatever the left says, and the result was handed twelve lines later to
+a `sanitize` this runtime declares takes `Array[String]`. One list,
+described two contradicting ways — and on spinel the contradiction
+surfaced as far from its cause as it could get:
+
+```
+sanitize_attributes.rb:13: error: incompatible pointer types passing
+  'sp_PolyArray *' to parameter of type 'sp_StrArray *'
+```
+
+from the C compiler, with the campfire binary failing to LINK.
+
+Typing the LEFT arm closes it, because `||` now folds to a left that
+cannot be falsy (Ruby's falsy set is `nil` and `false` and nothing else,
+so it reads off the type) instead of unioning with the right. The values
+are identical either way: campfire computes the same list from the same
+two pieces. Only an app that asks whether the reader is `nil` can tell
+the difference, and none does.
+
+**What is still not modeled:** a method that returns a class object is
+declared by its INSTANCE type, because that is the only type we have.
+`def sanitizer_class: () -> Class` is what gets emitted — honest, and
+what spinel's `sp_Class` wants — but a chain through it stays dynamic.
+Closing that means a singleton variant in `Ty`, which every target's
+exhaustive `match` would have to answer for.

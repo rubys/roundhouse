@@ -102,7 +102,7 @@ end
 
 module ActionText
   module ContentHelper
-    def self.allowed_attributes: () -> nil
+    def self.allowed_attributes: () -> Array[String]
     def self.sanitizer: () -> ActionText::SafeListSanitizer
   end
 

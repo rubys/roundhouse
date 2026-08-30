@@ -135,6 +135,38 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "PlatformAgent", &[], &[
         ("os", Ty::Str), ("match?", Ty::Bool), ("user_agent", user_agent_ty),
     ]);
+    // `ActionText::ContentHelper.allowed_attributes`, from
+    // `runtime/ruby/action_text.rbs` — the one façade reader campfire's
+    // `ContentFilters::SanitizeAttributes` needs typed:
+    //
+    //     ActionText::ContentHelper.allowed_attributes ||
+    //       (sanitizer_class.allowed_attributes +
+    //        ActionText::Attachment::ATTRIBUTES).to_a
+    //
+    // The right arm goes through a CLASS OBJECT
+    // (`ContentHelper.sanitizer.class`), and neither we nor spinel can
+    // dispatch statically on one — our `Ty` has no singleton and
+    // spinel's `sp_Class` is dynamic. So the right arm is
+    // `Array[untyped]` whatever we do here, and the result was handed
+    // to a `sanitize` this same file declares takes `Array[String]`.
+    // Two descriptions of one list, contradicting, and on spinel the
+    // contradiction surfaces as far from its cause as it can:
+    // `incompatible pointer types passing 'sp_PolyArray *' to parameter
+    // of type 'sp_StrArray *'`, from the C compiler, with the campfire
+    // binary failing to LINK.
+    //
+    // Typing the LEFT arm is what closes it, because `||` now folds to
+    // a left that cannot be falsy — see `analyze::body`. The runtime
+    // answers Rails' computed list rather than Rails' unconfigured
+    // `nil`; that divergence is in `docs/pipeline/runtime.md`, and it
+    // is why this entry is here rather than the whole module.
+    //
+    // `runtime/ruby/**/*.rbs` does not feed app analysis — only the
+    // runtime-sweep test builds a registry from it — so a façade the
+    // app calls has to be named here to be known.
+    register_stdlib_class(classes, "ActionText::ContentHelper", &[
+        ("allowed_attributes", Ty::Array { elem: Box::new(Ty::Str) }),
+    ], &[]);
     // `IPAddr` — the class `runtime/ruby/ipaddr.rb` ports. Only the
     // surface that file implements is registered, so a call beyond it
     // stays an honest gap rather than a method that types and then
