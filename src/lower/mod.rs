@@ -92,6 +92,7 @@ pub mod enum_symbols;
 pub mod has_json;
 pub mod update_writer_check;
 pub mod route_format_suffix;
+pub mod route_url_options;
 pub mod route_helper_receiver;
 pub mod config_reader;
 pub mod symbolize_keys;
@@ -164,6 +165,7 @@ pub use relation_select_block::apply_relation_select_block_lowering;
 pub use enum_symbols::apply_enum_symbol_lowering;
 pub use has_json::apply_has_json_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
+pub use route_url_options::apply_route_url_options_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
 pub use destroy_by::apply_destroy_by_lowering;
@@ -333,6 +335,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // two do not overlap (`format` is on NON_QUERY_OPTIONS) but the
     // survey should see the shape this pass leaves behind.
     ("route_format_suffix", &[]),
+    // `x_path(host: "h")` → `x_path()`. Rails' `RESERVED_OPTIONS` are
+    // deleted before the path generator ever sees them; ours became
+    // query params. Same ordering constraint as `route_format_suffix`
+    // — it must run before the route-helper lowering surveys these
+    // call sites for query keys.
+    ("route_url_options", &[]),
     // `where(role: :bot)` → `where(role: 2)`. Must run BEFORE the arel
     // folding that turns a `where` hash into SQL, so the folded literal
     // is the integer the column stores.
@@ -613,6 +621,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("relation_select_block");
     route_format_suffix::apply_route_format_suffix_lowering(app);
     ran!("route_format_suffix");
+    route_url_options::apply_route_url_options_lowering(app);
+    ran!("route_url_options");
     enum_symbols::apply_enum_symbol_lowering(app);
     ran!("enum_symbols");
     diags.extend(has_json::apply_has_json_lowering(app));

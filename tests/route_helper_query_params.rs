@@ -52,6 +52,22 @@ fn params(app: &roundhouse::App, name: &str) -> Vec<roundhouse::ty::Param> {
     params
 }
 
+/// The `#` literal `append_anchor` emits, as it reads in the debug
+/// rendering of the body — a bare `"#"` would also match the `#{}` of
+/// every interpolation, so match the InterpPart it actually is.
+const FRAGMENT: &str = "Text { value: \"#\" }";
+
+/// The generated helper's body, as the debug rendering the sibling
+/// `direct_url_helpers` suite reads.
+fn body(app: &roundhouse::App, name: &str) -> String {
+    let helpers = lower_routes_to_library_functions(app);
+    let f = helpers
+        .iter()
+        .find(|f| f.name.as_str() == name)
+        .unwrap_or_else(|| panic!("helper {name} not generated"));
+    format!("{:?}", f.body)
+}
+
 const ROUTES: &str = "Rails.application.routes.draw do\n  \
     get \"/autocompletable/notes\" => \"notes#index\", :as => \"autocompletable_notes\"\n  \
     get \"/rooms/:room_id/involvement\" => \"rooms#involvement\", :as => \"room_involvement\"\n  \
@@ -142,20 +158,97 @@ fn a_call_missing_its_required_segments_is_left_alone() {
     );
 }
 
-/// Neither `format:` nor `anchor:` is a QUERY key, and neither is a
-/// PARAMETER either. `format` is a trailing `.ext` the
-/// `route_format_suffix` lowering moves to the call site (a parameter
-/// would widen the signature for every caller, which Rust and Go — no
-/// default arguments — charge in full); `anchor` is the URL fragment
-/// and is nobody's yet.
+/// `format:` is not a QUERY key and not a PARAMETER either: it is a
+/// trailing `.ext` the `route_format_suffix` lowering moves to the call
+/// site (a parameter would widen the signature for every caller, which
+/// Rust and Go — no default arguments — charge in full).
 #[test]
-fn format_and_anchor_take_no_parameter() {
+fn format_takes_no_parameter() {
     let app = app_with(
         ROUTES,
-        "<%= link_to \"a\", autocompletable_notes_path(format: :json, anchor: \"x\") %>\n",
+        "<%= link_to \"a\", autocompletable_notes_path(format: :json) %>\n",
     );
     let ps = params(&app, "autocompletable_notes_path");
-    assert!(ps.is_empty(), "neither key becomes a parameter: {ps:?}");
+    assert!(ps.is_empty(), "format becomes no parameter: {ps:?}");
+}
+
+/// Rails' HOST-ONLY reserved options describe the half of a URL a
+/// `_path` helper does not render, so none of them is a query key —
+/// `room_at_message_path(1, 5, host: "x")` is `/rooms/1/@5`, not
+/// `/rooms/1/@5?host=x`.
+///
+/// The wall this closes: campfire's own broadcast assertion compares
+/// the URL a copy-link button holds against `room_at_message_url(@room,
+/// Message.last, host: "once.campfire.test")`, and the trailing
+/// `?host=once.campfire.test` was the whole difference.
+#[test]
+fn host_only_options_are_not_query_keys() {
+    for opt in [
+        "host: \"x\"",
+        "protocol: \"https\"",
+        "port: 3000",
+        "subdomain: \"a\"",
+        "domain: \"b.test\"",
+        "tld_length: 2",
+        "only_path: true",
+    ] {
+        let app = app_with(
+            ROUTES,
+            &format!("<%= link_to \"a\", autocompletable_notes_path({opt}) %>\n"),
+        );
+        let ps = params(&app, "autocompletable_notes_path");
+        assert!(ps.is_empty(), "`{opt}` must grow no parameter: {ps:?}");
+    }
+}
+
+/// `anchor:` is the one reserved option that DOES belong on a path, so
+/// unlike the host-only seven it is harvested — as a keyword parameter
+/// rendering `#tag`.
+///
+/// It previously grew no parameter while four lobsters call sites and
+/// two writebook ones kept passing one: `RouteHelpers.settings_path(
+/// anchor: "external")` against `def self.settings_path`, an
+/// ArgumentError on every page linking to `settings#external`.
+#[test]
+fn anchor_takes_a_parameter_and_renders_a_fragment() {
+    let app = app_with(
+        ROUTES,
+        "<%= link_to \"a\", autocompletable_notes_path(anchor: \"x\") %>\n",
+    );
+    let ps = params(&app, "autocompletable_notes_path");
+    assert_eq!(
+        ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["anchor"],
+        "anchor is a parameter: {ps:?}"
+    );
+    assert!(
+        matches!(ps[0].kind, ParamKind::Keyword { required: false }),
+        "an optional keyword, like every other option: {:?}",
+        ps[0].kind
+    );
+    let src = body(&app, "autocompletable_notes_path");
+    assert!(src.contains(FRAGMENT), "the body renders a `#` fragment:\n{src}");
+}
+
+/// `path_for` runs `add_params` and THEN `add_anchor`, so the fragment
+/// trails the whole query string. An anchor rendered first would put
+/// the `?room_id=1` INSIDE the fragment.
+#[test]
+fn the_anchor_renders_after_the_query_string() {
+    let app = app_with(
+        ROUTES,
+        "<%= link_to \"a\", autocompletable_notes_path(room_id: 1, anchor: \"x\") %>\n",
+    );
+    let ps = params(&app, "autocompletable_notes_path");
+    assert_eq!(
+        ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["room_id", "anchor"],
+        "anchor is ordered last: {ps:?}"
+    );
+    let src = body(&app, "autocompletable_notes_path");
+    let q = src.find("?room_id=").unwrap_or_else(|| panic!("no query key:\n{src}"));
+    let a = src.find(FRAGMENT).unwrap_or_else(|| panic!("no fragment:\n{src}"));
+    assert!(q < a, "the query string is built before the fragment:\n{src}");
 }
 
 /// An Array value renders as `k[]=a&k[]=b` in Rails (campfire writes

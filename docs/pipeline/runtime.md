@@ -1802,3 +1802,54 @@ receiver.
 
 Worth knowing because it is invisible in review: the emitted line is
 valid Ruby either way, and only the parse changes.
+
+### Four of Rails' reserved URL options are still query params
+
+`url_for` splits a route helper's option hash in two: the twelve names in
+`ActionDispatch::Routing::RouteSet::RESERVED_OPTIONS` (actionpack 8.1.3,
+`route_set.rb:838`) it consumes itself, and everything else, which it
+forwards to the path generator and which ends up in the query string. We
+forwarded all twelve, so `room_at_message_path(1, 5, host: "x")` rendered
+`/rooms/1/@5?host=x` where Rails renders `/rooms/1/@5` — and that extra
+`?host=` was what failed campfire's own broadcast assertion.
+
+`lower::route_url_options` now models the split as a table, and the table
+has three filled cells and one empty one:
+
+* **the seven host-only names** — `host`, `protocol`, `port`,
+  `subdomain`, `domain`, `tld_length`, `only_path` — are dropped from a
+  `_path` call site. `path_for` is `url_for(…, PATH, …)`, and the `PATH`
+  strategy never calls `build_host_url`, so these contribute nothing to
+  a path. Dropping them is EXACT, not an approximation.
+
+  On the `_url` spelling they are not dropped, because there they are
+  the answer: `x_url(…, host: h)` becomes
+  `"http://#{h}#{RouteHelpers.x_path(…)}"` — the same shape the view
+  lowerer grounds a hostless `_url` with (`Rails.application.domain` in
+  place of `h`) and the same one
+  `emit::ruby::library::rewrite_url_helpers_absolute` builds for the
+  explicit `…routes.url_helpers.x_url(…, host:)` chain. `protocol:`
+  replaces the `http` and rides bare (`"https"`, not `"https://"`),
+  which is that older pass's convention; Rails' `normalize_protocol`
+  accepts both spellings and we accept only the first.
+  `x_url(…, only_path: true)` is Rails asking the URL spelling for a
+  path, and gets one.
+* **`anchor:`** is rendered, `#tag`, after the query string — the order
+  `path_for` applies `add_params` and then `add_anchor` in.
+* **`format:`** is `lower::route_format_suffix`'s, which monomorphizes
+  the helper rather than widening its signature.
+* **`script_name:`, `original_script_name:`, `trailing_slash:` and
+  `params:` are NOT modeled.** Each genuinely changes the path — the
+  first two prefix it, the third appends a `/`, and `params:` is a hash
+  Rails merges into the query — and each is still treated as an ordinary
+  query key, so `foo_path(trailing_slash: true)` renders
+  `?trailing_slash=true`. Left visibly wrong rather than silently
+  dropped: no corpus app writes one of them on an app route (campfire's
+  one `params:` site is an integration-test POST), and a dropped option
+  is a URL that looks right and is not.
+
+A second, smaller divergence in the same place: Rails escapes a fragment
+with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
+`:` alone. The generated helper reuses the `url_encode` its query keys
+use, which percent-encodes them. Every anchor the corpus writes is a
+slug, a tag or a `dom_id`, so nothing can tell the difference today.

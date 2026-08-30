@@ -881,6 +881,16 @@ fn build_helper_function(
     // string. KEYWORD params with `nil` defaults, so the call sites
     // already written (`autocompletable_users_path(room_id: room.id)`)
     // bind unchanged and every other caller is unaffected.
+    //
+    // `anchor:` is the one key that is not a query key: `path_for`
+    // applies `add_params` and THEN `add_anchor`, so the fragment
+    // trails the whole query string. Ordering it last in the `def` and
+    // in the signature keeps the two readings of the helper agreeing.
+    let (anchor_keys, plain_keys): (Vec<QueryKey>, Vec<QueryKey>) =
+        query_keys.iter().cloned().partition(|k| k.anchor);
+    let ordered_keys: Vec<QueryKey> =
+        plain_keys.iter().chain(anchor_keys.iter()).cloned().collect();
+    let query_keys: &[QueryKey] = &ordered_keys;
     let mut query_sig: Vec<crate::ty::Param> = Vec::new();
     if !query_keys.is_empty() {
         for key in query_keys {
@@ -906,7 +916,10 @@ fn build_helper_function(
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
-        body = append_query_string(body, query_keys);
+        body = append_query_string(body, &plain_keys);
+        if let Some(anchor) = anchor_keys.first() {
+            body = append_anchor(body, &anchor.name);
+        }
     }
     // The signature must agree with the `def` above about which params
     // are optional: `fn_sig` marks every param Required, so a helper
@@ -964,14 +977,29 @@ fn build_helper_function(
 /// Keyword names a call site may pass that are NOT query params, so
 /// the demand survey must not turn them into one.
 ///
-///   * `format:` is already a parameter — the trailing `(.:format)`
-///     group gives the helper a `format = nil` and appends `.json`;
-///   * `anchor:` is Rails' FRAGMENT (`#tag`), which is not part of the
-///     query string and belongs to whoever models fragments.
+///   * `format:` is already handled — `lower::route_format_suffix`
+///     monomorphizes the helper and removes the key ahead of this
+///     survey, so a `format` reaching here is one that pass declined;
+///   * the HOST-ONLY half of Rails' `RESERVED_OPTIONS` — `host:`,
+///     `protocol:`, `port:`, and friends. `url_for` deletes all twelve
+///     reserved keys before generating a path, and these seven describe
+///     the host, which a `_path` renders not at all.
+///     `lower::route_url_options` strips them at the call site; this
+///     list is what stops the survey growing a parameter for one that
+///     reaches it by another route (a `_url` spelling folded onto its
+///     `_path` twin, say).
+///
+/// `anchor:` is deliberately NOT here. It is Rails' FRAGMENT, it does
+/// belong on a path, and it IS harvested — as a [`QueryKey`] flagged
+/// `anchor`, rendered `#tag` after the query string. Excluding it grew
+/// no parameter while the call sites kept passing one, which is an
+/// arity error on every lobsters page that links to `settings#external`.
 ///
 /// A key naming one of the route's own path segments is excluded at the
 /// call-site survey instead (it varies per route).
-const NON_QUERY_OPTIONS: &[&str] = &["format", "anchor"];
+fn is_non_query_option(key: &str) -> bool {
+    key == "format" || crate::lower::route_url_options::HOST_ONLY_OPTIONS.contains(&key)
+}
 
 /// One query key a helper must accept, and whether every call site
 /// passes it an ARRAY (`user_ids: [ user.id ]`), which Rails renders as
@@ -985,6 +1013,12 @@ const NON_QUERY_OPTIONS: &[&str] = &["format", "anchor"];
 pub(crate) struct QueryKey {
     pub(crate) name: String,
     pub(crate) array: bool,
+    /// Rails' `anchor:` — rendered `#tag` AFTER every query key, which
+    /// is the order `path_for` applies them in (`add_params` then
+    /// `add_anchor`). Derived from the name, not surveyed: `anchor` is
+    /// reserved, so a helper option spelled that way is the fragment
+    /// whatever the caller meant by it.
+    pub(crate) anchor: bool,
 }
 
 /// Query-string keys each route helper is actually called with —
@@ -1152,7 +1186,7 @@ fn query_param_demand(
                                     continue;
                                 };
                                 let key = key.as_str();
-                                if NON_QUERY_OPTIONS.contains(&key)
+                                if is_non_query_option(key)
                                     || segments.iter().any(|s| s.as_str() == key)
                                 {
                                     continue;
@@ -1193,7 +1227,11 @@ fn query_param_demand(
             (
                 helper,
                 keys.into_iter()
-                    .map(|(name, array)| QueryKey { name, array })
+                    .map(|(name, array)| QueryKey {
+                        anchor: name == "anchor",
+                        name,
+                        array,
+                    })
                     .collect(),
             )
         })
@@ -1417,6 +1455,54 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
         out = send_method(out, "+", vec![arm]);
     }
     out
+}
+
+/// Append `#tag` for the `anchor:` a call site passes, skipping it when
+/// the caller left it `nil`.
+///
+/// Last, after the query string: that is the order `path_for` builds a
+/// path in (`add_params`, then `add_anchor`), and an anchor ahead of a
+/// `?` would put the query INSIDE the fragment.
+///
+/// DIVERGENCE: Rails escapes a fragment with
+/// `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
+/// `:` alone; we reuse the `url_encode` the query keys use, which
+/// percent-encodes them. Every anchor the corpus writes is a slug, a
+/// tag or a `dom_id`, so no call site can tell the difference today.
+fn append_anchor(path: Expr, name: &str) -> Expr {
+    let escaped = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                },
+            )),
+            method: Symbol::from("url_encode"),
+            args: vec![send_method(var_ref(name), "to_s", Vec::new())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let frag = Expr::new(
+        Span::synthetic(),
+        ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Text { value: "#".to_string() },
+                InterpPart::Expr { expr: escaped },
+            ],
+        },
+    );
+    let arm = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send_method(var_ref(name), "nil?", Vec::new()),
+            then_branch: lit_str(String::new()),
+            else_branch: frag,
+        },
+    );
+    send_method(path, "+", vec![arm])
 }
 
 fn send_method(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
