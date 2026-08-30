@@ -50,6 +50,7 @@
 #
 # CRuby/JRuby only, like the `cable.rb` it publishes through. Spinel's
 # Action Cable rides tep and is a separate substrate.
+require "json"
 require_relative "broadcasts"
 
 module ActionCable
@@ -117,6 +118,54 @@ module ActionCable
     # docs/pipeline/runtime.md rather than left as a silent no-op.
     def remote_connections
       RemoteConnections.new
+    end
+
+    # `ActionCable.server.pubsub` — the queue an app's OWN test asks what
+    # was published.
+    #
+    # WHY IT EXISTS: this is not our seam, it is Rails'. campfire's
+    # `turbo_test_helper` reads it directly —
+    #
+    #   ActionCable.server.pubsub.broadcasts(name).collect { JSON.parse(_1) }
+    #
+    # — so `test_creating_a_message_broadcasts_the_message_to_the_room`
+    # could not reach its assertion without one. Our own emitted helper
+    # reads `Broadcasts::LOG` instead; both are views of the same log,
+    # and the app's is the one that matters because the app wrote it.
+    def pubsub
+      Pubsub.new
+    end
+  end
+
+  # Rails' test subscription adapter, on the log this runtime already
+  # keeps. `broadcasts(stream)` answers what was published on that
+  # stream, JSON-ENCODED — which is what Rails stores:
+  # `Server::Broadcasting#broadcast` does
+  # `pubsub.broadcast channel, ActiveSupport::JSON.encode(message)`, so
+  # the caller's `JSON.parse` gets the payload back. Encoding here rather
+  # than handing the value over raw is what makes the app's
+  # `collect { JSON.parse(_1) }` mean something instead of raising.
+  class Pubsub
+    def broadcasts(stream)
+      Broadcasts::LOG.select { |entry| entry[:stream] == stream }.map do |entry|
+        JSON.generate(payload_of(entry))
+      end
+    end
+
+    # A turbo entry is rebuilt into the fragment it dispatched — through
+    # `Broadcasts.render_fragment`, the same function `record` used, so
+    # there is one spelling of the markup rather than a second one here
+    # that drifts. A raw publish (`action: :message`) carries its own
+    # payload and is handed back as it was given.
+    def payload_of(entry)
+      return entry[:payload] if entry[:action] == :message
+
+      Broadcasts.render_fragment(
+        action: entry[:action],
+        target: entry[:target],
+        html: entry[:html],
+        attributes: entry[:attributes].to_s,
+      )
     end
   end
 

@@ -1663,6 +1663,83 @@ DOM comparison cannot see it.
 - [`verification.md`](verification.md) — toolchain tests that
   exercise runtime + emitted project end-to-end.
 
+### A `_path` helper turns `host:` into a query parameter
+
+`RouteHelpers.room_at_message_path(1, 5, host: "once.campfire.test")`
+emits `/rooms/1/@5?host=once.campfire.test`. Rails emits `/rooms/1/@5`.
+
+**Why.** `:host` is a URL-GENERATION option, not a route segment and not
+a query parameter. actionpack 8.1.1,
+`ActionDispatch::Routing::RouteSet`:
+
+```ruby
+RESERVED_OPTIONS = [:host, :protocol, :port, :subdomain, :domain,
+                    :tld_length, :trailing_slash, :anchor, :params,
+                    :only_path, :script_name, :original_script_name]
+```
+
+`path_for` passes that list as `reserved`, so none of those names reaches
+the query string. A `_path` helper drops `:host` entirely (`full_url_for`
+is the only consumer); `:anchor` becomes `#frag`; `:params` becomes the
+query. Our synthesis knows none of this and treats every leftover kwarg
+as a query parameter.
+
+**What it costs.** campfire's
+`MessagesControllerTest#test_creating_a_message_broadcasts_the_message_to_the_room`
+builds the expected copy-link URL with
+`room_at_message_path(@room.id, Message.last.id, host: "once.campfire.test")`
+and compares it to the rendered `data-copy-to-clipboard-content-value`.
+Both sides are ours, so they would agree if the view rendered the same
+wrong URL — the test fails because only the TEST passes `host:`. A page
+that renders one of these is serving a URL with a bogus query on it.
+
+**The fix is a rule table, not a special case.** Port `RESERVED_OPTIONS`
+and give the four that MEAN something (`anchor`, `params`,
+`trailing_slash`, and `host`/`protocol`/`port` for the `_url` family)
+their actual behaviour, rather than dropping `host` alone and leaving
+`anchor:` to become `?anchor=`.
+
+### `ActionView::RecordIdentifier` is ruby-family only
+
+Rails defines `dom_id` on `ActionView::RecordIdentifier` and includes
+that module into its helpers. This runtime defines it on
+`ActionView::ViewHelpers` and offers `RecordIdentifier.dom_id` as a
+delegate — but only on the ruby family, from
+`ruby_overlay/runtime/action_view_record_identifier.rb`.
+
+**Why not `runtime/ruby/`, beside the function it delegates to.** That
+directory prices all nine targets, and the ones with no module system
+flatten `ActionView`'s modules into a single namespace. Kotlin emitted
+both `domId`s into one `ViewHelpers.kt` and refused to build —
+"Conflicting overloads", then "Overload resolution ambiguity" at the
+call site. A delegate is exactly the shape that cannot survive
+flattening: same name, same arity, same namespace.
+
+**What it costs.** A strict target that meets
+`ActionView::RecordIdentifier` gets an uninitialized constant. Nothing
+does — the one caller is an app test helper, and those run on the ruby
+family. A target that needs it wants the module split, not this file
+copied.
+
+### `assert_select`'s block does not scope its nested assertions
+
+Rails runs an `assert_select` block against the MATCHED ELEMENTS: a
+nested `assert_select` inside searches only what the outer one selected.
+Ours yields with no scoping, so a nested assertion searches the last
+response body again.
+
+**What it costs, and the direction is the bad one.** A nested assertion
+can PASS against markup the outer selector never matched. campfire's
+broadcast test is the shape: the outer `assert_select` is scoped to a
+Nokogiri fragment built from the pubsub queue, and the assertions inside
+it look at the POST response instead. Both happen to contain the
+message, so the inner assertion is answering about the wrong document
+and agreeing anyway.
+
+**Not fixed here.** Scoping means the block's assertions run against a
+node set rather than a body, which is a change to every `assert_select`
+call site's plumbing rather than to this one method.
+
 ### `try` narrows to the classes that answer, and cannot see every one
 
 `recv.try(:name)` is Rails' `respond_to?(name) && public_send(name, …)`

@@ -114,6 +114,11 @@ require_relative "runtime/action_view_safe_buffer"
 # SafeString, which that file's `html_escape` is the reader of.
 require_relative "runtime/action_view_sanitize"
 require_relative "runtime/action_view_url_for"
+# `ActionView::RecordIdentifier.dom_id` — Rails' own home for `dom_id`,
+# which an app's test helper can name directly. Overlay-only: the
+# targets with no module system flatten it onto `ViewHelpers` and
+# collide with the delegate.
+require_relative "runtime/action_view_record_identifier"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
 require_relative "runtime/action_controller_session"

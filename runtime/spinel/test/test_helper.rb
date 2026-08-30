@@ -1345,8 +1345,32 @@ module RequestDispatch
   # `Dom.text` answers the whole document for every node — and of the
   # two available readings, the strict one fails loudly where the loose
   # one passed vacuously.
-  def assert_select(selector, content_or_opts = nil, opts = nil, &block)
-    body  = @__response.body.to_s
+  # Rails overloads the first parameter: `assert_select(selector, …)`
+  # scopes to the last response, `assert_select(root, selector, …)`
+  # scopes to a node you already have. campfire's `turbo_test_helper`
+  # uses the second form —
+  #
+  #   assert_select(Nokogiri::HTML.fragment(streams), "turbo-stream[…]")
+  #
+  # — over the broadcasts it pulled off the pubsub queue, which are not
+  # in any response body. Without it the assertion searched the LAST
+  # RESPONSE for a fragment that was never rendered into one.
+  #
+  # `to_s` rather than `to_html` on the root: a Nokogiri fragment
+  # answers the same markup for both, and `to_s` is a method every
+  # target can compile on a value it cannot type. The root arrives
+  # untyped by construction — it is whatever HTML library the app's own
+  # test reached for.
+  def assert_select(selector_or_root, content_or_opts = nil, opts = nil, &block)
+    if selector_or_root.is_a?(String)
+      body = @__response.body.to_s
+      selector = selector_or_root
+    else
+      body = selector_or_root.to_s
+      selector = content_or_opts
+      content_or_opts = opts
+      opts = nil
+    end
     nodes = Dom.select(Dom.parse(body), selector)
     options = content_or_opts.is_a?(Hash) ? content_or_opts : opts
     if options.is_a?(Hash) && options[:count] == 0

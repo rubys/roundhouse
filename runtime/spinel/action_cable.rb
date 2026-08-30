@@ -90,6 +90,43 @@ module ActionCable
     def remote_connections
       RemoteConnections.new
     end
+
+    # `ActionCable.server.pubsub` — the queue an app's OWN test asks
+    # what was published. Rails' seam, not ours: campfire's
+    # `turbo_test_helper` reads it directly. See the overlay sibling for
+    # the argument; this is the same view of the same log.
+    def pubsub
+      Pubsub.new
+    end
+  end
+
+  # Rails' test subscription adapter, on `Broadcasts::LOG`.
+  #
+  # DIVERGES FROM THE OVERLAY IN ONE PLACE, and it is the divergence
+  # this file's header already describes: a raw publish's payload was
+  # rendered to JSON TEXT at the boundary here (a strict target has no
+  # lane for the untyped Hash the overlay carries), so it is handed back
+  # as it stands rather than encoded a second time. A turbo entry is
+  # rebuilt through `Broadcasts.render_fragment` — the same function
+  # `record` used — and encoded, which is what Rails stores.
+  class Pubsub
+    def broadcasts(stream)
+      out = []
+      Broadcasts::LOG.each do |entry|
+        next if entry[:stream] != stream
+        if entry[:action] == :message
+          out << entry[:payload].to_s
+        else
+          out << Tep::Json.quote(Broadcasts.render_fragment(
+            action: entry[:action],
+            target: entry[:target],
+            html: entry[:html],
+            attributes: entry[:attributes].to_s,
+          ))
+        end
+      end
+      out
+    end
   end
 
   # The `where(…)` half of the above: a selection over connections

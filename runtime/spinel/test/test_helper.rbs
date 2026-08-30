@@ -268,16 +268,24 @@ module RequestDispatch
   def assert_redirected_to: (String expected_path, ?ActionResponse response) -> void
 
   # Two positional + optional content/opts forms + optional block.
-  # Selector is always String; second arg is either the content
-  # string to match against the rendered tag, or an options Hash, or
-  # nil. Returns void (raises on mismatch).
+  # The FIRST parameter is Rails' overload: a String is the selector
+  # and the last response is the haystack; anything else is a ROOT
+  # NODE to search instead, and the selector shifts one right
+  # (campfire's turbo_test_helper hands it a Nokogiri fragment built
+  # from the pubsub queue). Hence `untyped` rather than `String` — the
+  # root is whatever HTML library the app's own test reached for, and
+  # this file cannot name it.
+  #
+  # Second arg is either the selector (root form), the content string
+  # to match against the rendered tag, or an options Hash, or nil.
+  # Returns void (raises on mismatch).
   def assert_select: (
-    String selector,
+    untyped selector_or_root,
     ?(String | Hash[Symbol, untyped])? content_or_opts,
     ?Hash[Symbol, untyped]? opts
   ) { () -> void } -> void
        | (
-    String selector,
+    untyped selector_or_root,
     ?(String | Hash[Symbol, untyped])? content_or_opts,
     ?Hash[Symbol, untyped]? opts
   ) -> void

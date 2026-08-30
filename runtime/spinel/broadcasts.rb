@@ -84,7 +84,12 @@ module Broadcasts
   end
 
   def self.record(action:, stream:, target:, html:, attributes: "")
-    entry = { action: action, stream: stream, target: target, html: html }
+    # `attributes` rides along so a reader can rebuild the EXACT
+    # fragment this dispatched. `ActionCable::Server#pubsub` is that
+    # reader — an app's own test asks the pubsub queue what was
+    # published, and a fragment rebuilt without its attributes is not
+    # what went over the wire.
+    entry = { action: action, stream: stream, target: target, html: html, attributes: attributes }
     LOG << entry
     # Unconditional dispatch — TRANSPORTS always holds exactly one
     # transport (the no-op SeedTransport until an overlay replaces it),
