@@ -1,0 +1,56 @@
+class UserAgentToken
+  @product: String
+  @version: String
+  @comment: Array[String]
+
+  def initialize: (String product, String version, String? comment) -> void
+  def product: () -> String
+  def version: () -> String
+  def comment: () -> Array[String]
+end
+
+class UserAgent
+  MATCHER: Regexp
+  DEFAULT_USER_AGENT: String
+  GECKO_BROWSERS: Array[String]
+  BUILD_VERSIONS: Hash[String, String]
+  WINDOWS_NAMES: Hash[String, String]
+  IOS_VERSION_REGEX: Regexp
+
+  @tokens: Array[UserAgentToken]
+  @kind: String
+
+  def initialize: (Array[UserAgentToken] tokens, String kind) -> void
+  def self.parse: (String? string) -> UserAgent
+  def self.classify: (Array[UserAgentToken] tokens) -> String
+  def self.webkit?: (Array[UserAgentToken] tokens) -> bool
+  def self.product?: (Array[UserAgentToken] tokens, String name) -> bool
+  def self.find_product: (Array[UserAgentToken] tokens, String name) -> UserAgentToken?
+  def self.base_application: (Array[UserAgentToken] tokens) -> UserAgentToken?
+  def self.commented_application: (Array[UserAgentToken] tokens) -> UserAgentToken?
+  def self.normalize_os: (String? os) -> String
+  def application: () -> UserAgentToken?
+  def browser: () -> String
+  def gecko_browser: () -> String
+  def version: () -> String
+  def webkit_version: () -> String
+  def webkit_build: () -> String
+  def platform: () -> String
+  def os: () -> String
+  def chrome_os: (UserAgentToken app) -> String
+  def webkit_os: (UserAgentToken app) -> String
+  def gecko_os: (UserAgentToken app) -> String
+  def comment_match: (Regexp pattern) -> String
+end
+
+class PlatformAgent
+  @user_agent_string: String?
+  @user_agent: UserAgent
+
+  def initialize: (String? user_agent_string) -> void
+  def browser: () -> String
+  def version: () -> String
+  def os: () -> String
+  def match?: (Regexp pattern) -> bool
+  def user_agent: () -> UserAgent
+end

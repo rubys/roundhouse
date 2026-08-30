@@ -1306,7 +1306,19 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
         Literal::Float { .. } => Ty::Float,
         Literal::Str { .. } => Ty::Str,
         Literal::Sym { .. } => Ty::Sym,
-        Literal::Regex { .. } => unknown(),
+        // A regex literal is a `Regexp`, and saying so is not a
+        // refinement — it is the difference between `/Android/` being a
+        // known object and being a gradual hole. Every `match?(/x/)` in
+        // `runtime/ruby/` passed an untyped argument until now, and
+        // `runtime/ruby/` prices every target.
+        //
+        // `Regexp` is the same kind of name `Time` is: the class exists
+        // in the registry (`stdlib`), so a call ON the literal resolves
+        // through the ordinary class walk rather than through a
+        // per-literal table.
+        Literal::Regex { .. } => {
+            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }
+        }
     }
 }
 

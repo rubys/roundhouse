@@ -372,66 +372,6 @@ module SVG
   end
 end
 
-# platform_agent — Basecamp's User-Agent classifier. campfire's
-# `ApplicationPlatform < PlatformAgent` inherits `match?`, `user_agent`
-# and `os` and builds every predicate the PWA views ask for on top of
-# them. Off the read benchmark: `platform` is reached only from
-# `pwa/_install_instructions`, `pwa/_browser_settings` and
-# `sessions/incompatible_browser`.
-#
-# `match?` and `user_agent` are PRIVATE in the gem and private here —
-# the subclass calls both with an implicit receiver, which is the only
-# spelling that works either way, and a public copy would say the gem
-# offers a surface it does not.
-class PlatformAgent
-  def initialize(_user_agent_string)
-    GemFacade.fail!("PlatformAgent.new")
-    @user_agent_string = _user_agent_string
-  end
-
-  # `delegate :os, to: :user_agent` in the gem.
-  def os
-    GemFacade.fail!("PlatformAgent#os")
-    ""
-  end
-
-  private
-    def match?(_pattern)
-      GemFacade.fail!("PlatformAgent#match?")
-      false
-    end
-
-    def user_agent
-      GemFacade.fail!("PlatformAgent#user_agent")
-      UserAgent.new
-    end
-end
-
-# useragent — the parser platform_agent delegates to. Reached only
-# through `PlatformAgent#user_agent`, so the two façades stand or fall
-# together.
-class UserAgent
-  def self.parse(_string)
-    GemFacade.fail!("UserAgent.parse")
-    new
-  end
-
-  def browser
-    GemFacade.fail!("UserAgent#browser")
-    ""
-  end
-
-  def platform
-    GemFacade.fail!("UserAgent#platform")
-    ""
-  end
-
-  def version
-    GemFacade.fail!("UserAgent#version")
-    ""
-  end
-end
-
 # WebPush — the `web-push` gem, campfire's push-notification delivery.
 #
 # `payload_send` is the whole gem in one call: it derives a shared

@@ -2097,6 +2097,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // there is no `gem install` to swap TO. One implementation,
         // every target, ours.
         "surfguard",
+        // `useragent` 0.16.11 + `platform_agent` 1.0.1, ported. NOT
+        // swapped for the real gems on the CRuby/JRuby trees the way
+        // ipaddr and zlib are: `ApplicationPlatform` subclasses
+        // `PlatformAgent`, so two definitions of the constant is a
+        // superclass mismatch at load, not a fallback. One
+        // implementation, every target, ours — and the suite beside the
+        // port compares it against the real gems.
+        "user_agent",
         // `Zlib.crc32`, same arrangement as ipaddr: ported for the
         // targets with no zlib to bind to, swapped for Ruby's own on
         // the CRuby/JRuby trees below.
@@ -2411,7 +2419,6 @@ const GEM_REQUIRES: &[&str] = &[
     "rqrcode",
     "SVG/Graph/TimeSeries",
     "sentry-ruby",
-    "platform_agent",
     "rails-html-sanitizer",
 ];
 
@@ -2439,7 +2446,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 11] = [
+    const RUNTIME_GEMS: [(Marker, &str); 10] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -2456,20 +2463,15 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         // real gem loads in the emitted tree under CRuby.
         //
         (Marker::Constant("Sentry"), "sentry-ruby"),
-        // campfire's `ApplicationPlatform < PlatformAgent`, a LOAD-time
-        // superclass — the gem's absence is not a late NameError on one
-        // route, it is a tree that does not boot.
-        //
-        // It reads `delegate :browser, …, to: :user_agent` on its second
-        // line, which is why this entry was refused once: the gem
-        // declares `activesupport` as a runtime dependency for that one
-        // call, and pulling ActiveSupport into the emitted tree to
-        // satisfy it is the opposite of what the tree is for. Supplying
-        // the one method it names is thirty lines
-        // (`runtime/spinel/module_delegate.rb`, ruby-family only), and
-        // with that defined the real gem loads and answers correctly.
-        // Its own dependency `useragent` arrives through bundler.
-        (Marker::Constant("PlatformAgent"), "platform_agent"),
+        // `platform_agent` USED TO BE HERE, and is deliberately not any
+        // more: `runtime/ruby/user_agent.rb` ports it, along with the
+        // `useragent` it delegates to. Requiring the gem beside the port
+        // would redefine `PlatformAgent` and `UserAgent` on the CRuby
+        // tree alone, so the ruby lane would be running the GEM while
+        // every strict lane ran the port — and a sibling lane is
+        // evidence only if it runs the same code. The port's own suite
+        // (`runtime/ruby/test/user_agent_test.rb`) compares it against
+        // the real gems instead, which is where that comparison belongs.
         // rails-html-sanitizer, and it is the first entry whose demand
         // is OURS rather than the app's: no campfire file names
         // `Rails::HTML`, but `ActionView::ViewHelpers.sanitize` is what

@@ -303,3 +303,45 @@ Beyond the walks, `src/analyze/` carries single-purpose passes:
   seam.
 - [`lower.md`](lower.md) — what the lowered form consumes the analyzed
   IR for.
+
+## A conjunctive guard over-narrows on its fall-through path
+
+`return … if !x.nil? && <cond>` narrows `x` to `Nil` after the guard.
+It should leave `x` exactly as it was.
+
+```ruby
+def conjunctive_guard
+  list = ["a", "bb", "ccc"]
+  last = list.last               # String?
+  return "edge" if !last.nil? && last.length == 3
+  last.nil? ? "" : last          # analyzed String?, should be String
+end
+
+def plain_guard
+  list = ["a", "bb", "ccc"]
+  last = list.last
+  return "edge" if last.nil?
+  last                           # String — correct
+end
+```
+
+**The reasoning error is the shape of the negation.** Not taking the
+early return means `!(!x.nil? && cond)`, which is `x.nil? || !cond` — a
+DISJUNCTION. Being nil is one of its arms, not the conclusion. The
+narrowing applies the first conjunct's inverse as though the conjunction
+had one term, so the else path is typed as if `x` were known nil.
+
+Found in `runtime/ruby/user_agent.rb`, where `classify` reads
+`tokens.last` and then guards `!last.nil? && last.product == "Edge"`. A
+later `last.product` on the fall-through path reads off a receiver the
+analyzer believes is `Nil`, which came back as a `Ty::Var` in
+`tests/runtime_src_integration.rs`'s fully-typed check. The port works
+around it by reading the product once, before the guard.
+
+**Not yet fixed, and the reason to be careful about fixing it:** the
+correct answer is to narrow on a conjunctive guard's fall-through only
+when the conjunction has ONE term, and to leave the variable alone
+otherwise. That is strictly less narrowing than today, so it widens
+types across the corpus rather than narrowing them — the opposite
+direction from most of this file, and it wants the emitted-tree gates
+(not just `cargo test`) to price it.

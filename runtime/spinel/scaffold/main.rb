@@ -317,7 +317,21 @@ module Main
     # StrStrHash and the `request_obj.env = env` assignment warns on the
     # StrStr->StrPoly mismatch. Writing Strings into the poly field in place
     # is a valid poly-member write and never constructs the competing hash.
-    request_obj.env["HTTP_USER_AGENT"] = req.req_headers.fetch("user-agent", "")
+    user_agent = req.req_headers.fetch("user-agent", "")
+    request_obj.env["HTTP_USER_AGENT"] = user_agent
+    # …AND the reader, which is a DIFFERENT slot. The overlay twin's
+    # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
+    # (`runtime/ruby/action_dispatch/request.rb`) returns `@user_agent`,
+    # which only `Request.for` assigns and this path does not go
+    # through. Writing the env alone left `request.user_agent` as the
+    # `+""` it was initialized to, so campfire's
+    # `ApplicationPlatform.new(request.user_agent)` parsed the EMPTY
+    # string — which `UserAgent.parse` turns into the gem's
+    # `DEFAULT_USER_AGENT`, and every room page rendered its PWA
+    # instructions for "Mozilla" on an unknown OS whatever browser
+    # asked. A 200 the whole time, which is why only reading the page
+    # found it.
+    request_obj.user_agent = user_agent
     request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
     controller.request = request_obj
     ActionController::Current.request = request_obj

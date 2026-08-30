@@ -5450,6 +5450,20 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     // because boot.rb happened to have pulled the gem in first; a body
     // reached from the test harness, which builds its own require
     // chain, saw an undefined superclass and the file did not define.
+    // `PlatformAgent` is the same shape and no longer a façade:
+    // `runtime/ruby/user_agent.rb` PORTS it, so the anchor is that file
+    // rather than the façade host. It needs its own arm precisely
+    // because this resolver reads `is_gem_facade_root` and nothing
+    // else — dropping the pair from that list to port them took the
+    // anchor with it, and campfire's ruby lane went 256/288 to 0/288 on
+    // `uninitialized constant PlatformAgent` at load. The spinel lane
+    // stayed green throughout: its `main.rb` requires every runtime
+    // file eagerly, so the constant happened to exist by the time
+    // `application_platform.rb` ran. Exactly the accident the comment
+    // above says this arm exists to stop.
+    if raw == "PlatformAgent" || raw == "UserAgent" {
+        return Some("runtime/user_agent".to_string());
+    }
     if let Some(root) = raw.split("::").next() {
         if is_gem_facade_root(root) {
             return Some("runtime/gem_facades".to_string());
@@ -5472,11 +5486,6 @@ fn is_gem_facade_root(root: &str) -> bool {
             | "BCrypt"
             | "RQRCode"
             | "SVG"
-            // campfire's `ApplicationPlatform < PlatformAgent` names
-            // its superclass at LOAD time, so a missing anchor here is
-            // not a lazy failure: the tree does not boot.
-            | "PlatformAgent"
-            | "UserAgent"
     )
 }
 
@@ -5658,6 +5667,18 @@ fn require_path_for_body_const(
         // constant is actionpack's, not the stdlib's, so no bare
         // `require` reaches it on the ruby family either.
         "Mime" => Some("runtime/mime".to_string()),
+        // `useragent` + `platform_agent`, PORTED into
+        // `runtime/ruby/user_agent.rb` — they were façades that raised
+        // until campfire's room page turned out to render all three PWA
+        // partials, each of which asks `ApplicationPlatform` what
+        // browser it is. Anchored for every target, and it has to be
+        // anchored rather than lazily required: campfire's
+        // `ApplicationPlatform < PlatformAgent` names its superclass at
+        // LOAD time, so a missing anchor is not a lazy failure — the
+        // tree does not boot.
+        "UserAgent" | "UserAgentToken" | "PlatformAgent" => {
+            Some("runtime/user_agent".to_string())
+        }
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),
         // Gem façades — typed raising stand-ins for write-path-only

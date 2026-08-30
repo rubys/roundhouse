@@ -117,23 +117,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("base64digest", Ty::Str),
         ], &[]);
     }
-    // The gem façades `runtime/ruby/gem_facades.rb` hosts and the emit
-    // already anchors (`is_gem_facade_root`). They RAISE when reached —
-    // that is the contract — but they are real classes with real
-    // shapes, and the analyzer knowing neither made campfire's
-    // `UserAgent.parse(user_agent).browser` in a partial read out as
-    // `no known method parse on Class { UserAgent }`. Method lists are
-    // gem_facades.rbs verbatim, so the analyzer and a strict target
-    // agree; `PlatformAgent` rides along because
-    // `ApplicationPlatform < PlatformAgent` names it at LOAD time.
+    // `useragent` + `platform_agent`, now PORTED into
+    // `runtime/ruby/user_agent.rb` rather than stubbed. Method lists are
+    // that file's `.rbs` verbatim, so the analyzer and a strict target
+    // agree; `PlatformAgent` is here because `ApplicationPlatform <
+    // PlatformAgent` names it at LOAD time, and without the analyzer
+    // knowing the pair campfire's `UserAgent.parse(ua).browser` in a
+    // partial read out as `no known method parse on Class {
+    // UserAgent }`.
     let user_agent_ty = Ty::Class { id: ClassId(Symbol::from("UserAgent")), args: vec![] };
     register_stdlib_class(classes, "UserAgent", &[
         ("parse", user_agent_ty.clone()),
     ], &[
         ("browser", Ty::Str), ("platform", Ty::Str), ("version", Ty::Str),
+        ("os", Ty::Str),
     ]);
     register_stdlib_class(classes, "PlatformAgent", &[], &[
-        ("os", Ty::Str), ("match?", Ty::Bool), ("user_agent", user_agent_ty),
+        ("browser", Ty::Str), ("version", Ty::Str), ("os", Ty::Str),
+        ("match?", Ty::Bool), ("user_agent", user_agent_ty),
     ]);
     // `ActionText::ContentHelper.allowed_attributes`, from
     // `runtime/ruby/action_text.rbs` — the one façade reader campfire's
@@ -172,6 +173,34 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // stays an honest gap rather than a method that types and then
     // raises. `IPAddr.new(x)` reaches the universal `.new`, so the
     // predicates are looked up as INSTANCE methods on the result.
+    // `Regexp` and `MatchData` — Ruby's own, and the pair a PORT needs
+    // most. `runtime/ruby/user_agent.rb` tokenizes with
+    // `MATCHER.match(s)` and then reads `m[0]`, and with `match`
+    // unregistered every read off `m` was gradual: 45 untyped
+    // sub-expressions from one method, which is what the
+    // `Ty::Untyped` ratchet in `tests/runtime_src_integration.rs` is
+    // there to catch.
+    //
+    // ONLY the surface both lanes implement, the same rule IPAddr and
+    // Net::HTTP follow. `MatchData#[]` answers `String?` because a
+    // group that did not participate is nil, and pretending otherwise
+    // would hand a strict target a non-null it has to trust.
+    let match_data = Ty::Class { id: ClassId(Symbol::from("MatchData")), args: vec![] };
+    let str_or_nil_m = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    register_stdlib_class(classes, "Regexp", &[], &[
+        ("match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil] }),
+        ("match?", Ty::Bool),
+        ("source", Ty::Str),
+    ]);
+    register_stdlib_class(classes, "MatchData", &[], &[
+        ("[]", str_or_nil_m.clone()),
+        ("to_s", Ty::Str),
+        ("pre_match", Ty::Str),
+        ("post_match", Ty::Str),
+        ("captures", Ty::Array { elem: Box::new(str_or_nil_m) }),
+        ("size", Ty::Int),
+        ("length", Ty::Int),
+    ]);
     // `Zlib` — `crc32` is the whole ported surface (see
     // `runtime/ruby/zlib.rb`); registering only it keeps a call to
     // `Zlib.deflate` an honest gap instead of a method that types and
