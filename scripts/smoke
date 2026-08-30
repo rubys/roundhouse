@@ -114,11 +114,16 @@ count_from_log() {
         # dotnet test, both the classic and the v10 summary shapes
         match($0, /Passed:[ ]*[0-9]+/)       { net    = num(substr($0, RSTART, RLENGTH)); next }
         /[Tt]est summary/ && match($0, /total:[ ]*[0-9]+/) { net = num(substr($0, RSTART, RLENGTH)); next }
+        # Playwright: "  4 passed (12.3s)" from the list/line reporters.
+        # Needed because an archive whose only executed section is
+        # `## End-to-end` has no other summary shape to count.
+        match($0, /^[ \t]*[0-9]+ passed \(/) { pw = num(substr($0, RSTART, RLENGTH)); next }
         END {
             n = 0
             if (cargo > n) n = cargo; if (mini > n) n = mini; if (spin > n) n = spin
             if (cr    > n) n = cr;    if (ex   > n) n = ex;   if (node > n) n = node
             if (xc    > n) n = xc;    if (py   > n) n = py;   if (net  > n) n = net
+            if (pw    > n) n = pw
             # `seen` distinguishes "a runner reported zero" (a real, and
             # much more interesting, answer) from "nothing here looked
             # like a test summary at all".
@@ -230,6 +235,18 @@ case "$TARGET" in
         # unit differs, so the floor does too. (It counts test_helper.rb
         # among them, which is a `spin test` quirk, not coverage.)
         MIN_TESTS=6 ;;
+    campfire)
+        # Not a target — an APP. The campfire archive (campfire/spinel.tgz)
+        # is ONCE Campfire for the spinel target, and it proves itself in a
+        # browser. Counted in TESTS rather than in binaries, because the
+        # count comes from Playwright, not `spin test`.
+        #
+        # THREE, not four: the two-tab live-message milestone is
+        # `test.fixme` while the two defects it found are open (see
+        # docs/pipeline/runtime.md), so it does not execute. Raise this to
+        # 4 in the same commit that removes that marker — a floor that
+        # trails the suite is how a lost test goes unnoticed.
+        MIN_TESTS=3 ;;
     go)
         # `go test ./...` reports "ok <pkg>" / "? <pkg> [no test files]"
         # with no count at any verbosity we drive. `ran` asserts at least
@@ -310,11 +327,28 @@ for f in "${block_files[@]}"; do
         Test|Tests)
             saw_test_section=1
             assert_tests_executed "$LOGS/$name.log" || exit 1 ;;
+        End-to-end)
+            e2e_log="$LOGS/$name.log" ;;
     esac
 done
 
-if (( ! saw_test_section )) && [[ "$MIN_TESTS" != "0" ]]; then
-    fail "README has no § Test section — nothing asserted the app behaves"
+# THE FLOOR FOLLOWS THE PROOF, NOT THE SECTION NAME.
+#
+# Every blog archive proves itself twice — `## Test` compiles and runs the
+# emitted suite, `## End-to-end` drives a browser — so the floor has always
+# been asserted on `## Test`. The campfire archive proves itself ONCE, in a
+# browser: its emitted `test/` sources ship, but several do not compile or
+# do not pass, and a `## Test` section that is red is a section nobody
+# reads (see that archive's README).
+#
+# What the gate is actually for is unchanged, and is the reason it cannot
+# simply be skipped: every runner here exits 0 having run nothing (#34 §0).
+# So require that SOME section proved execution, and count `## End-to-end`
+# when it is the only one there is.
+if (( ! saw_test_section )) && [[ -n "${e2e_log:-}" ]]; then
+    assert_tests_executed "$e2e_log" || exit 1
+elif (( ! saw_test_section )) && [[ "$MIN_TESTS" != "0" ]]; then
+    fail "README has no § Test or § End-to-end section — nothing asserted the app behaves"
     exit 1
 fi
 

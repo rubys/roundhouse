@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# scripts/build-campfire-archive — build the downloadable campfire archive.
+#
+# Produces `<out>/campfire/spinel.tgz`: ONCE Campfire, transpiled for the
+# spinel target, with its static assets prebuilt and a README whose fenced
+# ```sh blocks ARE the build and test steps. `scripts/smoke` runs that
+# README against the unpacked archive, the same docs-as-contract deal the
+# per-target blog archives get.
+#
+# WHY THIS IS NOT `roundhouse --site`. That mode is "for every target,
+# write browse/<lang>.{json,tgz,zip}" from ONE fixture, and its archive
+# writer is text-only — every file is a `(String, String)`, so campfire's
+# hundred binary assets (mp3, png, webp, gif) could not be represented at
+# all. This script tars a DIRECTORY that `--target spinel -o` already
+# populated, binary assets included (`project::write_binary_assets`), so
+# the whole problem disappears rather than being solved twice.
+#
+# THE ARCHIVE IS SOURCE, NOT A BINARY. That is what makes "download it"
+# portable: the downloader compiles it with spinel for their own platform.
+# It also means this script never has to answer "which platforms do we
+# ship", which was the open question packaging started from.
+#
+# Usage:  scripts/build-campfire-archive [options] [APP_PATH]
+#
+#   APP_PATH   ONCE Campfire checkout. Default: ~/git/once-campfire
+#
+# Options:
+#   --out DIR        Site output root; archive lands at DIR/campfire/spinel.tgz
+#                    (default: _site)
+#   --keep-tree DIR  Also leave the emitted tree at DIR (debugging).
+#   --skip-assets    Don't run `make assets` (fast re-runs; the archive is
+#                    then NOT self-contained and every /assets/* 404s).
+#
+# Requires: cargo, tar, and — unless --skip-assets — ruby + bundler, which
+# `make assets` uses to locate the turbo-rails / stimulus-rails / actioncable
+# / actiontext gem dirs. Downloaders need none of that: the assets ship built.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+APP="$HOME/git/once-campfire"
+OUT="$REPO_ROOT/_site"
+KEEP_TREE=""
+SKIP_ASSETS=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)         OUT="$2"; shift 2 ;;
+        --keep-tree)   KEEP_TREE="$2"; shift 2 ;;
+        --skip-assets) SKIP_ASSETS=1; shift ;;
+        -h|--help)     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//;$d'; exit 0 ;;
+        -*)            echo "unknown flag: $1" >&2; exit 2 ;;
+        *)             APP="$1"; shift ;;
+    esac
+done
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
+
+[[ -d "$APP" ]] || fail "no campfire checkout at $APP"
+
+WORK="$(mktemp -d -t campfire-archive.XXXXXX)"
+trap 'rm -rf "$WORK"' EXIT
+TREE="$WORK/campfire"
+
+# ── 1. transpile ──────────────────────────────────────────────────────
+#
+# STRICT: no --allow-unsupported. An unsupported construct is an error and
+# the run writes nothing, which is the ceiling `campfire-conformance`
+# already enforces at 0. A downloadable archive is the wrong place to
+# discover that the ceiling moved.
+step "transpiling $APP → spinel"
+(cd "$REPO_ROOT" && cargo run --release --quiet --bin roundhouse -- \
+    --target spinel "$APP" -o "$TREE") 2>"$WORK/emit.log" || {
+    tail -30 "$WORK/emit.log" >&2
+    fail "transpile failed"
+}
+errors=$(grep -c 'error\[' "$WORK/emit.log" || true)
+[[ "$errors" -eq 0 ]] || { grep 'error\[' "$WORK/emit.log" >&2; fail "$errors emit error(s)"; }
+echo "  $(find "$TREE" -type f | wc -l | tr -d ' ') files"
+
+# ── 2. name the binary after the app ──────────────────────────────────
+#
+# The emitter writes `bin/blog.rb` unconditionally — spin's unit of build
+# is `bin/<name>.rb`, and the name has never been parameterised. Shipping a
+# campfire download whose binary is called `blog` is wrong where people
+# look, so rename here and fix the Makefile's two references to match.
+# FOLLOW-ON: parameterise it in src/project.rs so this step can go away.
+step "naming the binary 'campfire'"
+mv "$TREE/bin/blog.rb" "$TREE/bin/campfire.rb"
+sed -i.bak -e 's|build/bin/blog|build/bin/campfire|g' \
+           -e 's|$(BUILD)/blog|$(BUILD)/campfire|g' \
+           -e 's|build/blog|build/campfire|g' "$TREE/Makefile"
+rm -f "$TREE/Makefile.bak"
+sed -i.bak 's|build/bin/blog|build/bin/campfire|' "$TREE/bin/campfire.rb"
+rm -f "$TREE/bin/campfire.rb.bak"
+
+# ── 3. static assets ──────────────────────────────────────────────────
+#
+# Built HERE so the download needs no Ruby. `make assets` shells `bundle
+# exec ruby` to locate four gem dirs; the binary then sendfiles the result
+# from static/assets/. Without this the room page's ninety-five ES module
+# pins and twenty-six stylesheets all 404 behind a 200, which is precisely
+# what e2e/campfire/assets.spec.js exists to catch.
+if (( SKIP_ASSETS )); then
+    step "skipping assets (--skip-assets)"
+else
+    step "building static assets"
+    (cd "$TREE" && bundle install --quiet && make assets >/dev/null) \
+        || fail "make assets failed"
+    echo "  $(find "$TREE/static" -type f | wc -l | tr -d ' ') files in static/"
+fi
+
+# ── 4. drop the attachment fixtures ───────────────────────────────────
+#
+# 50 MB of the tree is binary fixtures for the attachment tests — a single
+# 46 MB earth.png, a 3.8 MB .mov, a 494 KB jpg. Attachments are out of this
+# MVP and no shipped section opens them, so they are 50 MB of download for
+# nothing. The test SOURCES stay: they cost 6 MB and make the follow-on
+# that adds a native `## Test` section a smaller change.
+step "dropping attachment fixtures"
+rm -rf "$TREE/test/fixtures/files"
+
+# ── 5. the archive's own README and e2e suite ─────────────────────────
+#
+# The emitter injects the BLOG's README and the blog's Playwright specs
+# (`/articles`, `SELECT COUNT(*) FROM articles`). Both are replaced here
+# with campfire's.
+step "installing the campfire README + e2e suite"
+rm -rf "$TREE/e2e"
+mkdir -p "$TREE/e2e"
+cp "$REPO_ROOT"/e2e/campfire/*.spec.js "$REPO_ROOT/e2e/campfire/helpers.js" "$TREE/e2e/"
+cp "$REPO_ROOT/e2e/campfire/package.json" "$TREE/e2e/package.json"
+
+ROUNDHOUSE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+CAMPFIRE_SHA="$(cd "$APP" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+SPINEL_VERSION="$(spinel --version 2>/dev/null | head -1 || echo 'not on PATH at build time')"
+
+"$REPO_ROOT/scripts/campfire-archive-files" "$TREE" \
+    "$ROUNDHOUSE_SHA" "$CAMPFIRE_SHA" "$SPINEL_VERSION"
+
+# ── 6. pack ───────────────────────────────────────────────────────────
+step "packing"
+mkdir -p "$OUT/campfire"
+tar czf "$OUT/campfire/spinel.tgz" -C "$WORK" campfire
+if [[ -n "$KEEP_TREE" ]]; then
+    rm -rf "$KEEP_TREE"; cp -R "$TREE" "$KEEP_TREE"
+    echo "  tree kept at $KEEP_TREE"
+fi
+printf '\n\033[1;32mok\033[0m  %s (%s)\n' \
+    "$OUT/campfire/spinel.tgz" \
+    "$(du -h "$OUT/campfire/spinel.tgz" | cut -f1 | tr -d ' ')"

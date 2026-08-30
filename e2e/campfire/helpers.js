@@ -36,9 +36,31 @@ export const PASSWORD = process.env.CAMPFIRE_PASSWORD || 'secret123456'
  */
 export async function signIn(page) {
   await page.goto('/')
-  await page.locator('#email_address').fill(EMAIL)
-  await page.locator('#password').fill(PASSWORD)
-  await page.locator('button[name="log_in"]').click()
+
+  // A FRESH DATABASE LANDS ON /first_run, NOT ON THE SIGN-IN FORM.
+  //
+  // Two callers, two starting states, and this helper has to serve
+  // both. `scripts/campfire-e2e` seeds an account before the suite
+  // runs, so it arrives at the sign-in form. The published archive
+  // ships no database at all — the binary creates one on first boot —
+  // so it arrives at campfire's own first-run page, which creates the
+  // account, the first user, and the first room in one POST.
+  //
+  // Same branch `scripts/campfire-cable-drive.rb` takes ("if GET
+  // /first_run is 200 then POST it, else POST /session"), and for the
+  // same reason: the walk is the thing these specs mirror, and it has
+  // to run against an app nobody has signed into yet.
+  if (page.url().includes('/first_run')) {
+    await page.locator('#user_name').fill('E2E')
+    await page.locator('#user_email_address').fill(EMAIL)
+    await page.locator('#user_password').fill(PASSWORD)
+    await page.locator('button[type="submit"]').click()
+  } else {
+    await page.locator('#email_address').fill(EMAIL)
+    await page.locator('#password').fill(PASSWORD)
+    await page.locator('button[name="log_in"]').click()
+  }
+
   await expect(page.locator('#user_sidebar')).toBeAttached({ timeout: 15_000 })
 }
 
@@ -103,7 +125,23 @@ export function watchForFailures(page) {
  * findings before anyone had seen them.
  */
 export const LEDGER = [
-  // { pattern: /example\.js$/, why: 'docs/pipeline/runtime.md § ...' },
+  // Every avatar URL 500s: the lowered model has no `to_param`, and
+  // campfire's own `users/avatars_helper.rb:9` calls it
+  // (`Zlib.crc32(user.to_param)`). A lowering gap, not a page bug — the
+  // rest of the module graph loads clean. Fix is a synthesized
+  // `to_param` beside `dom_prefix`; until then this reports rather than
+  // failing, so the suite stays worth reading.
+  {
+    pattern: /\/users\/[^/]+\/avatar/,
+    why: 'docs/pipeline/runtime.md § A model has no `to_param`, so every avatar URL 500s',
+  },
+  // The console error the 500 above produces, from the other channel.
+  // Chromium reports it without a URL, so this cannot be narrower — it
+  // goes when the entry above does.
+  {
+    pattern: /^Failed to load resource: the server responded with a status of 500/,
+    why: 'docs/pipeline/runtime.md § A model has no `to_param`, so every avatar URL 500s',
+  },
 ]
 
 /** Partition findings into what fails the run and what is ledgered. */

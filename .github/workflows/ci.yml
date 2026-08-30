@@ -1576,6 +1576,104 @@ jobs:
         run: scripts/smoke --tgz browse/spinel.tgz spinel
 
   # -------------------------------------------------------------------
+  # build-campfire-archive: ONCE Campfire for the spinel target, packaged
+  # the way the blog archives are.
+  #
+  # Published at rubys.github.io/roundhouse/campfire/spinel.tgz — NOT
+  # under browse/, which names the source VIEWER and has no manifest for
+  # this archive to render. Published but UNLINKED: see the build-site
+  # step that places it for why nothing points at it yet.
+  #
+  # What it buys TODAY is the question nobody has answered: this tree
+  # has only ever been built and driven on macOS arm64. This job is the
+  # first time it is compiled and browser-driven on Linux.
+  #
+  # Where the blog archives come out of `roundhouse --site`, this one is
+  # built by scripts/build-campfire-archive, for two reasons the script's
+  # header states: `--site` is one-fixture-many-targets, and its archive
+  # writer is text-only — campfire's hundred binary assets (mp3, png,
+  # webp, gif) cannot be represented as `(String, String)` at all. The
+  # script tars the directory `--target spinel -o` already populated.
+  #
+  # Ruby is here for `make assets` ONLY, which shells `bundle exec ruby`
+  # to locate four gem dirs. Baking the assets in is what lets a
+  # downloader need nothing but spinel, a C compiler and Node — and it
+  # is why the room page's ninety-five ES module pins resolve instead of
+  # 404ing behind a 200.
+  # -------------------------------------------------------------------
+  build-campfire-archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: Fetch once-campfire at the pinned SHA
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire
+          tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Build campfire/spinel.tgz
+        run: scripts/build-campfire-archive --out _site /tmp/campfire
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campfire-archive
+          path: _site/campfire/spinel.tgz
+
+  # smoke-campfire: the campfire archive runs its own README, exactly as
+  # smoke-spinel does for the blog — extract, execute every fenced ```sh
+  # block in order, skip `## Run` and `## Regenerate`.
+  #
+  # The difference from every other smoke is WHAT proves it: this archive
+  # has no `## Test` section (its emitted test/ sources ship, but several
+  # do not compile or do not pass yet — see the archive README), so the
+  # executed-count floor is asserted against `## End-to-end`. That is a
+  # generalization in scripts/smoke, not a campfire exception: the gate
+  # exists because every runner exits 0 having run nothing, and Playwright
+  # is as capable of that as `dotnet test` was.
+  #
+  # Advisory (continue-on-error) like every spinel job — it tracks
+  # matz/spinel master UNPINNED, so a red here can be upstream drift
+  # rather than our regression. Read it job-by-job; a green RUN does not
+  # mean this passed.
+  smoke-campfire:
+    needs: [build-campfire-archive, build-spinel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: campfire-archive
+          path: campfire
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: Install libsqlite3-dev
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Pre-warm Playwright (chromium + system deps)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
+      - name: scripts/smoke campfire
+        run: scripts/smoke --tgz campfire/spinel.tgz campfire
+
+  # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at
   # rubys.github.io/roundhouse/browse/<target>.tgz are matz's primary
@@ -1606,7 +1704,7 @@ jobs:
     # where it is most useful would be exactly backwards. A missing
     # artifact degrades to a skipped render and a warning, not a broken
     # site build.
-    needs: [generate-fixture, build-wasm, campfire-conformance]
+    needs: [generate-fixture, build-wasm, campfire-conformance, build-campfire-archive]
     if: ${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1681,6 +1779,39 @@ jobs:
         env:
           ROUNDHOUSE_ASSETS_DIR: build/assets
         run: cargo run --release --bin roundhouse -- --site
+
+      # The campfire archive, built by the parallel build-campfire-archive
+      # job. It lands AFTER `--site` because build_site() removes and
+      # recreates the output directory, which would take _site/campfire
+      # with it.
+      #
+      # PUBLISHED BUT NOT ADVERTISED. The bytes go live at
+      # rubys.github.io/roundhouse/campfire/spinel.tgz — a real URL to
+      # hand someone, and the one-download repro shape upstream bug
+      # reports want. Nothing LINKS to it: not site/index.html, not
+      # site/apps/campfire.html, not the browse viewer. Two defects in
+      # docs/pipeline/runtime.md stop a second browser working (the
+      # broadcast-rendered row carries no body; a single-worker server
+      # serializes on one keep-alive connection), so this is not yet a
+      # download to point a stranger at. Add the link when they close.
+      #
+      # Tolerant of a missing artifact ON PURPOSE, and for the same reason
+      # this job does not require campfire-conformance to have SUCCEEDED:
+      # per matz/spinel#314 the published archives are an extraction
+      # surface for upstream bug repros, so a broken campfire emit must not
+      # stall publication of the eleven blog archives beside it.
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: campfire-archive
+          path: _site/campfire
+      - name: Report campfire archive
+        run: |
+          if [ -f _site/campfire/spinel.tgz ]; then
+            echo "campfire archive: $(du -h _site/campfire/spinel.tgz | cut -f1) (published, unlinked)"
+          else
+            echo "::warning::no campfire archive this run (build-campfire-archive did not produce one)"
+          fi
 
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
       # the worker profile, vite-builds it with ROUNDHOUSE_BASE set to the

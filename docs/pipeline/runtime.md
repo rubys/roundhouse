@@ -1975,3 +1975,141 @@ declared by its INSTANCE type, because that is the only type we have.
 what spinel's `sp_Class` wants — but a chain through it stays dynamic.
 Closing that means a singleton variant in `Ty`, which every target's
 exhaustive `match` would have to answer for.
+
+### A model has no `to_param`, so every avatar URL 500s
+
+Rails gives every `ActiveRecord::Base` a `to_param` (`id&.to_s`), which a
+model may override — lobsters' `User#to_param` answers the username. The
+lowered model gets no such method: `model_to_library` registers a
+SIGNATURE for `persisted?` and friends (`mod.rs:1274`) but synthesizes no
+`to_param` body, and the definition that exists lives in
+`runtime/spinel/scaffold/ruby_overlay/runtime/active_support_core_ext.rb`
+— the **ruby overlay**, which the spinel target never applies.
+
+campfire calls it directly:
+
+```ruby
+# app/models/users/avatars_helper.rb:9
+AVATAR_COLORS[Zlib.crc32(user.to_param) % AVATAR_COLORS.size]
+```
+
+so on the spinel binary every avatar request answers
+
+```
+500 GET /users/<sgid>/avatar -- NoMethodError: undefined method 'to_param' for an instance of User
+```
+
+**Measured 2026-08-30** against the campfire spinel binary with assets
+built: four such 500s on the signed-in room page, reported by
+`e2e/campfire/assets.spec.js`. Nothing else on the page fails — the
+module graph, the stylesheets and the cable all load.
+
+**Not caught by anything else, and that is the point.** The cable walk
+(`scripts/campfire-cable-drive.rb`) never requests an avatar, the emitted
+suite does not reach this helper, and the page returns 200 with the
+avatar `<img>` simply broken. It took a browser asking for the file.
+
+**The fix is a lowering, not a runtime file** — a `to_param` synthesized
+beside `dom_prefix` (`model_to_library/markers.rs::push_dom_prefix_method`
+is the template), pushed BEFORE `push_user_methods` so a model's own
+override still wins. It is `id.to_s`, and it belongs to every target, not
+to the ruby overlay.
+
+Until then `e2e/campfire/helpers.js` carries it as a LEDGER entry so the
+asset spec reports it without failing the run.
+
+### A single-worker Tep server serializes on one keep-alive connection
+
+`Tep::Server#worker_loop` accepts one connection and calls
+`handle_connection`, which loops `handle_one` on THAT socket until the
+peer closes or a request declines keep-alive:
+
+```ruby
+def worker_loop(sfd)
+  loop do
+    client = Sock.sphttp_accept(sfd)
+    if client < 0 then next end
+    handle_connection(client)   # does not return while the peer holds the socket
+  end
+end
+```
+
+A browser holds its connections open. So with `workers=1` — the default,
+and what the campfire archive boots — the worker parks inside the FIRST
+browser's keep-alive loop and does not call `accept()` again. A second
+browser waits in the backlog.
+
+**Measured 2026-08-30**, campfire spinel binary, two Playwright browser
+contexts:
+
+| | sign-in |
+|---|---|
+| tab A | **878 ms** |
+| tab B | **30 413 ms** |
+
+Reproducible across runs, and consistently ~30 s rather than a spread,
+so it is a timeout expiring rather than load.
+
+**The obvious fix is blocked by the broadcast.** The server takes `-w N`
+and preforks with SO_REUSEPORT, which fixes the stall — but workers are
+separate PROCESSES and `Tep::Broadcast`'s registry is in-memory per
+worker. Cross-worker fan-out needs `Tep::RedisFeed`, which is opt-in and
+depends on the `redis` spin package that campfire's tree does not carry.
+So:
+
+* `workers=1` → fan-out reaches both tabs; the second tab stalls ~30 s.
+* `workers>1` → both tabs served promptly; a broadcast published in one
+  worker never reaches a socket held by another.
+
+Neither setting delivers "two tabs, one room, one live message" cleanly,
+which is the milestone campfire exists here to demonstrate.
+
+**Why no existing gate sees it.** `scripts/campfire-cable-drive.rb` opens
+two RAW sockets that upgrade to WebSockets immediately and move to the
+poll reactor; it never has two clients holding idle HTTP keep-alive
+connections. It takes a browser — two of them.
+
+### The broadcast-rendered message row carries no body
+
+A message posted in one browser tab reaches a second tab's DOM and is
+inserted — and arrives EMPTY. The two render paths disagree about the
+same message, in the same run.
+
+**Measured 2026-08-30**, campfire spinel binary, two browser contexts,
+one room. Tab A posts; both tabs are subscribed and `connected`:
+
+| | body visible |
+|---|---|
+| tab A (direct render of its own POST) | **yes, +18 ms** |
+| tab B (turbo-stream over `/cable`) | **no — 30 s, never** |
+
+The frame does arrive. Tab B's `#messages_room_1` gains
+`<div id="message_1" class="message …">` with the author, the avatar and
+the "Message options" control. What it does not gain is the message text.
+
+The same row also renders `local_time`'s options hash as TEXT rather
+than expanding it into tag attributes — the two paths, same message:
+
+```html
+tab A: <time class="message__timestamp" datetime="2026-08-30T23:41:53.831Z"
+             data-local-time-target="date" title="8/30/26, 7:41 PM">August 30, 2026</time>
+tab B: <time>{datetime: "2026-08-30T23:41:53Z", data: {local_time_target: :date}}</time>
+```
+
+(An uppercased variant of that text appears in `innerText` because the
+day separator carries `text-transform`; it is the same string.)
+
+So the defect is in the partial as rendered by the BROADCAST path, not in
+the fan-out: a helper whose keyword options survive one path and become a
+stringified Hash on the other, and a body that is dropped entirely.
+
+**Why the cable walk does not see it.**
+`scripts/campfire-cable-drive.rb` asserts `html.include?(BODY)` against
+the raw frame — it reads the wire, not the DOM, and never renders. This
+is the same shape as [[project_campfire_empty_message_bodies]]'s lesson
+("an emptiness test must not go through a renderer") arriving from the
+opposite direction: a wire test cannot see a renderer that drops content
+downstream of the bytes it checked.
+
+Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
+and the keep-alive serialization entry above are closed.
