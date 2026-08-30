@@ -38,7 +38,45 @@ module GlobalID
   module Locator
     # `gid_param` is the urlsafe-base64 form (what a stream name carries);
     # `only` is the model class the caller will accept.
+    #
+    # THE GENERIC FORM, AND THE ONE A STRICT TARGET CANNOT RUN. `only`
+    # arrives as a class OBJECT, so `only.name` and `only.find` need a
+    # singleton to dispatch through; spinel has none and emits a call to
+    # a class method `ActiveRecord::Base` never defines
+    # (matz/spinel#4217). `lower::global_id_locate` rewrites every call
+    # site whose `only:` is a literal class — which is all of them in
+    # the corpus — to one of the generated `locate_<model>` entry points
+    # below, so on a strict target nothing reaches this body and it is
+    # not emitted. It stays for the Ruby lanes, where a class object
+    # dispatches, and as the honest answer for a COMPUTED `only:`: that
+    # call is left alone and refused at compile time rather than
+    # rewritten to find on a class the caller did not name.
     def self.locate(gid_param, only:)
+      parts = parts_from(gid_param)
+      return nil if parts.nil?
+      return nil unless parts[1] == only.name
+
+      only.find(cast_id(parts[2]))
+    end
+
+    # One entry point per model class an `only:` names, with the finder
+    # spelled as a literal constant. GENERATED —
+    # `project::apply_global_id_locate` rewrites the span between the
+    # markers from `App::global_id_locate_models`, the same
+    # eager-arm shape `apply_cable_connection` uses for the connection
+    # class. Empty for an app with no `locate` call site.
+    # >>> generated: global-id-locate
+    # <<< generated: global-id-locate
+
+    # The `[app, model, id]` triple a well-formed gid carries, or nil
+    # for anything that is not a name this app minted — a truncated
+    # param, a different app's gid, a shape with the wrong arity.
+    #
+    # SHARED BY THE GENERIC FORM AND EVERY GENERATED ONE, so the two
+    # cannot drift: a specialization differs from `locate` only in how
+    # the finder is named, and that is the only line the generator
+    # writes differently.
+    def self.parts_from(gid_param)
       uri = decode(gid_param)
       return nil if uri.nil?
 
@@ -51,9 +89,8 @@ module GlobalID
       parts = rest.split("/")
       return nil unless parts.length == 3
       return nil unless parts[0] == Rails.application.global_id_app
-      return nil unless parts[1] == only.name
 
-      only.find(cast_id(parts[2]))
+      parts
     end
 
     # A malformed param is a nil, not a raise: the caller is deciding

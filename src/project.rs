@@ -1312,6 +1312,140 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// Write one arm per app channel into `runtime/cable.rb`'s
+/// `Cable.build_channel`, so a subscribe frame reaches the class it
+/// NAMES and the app's own `subscribed` runs.
+///
+/// THE THIRD EAGER-ARM FACTORY, after `apply_controller_dispatch` and
+/// `apply_cable_connection`, and for the identical reason: the name
+/// arrives as a STRING off the wire and this target resolves every call
+/// statically, so there is no `const_get` to reach the class with. The
+/// property that makes an eager arm the right answer rather than a
+/// workaround is that the set is CLOSED — only a class the generator
+/// wrote an arm for is reachable, so a crafted name on the wire cannot
+/// widen it.
+///
+/// TRANSITIVE DESCENT, not a one-level check. campfire's channels are
+/// two and three deep (`RoomChannel < ApplicationCable::Channel <
+/// ActionCable::Channel::Base`, and `RoomMessagesChannel` below that),
+/// so asking which classes name `ActionCable::Channel::Base` as their
+/// parent finds NONE of them.
+///
+/// ABSTRACT MIDDLE CLASSES GET ARMS TOO, deliberately. Rails would
+/// happily build an `ApplicationCable::Channel` for a client that named
+/// it; it defines no `subscribed`, so the base's no-op runs, no stream
+/// is registered and the subscription is confirmed with nothing in it.
+/// Skipping it would be a policy this pipeline invented — and telling
+/// the two apart needs `abstract_class`-style intent that a channel
+/// hierarchy does not carry.
+///
+/// `Turbo::StreamsChannel` is spelled in the DEFAULT body in
+/// `runtime/cable.rb` rather than generated here: it is a runtime class,
+/// not an app one, so no descent over `library_classes` finds it, and
+/// every tree carries it.
+fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: cable-channels\n";
+    const TAIL: &str = "  # <<< generated: cable-channels\n";
+    const ROOT: &str = "ActionCable::Channel::Base";
+
+    let mut channels: Vec<&str> = Vec::new();
+    let mut known: Vec<&str> = vec![ROOT];
+    // Fixpoint rather than one pass: `library_classes` is in ingest
+    // order, and a subclass may be listed before the parent that puts
+    // it in the set.
+    loop {
+        let before = known.len();
+        for lc in &app.library_classes {
+            let name = lc.name.0.as_str();
+            if lc.is_module || known.contains(&name) {
+                continue;
+            }
+            let Some(parent) = &lc.parent else { continue };
+            if known.contains(&parent.0.as_str()) {
+                known.push(name);
+                channels.push(name);
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    channels.sort_unstable();
+
+    let mut generated = String::from(HEAD);
+    generated.push_str("  def self.build_channel(name, connection, identifier)\n");
+    for name in channels.iter().chain(["Turbo::StreamsChannel"].iter()) {
+        generated.push_str(&format!(
+            "    if name == \"{name}\"\n\
+             \x20     return {name}.new(\n\
+             \x20       connection, identifier, ActionCable::Channel::Parameters.new(identifier))\n\
+             \x20   end\n",
+        ));
+    }
+    generated.push_str("    nil\n  end\n");
+    generated.push_str(TAIL);
+
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("cable.rb") || path.ends_with("action_cable.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
+/// Write one `GlobalID::Locator.locate_<model>` entry point into
+/// `runtime/global_id_locator.rb` for every model class an `only:`
+/// names, with the finder spelled as a LITERAL constant.
+///
+/// The pair to [`crate::lower::global_id_locate`], which rewrote each
+/// call site to the name generated here. Both halves exist because
+/// `only:` is the finder and it arrives as a class object: CRuby
+/// dispatches through the singleton, a strict target has none, and
+/// spinel emits a call to a class method `ActiveRecord::Base` never
+/// defines (matz/spinel#4217). The set of models is CLOSED at ingest —
+/// one per literal call site — so specializing removes the dispatch
+/// rather than working around it.
+///
+/// NO-OP with an empty span when the app has no `locate` call site,
+/// which is every corpus app but campfire. The generic `locate` stays
+/// in the file either way: it is what a computed `only:` still reaches,
+/// and it runs correctly on the Ruby lanes.
+///
+/// A SPAN REPLACE between two markers, not a match on today's text —
+/// same reason `apply_cable_connection` gives.
+fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "    # >>> generated: global-id-locate\n";
+    const TAIL: &str = "    # <<< generated: global-id-locate\n";
+
+    let mut generated = String::from(HEAD);
+    for model in &app.global_id_locate_models {
+        let name = model.as_str();
+        let suffix = crate::lower::global_id_locate::entry_point_suffix(name);
+        generated.push_str(&format!(
+            "    def self.locate_{suffix}(gid_param)\n\
+             \x20     parts = parts_from(gid_param)\n\
+             \x20     return nil if parts.nil?\n\
+             \x20     return nil unless parts[1] == \"{name}\"\n\n\
+             \x20     {name}.find(cast_id(parts[2]))\n\
+             \x20   end\n",
+        ));
+    }
+    generated.push_str(TAIL);
+
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("global_id_locator.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// De-cable the CRuby/JRuby overlay for a broadcast-less app: drop
 /// `cable.rb` and the three /cable seams in `config.ru` (the require,
 /// the `Cable::Registry` transport registration, and the WebSocket-
@@ -2318,6 +2452,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // require it — their config.ru requires the overlay's own top-level
     // `cable.rb`, which has its own identity path and its own test.
     apply_cable_connection(&mut files, app);
+    apply_cable_channels(&mut files, app);
+    // The `only:`-as-finder specializations, also in the shared base:
+    // `runtime/global_id_locator.rb` is ONE file that both the spinel
+    // tree and the ruby overlay require, and the rewrite that names
+    // these entry points ran at lowering — before any target was
+    // chosen. Generating on only one lane would leave the other calling
+    // a method nothing defined.
+    apply_global_id_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);

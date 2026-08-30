@@ -215,6 +215,32 @@ module ActionCable
         @params
       end
 
+      # THE TWO LIFECYCLE CALLBACKS, as no-ops.
+      #
+      # Every channel in an ingested tree overrides `subscribed`, so
+      # nothing reaches this body — and that is exactly why it has to
+      # exist. `Cable.subscribe` holds one channel in a slot and calls
+      # `subscribed` on it; on a target that resolves every call
+      # statically the method must be declared on the class the slot is
+      # typed as, or there is nothing to dispatch through. Rails'
+      # `Channel::Base` defines them the same way and for the same
+      # reason a base class does anywhere: a channel that only listens
+      # is allowed to say nothing.
+      #
+      # `unsubscribed` is not called on this lane yet — teardown drops
+      # fds (`Tep::WebSocket::Connection.dispatch_close` runs
+      # `Tep::Broadcast.unsubscribe_fd`) and no channel object survives
+      # the frame that built it. Declared with its sibling because the
+      # pair is one contract, and a half-declared one invites a caller
+      # to assume the other half runs.
+      def subscribed
+        nil
+      end
+
+      def unsubscribed
+        nil
+      end
+
       # What `subscribed` asked for, in the order it asked. The CALLER
       # registers these; nothing here touches the transport.
       def streams
@@ -335,6 +361,63 @@ module ActionCable
         out
       end
     end
+
+    # A channel's `params` — the subscribe frame's identifier, read one
+    # key at a time.
+    #
+    # OVER THE JSON TEXT, NOT A PARSED HASH. An identifier is
+    # `{"channel":"RoomChannel","room_id":5}`: heterogeneous values
+    # under keys only the app knows, which is the untyped bag this
+    # pipeline has nowhere to put. `Tep::Json` already walks that text
+    # a key at a time without building one, and a channel only ever
+    # asks for the keys it names — campfire's seven ask for
+    # `signed_stream_name` and `room_id` — so nothing needs the whole
+    # object at once.
+    #
+    # A STRING EVERY TIME, INCLUDING FOR A NUMBER. `RoomChannel` does
+    # `Room.find_by(id: params[:room_id])` and the client writes
+    # `{"room_id":5}` — a JSON number. Answering it as its digits is
+    # what makes the find work: the column is an integer and the
+    # adapter casts a numeric string, where a Ruby Integer and a Ruby
+    # String cannot both come out of one slot on a strict target.
+    # Rails' own `params` is string-valued for the same reason one hop
+    # earlier (a query string has no types), so this is the Rails
+    # answer rather than a concession.
+    #
+    # "" for a key the identifier does not carry, which is what a
+    # channel testing `if params[:signed_stream_name]` needs — a nil
+    # would make the slot nullable for every reader.
+    class Parameters
+      def initialize(identifier)
+        @identifier = identifier
+      end
+
+      # THE VALUE'S OWN SYNTAX DECIDES HOW IT IS READ, not a fallback
+      # chain: `get_str` answers "" for a number AND for an empty
+      # string, so trying it first and falling back on "" would turn
+      # `{"k":""}` into `"0"`. One look at the first character of the
+      # value settles it.
+      def [](key)
+        name = key.to_s
+        pos = Tep::Json.find_value_start(@identifier, name)
+        if pos < 0
+          return ""
+        end
+        pos = Tep::Json.skip_ws(@identifier, pos)
+        if pos >= @identifier.length
+          return ""
+        end
+        if @identifier[pos] == "\""
+          return Tep::Json.parse_str_value(@identifier, pos)
+        end
+        Tep::Json.get_int(@identifier, name).to_s
+      end
+
+      def key?(key)
+        Tep::Json.has_key?(@identifier, key.to_s)
+      end
+    end
+
   end
 
   module Connection

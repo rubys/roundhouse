@@ -59,6 +59,8 @@ pub mod pathname_ctor;
 pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
+pub mod global_id_locate;
+pub mod array_ordinal;
 pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
@@ -249,6 +251,15 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const-receiver one nothing else keys on, so no ordering
     // constraints.
     ("class_body_new", &[]),
+    // `GlobalID::Locator.locate(gid, only: K)` → `locate_<k>(gid)`.
+    // Keys on a two-segment Const receiver and a literal `only:` kwarg,
+    // neither of which any other pass produces or consumes, so no
+    // ordering constraints.
+    ("global_id_locate", &[]),
+    // ActiveSupport `Array#second`..`#fifth` → an index read. Keys on
+    // a typed-Array receiver, which no other pass produces or
+    // consumes, so no ordering constraints.
+    ("array_ordinal", &[]),
     ("assoc_pluck", &[]),
     ("try_guard", &[]),
     // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
@@ -577,6 +588,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("pathname_ctor");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
+    global_id_locate::apply_global_id_locate_lowering(app);
+    ran!("global_id_locate");
+    array_ordinal::apply_array_ordinal_lowering(app);
+    ran!("array_ordinal");
     assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
     try_guard::apply_try_guard_lowering(app);

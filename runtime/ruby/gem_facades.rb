@@ -392,3 +392,65 @@ module WebPush
     ""
   end
 end
+
+# Sentry — the `sentry-ruby` error reporter.
+#
+# THE ONE FAÇADE HERE THAT DOES NOT RAISE, and the reason is what the
+# member is FOR. Every other occupant of this file stands in for a code
+# path the read side never executes, so a loud raise turns "we got here
+# unexpectedly" into a visible failure. `capture_exception` is the
+# opposite: it is only ever called from a `rescue`, so it runs on
+# exactly the paths that are already going wrong, and a raise there
+# replaces the app's error handling with a second error.
+#
+# campfire's `MessagesHelper.message_tag` is the case that named it:
+#
+#   rescue Exception => e
+#     Sentry.capture_exception(e, extra: { message: message })
+#     Rails.logger.error "Exception while rendering message …"
+#     Views::Messages.unrenderable(message)
+#
+# The app's intent is "tell someone, then render a placeholder". With
+# no `Sentry` constant in the tree the rescue itself raised
+# `NameError`, and a rendering failure became a 500 for the whole
+# request — the handler campfire wrote specifically so it would not.
+#
+# STDERR IS THE REPORT, which is also what the real gem does when no
+# DSN is configured: `Sentry.init` is inside `if ENV["SENTRY_DSN"]` in
+# campfire's own initializer, so an unconfigured deployment already
+# gets "the constant answers and nothing is transmitted". Writing the
+# exception where the operator can see it is the honest floor — a
+# silent `nil` would make a swallowed exception invisible in a runtime
+# that has no error reporting at all.
+#
+# Ledgered in docs/pipeline/runtime.md: exceptions are reported to
+# stderr, not to an error-tracking service.
+module Sentry
+  def self.capture_exception(exception, extra: nil)
+    # NO INTROSPECTION OF THE EXCEPTION, and that is a recorded gap
+    # rather than a preference. Both `exception.message` and
+    # `exception.class` 500 the emitted campfire tree with `undefined
+    # method 'message' for an instance of NoMethodError` — the same
+    # empty-dispatch-table shape as matz/spinel#4219, reached here
+    # through a parameter this file declares `untyped`. Three
+    # reductions failed to reproduce it standalone (a typed rescue
+    # local, an inferred parameter, and a declared-`untyped` parameter
+    # all work), so it is left as evidence on the tree rather than
+    # chased further.
+    #
+    # campfire's own next line — `Rails.logger.error "… #{e.class} …
+    # #{e.message}"` — DOES run, because its `e` is the rescue's own
+    # local. So the app still reports what went wrong; what is lost is
+    # this façade's independent copy of it. An app whose only reporting
+    # is `Sentry.capture_exception` gets a bare line saying an
+    # exception was captured, which is worse than the real gem and
+    # better than the 500 the missing constant caused.
+    warn "[sentry] exception captured (details unavailable — see gem_facades.rb)"
+    nil
+  end
+
+  def self.capture_message(message, extra: nil)
+    warn "[sentry] #{message}"
+    nil
+  end
+end

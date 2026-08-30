@@ -108,6 +108,19 @@ pub struct App {
     /// that live on the CONTROLLER.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub view_visible_controller_methods: BTreeSet<Symbol>,
+    /// Model class names a `GlobalID::Locator.locate(gid, only: K)`
+    /// call site names, collected by [`crate::lower::global_id_locate`]
+    /// as it rewrites each site to a per-model `locate_<model>`.
+    ///
+    /// The generic `locate` takes its finder as a CLASS OBJECT, and a
+    /// class object has no singleton on a strict target — `only.find`
+    /// emits a call to a class method `ActiveRecord::Base` never
+    /// defines (matz/spinel#4217). The set is what
+    /// `project::apply_global_id_locate` needs to write one
+    /// specialization per model into `runtime/global_id_locator.rb`,
+    /// where the finder is spelled as a literal constant.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub global_id_locate_models: BTreeSet<Symbol>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -449,6 +462,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),
+            global_id_locate_models: BTreeSet::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

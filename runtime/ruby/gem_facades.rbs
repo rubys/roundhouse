@@ -129,3 +129,8 @@ end
 module WebPush
   def self.payload_send: (message: String, endpoint: String, p256dh: String, auth: String, vapid: Hash[Symbol, String], ?connection: untyped, ?urgency: String) -> String
 end
+
+module Sentry
+  def self.capture_exception: (untyped exception, ?extra: untyped) -> nil
+  def self.capture_message: (String message, ?extra: untyped) -> nil
+end

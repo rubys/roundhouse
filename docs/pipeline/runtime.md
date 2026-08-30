@@ -1263,10 +1263,29 @@ Real signing lands in one commit across all three ends —
 `Turbo::Streams::StreamName` — or not at all: two of them agreeing and
 the third not is the failure that looks like it works.
 
-### A cable subscribe is not authorized on the SPINEL lane
+### A cable subscribe is not authorized on the SPINEL lane — CLOSED
 
-The two runtimes have parted company here, so this entry now describes
-one of them.
+**CLOSED 2026-08-30 on BOTH lanes.** `Cable.subscribe`
+(`runtime/spinel/cable.rb`) now reads the `channel` the identifier
+names, builds it through the generated `Cable.build_channel`
+(`project::apply_cable_channels` — one eager arm per class descending
+from `ActionCable::Channel::Base`, found by transitive descent, plus
+`Turbo::StreamsChannel`), runs the app's own `subscribed`, and
+registers only the streams that method asked for. A `reject` — or a
+channel name nothing defined, or a raise inside `subscribed` — sends
+`reject_subscription` and registers nothing.
+
+That puts campfire's `RoomStreamsAreAuthorized` in the lookup chain on
+the spinel binary: `scripts/campfire-cable-drive.rb` against the
+binary now reports *"the stock channel refuses the room's `:messages`
+stream"*, which is the probe this entry existed for.
+
+The rest of the entry is kept as the record of what the gap WAS, since
+the shape recurs: identity without dispatch does not authorize
+anything by itself.
+
+The two runtimes had parted company here, and the description of each
+follows.
 
 - **CRuby overlay — CLOSED.** `Cable::Connection#handle_message`
   (`runtime/spinel/scaffold/ruby_overlay/cable.rb`) reads the `channel`
@@ -1878,6 +1897,35 @@ with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
 `:` alone. The generated helper reuses the `url_encode` its query keys
 use, which percent-encodes them. Every anchor the corpus writes is a
 slug, a tag or a `dom_id`, so nothing can tell the difference today.
+
+### An exception reported to Sentry reaches stderr, and loses its detail
+
+`Sentry.capture_exception` is a façade in `runtime/ruby/gem_facades.rb`
+that writes one line to stderr and returns nil. Nothing is transmitted
+to an error-tracking service, because this runtime has none.
+
+**It is the one façade in that file that does not raise**, and
+deliberately: every other occupant stands in for a path the read side
+never executes, so a loud raise is a useful alarm. `capture_exception`
+is only ever called from a `rescue` — it runs on exactly the paths that
+are already going wrong, and a raise there replaces the app's error
+handling with a second error. campfire's `MessagesHelper.message_tag`
+is the case: with no `Sentry` constant in the tree the rescue itself
+raised `NameError`, and a rendering failure became a 500 for the whole
+request, which is the opposite of what the handler was written for.
+
+**The line carries no detail.** `exception.message` and
+`exception.class` both fail inside the façade in the emitted campfire
+tree (`undefined method 'message' for an instance of NoMethodError`) —
+the parameter is declared `untyped` there and the dispatch table comes
+out short, the same shape as matz/spinel#4219. Three reductions failed
+to reproduce it standalone. An app's own logging is unaffected:
+campfire's next line, `Rails.logger.error "… #{e.class} … #{e.message}"`,
+runs, because its `e` is the rescue's own local.
+
+Rails with the gem installed and no `SENTRY_DSN` also transmits
+nothing, so the *delivery* half of this is not a divergence for an
+unconfigured deployment; the lost detail is.
 
 ### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
 

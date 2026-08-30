@@ -467,10 +467,24 @@ impl<'a> BodyTyper<'a> {
             None => unknown(),
             // RBS-declared gradual receiver. Method dispatch on
             // `Untyped` returns `Untyped` — the gradual choice
-            // propagates unconditionally through the IR. Author-signed
-            // opt-out, distinct from `Var` (inference gap, returns
-            // `unknown()`).
-            Some(Ty::Untyped) => Ty::Untyped,
+            // propagates through the IR. Author-signed opt-out,
+            // distinct from `Var` (inference gap, returns `unknown()`).
+            //
+            // EXCEPT THE CONVERSIONS, which have a fixed return type
+            // whatever the receiver is: `x.to_s` is a String even when
+            // nothing is known about `x`. The `Var` arm below already
+            // says so; saying it here too is what lets a chain RECOVER
+            // from a gradual receiver instead of staying gradual to its
+            // end. campfire's `stream_name.to_s.split(":", 2).second`
+            // is the case that earned it — `stream_name` is an untyped
+            // class-method param, so the whole chain absorbed, `second`
+            // reached the emit as a dynamic dispatch, and on a target
+            // with no `Array#second` it was a NoMethodError that killed
+            // the process on the first cable subscribe.
+            //
+            // Signing out of typing for a receiver is not signing out
+            // of Ruby's own guarantees about the answer.
+            Some(Ty::Untyped) => conversion_fallback(method).unwrap_or(Ty::Untyped),
             Some(Ty::Class { id, args }) => {
                 // `Range` is modeled as `Ty::Class { id: "Range", args:
                 // [elem] }` (see the body-typer's `ExprNode::Range` arm),

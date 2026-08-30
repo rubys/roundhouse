@@ -112,41 +112,110 @@ module Cable
     conn
   end
 
-  # Recover the stream name from Turbo's signed_stream_name:
-  # `<base64(JSON(stream))>--<sig>`. Strip the `--` suffix, base64-
-  # decode (-> a JSON string like `"articles"`), drop the surrounding
-  # quotes. Returns "" on anything malformed.
-  def self.decode_stream(signed)
-    cut = Tep.str_find(signed, "--", 0)
-    b64 = cut < 0 ? signed : signed[0, cut]
-    if b64.length == 0
-      return ""
+  # THE CHANNEL A SUBSCRIBE FRAME NAMES.
+  #
+  # GENERATED, between the markers, by `project::apply_cable_channels`
+  # — one arm per class in the tree that descends from
+  # `ActionCable::Channel::Base`, found by TRANSITIVE descent (campfire's
+  # channels are two and three levels deep behind
+  # `ApplicationCable::Channel`, so a one-level check finds none of
+  # them). The same eager-arm answer `build_connection` above gives, for
+  # the same reason: the name arrives as a STRING off the wire and this
+  # target has no `const_get`. Only a class the generator wrote an arm
+  # for is reachable, so nothing on the wire can widen the set.
+  #
+  # `Turbo::StreamsChannel` IS ALWAYS AN ARM, and it is not found by
+  # descent: it lives in `runtime/turbo_streams.rb`, not in the app.
+  # It is also the channel that matters most — a
+  # `<turbo-cable-stream-source>` names it unless the page said
+  # otherwise, so an app with no channels of its own still needs this
+  # one to receive anything at all.
+  #
+  # nil for a name nothing defined. `subscribe` answers that with
+  # `reject_subscription`, which is what Action Cable's client expects
+  # and what stops it waiting forever for a confirmation.
+  # >>> generated: cable-channels
+  def self.build_channel(name, connection, identifier)
+    if name == "Turbo::StreamsChannel"
+      return Turbo::StreamsChannel.new(
+        connection, identifier, ActionCable::Channel::Parameters.new(identifier))
     end
-    decoded = Base64.strict_decode64(b64)
-    # decoded is the JSON-encoded stream name, e.g. "\"articles\"".
-    if decoded.length >= 2 && decoded[0] == "\"" && decoded[decoded.length - 1] == "\""
-      return decoded[1, decoded.length - 2]
+    nil
+  end
+  # <<< generated: cable-channels
+
+  # Route one subscribe frame to the channel it NAMES, run the app's own
+  # `subscribed`, and register whatever streams it asked for.
+  #
+  # THIS IS WHERE AUTHORIZATION HAPPENS, and the reason item 4 is a
+  # dispatch rather than a guard bolted onto the old path: campfire
+  # prepends `RoomStreamsAreAuthorized` onto `Turbo::StreamsChannel`,
+  # and a prepended module only runs if something calls the method it
+  # wraps. The frame used to be decoded here and subscribed directly,
+  # so `subscribed` never ran and the guard sat in the tree unreached —
+  # whoever could spell a stream name got its fan-out.
+  #
+  # THE CHANNEL DECIDES THE STREAMS, not this method. `subscribed` calls
+  # `stream_from`/`stream_for`, which record on the channel; the loop
+  # below registers what it recorded. A channel that authorizes and then
+  # subscribes to nothing is confirmed with zero streams, which is what
+  # Rails does — the confirmation says "your subscription exists", not
+  # "you will receive something".
+  #
+  # A REJECTION IS A FRAME, not a silence. Action Cable's client keys
+  # its subscription table on the identifier and retries a subscription
+  # it never heard back about, so a dropped frame is a reconnect loop.
+  def self.subscribe(ws, connection, identifier)
+    name = Tep::Json.get_str(identifier, "channel")
+    if name.length == 0
+      return Cable.reject(ws, identifier)
     end
-    decoded
+    channel = Cable.build_channel(name, connection, identifier)
+    if channel.nil?
+      return Cable.reject(ws, identifier)
+    end
+    # A RAISE IS AN OUTCOME, NOT AN ESCAPE, and on this lane that is
+    # load-bearing rather than tidy: tep has no per-request rescue, so
+    # an unhandled error inside `subscribed` ends the PROCESS — every
+    # other connection with it. `Array#second` reaching the binary
+    # un-lowered took the server down on the first cable subscribe.
+    # The client is told the subscription was rejected; stderr is the
+    # only place the reason can exist, and a subscription that silently
+    # stops working is the bug that costs an afternoon. The overlay's
+    # `Cable::Dispatch.subscribe` reports the same event the same way.
+    begin
+      channel.subscribed
+    rescue StandardError => e
+      warn "[cable] " + name + "#subscribed raised: " + e.message
+      return Cable.reject(ws, identifier)
+    end
+    if channel.subscription_rejected?
+      return Cable.reject(ws, identifier)
+    end
+    channel.streams.each do |stream|
+      Tep::APP.cable_identifiers[stream] = identifier
+      Tep::Broadcast.subscribe_ws(stream, ws.fd)
+    end
+    ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
+            ",\"type\":\"confirm_subscription\"}")
+    0
+  end
+
+  def self.reject(ws, identifier)
+    ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
+            ",\"type\":\"reject_subscription\"}")
+    0
   end
 
   # Handle one inbound WebSocket frame. Only the `subscribe` command is
-  # acted on; pings/unsubscribes are ignored (teardown drops fds).
+  # acted on; pings and unsubscribes are ignored (teardown drops fds,
+  # and `Broadcast.unsubscribe_fd` runs on close).
   #
-  # NOT AUTHORIZED, and that is a ledgered divergence — see
-  # docs/pipeline/runtime.md, "A cable subscribe is not authorized on
-  # the SPINEL lane". The frame names a channel and nothing routes on
-  # it, so the app's `subscribed` never runs: whoever can spell the
-  # stream name gets its fan-out.
-  #
-  # THE `current_user` NOW EXISTS AND IS STILL NOT CONSULTED — #71 item
-  # 3 landed, item 4 did not. `Cable.upgrade` runs the app's `connect`
-  # and hands the identified connection to `WsMessage#connection`, so
-  # the thing a guard would test against is one hop away; what is
-  # missing is the hop. Nothing here reads it yet, and that is the gap
-  # rather than an oversight. Closing it is item 4 — routing this frame
-  # to the channel it NAMES — not stream-name signing.
-  def self.handle_message(ws, data)
+  # `connection` is the identified connection this socket was upgraded
+  # with — #71 item 3 — and it is passed through to the channel so the
+  # app's `subscribed` can read `current_user`. That is the hop item 4
+  # adds: identity existed and nothing consulted it.
+  def self.handle_message(ws, connection, data)
     cmd = Tep::Json.get_str(data, "command")
     if cmd != "subscribe"
       return 0
@@ -155,19 +224,7 @@ module Cable
     if identifier.length == 0
       return 0
     end
-    signed = Tep::Json.get_str(identifier, "signed_stream_name")
-    if signed.length == 0
-      return 0
-    end
-    stream = Cable.decode_stream(signed)
-    if stream.length == 0
-      return 0
-    end
-    Tep::APP.cable_identifiers[stream] = identifier
-    Tep::Broadcast.subscribe_ws(stream, ws.fd)
-    ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
-            ",\"type\":\"confirm_subscription\"}")
-    0
+    Cable.subscribe(ws, connection, identifier)
   end
 
   # Spawn a per-connection ping fiber on the cooperative scheduler.
@@ -232,7 +289,7 @@ module Cable
     end
 
     def handle_event(evt)
-      Cable.handle_message(@ws, evt.data)
+      Cable.handle_message(@ws, @connection, evt.data)
       0
     end
   end
