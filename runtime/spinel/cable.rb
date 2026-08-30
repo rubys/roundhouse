@@ -36,6 +36,82 @@ module Cable
 
   PING_INTERVAL = 3   # seconds — matches Action Cable's default
 
+  # THE APP'S OWN `ApplicationCable::Connection`, built against the
+  # handshake's cookie jar — or an anonymous one when the app declares
+  # no connection class.
+  #
+  # GENERATED. `project::apply_cable_connection` rewrites the span
+  # between the two markers below from the ingested app, the same way
+  # `apply_controller_dispatch` rewrites `Main.instantiate_controller`:
+  # the class name arrives as a STRING off the wire nowhere here, but
+  # the class itself cannot be reached by `const_get` on a target that
+  # resolves every call statically. An eager arm is the whole answer.
+  #
+  # THE DEFAULT ARM IS NOT A STUB. An app with no
+  # `app/channels/application_cable/connection.rb` — the blog fixture —
+  # connects ANONYMOUSLY, and must: Turbo Stream fan-out predates
+  # identity and has to keep working for an app that never asked for
+  # it. `Connection::Base#connect` is a no-op and its `current_user` is
+  # nil, so a channel that needs a user fails on nil rather than
+  # silently getting somebody else's.
+  #
+  # NO REQUIRE, deliberately: this is a method BODY reference, and
+  # `app/models.rb` (boot.rb, well before any request) has loaded the
+  # class by the time a handshake arrives. Requiring it here would
+  # invert the load order — `ApplicationCable::Connection`'s superclass
+  # is `ActionCable::Connection::Base`, a LOAD-time reference into
+  # `runtime/action_cable`, which requires this file back.
+  #
+  # ONE RETURN TYPE PER TREE, which is why `WsMessage#initialize` builds
+  # its placeholder through here too rather than naming the base class
+  # directly: two spellings would make the handler's connection slot
+  # poly for no gain: a base class is a union point, and a slot with
+  # two spellings in it is one the emitter can no longer monomorphize.
+  # >>> generated: cable-connection
+  def self.build_connection(cookies)
+    ActionCable::Connection::Base.new(cookies)
+  end
+  # <<< generated: cable-connection
+
+  # Resolve the handshake's identity by running the APP's own `connect`.
+  #
+  # WHY THE APP'S CODE AND NOT A COOKIE LOOKUP HERE: `connect` is where
+  # an app decides who is on the other end, and every app decides it
+  # differently. campfire's reads `cookies.signed[:session_token]` and
+  # loads a `Session`; reimplementing that here would hardcode one app's
+  # authentication into the runtime and diverge the moment the app
+  # changed it. The runtime's job is to hand `connect` a real signed
+  # cookie jar and to honour its verdict — and the jar is the SAME
+  # `ActionController::CookieJar` over the SAME `req.cookies` that
+  # `Main.dispatch` builds for a controller, because a WebSocket upgrade
+  # IS an ordinary HTTP GET and carries the same `Cookie:` header.
+  #
+  # Returns nil when the app refused. The caller answers that with a
+  # status, which is only possible because identity resolves BEFORE
+  # `res.start_websocket` — a socket already handed to the recv loop
+  # could be closed but not given a reason.
+  #
+  # No DB lease is taken here: `connect` loads a `Session`, and
+  # main.rb's `Db.with_connection { Main.dispatch(req, res) }` already
+  # wraps the whole dispatch, cable branch included.
+  def self.identify(req)
+    conn = Cable.build_connection(ActionController::CookieJar.new(req.cookies))
+    refused = false
+    begin
+      conn.connect
+    rescue ActionCable::Connection::Authorization::UnauthorizedError
+      # A refusal is an ORDINARY OUTCOME of `connect`, not a crash, and
+      # the rescue is narrowed to exactly the error
+      # `reject_unauthorized_connection` raises so that a channel that
+      # genuinely broke still reaches the caller as an error.
+      refused = true
+    end
+    if refused
+      return nil
+    end
+    conn
+  end
+
   # Recover the stream name from Turbo's signed_stream_name:
   # `<base64(JSON(stream))>--<sig>`. Strip the `--` suffix, base64-
   # decode (-> a JSON string like `"articles"`), drop the surrounding
@@ -58,11 +134,18 @@ module Cable
   # acted on; pings/unsubscribes are ignored (teardown drops fds).
   #
   # NOT AUTHORIZED, and that is a ledgered divergence — see
-  # docs/pipeline/runtime.md, "A cable subscribe is not authorized, on
-  # either lane". The frame names a channel and nothing routes on it, so
-  # the app's `subscribed` never runs and there is no `current_user` to
-  # test against: whoever can spell the stream name gets its fan-out.
-  # Closing it is #71 items 3 and 4, not stream-name signing.
+  # docs/pipeline/runtime.md, "A cable subscribe is not authorized on
+  # the SPINEL lane". The frame names a channel and nothing routes on
+  # it, so the app's `subscribed` never runs: whoever can spell the
+  # stream name gets its fan-out.
+  #
+  # THE `current_user` NOW EXISTS AND IS STILL NOT CONSULTED — #71 item
+  # 3 landed, item 4 did not. `Cable.upgrade` runs the app's `connect`
+  # and hands the identified connection to `WsMessage#connection`, so
+  # the thing a guard would test against is one hop away; what is
+  # missing is the hop. Nothing here reads it yet, and that is the gap
+  # rather than an oversight. Closing it is item 4 — routing this frame
+  # to the channel it NAMES — not stream-name signing.
   def self.handle_message(ws, data)
     cmd = Tep::Json.get_str(data, "command")
     if cmd != "subscribe"
@@ -123,12 +206,29 @@ module Cable
   end
 
   # on_message handler: subscribe dispatch.
+  #
+  # THE PER-CONNECTION OBJECT ON THIS LANE. The overlay has one because
+  # nio4r hands it a connection; tep hands out an fd and two handler
+  # objects — and `Cable.upgrade` builds a FRESH `WsMessage` per
+  # upgrade, so the handler instance already IS per-connection. It only
+  # lacked identity. Nothing new has to be given a lifecycle: the driver
+  # holds the handler (`set_on_message`), so the handler lives exactly
+  # as long as the connection and dies with it —
+  # `Tep::WebSocket::Connection.dispatch_close` runs `h_close` and then
+  # `Tep::Broadcast.unsubscribe_fd(driver.fd)`, and the driver goes.
   class WsMessage < Tep::WebSocket::Handler
-    attr_accessor :ws
+    attr_accessor :ws, :connection
 
     def initialize
       super
       @ws = Tep::WebSocket::Driver.new(0)
+      # An anonymous placeholder so the slot has a type before
+      # `upgrade` assigns the identified connection. Built through
+      # `Cable.build_connection` rather than by naming
+      # `ActionCable::Connection::Base` directly so the slot holds ONE
+      # class per tree — see that method's note.
+      @connection = Cable.build_connection(
+        ActionController::CookieJar.new(Tep.str_hash))
     end
 
     def handle_event(evt)
@@ -151,6 +251,21 @@ module Cable
       res.body = "invalid websocket upgrade"
       return true
     end
+
+    # IDENTITY RESOLVES BEFORE THE SOCKET IS TAKEN OVER. `res.status`
+    # below is only answerable while this is still an ordinary HTTP
+    # response; once `res.start_websocket` runs, Tep::Server::Scheduled
+    # has written the 101 and a refusal could only be a silent close.
+    # 401 rather than a quiet welcome, and 401 rather than Rails' 404,
+    # because it is what the CRuby overlay's config.ru already answers —
+    # the two lanes have to refuse the same way to be comparable.
+    conn = Cable.identify(req)
+    if conn.nil?
+      res.status = 401
+      res.body = "unauthorized"
+      return true
+    end
+
     drv = Tep::WebSocket::Driver.new(0)
     # Echo the Action Cable subprotocol. The browser's ActionCable client
     # opens with `Sec-WebSocket-Protocol: actioncable-v1-json` and, per its
@@ -174,6 +289,7 @@ module Cable
     cb_msg = Cable::WsMessage.new
     cb_msg.ws = drv
     cb_msg.req = req
+    cb_msg.connection = conn
     drv.set_on_message(cb_msg)
 
     res.start_websocket(hs.accept_key, drv)

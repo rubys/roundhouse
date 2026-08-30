@@ -1263,6 +1263,55 @@ fn ruby_runtime_files(
     Ok(files)
 }
 
+/// Rewrite `runtime/cable.rb`'s `Cable.build_connection` factory from
+/// the ingested app, so a `/cable` handshake is identified by running
+/// the app's OWN `ApplicationCable::Connection#connect`.
+///
+/// THE SHAPE, and why it is a generated factory rather than a lookup:
+/// `Cable.upgrade` has to reach a class the ingested app named, on a
+/// target with no `const_get`. `apply_controller_dispatch` already
+/// answers exactly that question for controllers with eager arms, and
+/// this is the same answer for the one class Rails' convention fixes
+/// the name of. It also preserves the property the CRuby overlay chose
+/// a `REGISTRY` for: only a class the generator emitted an arm for is
+/// reachable, so nothing that arrives on the wire can widen the set.
+///
+/// NO-OP when the app declares no `ApplicationCable::Connection` — the
+/// default arm in `cable.rb` connects anonymously, which is what an app
+/// that never asked for identity needs. `ApplicationCable::Connection`
+/// is Rails' fixed convention name, the same convention
+/// `runtime/action_cable.rb` already encodes by giving
+/// `ActionCable::Connection::Base` a body.
+///
+/// Written as a re-appliable SPAN replace between two markers, for the
+/// reason `patch_harness_dispatch` gives: a match on the default body's
+/// text would freeze this at today's spelling while `cable.rb` moved on.
+fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: cable-connection\n";
+    const TAIL: &str = "  # <<< generated: cable-connection\n";
+    const CONNECTION_CLASS: &str = "ApplicationCable::Connection";
+
+    if !app
+        .library_classes
+        .iter()
+        .any(|lc| lc.name.0.as_str() == CONNECTION_CLASS)
+    {
+        return;
+    }
+    let generated = format!(
+        "{HEAD}  def self.build_connection(cookies)\n    {CONNECTION_CLASS}.new(cookies)\n  end\n{TAIL}"
+    );
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("cable.rb") || path.ends_with("action_cable.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// De-cable the CRuby/JRuby overlay for a broadcast-less app: drop
 /// `cable.rb` and the three /cable seams in `config.ru` (the require,
 /// the `Cable::Registry` transport registration, and the WebSocket-
@@ -2205,6 +2254,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // CRuby/JRuby trees re-apply the dispatch in lazy flavor to the
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
+    // Identity for the `/cable` handshake, in the shared base like the
+    // dispatch above. Only the SPINEL tree runs the result: the
+    // CRuby/JRuby trees carry this `runtime/cable.rb` too but never
+    // require it — their config.ru requires the overlay's own top-level
+    // `cable.rb`, which has its own identity path and its own test.
+    apply_cable_connection(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
     apply_module_mixins(&mut files, app, false);
@@ -4622,5 +4677,76 @@ mod tests {
         for prose in ["app/controllers/login_controller.rb", "runtime/tep/response.rb"] {
             assert!(!get(prose).contains("require \"set\""), "{prose}");
         }
+    }
+
+    /// `Cable.build_connection` is rewritten from the app, and the text
+    /// it is rewritten to is the text `tests/spinel_cable_identity.rb`
+    /// exercises.
+    ///
+    /// Reads the REAL `runtime/spinel/cable.rb`, so a rename of either
+    /// marker fails here rather than silently shipping a tree whose
+    /// `/cable` handshake identifies nobody — a failure mode with no
+    /// symptom short of an unauthenticated socket, since the default arm
+    /// connects anonymously ON PURPOSE and cannot be told apart from a
+    /// generator that did not run.
+    #[test]
+    fn cable_connection_factory_is_generated_from_the_app() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::{ClassId, Symbol};
+
+        let cable = fs::read_to_string("runtime/spinel/cable.rb").unwrap();
+        let connection_class = |name: &str| LibraryClass {
+            name: ClassId(Symbol::from(name)),
+            is_module: false,
+            parent: Some(ClassId(Symbol::from("ActionCable::Connection::Base"))),
+            includes: Vec::new(),
+            methods: Vec::new(),
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            unknown_calls: Vec::new(),
+        };
+
+        // The app declares one: the arm names it.
+        let mut app = App::new();
+        app.library_classes.push(connection_class("ApplicationCable::Connection"));
+        let mut files = vec![("runtime/cable.rb".to_string(), cable.clone())];
+        apply_cable_connection(&mut files, &app);
+        let out = &files[0].1;
+        // VERBATIM the body `tests/spinel_cable_identity.rb` installs
+        // before its generated-arm probes. Asserted as one string rather
+        // than by `contains("ApplicationCable::Connection")` — the
+        // default arm's comment block names that class too, in prose.
+        assert!(
+            out.contains(
+                "  def self.build_connection(cookies)\n    ApplicationCable::Connection.new(cookies)\n  end\n"
+            ),
+            "generated arm not written:\n{out}"
+        );
+        assert!(
+            !out.contains("ActionCable::Connection::Base.new(cookies)"),
+            "default arm survived alongside the generated one:\n{out}"
+        );
+        // Re-appliable: running twice is running once. The spinel tree
+        // takes this pass in the shared base, and a second pass over an
+        // already-rewritten file must not nest or duplicate the arm.
+        let once = out.clone();
+        apply_cable_connection(&mut files, &app);
+        assert_eq!(files[0].1, once, "second application changed the file");
+
+        // No connection class: the file ships its default arm untouched,
+        // and the blog fixture keeps connecting anonymously.
+        let mut files = vec![("runtime/cable.rb".to_string(), cable.clone())];
+        apply_cable_connection(&mut files, &App::new());
+        assert_eq!(files[0].1, cable, "a channel-less app had its cable.rb rewritten");
+
+        // `action_cable.rb` also ends in `cable.rb` and carries no
+        // markers; the suffix test must not claim it.
+        let mut app2 = App::new();
+        app2.library_classes.push(connection_class("ApplicationCable::Connection"));
+        let action_cable = fs::read_to_string("runtime/spinel/action_cable.rb").unwrap();
+        let mut files = vec![("runtime/action_cable.rb".to_string(), action_cable.clone())];
+        apply_cable_connection(&mut files, &app2);
+        assert_eq!(files[0].1, action_cable, "action_cable.rb was rewritten");
     }
 }

@@ -1276,13 +1276,26 @@ one of them.
   that method asked for through `stream_from`/`stream_for` is
   registered, and a `reject` registers nothing. `current_user` comes off
   the identity `Cable.identify` resolved from the handshake.
-- **spinel — OPEN.** `Cable.handle_message` (`runtime/spinel/cable.rb`)
-  still reads `identifier["signed_stream_name"]`, decodes it, and calls
-  `Tep::Broadcast.subscribe_ws(stream, ws.fd)`. No channel is
-  instantiated, so no `subscribed` runs, and
-  `ApplicationCable::Connection#connect` never runs either — there is no
-  `current_user` to test. **A client that can spell a stream name
-  receives that stream's fan-out.**
+- **spinel — HALF CLOSED, and the half that remains is the one that
+  costs.** The HANDSHAKE is now identified: `Cable.identify`
+  (`runtime/spinel/cable.rb`) builds the app's own
+  `ApplicationCable::Connection` against an
+  `ActionController::CookieJar` over the handshake's `req.cookies`, runs
+  its `connect`, and answers a `reject_unauthorized_connection` with
+  **401 before `res.start_websocket`** rather than an anonymous socket.
+  The identified connection is carried on the per-upgrade
+  `Cable::WsMessage` handler, which the driver holds, so it lives
+  exactly as long as the connection. The class is reached through a
+  generated eager arm (`project::apply_cable_connection`), not
+  `const_get` — an app with no `app/channels/` keeps the default arm and
+  connects anonymously, because Turbo fan-out predates identity.
+  **SUBSCRIBE is still unrouted:** `Cable.handle_message` reads
+  `identifier["signed_stream_name"]`, decodes it, and calls
+  `Tep::Broadcast.subscribe_ws(stream, ws.fd)` without instantiating a
+  channel, so no `subscribed` runs and the `current_user` that now
+  EXISTS on the connection is never consulted. **A client that can spell
+  a stream name still receives that stream's fan-out** — identity
+  without dispatch does not authorize anything by itself.
 
 **Why the split.** The two lanes share `runtime/spinel/turbo_streams.rb`
 and the channel classes, but not the transport: the overlay rides Puma's
@@ -1306,7 +1319,9 @@ and its comment states the reason — "authorizing room messages only in
 `RoomMessagesChannel` would leave the stock channel as a way around it:
 same signed stream name, no membership check." On spinel that prepend is
 now EMITTED (the constant exists) and still never reached, because
-nothing routes a subscribe frame to a channel.
+nothing routes a subscribe frame to a channel. Identity landing does not
+move this: `connect` running gives the guard a user to test against, and
+the guard is still not in any path.
 
 The name is not a secret either: it is a GlobalID
 (`GlobalID::Locator.locate gid_param, only: Room`), an identifier rather
