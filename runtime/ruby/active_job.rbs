@@ -4,9 +4,18 @@ module ActiveJob
   def self.performed: () -> Array[String]
 
   ENQUEUE_ONLY: Array[String]
+  # `untyped` rather than `^() -> nil`: the RBS reader does not
+  # support ProcType yet, and a Proc is opaque to this analyzer anyway.
+  PENDING: Array[untyped]
+  DRAINED: Array[String]
   def self.enqueue_only: () -> bool
   def self.enqueue_without_running: () -> nil
   def self.run_enqueued: () -> nil
+  def self.drain_registered: () -> bool
+  def self.register_drain: () -> nil
+  def self.enqueue: (untyped work) -> nil
+  def self.pending_count: () -> Integer
+  def self.drain: () -> Integer
 
   class Base
     def self.queue_as: (?Symbol? name) -> nil

@@ -5123,3 +5123,20 @@ fn concern_ivar_env_of(
         }
     out
 }
+
+/// Register the stdlib class surface into a caller-built registry — the
+/// same table [`Analyzer::new`] folds in.
+///
+/// Exists for a gate rather than for the pipeline:
+/// `tests/runtime_src_integration.rs` types every `runtime/ruby/` body
+/// against a registry it assembles from the paired `.rbs` files, and
+/// without this that registry is strictly poorer than the one those
+/// same files meet once they land in an emitted tree. The gap it
+/// invents is not hypothetical — `rescue => e; e.message` typed as
+/// unknown there and as `String` everywhere else, which reads as "the
+/// runtime file is wrong" when the registry was.
+pub fn register_stdlib_classes(
+    classes: &mut std::collections::HashMap<crate::ident::ClassId, ClassInfo>,
+) {
+    registry::stdlib::register(classes);
+}

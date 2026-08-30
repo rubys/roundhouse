@@ -428,6 +428,14 @@ fn every_runtime_method_body_is_fully_typed() {
     // production pipelines get via `seed_well_known_classes` /
     // `insert_framework_stubs`).
     roundhouse::lower::view_to_library::insert_db_stub(&mut class_registry);
+    // …and the stdlib surface, which the app path gets from
+    // `Analyzer::new` and this registry did not. The runtime files are
+    // re-analyzed by that path once they land in an emitted tree, so a
+    // registry poorer than it is what makes this gate report a gap the
+    // real pipeline does not have: `rescue => e; e.message` types here
+    // as unknown and there as String. Entries are `or_insert`, so an
+    // `.rbs` in runtime/ruby always wins over a stdlib default.
+    roundhouse::analyze::register_stdlib_classes(&mut class_registry);
     // Per-class include lists, accumulated across all .rbs files.
     // Key: short class id (last segment); Value: list of short module
     // ids the class includes.

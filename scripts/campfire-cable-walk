@@ -40,7 +40,9 @@
 #                driver takes a base URL and knows nothing about which
 #                runtime answers it, which is what makes the two lanes
 #                comparable. Slower (a whole-program C compile) and it
-#                needs `spinel` on PATH.
+#                needs `spinel` on PATH. Background jobs run on that
+#                lane's own scheduler fiber; only the ruby lane gets the
+#                job-posture splice below.
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
 #   --reuse DIR  Skip transpiling; run against an emit prepared earlier.
@@ -116,11 +118,21 @@ else
 fi
 
 # The job posture, spliced once and printed so the run says what it did.
-# Both lanes splice after the SAME marker; they differ only in which
-# file boots the app (`config.ru` under Puma, `main.rb` in the binary).
+#
+# RUBY LANE ONLY. The spinel scaffold's `main.rb` registers a drain and
+# spawns a scheduler fiber for it, so `perform_later` there already does
+# what Rails does — hands the work over and returns — and the web-push
+# gap fails as one logged job after the response instead of taking the
+# request with it. Splicing the hold there would be worse than
+# unnecessary: `enqueue_only` is checked FIRST, so it would skip the job
+# entirely and the walk would stop exercising the queue it now has.
+#
+# The ruby lane still runs `perform_later` at the call site, so it still
+# needs the hold. Giving the overlay a drain is a separate change: it
+# has real threads (`Cable::Workers`), so the answer there is a worker
+# post rather than a fiber.
 BOOT_FILE="$OUT/config.ru"
-[[ "$LANE" == spinel ]] && BOOT_FILE="$OUT/main.rb"
-if ! grep -q "enqueue_without_running" "$BOOT_FILE"; then
+if [[ "$LANE" == ruby ]] && ! grep -q "enqueue_without_running" "$BOOT_FILE"; then
     step "holding background jobs (see this script's header)"
     python3 - "$BOOT_FILE" <<'PY'
 import sys

@@ -175,24 +175,99 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 record.ty = Some(Ty::Nil);
-                // …and DISPATCHES ONLY UNDER THE INLINE ADAPTER. Rails'
-                // test environment runs `:test`, which enqueues without
-                // running, and the difference is load-bearing rather
+                // …and THEN ONE OF THREE THINGS, in this order.
+                //
+                // `ActiveJob.enqueue_only` — the `:test` adapter: record
+                // and return. Rails' test environment runs `:test`, not
+                // `:inline`, and the difference is load-bearing rather
                 // than cosmetic: campfire's `Message` has
                 // `after_create_commit -> { room.receive(self) }` whose
-                // tail is a `perform_later`, so inline dispatch would
-                // run `Room::MessagePusher` for every message a FIXTURE
+                // tail is a `perform_later`, so dispatching would run
+                // `Room::MessagePusher` for every message a FIXTURE
                 // loads and take the whole suite down in its
-                // unresolvable nested join. Rails' own suite never
-                // reaches that code. `ActiveJob::ENQUEUE_ONLY` is empty
-                // for an app, so a running app is unchanged.
+                // unresolvable nested join.
+                //
+                // `ActiveJob.drain_registered` — a real queue: hand the
+                // work over and return, which is what Rails' production
+                // adapters do and what `perform_later` has always
+                // promised. A ZERO-ARGUMENT PROC closing over the
+                // arguments is what makes this expressible on a strict
+                // target: a job queue is heterogeneous by nature, and
+                // `() -> nil` is the one type every entry shares
+                // whatever it closed over.
+                //
+                // Otherwise INLINE, unchanged. A job put on a queue
+                // nobody drains is a job silently dropped, so the
+                // enqueue arm is taken only when a drain has said it
+                // exists — `main.rb` registers one, the emitted test
+                // harness does not.
+                let active_job = |sp| {
+                    Expr::new(sp, ExprNode::Const { path: vec![Symbol::from("ActiveJob")] })
+                };
+                let mut nil_arm = Expr::new(
+                    span,
+                    ExprNode::Lit { value: crate::expr::Literal::Nil },
+                );
+                nil_arm.ty = Some(Ty::Nil);
+
+                // The Proc: `{ new.perform(...); nil }`. The trailing
+                // nil is what makes every entry's type the same one —
+                // `perform` answers whatever the app wrote.
+                let mut block_body = Expr::new(
+                    span,
+                    ExprNode::Seq { exprs: vec![body.clone(), nil_arm.clone()] },
+                );
+                block_body.ty = Some(Ty::Nil);
+                let block = Expr::new(
+                    span,
+                    ExprNode::Lambda {
+                        params: Vec::new(),
+                        rest_param: None,
+                        block_param: None,
+                        body: block_body,
+                        block_style: crate::expr::BlockStyle::Do,
+                    },
+                );
+                // AN ARGUMENT, NOT A BLOCK: `ActiveJob.enqueue` names its
+                // parameter `^() -> nil` so the runtime file types
+                // fully, and RBS has no syntax for naming a block.
+                let mut enqueue = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(active_job(span)),
+                        method: Symbol::from("enqueue"),
+                        args: vec![block],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                enqueue.ty = Some(Ty::Nil);
+
+                let mut drained = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(active_job(span)),
+                        method: Symbol::from("drain_registered"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                drained.ty = Some(Ty::Bool);
+                let mut queued_or_inline = Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: drained,
+                        then_branch: enqueue,
+                        else_branch: body,
+                    },
+                );
+                queued_or_inline.ty = Some(Ty::Nil);
+
                 let mut gate = Expr::new(
                     span,
                     ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Const { path: vec![Symbol::from("ActiveJob")] },
-                        )),
+                        recv: Some(active_job(span)),
                         method: Symbol::from("enqueue_only"),
                         args: vec![],
                         block: None,
@@ -211,16 +286,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 cond.ty = Some(Ty::Bool);
-                let mut nil_arm = Expr::new(
-                    span,
-                    ExprNode::Lit { value: crate::expr::Literal::Nil },
-                );
-                nil_arm.ty = Some(Ty::Nil);
                 let mut guarded = Expr::new(
                     span,
                     ExprNode::If {
                         cond,
-                        then_branch: body,
+                        then_branch: queued_or_inline,
                         else_branch: nil_arm.clone(),
                     },
                 );

@@ -87,6 +87,99 @@ module ActiveJob
     nil
   end
 
+  # ---- A real queue -------------------------------------------------
+  #
+  # `perform_later` PUTS THE WORK DOWN AND RETURNS, which is what Rails
+  # means by it. Everything above this describes the two postures that
+  # came before: run at the call site, or skip. Neither is what Rails
+  # does, and the difference showed up the moment a real app was driven
+  # rather than tested — campfire's `Message` has `after_create_commit
+  # -> { room.receive(self) }` whose tail is a `perform_later`, so
+  # posting a message ran web-push delivery INSIDE the POST. On the
+  # spinel binary, where an unhandled error ends the process rather
+  # than the request, that is a 500 at best.
+  #
+  # A ZERO-ARGUMENT PROC IS THE ENTRY, and that is what makes this
+  # expressible on a strict target at all. A queue of jobs is
+  # heterogeneous by nature — `Room::PushMessageJob` takes (room,
+  # message), another takes an Integer — and there is nowhere to put
+  # that on a target with one element type per container. A Proc
+  # closing over its own arguments erases the difference: every entry
+  # is `() -> nil`, whatever it closed over. Probed on spinel before
+  # this was written, with two job classes of different arities and
+  # argument types, and the output is byte-identical to CRuby's.
+  #
+  # ONE QUEUE, NOT ONE PER QUEUE NAME. `queue_as` is inert here (see
+  # `Base` below) because a single in-process drain has no scheduling
+  # decision to make: there is no worker pool to allocate and no
+  # priority to honour, so recording the name would suggest an ordering
+  # guarantee nothing implements.
+  PENDING = []
+
+  # Whether a drain exists to pick the work up. Empty means no — and
+  # then `perform_later` runs inline, exactly as before, because a job
+  # put on a queue nobody drains is a job silently dropped, which is
+  # the failure mode this whole file is trying not to have.
+  #
+  # `main.rb` opts in by spawning the drain; the emitted test harness
+  # does not, so the suite keeps the inline semantics its assertions
+  # were written against.
+  DRAINED = []
+
+  def self.drain_registered
+    DRAINED.length > 0
+  end
+
+  def self.register_drain
+    DRAINED << "1"
+    nil
+  end
+
+  # THE PROC ARRIVES AS AN ARGUMENT, NOT A BLOCK, and the reason is the
+  # runtime's own invariant rather than taste: RBS has no way to name a
+  # block parameter, so `&work` cannot be given a type and
+  # `tests/runtime_src_integration.rs` fails the file for an untyped
+  # sub-expression.
+  #
+  # It is declared `untyped` rather than `^() -> nil` only because the
+  # RBS reader does not support ProcType yet ("unsupported RBS type
+  # node: ProcType"). The precise spelling is the one this wants, and a
+  # Proc is opaque to the analyzer either way -- `work.call` answers
+  # gradually under both.
+  def self.enqueue(work)
+    PENDING << work
+    nil
+  end
+
+  def self.pending_count
+    PENDING.length
+  end
+
+  # Run every job queued so far, FIFO, and answer how many ran.
+  #
+  # A RAISE IS ONE LOST JOB, NEVER A LOST DRAIN, and on the spinel lane
+  # never a lost process: there is no per-request rescue under tep, so
+  # an unhandled error in a job would take every other connection with
+  # it. The job's own failure is reported where an operator can see it
+  # — Rails logs the same event — and the queue moves on.
+  #
+  # A job that enqueues another is handled by the `while`: the new
+  # entry is behind the current one and this pass reaches it. That is
+  # Rails' behaviour for an inline drain too.
+  def self.drain
+    ran = 0
+    while PENDING.length > 0
+      work = PENDING.shift
+      begin
+        work.call
+        ran = ran + 1
+      rescue StandardError => e
+        warn "[job] a queued job raised: " + e.message
+      end
+    end
+    ran
+  end
+
   class Base
     # `queue_as :default` — queue routing has no meaning inline.
     def self.queue_as(name = nil)

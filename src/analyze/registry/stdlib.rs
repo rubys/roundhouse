@@ -262,6 +262,37 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("get", http_response.clone()),
         ("post", http_response.clone()),
     ]);
+    // The EXCEPTION FAMILY. A `rescue => e` binds `e` as
+    // `Class{StandardError}` (see `analyze::body`'s rescue arm) and a
+    // `rescue Foo => e` binds the class named — and nothing registered
+    // what any of them ANSWER, so the single most common thing anyone
+    // does with a rescued exception, `e.message`, typed as a gap.
+    //
+    // It surfaced twice in one afternoon: once in a runtime file, where
+    // `tests/runtime_src_integration.rs` refuses an untyped
+    // sub-expression, and once in a gem façade whose whole job was to
+    // report an exception. Registering the shape is cheaper than either
+    // workaround, and it is the same shape for every member.
+    //
+    // The registry does no inheritance for stdlib classes, so each name
+    // carries the surface — the same reason the `Net::HTTP::<verb>`
+    // loop below repeats itself. The list is Ruby's own hierarchy under
+    // `StandardError` plus `Exception` itself, which `rescue Exception`
+    // names and campfire's `MessagesHelper` actually writes.
+    for exc in [
+        "Exception", "StandardError", "RuntimeError", "ArgumentError",
+        "TypeError", "NameError", "NoMethodError", "IndexError",
+        "KeyError", "RangeError", "IOError", "NotImplementedError",
+        "FrozenError", "ZeroDivisionError", "StopIteration",
+    ] {
+        register_stdlib_class(classes, exc, &[], &[
+            ("message", Ty::Str),
+            ("to_s", Ty::Str),
+            ("full_message", Ty::Str),
+            ("inspect", Ty::Str),
+            ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
+        ]);
+    }
     // The response. `code` is a String here as it is in CRuby ("200",
     // not 200) — campfire compares `response.code == "200"`, which folds
     // to a constant false against an Int.
