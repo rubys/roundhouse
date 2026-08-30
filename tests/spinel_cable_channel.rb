@@ -161,6 +161,83 @@ check("current_user comes off the connection", ch.current_user.id, 7)
 anon = UnreadRoomsChannel.new(nil, "{}", {})
 check("an anonymous connection has no current_user", anon.current_user, nil)
 
+# --- the connection half: identity off the handshake's cookie jar -----
+#
+# A WebSocket upgrade is an ordinary HTTP GET, so it carries the same
+# `Cookie:` header the controllers authenticate from. What is under test
+# is that the runtime hands the app's OWN `connect` a real jar and
+# honours its verdict — not a reimplementation of campfire's auth.
+class FakeJar
+  def initialize(values) = @values = values
+  def signed = @values
+end
+
+module Authentication
+  module SessionLookup
+    def find_session_by_cookie
+      if token = cookies.signed[:session_token]
+        token == "good-token" ? FakeSession.new(FakeUser.new(42)) : nil
+      end
+    end
+  end
+end
+
+class FakeSession
+  def initialize(user) = @user = user
+  def user = @user
+end
+
+# campfire's EMITTED ApplicationCable::Connection, verbatim.
+module ApplicationCable
+  class Connection < ActionCable::Connection::Base
+    include Authentication::SessionLookup
+
+    def connect
+      self.current_user = find_verified_user
+    end
+
+    def find_verified_user
+      if verified_session = find_session_by_cookie
+        verified_session.user
+      else
+        reject_unauthorized_connection
+      end
+    end
+  end
+end
+
+signed_in = ApplicationCable::Connection.new(FakeJar.new({ session_token: "good-token" }))
+signed_in.connect
+check("connect identifies the user from the signed jar", signed_in.current_user.id, 42)
+
+# A refusal is a CATCHABLE outcome, not a NotImplementedError: the caller
+# has to tell "the app said no" apart from "the app crashed", because the
+# first is answered with a status and the second is a bug.
+refused = ApplicationCable::Connection.new(FakeJar.new({}))
+begin
+  refused.connect
+  check("an unidentified handshake is refused", "no raise", "UnauthorizedError")
+rescue ActionCable::Connection::Authorization::UnauthorizedError
+  check("an unidentified handshake is refused", "UnauthorizedError", "UnauthorizedError")
+end
+
+# A tampered token reaches the app's own lookup and fails there, not in
+# the runtime — the point being that the decision stays the app's.
+tampered = ApplicationCable::Connection.new(FakeJar.new({ session_token: "forged" }))
+begin
+  tampered.connect
+  check("a forged token is refused", "no raise", "UnauthorizedError")
+rescue ActionCable::Connection::Authorization::UnauthorizedError
+  check("a forged token is refused", "UnauthorizedError", "UnauthorizedError")
+end
+
+# An app that declares no identifiers connects ANONYMOUSLY: Base#connect
+# is a no-op so the caller can call it unconditionally.
+class BareConnection < ActionCable::Connection::Base; end
+bare = BareConnection.new(FakeJar.new({}))
+bare.connect
+check("a connection with no identifiers is anonymous", bare.current_user, nil)
+
 puts
 if FAILURES.empty?
   puts "ALL OK"

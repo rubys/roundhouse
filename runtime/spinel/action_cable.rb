@@ -338,18 +338,62 @@ module ActionCable
   end
 
   module Connection
+    # What `reject_unauthorized_connection` raises. Rails names it the
+    # same way, and `Cable.upgrade` is the one place that rescues it: an
+    # unauthorized handshake is answered before the socket is taken over,
+    # so it can still be given a status.
+    module Authorization
+      class UnauthorizedError < StandardError
+      end
+    end
+
     class Base
-      # `identified_by :current_user` is a CLASS-BODY call that defines
-      # an accessor from a computed name — the shape a strict target
-      # cannot compile, and ingest drops it from the emitted connection,
-      # so the accessor it would have written is declared here instead.
-      # One name, because one is what `identified_by` has ever been given.
+      # WHAT `identified_by :current_user` WOULD HAVE WRITTEN.
+      #
+      # Ingest DROPS that line — it defines an accessor from a computed
+      # name, the shape a strict target cannot compile — so the emitted
+      # `ApplicationCable::Connection` has no `current_user=` of its own
+      # and campfire's `connect` (`self.current_user =
+      # find_verified_user`) would be a NoMethodError on the first
+      # handshake. One name, because one is what `identified_by` has
+      # ever been given.
       attr_accessor :current_user
 
+      # THE COOKIE JAR OF THE HANDSHAKE REQUEST, and the whole reason
+      # identity can work at all: a WebSocket upgrade is an ordinary
+      # HTTP GET, so it carries the same `Cookie:` header the app's
+      # controllers authenticate from. campfire's
+      # `ApplicationCable::Connection` includes
+      # `Authentication::SessionLookup` and calls
+      # `cookies.signed[:session_token]` — the SAME method object its
+      # controllers use, reached here through the same shared
+      # `ActionController::CookieJar` that `Main.dispatch` builds from
+      # `req.cookies`. Handing it a real signed jar is what makes
+      # `connect` the app's own code rather than a reimplementation.
+      def cookies
+        @cookies
+      end
+
+      def initialize(cookies)
+        @cookies = cookies
+      end
+
+      # Rails' Base does not define `connect`; a subclass that wants
+      # identity does. A no-op here means the caller can call it
+      # unconditionally, so an app whose Connection declares no
+      # identifiers connects anonymously instead of erroring.
+      def connect
+        nil
+      end
+
+      # RAISES A CATCHABLE ERROR, where this used to raise
+      # NotImplementedError with "connections are not identified yet".
+      # That was accurate and is now the wrong shape: a refusal is an
+      # ordinary outcome of `connect`, and the caller has to be able to
+      # tell it apart from a connection that crashed.
       def reject_unauthorized_connection
-        raise NotImplementedError,
-              "ActionCable::Connection#reject_unauthorized_connection: /cable " \
-              "connections are not identified yet"
+        raise Authorization::UnauthorizedError,
+              "ActionCable::Connection: the handshake carried no identified user"
       end
     end
   end
