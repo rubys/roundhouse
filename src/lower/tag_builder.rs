@@ -97,7 +97,12 @@ pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
         .iter()
         .map(|m| crate::naming::snake_case(m.name.0.as_str()))
         .collect();
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &models, &mut diags));
+    // Named routes the app actually declares — the guard on resolving a
+    // polymorphic `link_to [ :edit, @room ]`. Same set
+    // `route_format_suffix` and `route_url_options` key off, so the three
+    // passes cannot disagree about what a route helper is.
+    let helpers = super::route_format_suffix::route_helper_names(app);
+    super::for_each_hook_body(app, &mut |body| rewrite(body, &models, &helpers, &mut diags));
     diags
 }
 
@@ -250,10 +255,11 @@ fn is_tag_helper(recv: &Expr) -> bool {
 fn rewrite(
     expr: &mut Expr,
     models: &std::collections::HashSet<String>,
+    helpers: &std::collections::HashSet<String>,
     diags: &mut Vec<Diagnostic>,
 ) {
     expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, models, diags));
+        .for_each_child_mut(&mut |child| rewrite(child, models, helpers, diags));
 
     if rewrite_turbo_frame_tag(expr, models) {
         return;
@@ -267,7 +273,7 @@ fn rewrite(
     if rewrite_button_to_block(expr) {
         return;
     }
-    if rewrite_link_to_block(expr, diags) {
+    if rewrite_link_to_block(expr, models, helpers, diags) {
         return;
     }
 
@@ -460,6 +466,69 @@ fn rewrite_button_to_block(expr: &mut Expr) -> bool {
     true
 }
 
+/// `[ :edit, @room ]` → `edit_room_path(@room)`, Rails' polymorphic URL
+/// resolved the only way a static target can resolve it: at transpile
+/// time, from the record's model.
+///
+/// The LAST element is the record and everything before it is a prefix
+/// (`[ :edit, @room ]`, `[ :new, :message ]`); Rails builds the helper
+/// name by joining them, and so does this. The record's model comes from
+/// `bare_record_name`, the same syntactic reading `turbo_frame_tag` and
+/// `dom_id` use — which works here because this pass runs before the
+/// ivar rewrite, so `@room` is still an `Ivar` and not yet
+/// `Current.controller.room`.
+///
+/// TWO GUARDS, and both matter. The name has to be a model the app
+/// actually has, and the assembled helper has to be a NAMED ROUTE the
+/// app actually declares — `route_helper_names` is the same set
+/// `route_format_suffix` and `route_url_options` key off. Without the
+/// second, `[ :edit, @room ]` in an app with no `edit` member route
+/// would emit a call to a helper nothing defines: a NameError on CRuby
+/// and an unresolved-call build wall on a strict target, which is worse
+/// than the ledgered array it replaces.
+///
+/// A bare call, not `RouteHelpers.<x>` — `route_helper_receiver::
+/// qualify_lcs` runs at emit and qualifies it, and the same pass turns
+/// the record argument into its id. Synthesizing the qualified form here
+/// would be a second, independently-maintained copy of that rule.
+fn polymorphic_route_call(
+    url: &Expr,
+    models: &std::collections::HashSet<String>,
+    helpers: &std::collections::HashSet<String>,
+) -> Option<Expr> {
+    let ExprNode::Array { elements, .. } = &*url.node else {
+        return None;
+    };
+    let (record, prefixes) = elements.split_last()?;
+    let singular = crate::lower::view_to_library::bare_record_name(record)?;
+    if !models.contains(&singular) {
+        return None;
+    }
+    let mut name = String::new();
+    for prefix in prefixes {
+        let ExprNode::Lit { value: Literal::Sym { value } } = &*prefix.node else {
+            return None;
+        };
+        name.push_str(value.as_str());
+        name.push('_');
+    }
+    name.push_str(&singular);
+    name.push_str("_path");
+    if !helpers.contains(&name) {
+        return None;
+    }
+    Some(Expr::new(
+        url.span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from(name),
+            args: vec![record.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    ))
+}
+
 /// `link_to url, opts do … end` written in a HELPER body — Rails'
 /// BLOCK spelling, where the first argument is the URL and the block
 /// supplies the anchor's content.
@@ -479,7 +548,12 @@ fn rewrite_button_to_block(expr: &mut Expr) -> bool {
 ///
 /// Declines when there is no URL argument or when the options are not
 /// a literal Hash, leaving the site loud rather than guessed at.
-fn rewrite_link_to_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) -> bool {
+fn rewrite_link_to_block(
+    expr: &mut Expr,
+    models: &std::collections::HashSet<String>,
+    helpers: &std::collections::HashSet<String>,
+    diags: &mut Vec<Diagnostic>,
+) -> bool {
     let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
         return false;
     };
@@ -487,30 +561,40 @@ fn rewrite_link_to_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) -> bool {
         return false;
     }
     let Some(url) = args.first() else { return false };
-    // A POLYMORPHIC url (`link_to [ :edit, @room ]`) names a route by
-    // record, which only the routes lowering can resolve. Interpolated
-    // as-is it reached `html_escape` as an Array and took the whole
-    // room page down with `undefined method 'html_safe?'`. Declining
-    // leaves it visible.
-    if matches!(&*url.node, ExprNode::Array { .. }) {
-        diags.push(super::residue_diagnostic(
-            "tag_builder",
-            "polymorphic-link-url",
-            expr.span,
-            "`link_to [ … ]` in a helper: polymorphic URL",
-            "a polymorphic URL array names its route through the record's \
-             model, which only the routes lowering resolves — the array \
-             reaches the emitted anchor as itself and renders the record's \
-             `inspect` into the href"
-                .to_string(),
-        ));
-        return false;
-    }
-    // The block has to be a real one. `link_to url, opts, &` — the
-    // FORWARD of the caller's block, which campfire's
-    // `link_to_room`/`link_to_edit_room` both write — has no body to
-    // capture, and treating it as one drops what the caller passed.
-    if !matches!(&*block.node, ExprNode::Lambda { .. }) {
+    // A POLYMORPHIC url (`link_to [ :edit, @room ]`) names its route
+    // through the record's model, which is a transpile-time question —
+    // `ViewHelpers.polymorphic_url` raises at runtime on purpose, because
+    // a class-to-route registry is exactly the dynamic dispatch the
+    // strict targets cannot carry. Resolve it here, or decline loudly:
+    // interpolated as-is the array reaches `html_escape` as an Array and
+    // renders the record's `inspect` into the page.
+    let url = match &*url.node {
+        ExprNode::Array { .. } => match polymorphic_route_call(url, models, helpers) {
+            Some(call) => call,
+            None => {
+                diags.push(super::residue_diagnostic(
+                    "tag_builder",
+                    "polymorphic-link-url",
+                    expr.span,
+                    "`link_to [ … ]` in a helper: polymorphic URL",
+                    "a polymorphic URL array names its route through the record's \
+                     model — this one resolves to no named route helper, so the \
+                     array reaches the emitted anchor as itself and renders the \
+                     record's `inspect` into the href"
+                        .to_string(),
+                ));
+                return false;
+            }
+        },
+        _ => url.clone(),
+    };
+    // A Lambda is a block written HERE; a Var is the caller's block
+    // FORWARDED (`link_to url, opts, &`, which ingest binds as `__blk`)
+    // — campfire's `link_to_room` and `link_to_edit_room` both write the
+    // second form. `capture_call` already handles both, guarding the
+    // forwarded one against being absent at run time, so declining it
+    // here only kept the site broken.
+    if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }) {
         return false;
     }
     let opts = match args.get(1).map(|a| &*a.node) {
@@ -521,7 +605,7 @@ fn rewrite_link_to_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) -> bool {
     let span = expr.span;
     let block = block.clone();
     let (mut parts, suffix) =
-        crate::lower::view_to_library::helpers::link_to_wrapper_markup(url.clone(), opts);
+        crate::lower::view_to_library::helpers::link_to_wrapper_markup(url, opts);
     // Rails treats what the block yields as the anchor's HTML content,
     // so it is CAPTURED, not escaped — the same rule the `button_to`
     // twin follows, and campfire's blocks are an `image_tag` plus a
@@ -766,4 +850,98 @@ fn residue(expr: &Expr, reason: &str) -> Diagnostic {
              left to the runtime content_tag, which strict targets lack"
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::Span;
+
+    fn ivar(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from(name) })
+    }
+
+    fn sym(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } },
+        )
+    }
+
+    fn array(elements: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements, style: crate::expr::ArrayStyle::default() },
+        )
+    }
+
+    fn set(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The campfire site this exists for: `link_to [ :edit, @room ]` in
+    /// `RoomsHelper#link_to_edit_room`, which rendered the room's
+    /// `inspect` into every room page's nav.
+    #[test]
+    fn a_prefixed_polymorphic_array_becomes_its_route_helper() {
+        let url = array(vec![sym("edit"), ivar("room")]);
+        let call = polymorphic_route_call(&url, &set(&["room"]), &set(&["edit_room_path"]))
+            .expect("[:edit, @room] should resolve");
+        let ExprNode::Send { recv: None, method, args, .. } = &*call.node else {
+            panic!("expected a bare call, got {:?}", call.node);
+        };
+        assert_eq!(method.as_str(), "edit_room_path");
+        // The RECORD is the argument, not its id: `route_helper_receiver`
+        // owns that rewrite and applies it at emit.
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&*args[0].node, ExprNode::Ivar { .. }));
+    }
+
+    #[test]
+    fn a_bare_record_array_is_the_plain_helper() {
+        let url = array(vec![ivar("room")]);
+        let call = polymorphic_route_call(&url, &set(&["room"]), &set(&["room_path"]))
+            .expect("[@room] should resolve");
+        let ExprNode::Send { method, .. } = &*call.node else { panic!() };
+        assert_eq!(method.as_str(), "room_path");
+    }
+
+    /// BOTH guards, and the reason each is there. An unknown model means
+    /// the array was never a polymorphic URL; a known model whose route
+    /// the app does not declare would emit a call to a helper nothing
+    /// defines — a NameError on CRuby and a build wall on a strict
+    /// target, strictly worse than the ledgered array it replaced.
+    #[test]
+    fn it_declines_rather_than_inventing_a_helper() {
+        // Not a model.
+        assert!(
+            polymorphic_route_call(
+                &array(vec![sym("edit"), ivar("widget")]),
+                &set(&["room"]),
+                &set(&["edit_room_path", "edit_widget_path"]),
+            )
+            .is_none(),
+            "a name that is not a model must not resolve"
+        );
+        // A model, but the app declares no such route.
+        assert!(
+            polymorphic_route_call(
+                &array(vec![sym("edit"), ivar("room")]),
+                &set(&["room"]),
+                &set(&["room_path"]),
+            )
+            .is_none(),
+            "an undeclared route must not be invented"
+        );
+        // A prefix that is not a symbol carries no name to join.
+        assert!(
+            polymorphic_route_call(
+                &array(vec![ivar("scope"), ivar("room")]),
+                &set(&["room", "scope"]),
+                &set(&["edit_room_path"]),
+            )
+            .is_none(),
+            "a non-symbol prefix must not resolve"
+        );
+    }
 }
