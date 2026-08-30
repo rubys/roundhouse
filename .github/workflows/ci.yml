@@ -904,9 +904,22 @@ jobs:
       # type is not inferred (so a local bound from it is not projected
       # to its id at a route helper). Raising this floor further means
       # closing those, not asserting the number.
+      #
+      # 255/41 -> 256/42, on the notice this step has now emitted FOUR
+      # TIMES. The file that turned is `messages_controller_test`, and it
+      # turned at `9d10511b` — "Rails deletes twelve URL options before
+      # generating a path; we forwarded all twelve". The three commits
+      # after it (`b2acbc64`, `ef6127cf`, `18e1601f`) each measured the
+      # same 256/42 and each asked again; the number moved once and the
+      # floor simply did not follow it.
+      #
+      # A stale floor is not harmless, which is the reason to bump it
+      # rather than let it ride: while it sat at 255, the test
+      # `9d10511b` had just won was free to break again without failing
+      # this step. A ratchet that lags is a ratchet with slack in it.
         env:
-          FLOOR_TESTS: 255
-          FLOOR_FILES: 41
+          FLOOR_TESTS: 256
+          FLOOR_FILES: 42
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
