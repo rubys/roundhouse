@@ -1,0 +1,11 @@
+{
+  "name": "roundhouse-e2e-campfire",
+  "private": true,
+  "description": "Playwright specs driving the emitted ONCE Campfire — see scripts/campfire-e2e",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

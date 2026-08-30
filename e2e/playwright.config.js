@@ -19,7 +19,12 @@ const SKIP = (process.env.E2E_SKIP || '')
 
 export default defineConfig({
   testDir: '.',
-  testIgnore: SKIP.map(name => `**/${name}*.spec.js`),
+  // `campfire/` is a SEPARATE harness with its own config, package.json
+  // and server lifecycle (scripts/campfire-e2e) — it drives the emitted
+  // ONCE Campfire, not a target archive. `testDir: '.'` recurses, so
+  // without this ignore every `scripts/e2e` and `scripts/smoke` run
+  // would try campfire's specs against a blog server.
+  testIgnore: ['**/campfire/**', ...SKIP.map(name => `**/${name}*.spec.js`)],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

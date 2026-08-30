@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# scripts/campfire-e2e — drive the emitted campfire in a REAL BROWSER.
+#
+# Transpiles ONCE Campfire for the `ruby` target, builds its static
+# assets, seeds an empty schema, boots it under Puma, completes the
+# app's own `/first_run` to create the account, and runs the Playwright
+# specs in `e2e/campfire/` against it.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT `campfire-cable-walk`. The walk
+# asserts the SERVER's contract — what goes on the wire, including
+# frames no client would ever send (it subscribes to the stock
+# `Turbo::StreamsChannel` with a stolen-but-valid signed stream name and
+# requires a rejection, which is campfire's `RoomStreamsAreAuthorized`
+# guard end to end). It runs with no browser and no assets, and it stays.
+# This harness asserts the CLIENT's outcome: that campfire's own
+# JavaScript, loaded from the assets `make assets` produces, does
+# something correct with what arrives. Neither is a superset of the
+# other, and the failure diagnosis is much better on the walk's side —
+# reach for this when the question is about the page.
+#
+# THE FIRST SPEC IS A NETWORK SPEC, ON PURPOSE. `assets.spec.js` asserts
+# only that nothing 404s and nothing throws. That is the class of bug
+# this tree has actually been shipping: the room page pins ninety-five
+# ES modules and links twenty-six stylesheets, and until `18e1601f`
+# every one of them was a request for a file the build did not produce —
+# behind a 200, a green 256/288 suite, and a green cable walk. A
+# behavioural spec cannot see it: a locator that times out says "no row
+# appeared", never "Turbo never booted because its import 404'd".
+#
+# ASSETS ARE BUILT, NOT ASSUMED. `make assets` runs here rather than
+# being a documented prerequisite, because a stale `static/` is
+# indistinguishable from a working one until a browser asks for a file
+# that changed.
+#
+# Usage:  scripts/campfire-e2e [options] [APP_PATH]
+#
+#   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
+#
+# Options:
+#   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
+#   --keep       Keep the temp emit and print its path.
+#   --reuse DIR  Skip transpiling; run against an emit prepared earlier.
+#   --port N     Serve on N (default: an OS-assigned free port).
+#   --headed     Run the browser visibly (debugging).
+#   --spec PAT   Only run specs matching PAT (passed to `playwright test`).
+#
+# Requires: cargo, ruby, the sqlite3 CLI, node, and the puma /
+# websocket-driver / nio4r gems. Playwright's chromium is installed on
+# demand into `e2e/campfire/node_modules`.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SPEC_DIR="$REPO_ROOT/e2e/campfire"
+
+APP="$HOME/git/once-campfire"
+OUT=""
+KEEP=0
+REUSE=""
+PORT=""
+HEADED=""
+SPEC=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)    OUT="$2"; KEEP=1; shift 2 ;;
+        --keep)   KEEP=1;   shift ;;
+        --reuse)  REUSE="$2"; shift 2 ;;
+        --port)   PORT="$2"; shift 2 ;;
+        --headed) HEADED="--headed"; shift ;;
+        --spec)   SPEC="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//;$d'; exit 0 ;;
+        -*)       echo "unknown flag: $1" >&2; exit 2 ;;
+        *)        APP="$1"; shift ;;
+    esac
+done
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
+fail() { printf '\033[1;31m%s\033[0m\n' "$1"; exit 1; }
+
+command -v sqlite3 >/dev/null || fail "campfire-e2e: needs the sqlite3 CLI"
+command -v node    >/dev/null || fail "campfire-e2e: needs node"
+
+SERVER_PID=""
+cleanup() {
+    # By PID, and only the one this script started.
+    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$OUT" && $KEEP -eq 0 && -z "$REUSE" ]]; then rm -rf "$OUT"; fi
+}
+trap cleanup EXIT INT TERM
+
+# ── emit ─────────────────────────────────────────────────────────────
+
+if [[ -n "$REUSE" ]]; then
+    OUT="$REUSE"
+    [[ -d "$OUT" ]] || fail "no such emit: $OUT"
+    step "reusing emit at $OUT"
+else
+    [[ -d "$APP" ]] || fail "campfire-e2e: no app at $APP"
+    [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-e2e.XXXXXX)"
+    step "transpiling $APP → $OUT (target: ruby)"
+    # `roundhouse -o` does not wipe, and a stale file from an older emit
+    # outlives the run that wrote it. Always start clean.
+    rm -rf "$OUT"
+    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    echo "  emit diagnostics: $OUT.log"
+
+    step "building static assets (make assets)"
+    # The whole point of the harness: a browser asks for every one of
+    # these, and nothing else in the repo does.
+    (cd "$OUT" && make assets) >"$OUT/assets.log" 2>&1 \
+        || { tail -20 "$OUT/assets.log"; fail "make assets failed"; }
+    echo "  $(find "$OUT/static" -type f | wc -l | tr -d ' ') files under static/"
+
+    step "preparing storage/development.sqlite3 (schema only)"
+    mkdir -p "$OUT/storage"
+    rm -f "$OUT/storage/development.sqlite3"
+    sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
+fi
+
+# Same job posture as the cable walk, and for the same reason: this
+# runtime runs `perform_later` INLINE, so campfire's
+# `after_create_commit -> { room.receive(self) }` reaches
+# `Room::PushMessageJob` inside the request and dies on
+# `Net::HTTP::Persistent` — a ledgered web-push gap standing in front of
+# a page render it has nothing to do with. Holding jobs is also the
+# closer of the two to Rails, which enqueues and lets a worker run it.
+if ! grep -q "enqueue_without_running" "$OUT/config.ru"; then
+    step "holding background jobs (see scripts/campfire-cable-walk's header)"
+    python3 - "$OUT/config.ru" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+marker = "Main.configure_default_adapter!"
+assert marker in s, "config.ru has no adapter marker to splice after"
+s = s.replace(marker, marker + "\n\n# Spliced by scripts/campfire-e2e.\nActiveJob.enqueue_without_running", 1)
+open(p, "w").write(s)
+PY
+fi
+
+# ── boot ─────────────────────────────────────────────────────────────
+
+if [[ -z "$PORT" ]]; then
+    PORT="$(ruby -rsocket -e 's = TCPServer.new("127.0.0.1", 0); print s.addr[1]; s.close')"
+fi
+BASE="http://127.0.0.1:$PORT"
+
+step "starting the emit on :$PORT"
+LOG="$OUT/e2e-server.log"
+(
+  cd "$OUT"
+  RAILS_ENV=development \
+  SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
+  exec ruby -S puma -p "$PORT" config.ru
+) >"$LOG" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 60); do
+    curl -fsS -o /dev/null "$BASE/first_run" 2>/dev/null && break
+    kill -0 "$SERVER_PID" 2>/dev/null || { cat "$LOG"; fail "the server exited during boot"; }
+    sleep 0.5
+done
+curl -fsS -o /dev/null "$BASE/first_run" 2>/dev/null \
+    || { tail -30 "$LOG"; fail "the server never answered /first_run"; }
+echo "  up (log: $LOG)"
+
+# ── the account ──────────────────────────────────────────────────────
+#
+# Through the app's OWN first-run flow rather than by INSERTing rows:
+# `User#grant_membership_to_open_rooms` is an `after_create_commit` that
+# gives the first user their rooms, and a seeded row would skip it and
+# leave `/rooms/1` unreachable for reasons that have nothing to do with
+# the page. It is also the only "seed data" campfire needs — the reason
+# this harness ships no fixture of its own.
+E2E_EMAIL="e2e@example.com"
+E2E_PASSWORD="secret123456"
+E2E_NAME="E2E Walker"
+
+if [[ "$(curl -fsS -o /dev/null -w '%{http_code}' "$BASE/first_run")" == "200" ]]; then
+    step "completing /first_run as $E2E_EMAIL"
+    code=$(curl -fsS -o /dev/null -w '%{http_code}' -X POST "$BASE/first_run" \
+        --data-urlencode "user[name]=$E2E_NAME" \
+        --data-urlencode "user[email_address]=$E2E_EMAIL" \
+        --data-urlencode "user[password]=$E2E_PASSWORD" || true)
+    [[ "$code" == "302" || "$code" == "200" ]] \
+        || { tail -30 "$LOG"; fail "POST /first_run answered $code"; }
+    echo "  account created (HTTP $code)"
+else
+    step "account already present — skipping /first_run"
+fi
+
+# ── playwright ───────────────────────────────────────────────────────
+
+step "installing the browser harness"
+(cd "$SPEC_DIR" && npm install --no-audit --no-fund --silent)
+(cd "$SPEC_DIR" && npx playwright install chromium >/dev/null)
+
+step "running the specs against $BASE"
+set +e
+(
+  cd "$SPEC_DIR"
+  CAMPFIRE_BASE_URL="$BASE" \
+  CAMPFIRE_EMAIL="$E2E_EMAIL" \
+  CAMPFIRE_PASSWORD="$E2E_PASSWORD" \
+  npx playwright test $HEADED ${SPEC:+"$SPEC"}
+)
+STATUS=$?
+set -e
+
+# A 500 in the emit reaches the browser as a failed navigation and the
+# spec reports a status code; the exception itself is in the server log.
+if [[ $STATUS -ne 0 ]]; then
+    step "server-side exceptions"
+    grep -iE "error|exception|Rack app" "$LOG" | tail -20 || echo "  (none logged)"
+fi
+
+[[ $KEEP -eq 1 ]] && echo && echo "emit retained at $OUT"
+exit $STATUS
