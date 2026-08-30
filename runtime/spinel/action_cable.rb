@@ -177,50 +177,162 @@ module ActionCable
 
   module Channel
     class Base
-      # The five methods the base itself owns. Each is reachable only
-      # from a subscription callback, and no subscription callback runs
-      # yet — see the header. They raise because the alternative is a
-      # `subscribed` that appears to succeed.
-      def stream_from(broadcasting)
-        raise NotImplementedError,
-              "ActionCable::Channel#stream_from: channel subscriptions are not " \
-              "dispatched yet (Turbo streams subscribe through Cable directly)"
+      # A channel is an ORDINARY OBJECT with no transport in it: it is
+      # built against a connection, `subscribed` runs, and the caller
+      # reads `streams` and `subscription_rejected?` back off it. The
+      # socket, the fd table and the fan-out live in `Cable`, which is
+      # what lets a channel's authorization decision be exercised
+      # without a server — the same split the CRuby overlay's
+      # `Cable::Dispatch` was designed around.
+      #
+      # These bodies used to raise ("subscriptions are not dispatched
+      # yet"), which was true and is the reason a green
+      # `presence_channel_test.rb` said nothing about this lane:
+      # Rails' `ActionCable::Channel::TestCase` builds the channel
+      # itself, so the suite never asked the runtime for one.
+
+      # `identifier` is the identifier JSON STRING exactly as the client
+      # sent it — every frame back to that client echoes it byte for
+      # byte, because the client keys its subscription table on it. A
+      # re-spelled identifier is a frame nobody claims.
+      def initialize(connection, identifier, params)
+        @connection = connection
+        @identifier = identifier
+        @params = params
+        @streams = []
+        @rejected = false
       end
 
+      def connection
+        @connection
+      end
+
+      def identifier
+        @identifier
+      end
+
+      def params
+        @params
+      end
+
+      # What `subscribed` asked for, in the order it asked. The CALLER
+      # registers these; nothing here touches the transport.
+      def streams
+        @streams
+      end
+
+      # The connection identifier campfire's seven channels all read.
+      # Spelled out rather than generated from `identified_by` for the
+      # reason `Connection::Base` gives below: one name is what
+      # `identified_by` has ever been given, and an accessor defined
+      # from a computed name is not statically resolvable.
+      #
+      # nil on a connection that carries no identity. A channel that
+      # needs a user then fails on nil, which is the honest outcome — an
+      # app whose channels need a user and whose connection does not
+      # identify one has a hole, and swallowing it here would hide the
+      # hole rather than the error.
+      def current_user
+        if @connection.nil?
+          return nil
+        end
+        @connection.current_user
+      end
+
+      def stream_from(broadcasting)
+        @streams << broadcasting.to_s
+        nil
+      end
+
+      # `broadcasting_for` is spelled ONCE, on the class, because
+      # `stream_for` subscribes to that name and `broadcast_to`
+      # publishes on it: two spellings would be a subscription nobody
+      # ever reaches, and only the browser would notice.
       def stream_for(record)
-        raise NotImplementedError,
-              "ActionCable::Channel#stream_for: channel subscriptions are not " \
-              "dispatched yet (Turbo streams subscribe through Cable directly)"
+        stream_from(self.class.broadcasting_for(record))
       end
 
       # The PUBLISH half of the channel API — `broadcast_to @room,
       # action: :start` in campfire's TypingNotificationsChannel.
-      # `ActionCable.server.broadcast` works, so it is fair to ask why
-      # this raises: because the stream it would publish to is
-      # `broadcasting_for(record)`, and the only thing that ever
-      # subscribes to that name is `stream_for` — which raises three
-      # methods up. Nothing is listening, so a publish here is the
-      # silent-success failure, not a working broadcast.
       #
-      # Reachable only from an inbound channel action, and inbound
-      # actions are not dispatched either (`Cable.handle_message` acts
-      # on `subscribe` and returns 0 for everything else).
+      # IMPLEMENTED NOW, and the reason is that `stream_for` above
+      # subscribes to the SAME name. It used to raise on the grounds
+      # that nothing was listening on `broadcasting_for(record)`, which
+      # was true while `stream_for` raised too; leaving the raise in
+      # once the subscribe half works would be a false claim about the
+      # runtime rather than a recorded gap.
+      #
+      # Still UNREACHABLE, for a different reason: the only two call
+      # sites are `TypingNotificationsChannel#start` and `#stop`, which
+      # are inbound channel ACTIONS, and `Cable.handle_message` acts on
+      # `subscribe` alone. That is #71 item 6, deliberately outside the
+      # MVP — so this is correct-and-unreachable rather than a stub, and
+      # nothing has to change here when an action is first routed.
       def broadcast_to(record, message)
-        raise NotImplementedError,
-              "ActionCable::Channel#broadcast_to: channel subscriptions are not " \
-              "dispatched yet, so `broadcasting_for(record)` has no subscribers"
+        ActionCable.server.broadcast(self.class.broadcasting_for(record), message)
       end
 
+      # A rejection is recorded, not raised. The caller turns it into
+      # the `reject_subscription` frame Action Cable's client expects,
+      # and a raise here would be indistinguishable from a channel that
+      # crashed.
       def reject
-        raise NotImplementedError,
-              "ActionCable::Channel#reject: channel subscriptions are not " \
-              "dispatched yet, so there is nothing to reject"
+        @rejected = true
+        nil
       end
 
-      def params
-        raise NotImplementedError,
-              "ActionCable::Channel#params: no subscription frame is bound to " \
-              "this channel — subscriptions are not dispatched yet"
+      def subscription_rejected?
+        @rejected
+      end
+
+      # `RoomChannel` -> `"room"`; `Turbo::StreamsChannel` ->
+      # `"turbo:streams"`. actioncable 8.0:
+      #
+      #   name.sub(/Channel$/, "").gsub("::", ":").underscore
+      #
+      # NO MEMO. The overlay caches this in a class ivar; a class-level
+      # `||=` is not a shape this lane should lean on, and the string is
+      # short.
+      def self.channel_name
+        Base.underscore(Base.strip_channel_suffix(name).gsub("::", ":"))
+      end
+
+      def self.strip_channel_suffix(text)
+        if text.length > 7 && text[text.length - 7, 7] == "Channel"
+          return text[0, text.length - 7]
+        end
+        text
+      end
+
+      # actioncable's `serialize_broadcasting` asks the record for
+      # `to_gid_param` and falls back to `to_param`; every lowered model
+      # is given a `to_gid_param` (see `lower::broadcasts`), so there is
+      # nothing to fall back FROM and no `respond_to?` here.
+      def self.broadcasting_for(record)
+        channel_name + ":" + record.to_gid_param
+      end
+
+      # Class names only — `RoomsChannel` shapes, never a path or a word
+      # with digits. activesupport's `underscore` also swaps "::" for
+      # "/" and strips inflector acronyms; the caller has already
+      # replaced "::" and no channel name in the corpus carries an
+      # acronym, so this is the CamelCase-to-snake_case half alone.
+      def self.underscore(text)
+        out = String.new
+        i = 0
+        while i < text.length
+          c = text[i]
+          if c >= "A" && c <= "Z"
+            if i != 0 && out[out.length - 1] != "_" && out[out.length - 1] != ":"
+              out << "_"
+            end
+            out << c.downcase
+          else
+            out << c
+          end
+          i = i + 1
+        end
+        out
       end
     end
   end
