@@ -1319,9 +1319,19 @@ and its comment states the reason — "authorizing room messages only in
 `RoomMessagesChannel` would leave the stock channel as a way around it:
 same signed stream name, no membership check." On spinel that prepend is
 now EMITTED (the constant exists) and still never reached, because
-nothing routes a subscribe frame to a channel. Identity landing does not
-move this: `connect` running gives the guard a user to test against, and
-the guard is still not in any path.
+nothing routes a subscribe frame to a channel.
+
+**The prepend is now IN THE SPINEL BINARY'S LOOKUP CHAIN**, where it used
+to be a commented-out line in `boot.rb`: spinel refused
+`X.prepend Y` through an explicit receiver, and the class-reopen form its
+own diagnostic recommended compiled and did nothing. Fixed upstream in
+matz/spinel `a7b6f726`, so `apply_module_mixins` emits the reopen for
+that target rather than a comment. It changes no behaviour YET, and that
+is the point of saying so here: the guard is installed and unreachable,
+because `handle_message` still never builds a channel to run
+`subscribed` on. Identity does not move this either — `connect` running
+gives the guard a user to test against, and the guard is still not in any
+path.
 
 The name is not a secret either: it is a GlobalID
 (`GlobalID::Locator.locate gid_param, only: Room`), an identifier rather
