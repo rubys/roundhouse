@@ -34,6 +34,13 @@
 #   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
 #
 # Options:
+#   --spinel     Drive the SPINEL BINARY instead of the ruby lane: emit
+#                for `--target spinel`, `make build`, and run
+#                `build/blog`. Same drive script, same probes — the
+#                driver takes a base URL and knows nothing about which
+#                runtime answers it, which is what makes the two lanes
+#                comparable. Slower (a whole-program C compile) and it
+#                needs `spinel` on PATH.
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
 #   --reuse DIR  Skip transpiling; run against an emit prepared earlier.
@@ -51,6 +58,7 @@ OUT=""
 KEEP=0
 REUSE=""
 PORT=""
+LANE=ruby
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,7 +66,8 @@ while [[ $# -gt 0 ]]; do
         --keep)  KEEP=1;   shift ;;
         --reuse) REUSE="$2"; shift 2 ;;
         --port)  PORT="$2"; shift 2 ;;
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        --spinel) LANE=spinel; shift ;;
+        -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
         *)       APP="$1"; shift ;;
     esac
 done
@@ -83,29 +92,42 @@ if [[ -n "$REUSE" ]]; then
     step "reusing emit at $OUT"
 else
     [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-cable.XXXXXX)"
-    step "transpiling $APP → $OUT (target: ruby)"
+    step "transpiling $APP → $OUT (target: $LANE)"
+    # `rm -rf` FIRST, and it matters most on the spinel lane: `-o` does
+    # not wipe, and spinel writes `main.rbs` into the tree during a
+    # build. A stale one from an older compiler is picked up by `--rbs`
+    # and surfaces as duplicate symbols at link, nowhere near the cause.
     rm -rf "$OUT"
     # `--allow-unsupported` for the same reason the suite uses it:
     # campfire is a ledger app, and the point is to run what DOES work.
     (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+        --target "$LANE" "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
-    step "preparing storage/development.sqlite3 from db/seed.sql"
-    mkdir -p "$OUT/storage"
-    rm -f "$OUT/storage/development.sqlite3"
-    sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
+    if [[ "$LANE" == ruby ]]; then
+        step "preparing storage/development.sqlite3 from db/seed.sql"
+        mkdir -p "$OUT/storage"
+        rm -f "$OUT/storage/development.sqlite3"
+        sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
+    fi
+    # The spinel binary creates and migrates its own database at the
+    # path `BLOG_DB` names, so there is no seed step for it — the drive
+    # signs up through `/first_run` either way.
 fi
 
 # The job posture, spliced once and printed so the run says what it did.
-if ! grep -q "enqueue_without_running" "$OUT/config.ru"; then
+# Both lanes splice after the SAME marker; they differ only in which
+# file boots the app (`config.ru` under Puma, `main.rb` in the binary).
+BOOT_FILE="$OUT/config.ru"
+[[ "$LANE" == spinel ]] && BOOT_FILE="$OUT/main.rb"
+if ! grep -q "enqueue_without_running" "$BOOT_FILE"; then
     step "holding background jobs (see this script's header)"
-    python3 - "$OUT/config.ru" <<'PY'
+    python3 - "$BOOT_FILE" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
 marker = "Main.configure_default_adapter!"
-assert marker in s, "config.ru has no adapter marker to splice after"
+assert marker in s, f"{p} has no adapter marker to splice after"
 s = s.replace(marker, marker + """
 
 # Spliced by scripts/campfire-cable-walk. `perform_later` runs INLINE in
@@ -122,15 +144,33 @@ if [[ -z "$PORT" ]]; then
     PORT="$(ruby -rsocket -e 's = TCPServer.new("127.0.0.1", 0); print s.addr[1]; s.close')"
 fi
 
-step "starting the emit on :$PORT"
 LOG="$OUT/cable-walk-server.log"
-(
-  cd "$OUT"
-  RAILS_ENV=development \
-  SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
-  exec ruby -S puma -p "$PORT" config.ru
-) >"$LOG" 2>&1 &
-SERVER_PID=$!
+
+if [[ "$LANE" == spinel ]]; then
+    step "building the binary (whole-program C compile — minutes, not seconds)"
+    (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \
+        || { tail -30 "$OUT/build.log"; fail "the spinel build failed"; }
+    # `make` reports a failed build correctly; do NOT pipe it through
+    # `tail` to check, which reports the PIPE's status instead.
+    ERRS=$(grep -cE "error:" "$OUT/build.log" || true)
+    echo "  built (log: $OUT/build.log, error: lines: $ERRS)"
+
+    step "starting the binary on :$PORT"
+    (
+      cd "$OUT"
+      BLOG_DB="$OUT/storage/walk.sqlite3" PORT="$PORT" exec ./build/blog
+    ) >"$LOG" 2>&1 &
+    SERVER_PID=$!
+else
+    step "starting the emit on :$PORT"
+    (
+      cd "$OUT"
+      RAILS_ENV=development \
+      SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
+      exec ruby -S puma -p "$PORT" config.ru
+    ) >"$LOG" 2>&1 &
+    SERVER_PID=$!
+fi
 
 for _ in $(seq 1 60); do
     if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/first_run" 2>/dev/null; then break; fi
@@ -151,6 +191,14 @@ set -e
 if [[ $STATUS -ne 0 ]]; then
     step "server-side exceptions"
     grep -E "Rack app|Error|error" "$LOG" | tail -20 || echo "  (none logged)"
+    # A spinel binary has no per-request rescue: an unhandled error ends
+    # the PROCESS, and a probe that "just failed" may mean the server is
+    # gone. Say so, because the log looks identical either way.
+    if [[ "$LANE" == spinel ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        printf '\n\033[1;31m  the binary EXITED during the drive\033[0m — an unhandled\n'
+        printf '  error ends the process on this lane. macOS keeps a symbolized\n'
+        printf '  stack for a SIGSEGV in ~/Library/Logs/DiagnosticReports/blog-*.ips\n'
+    fi
 fi
 
 [[ $KEEP -eq 1 ]] && echo && echo "emit retained at $OUT"
