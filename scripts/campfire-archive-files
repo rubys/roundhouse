@@ -87,8 +87,20 @@ Turbo channel. Each spec names which of the walk's checks it stands for.
 
 - **Attachments and avatar variants** — no blob storage, no image
   processor. The attachment test fixtures are stripped (they were 50 MB).
-- **Web push** — VAPID needs EC keys that the spinel crypto surface does
-  not expose yet.
+  User avatars currently answer 500 (a \`to_param\` gap in the
+  transpiler's runtime, ledgered), so pages show broken avatar images.
+- **Web push.** Every message you post will print
+
+  \`\`\`
+  [job] a queued job raised: uninitialized constant ThreadPoolExecutor
+  \`\`\`
+
+  on stderr: campfire enqueues a web-push delivery job per message, and
+  the job dies at its thread-pool constructor because the delivery
+  machinery (a keep-alive HTTP client and a \`Concurrent\` thread pool)
+  is not modeled. The job is dropped; the message itself is unaffected —
+  it was already broadcast to the room before the job ran. Expected
+  output, not a crash.
 - **The native test binaries.** The emitted \`test/\` sources ship, but
   \`spin test\` is not wired into this README: several test programs do not
   compile or do not pass today, and a \`## Test\` section that is red is a
