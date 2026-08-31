@@ -56,10 +56,23 @@
 //! Attributes that are not a literal Hash — campfire's `tag.time
 //! **attributes, datetime: …` desugars to a `merge` chain — cannot be
 //! walked at compile time. Those fall back to the runtime
-//! `ActionView::ViewHelpers.content_tag`, which is ruby-family only, and
-//! are ledgered. The fallback is what makes the pass TOTAL: every
-//! `tag.<name>` site becomes something that runs, which is the whole
-//! point when the alternative is an unbound `tag`.
+//! `ActionView::ViewHelpers.content_tag`, and are ledgered. The fallback
+//! is what makes the pass TOTAL: every `tag.<name>` site becomes
+//! something that runs, which is the whole point when the alternative is
+//! an unbound `tag`.
+//!
+//! That example was aspirational until 2026-08-31: the fallback's guard
+//! required `args.len() > 1`, and a call whose arguments are ENTIRELY
+//! keywords has exactly one — so the lone merge chain was read as the
+//! tag's CONTENT and stringified into its body. Every `<time>` campfire
+//! rendered came out as `<time>{datetime: "…", data: {…}}</time>`. See
+//! `is_kwsplat_merge_chain`.
+//!
+//! `content_tag` is not ruby-family only, despite what this note used to
+//! claim: it and `render_attrs` are in the emitted spinel tree too
+//! (`runtime/action_view/view_helpers.rb`, with `.rbs` signatures), which
+//! is what makes the fallback a real answer on a strict target rather
+//! than a deferred failure.
 //!
 //! ## Also here: `turbo_frame_tag`
 //!
@@ -291,7 +304,7 @@ fn rewrite(
 
     // Split the arguments Rails' way: a trailing Hash is the attributes,
     // anything before it is the content.
-    let (content, opts): (Option<Expr>, Option<Vec<(Expr, Expr)>>) = match args.last() {
+    let (mut content, opts): (Option<Expr>, Option<Vec<(Expr, Expr)>>) = match args.last() {
         Some(last) => match &*last.node {
             ExprNode::Hash { entries, .. } => {
                 (args[..args.len() - 1].first().cloned(), Some(entries.clone()))
@@ -300,9 +313,31 @@ fn rewrite(
         },
         None => (None, None),
     };
+
+    // A LONE computed hash is ATTRIBUTES, and the split above cannot see
+    // it. `ingest::expr` desugars a double splat into the `merge` chain it
+    // is defined to be, and says so: "A merge chain is a `Send`, not a
+    // `Hash`, so it loses the `kwargs` flag and renders as a positional
+    // hash argument." The arm above therefore reads the sole argument as
+    // the tag's CONTENT and stringifies the attributes into its body:
+    //
+    //     tag.time **attributes, datetime: …, data: { local_time_target: style }
+    //  => <time>{datetime: "2026-08-31T00:38:06Z", data: {local_time_target: :date}}</time>
+    //
+    // That is what EVERY `<time>` campfire renders looked like — the day
+    // separator on every message and every permalink timestamp — behind a
+    // 200 and a green suite, because no gate reads the attributes of a tag.
+    // `computed_attrs` did not catch it: it required `args.len() > 1`, and
+    // a call whose arguments are entirely keywords has exactly one.
+    let lone_computed_attrs =
+        args.len() == 1 && opts.is_none() && is_kwsplat_merge_chain(&args[0]);
+    if lone_computed_attrs {
+        content = None;
+    }
+
     // A non-Hash trailing argument that isn't the only argument means the
     // attributes are a computed expression (the `**attrs` merge chain).
-    let computed_attrs = args.len() > 1 && opts.is_none();
+    let computed_attrs = opts.is_none() && (args.len() > 1 || lone_computed_attrs);
     let block = block.clone();
 
     if computed_attrs {
@@ -836,7 +871,45 @@ fn content_tag_fallback(
     if let Some(opts) = opts {
         args.push(opts);
     }
-    html_safe(view_helpers_call("content_tag", args), span)
+    let mut built = html_safe(view_helpers_call("content_tag", args), span);
+    // QUALIFY HERE, not at the call sites. `view_helpers_call` builds a bare
+    // `ViewHelpers.<m>`, and the emitted tree defines the module only as
+    // `ActionView::ViewHelpers` — there is no top-level alias. The inline
+    // path qualifies its own result (six `qualify_view_helpers(&mut built)`
+    // calls), but every fallback `return`s before reaching them.
+    //
+    // That was latent until a lone `**splat` first routed here: campfire's
+    // `local_datetime_tag` emitted `ViewHelpers.content_tag(…)`, which
+    // raises NameError — and `MessagesHelper#message_tag` wraps its body in
+    // campfire's own `rescue Exception`, so the raise became an EMPTY
+    // string and the message silently vanished from the page. That read as
+    // `expected "#message_13" in response body`: two files, five tests, and
+    // no mention of the constant anywhere in the failure.
+    qualify_view_helpers(&mut built);
+    built
+}
+
+/// The shape a double splat leaves behind: `head.merge({ … })`, chained
+/// left-to-right, one link per splat boundary (`ingest::expr`).
+///
+/// Matched STRUCTURALLY rather than by asking whether the expression is
+/// hash-typed, because this pass runs before that question has an answer
+/// for a `**rest` parameter — the merge's head is the bare parameter, and
+/// its type is whatever the caller passed.
+///
+/// Deliberately narrow: the receiver may be anything (it is the splatted
+/// parameter), but the argument must be a Hash LITERAL, which is what the
+/// desugar always builds. A hand-written `foo.merge(bar)` in a tag call
+/// does not match, and keeps its old meaning.
+fn is_kwsplat_merge_chain(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "merge" && args.len() == 1 =>
+        {
+            matches!(&*args[0].node, ExprNode::Hash { .. }) || is_kwsplat_merge_chain(recv)
+        }
+        _ => false,
+    }
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
@@ -877,6 +950,71 @@ mod tests {
 
     fn set(names: &[&str]) -> std::collections::HashSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn hash(entries: Vec<(&str, Expr)>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: entries.into_iter().map(|(k, v)| (sym(k), v)).collect(),
+                kwargs: false,
+            },
+        )
+    }
+
+    fn send(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn lvar(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    /// The campfire site this exists for. `TimeHelper#local_datetime_tag`
+    /// is `tag.time **attributes, datetime: …, data: { local_time_target: style }`,
+    /// and the double splat leaves a `merge` chain — ONE argument, and a
+    /// `Send` rather than a `Hash`. Read as content, it stringified the
+    /// attribute hash into the tag's body, so every `<time>` campfire
+    /// rendered came out as
+    /// `<time>{datetime: "…", data: {local_time_target: :date}}</time>`:
+    /// the day separator on every message, and every permalink timestamp.
+    #[test]
+    fn a_lone_kwsplat_merge_chain_is_attributes_not_content() {
+        let chain = send(lvar("attributes"), "merge", vec![hash(vec![("datetime", sym("iso"))])]);
+        assert!(
+            is_kwsplat_merge_chain(&chain),
+            "`attributes.merge({{…}})` is the shape ingest leaves a double splat in"
+        );
+    }
+
+    /// Chained splats (`**a, k: 1, **b`) nest the merges, so the check has
+    /// to walk the receiver rather than only inspecting the outermost call.
+    #[test]
+    fn a_nested_merge_chain_is_still_attributes() {
+        let inner = send(lvar("a"), "merge", vec![hash(vec![("k", sym("v"))])]);
+        let outer = send(inner, "merge", vec![lvar("b")]);
+        assert!(is_kwsplat_merge_chain(&outer));
+    }
+
+    /// Narrow on purpose: a hand-written `merge` whose argument is not a
+    /// hash literal is not the desugar's shape, and keeps its old meaning
+    /// rather than being silently promoted to attributes.
+    #[test]
+    fn a_plain_merge_of_two_variables_is_not_the_desugar() {
+        let call = send(lvar("a"), "merge", vec![lvar("b")]);
+        assert!(!is_kwsplat_merge_chain(&call));
     }
 
     /// The campfire site this exists for: `link_to [ :edit, @room ]` in

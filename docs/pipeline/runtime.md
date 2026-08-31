@@ -2069,7 +2069,54 @@ two RAW sockets that upgrade to WebSockets immediately and move to the
 poll reactor; it never has two clients holding idle HTTP keep-alive
 connections. It takes a browser — two of them.
 
-### The broadcast-rendered message row carries no body
+### A `tag.<el>` whose arguments are all keywords rendered its attributes as TEXT — FIXED
+
+**FIXED 2026-08-31.** `tag.time **attributes, datetime: …, data: { … }`
+rendered as
+
+```html
+<time>{datetime: "2026-08-31T00:38:06Z", data: {local_time_target: :date}}</time>
+```
+
+— the attribute hash stringified into the tag's BODY. `ingest::expr`
+desugars a double splat into the `merge` chain it is defined to be, which
+is a `Send` rather than a `Hash`; `tag_builder`'s content/attributes split
+therefore read the sole argument as CONTENT. The guard meant to catch
+this required `args.len() > 1`, and a call whose arguments are entirely
+keywords has exactly one. Now:
+
+```html
+<time datetime="2026-08-31T00:45:43Z" data-local-time-target="date"></time>
+```
+
+Not campfire-specific: it hit every `tag.<el>` call with a `**splat` and
+no positional content.
+
+**A CORRECTION TO WHAT THIS ENTRY USED TO SAY.** It claimed the
+broadcast-rendered row "carries no body", on the strength of a browser
+observation. Measured directly over HTTP, the server render **does**
+contain the body — `message__body` markup and the posted text are both
+present, before and after this fix. The two render paths do not disagree:
+what looked like a direct render in the browser was campfire's own
+CLIENT-side optimistic echo (`app/views/messages/_template.rb`, the
+`$messageDatetime$` template), which is why its element carried a
+client-generated id. Why tab B's DOM did not display a body that is in
+the HTML it received is UNEXPLAINED and still open; it needs re-measuring
+now that the `<time>` defect is gone.
+
+**A near-miss worth keeping.** The first version of the fix routed to the
+`content_tag` fallback, which `return`s before the inline path's
+`qualify_view_helpers` — so it emitted a bare `ViewHelpers.content_tag`.
+The emitted tree defines only `ActionView::ViewHelpers`. On the SPINEL
+binary that resolved and rendered correctly; on CRuby it raised
+`NameError` inside `MessagesHelper#message_tag`, whose body campfire
+wraps in `rescue Exception`, so every message became `""` and vanished.
+The suite reported `expected "#message_13" in response body` — five
+tests, two files, no mention of a constant. **The AOT target was the
+PERMISSIVE lane here and the interpreted one caught it**, which inverts
+the usual assumption. Qualification now happens inside
+`content_tag_fallback`, so every fallback path is covered.
+
 
 A message posted in one browser tab reaches a second tab's DOM and is
 inserted — and arrives EMPTY. The two render paths disagree about the
@@ -2113,3 +2160,43 @@ downstream of the bytes it checked.
 
 Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
 and the keep-alive serialization entry above are closed.
+### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
+
+Narrowed, not solved. Two browser tabs, one room; tab A posts. Tab B's
+socket receives `<turbo-stream action="append" target="messages_room_1">`,
+the row is inserted (`<div id="message_1" class="message …">` with the
+author and the message-options control), and the body text is not
+displayed.
+
+**What was ruled out on 2026-08-31.** The server render is not at fault:
+requested directly over HTTP with `Accept: text/vnd.turbo-stream.html`,
+the same `Views::Messages.message(message)` returns `message__body`
+markup containing the posted text. Both the broadcast
+(`Message::Broadcasts#broadcast_create`) and the controller response
+(`app/views/messages/create.rb`) call that one function with one
+argument, so there is no second render path to disagree with the first.
+
+**What an earlier version of this entry got wrong.** It read tab A as a
+server render that worked and tab B as a broadcast render that dropped
+the body. Tab A's row carried a CLIENT-generated id
+(`message_lk96p3l27rr`) because it was campfire's own optimistic echo
+from `app/views/messages/_template.rb` — the `$messageDatetime$`
+template — not a server render at all. The comparison was between a
+server render and a JavaScript one.
+
+**Also fixed since, and possibly relevant:** every `<time>` in that row
+used to render its attribute hash as text (see the `tag.<el>` entry
+above). That is closed now, and this needs re-measuring on top of it
+before any further theory — a malformed `<time>` in appended content is
+the kind of thing that can affect what a client does with the rest.
+
+**Why the cable walk does not see it.**
+`scripts/campfire-cable-drive.rb` asserts `html.include?(BODY)` against
+the raw frame — it reads the wire, not the DOM, and never renders. Same
+shape as [[project_campfire_empty_message_bodies]]'s lesson ("an
+emptiness test must not go through a renderer") from the opposite
+direction: a wire test cannot see a client that fails to display bytes
+it received intact.
+
+Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
+and the keep-alive serialization entry are closed.
