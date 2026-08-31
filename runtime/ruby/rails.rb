@@ -106,6 +106,17 @@ module Rails
     Logger.new
   end
 
+  # The Logger's one write path, hoisted to module level so the bare
+  # `warn` resolves to Kernel#warn — inside the Logger class itself a
+  # bare `warn` would hit `Logger#warn` (self wins the lookup), which
+  # for that method is infinite recursion and for the others a double
+  # prefix. (`Kernel.warn` spelled with its receiver is not in the
+  # runtime typing gate's registry; the bare call is, and it is the
+  # same spelling the `[job]` drain in active_job.rb uses.)
+  def self.log_line(line)
+    warn(line)
+  end
+
   def self.application
     Application.new
   end
@@ -216,9 +227,10 @@ module Rails
   # easier; the request path still doesn't DEPEND on log output, but
   # the operator does.
   #
-  # stderr, not stdout, matching `Tep.log_dispatch_error`: the access
-  # banner owns stdout, and a report interleaved into it is the thing
-  # you grep past. Severity is spelled out because the streams mix; the
+  # stderr via `warn` (through `Rails.log_line`, see its note), not
+  # stdout, matching the `[job]` drain beside it (`active_job.rb`): the
+  # access banner owns stdout, and a report interleaved into it is the
+  # thing you grep past. Severity is spelled out because the streams mix; the
   # `[rails]` tag sits beside `[tep]` and `[job]`. `debug` stays
   # silent — Rails' dev default is debug-visible, but a compiled demo
   # binary is closer to production, whose default is info.
@@ -229,21 +241,21 @@ module Rails
   # optional block is its own hazard on the strict targets.
   class Logger
     def info(message)
-      $stderr.puts("[rails] INFO " + message.to_s)
+      Rails.log_line("[rails] INFO " + message.to_s)
     end
 
     def error(message)
-      $stderr.puts("[rails] ERROR " + message.to_s)
+      Rails.log_line("[rails] ERROR " + message.to_s)
     end
 
     def warn(message)
-      $stderr.puts("[rails] WARN " + message.to_s)
+      Rails.log_line("[rails] WARN " + message.to_s)
     end
 
     def debug(message); end
 
     def fatal(message)
-      $stderr.puts("[rails] FATAL " + message.to_s)
+      Rails.log_line("[rails] FATAL " + message.to_s)
     end
   end
 

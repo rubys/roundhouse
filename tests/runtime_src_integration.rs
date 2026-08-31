@@ -1163,7 +1163,17 @@ fn every_runtime_method_body_concretely_typed() {
     // BINARY. Unqualified, `form_with` in `FormsHelper` was a bare name
     // nothing defines: spinel dropped the helper's whole body and the
     // linker failed on the caller's reference to the vanished symbol.
-    const CEILING: usize = 341;
+    //
+    // 341 -> 345: `Rails.logger` stopped being a no-op. FOUR sites, one
+    // per printing severity (info/error/warn/fatal — debug stays
+    // silent), each the `message` parameter read inside `message.to_s`.
+    // The parameter is `untyped` because that is the logger's actual
+    // contract — Ruby's Logger takes any object — and narrowing it to
+    // String would make the honest caller the illegal one. What the
+    // sites bought: every `Rails.logger.error` an app writes inside a
+    // `rescue` is now visible on stderr, instead of the operator
+    // splicing a reporter into the emitted tree to learn what raised.
+    const CEILING: usize = 345;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

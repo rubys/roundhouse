@@ -8,6 +8,7 @@ module Rails
   def self.public_path: () -> AppPath
   def self.cache: () -> Cache
   def self.logger: () -> Logger
+  def self.log_line: (String line) -> void
   def self.application: () -> Application
 
   class AppPath
