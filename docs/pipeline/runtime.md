@@ -2218,6 +2218,61 @@ are both outside that subset. A literal keyword list is unaffected —
 `local_datetime_tag ts, style: :date` is `lower::helper_kwargs`' case and
 still splices by name, which is why the two passes run in that order.
 
+### The spinel binary WEDGES after a queued job raises — OPEN
+
+**Found 2026-08-31**, and it blocks the cable walk and the browser
+milestone on the spinel lane. Introduced with the in-process job queue
+(`3aed469c`), not by anything since.
+
+Before any job runs, the binary is healthy:
+
+```
+$ curl -o /dev/null -w '%{http_code} %{time_total}s' http://127.0.0.1:59444/
+302 0.000974s          # and 0.0% CPU at idle
+```
+
+After one queued job raises, it serves nothing at all:
+
+```
+[tep 0.8.1-vendored] listening on http://0.0.0.0:59273 (workers=1)
+[job] a queued job raised: uninitialized constant ThreadPoolExecutor
+        ← no further output, ever
+```
+
+`sample(1)` puts 100% of the main thread in `sp_Scheduled_s_run_worker`
+— `Tep::Server::Scheduled.run_worker`'s `while alive_count > 0;
+tick(1000); end` — and `curl` against the bound port times out. Observed
+twice, independently: the cable walk's binary (spun 53 minutes, 13 past
+its own `timeout 2400`, until reaped by hand) and the archive's binary
+under `scripts/smoke campfire`, whose log has ZERO `[WebServer]` lines
+after the raise.
+
+**A THEORY, not a diagnosis.** `Scheduler.tick` marks the fiber it is
+about to resume with `sched_wake_at[best] = -1`, and its readiness test
+is `sched_wake_at[i] <= now`. Since `-1 <= now` is always true, a fiber
+that yields WITHOUT re-arming its wake time is permanently ready:
+`any_time_ready` then forces `poll_round(0)`, which never blocks, and the
+loop spins while starving the accept fiber. The `-1` hazard is known and
+already guarded at both ordinary yield points — `pause` re-arms, and
+`io_wait` says so explicitly ("-1 would mean 'ready now' to the tick
+picker, so use a far-future wake_at as the sentinel"). So the suspect is
+a third path that reaches `Fiber.yield` without re-arming, on or near the
+`Db.with_connection { ActiveJob.drain }` line in the scaffold's
+`job_loop`. `ActiveJob.drain` itself is not obviously at fault: it
+rescues `StandardError`, `NameError` is one, and the log line proves the
+rescue ran.
+
+**Why no existing gate sees it.** The ruby lane holds jobs
+(`enqueue_without_running`) and runs under Puma, so neither
+`campfire-suite` nor `scripts/campfire-e2e` ever drains a raising job on
+this server. `scripts/smoke campfire` DOES hit it, and stays green,
+because the only spec that posts a message is `test.fixme`.
+
+**`ThreadPoolExecutor` is the trigger, not the bug.** It is
+concurrent-ruby (campfire's suite also wants `Concurrent::CyclicBarrier`).
+Any raising job wedges the server the same way; a missing constant is
+merely the one this app reaches first.
+
 ### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
 
 Narrowed, not solved. Two browser tabs, one room; tab A posts. Tab B's
@@ -2242,11 +2297,23 @@ from `app/views/messages/_template.rb` — the `$messageDatetime$`
 template — not a server render at all. The comparison was between a
 server render and a JavaScript one.
 
-**Also fixed since, and possibly relevant:** every `<time>` in that row
-used to render its attribute hash as text (see the `tag.<el>` entry
-above). That is closed now, and this needs re-measuring on top of it
-before any further theory — a malformed `<time>` in appended content is
-the kind of thing that can affect what a client does with the rest.
+**Re-measured 2026-08-31, after both `<time>` defects closed.** On the
+RUBY lane the milestone now PASSES outright — `cable.spec.js`,
+un-`fixme`d, is green in 1.2s with the body displayed in both tabs. On
+the SPINEL lane it still fails, with the row present and the body
+absent. The two lanes emit BYTE-IDENTICAL helper source
+(`TimeHelper.local_datetime_tag(message.created_at, :time, attributes)`
+in both), so whatever remains is downstream of the shared lowering — in
+the spinel target's emit, its runtime, or Tep — and NOT the tag-builder
+family.
+
+That measurement is not yet conclusive, because the spinel run also
+wedges (see the entry above): the job raises moments after the post, so
+"tab B never received it" and "tab B received it without a body" are not
+yet distinguishable on that lane. The row IS present, which argues the
+broadcast arrived before the wedge — but the walk, which would settle it
+by reading the frame, cannot complete on the spinel lane until the wedge
+is fixed. **Fix the wedge first; this entry is blocked behind it.**
 
 **Why the cable walk does not see it.**
 `scripts/campfire-cable-drive.rb` asserts `html.include?(BODY)` against
