@@ -2128,7 +2128,57 @@ the usual assumption. Qualification now happens inside
 `content_tag_fallback`, so every fallback path is covered.
 
 
-### An HTML message body renders as nothing: the safe-list sanitizer is a raising façade behind a `rescue Exception`
+### An HTML message body renders as nothing: the safe-list sanitizer is a raising façade behind a `rescue Exception` — FIXED, twice over
+
+**FIXED 2026-08-31, in two acts, verified in a browser** (e2e/campfire
+4/4 including the two-tab live-message milestone; smoke floor raised
+3 → 4 in the same commit).
+
+**Act one: the safe-list sanitizer is PORTED, not raising.**
+`ActionView::ViewHelpers.sanitize` / `sanitize_allowing` are now a real
+scanner-based safe-list sanitizer in the shared runtime — the gem's own
+rule tables (rails-html-sanitizer 1.7.1 / loofah 2.25.2: default tags
+and attributes, URI attributes, the 27 allowed protocols, data-URI
+mediatypes, and loofah's `allowed_uri?` decode-strip-downcase pipeline
+step for step). MEASURED: byte-identical with the gem on 75 of 81
+corpus probes (`tests/shared_sanitize.rb`); the six divergences are
+declared policies, every one more-escaped or more-blocked than the gem,
+never less:
+
+* entities in text and in kept attribute values stay as written rather
+  than being decoded and re-serialized (same policy `strip_tags`
+  ledgers; identical rendering);
+* no HTML5 tree reconstruction on malformed nesting — source tag order
+  is kept, still-open tags close at end of input, a close nothing
+  opened is dropped;
+* a numeric reference to a C1 control in a URL (`jav&#x85;ascript:`) is
+  decoded, stripped and therefore BLOCKED, where the gem's parser
+  remaps it to its Windows-1252 character first and allows it.
+
+The refusal that remains, narrowed to where it is honest: an allow-list
+naming a rawtext/foreign/template container, or the `style` attribute
+(the CSS sanitizer), raises `NotImplementedError`. No corpus caller
+does either. The CRuby overlay keeps binding the real gem.
+
+**Act two: `h()` must not escape the chain's product.** With the raise
+gone, the body rendered as its own ESCAPED source: campfire's
+`Filter.apply` wraps every filter product in
+`ActionText::Content.new(...)`, whose `to_s` is born html-safe in Rails
+— and neither lane carries that mark at runtime, so
+`h(ContentFilters::TextMessagePresentationFilters.apply(...))` escaped
+the sanitized markup on BOTH lanes (the overlay's gem sanitizer answers
+a plain String too; invisible until now because every gate posted
+plain text). The chain's type is not inferable (`*splat` of class
+objects into a `reduce`), but its construction is statically visible,
+so `lower::html_safe` now collects constants initialized
+`ActionText::Content::Filters.new(...)` and rewrites
+`h(<chain>.apply(x))` → `<chain>.apply(x).to_s` — the escape exemption
+decided at the call-site rewrite layer, where every other exemption in
+this runtime is decided, and one rewrite fixes both lanes.
+
+The original entry follows, for the mechanism and the measurements.
+
+### The original entry: what a browser found
 
 A message posted in one browser tab reaches a second tab's DOM and is
 inserted — and arrives EMPTY. The two render paths disagree about the
@@ -2203,9 +2253,9 @@ is the same shape as [[project_campfire_empty_message_bodies]]'s lesson
 opposite direction: a wire test cannot see a renderer that drops content
 downstream of the bytes it checked.
 
-Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until
-this entry closes (the truncation entry above, its former co-gate, is
-closed).
+Tracked by `e2e/campfire/cable.spec.js` — `test.fixme` while this was
+open, an executing milestone spec (and a smoke-floor increment) since
+it closed.
 ### A forwarded `**` bundle bound the OPTIONAL KEYWORD beside it — FIXED
 
 **FIXED 2026-08-31.** The other half of the `<time>` defect above, and

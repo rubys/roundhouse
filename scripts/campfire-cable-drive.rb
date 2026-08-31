@@ -227,6 +227,34 @@ if frame
   check("the frame echoes the subscription identifier", frame["identifier"], identifier)
 end
 
+# ── an HTML body, which is what Trix actually posts ───────────────────
+#
+# Every probe above posts PLAIN TEXT, and that blindness cost a day:
+# the safe-list sanitizer raised on any body containing markup,
+# campfire's `rescue Exception` rendered it as "", and 13/13 here
+# coexisted with a chat app that could not display a composer-typed
+# message (Trix wraps everything in `<div>`). Two fixes later —
+# the sanitizer port, and the `h()` escape-exemption for the filter
+# chain's `ActionText::Content` — this probe is what keeps both honest,
+# at the wire, on whichever lane runs this script. The allow-listed
+# `<strong>` must arrive AS MARKUP (not `&lt;strong&gt;`), and the
+# `<script>` must arrive stripped to its text.
+puts "\n\e[1;34m==>\e[0m post an HTML body, which must render as markup"
+before2 = a.payloads.size
+req("POST", "/rooms/1/messages",
+    { "message[body]" => "<div>rich <strong>bold</strong> <script>alert(1)</script></div>",
+      "message[client_message_id]" => "cable-walk-2" },
+    accept: "text/vnd.turbo-stream.html, text/html")
+check("connection A receives the HTML-bodied broadcast", received?(a, before2), true)
+frame2 = a.payloads.drop(before2).find { |m| m["message"].to_s.include?("turbo-stream") }
+if frame2
+  html2 = frame2["message"].to_s
+  check("the markup survives sanitizing un-escaped",
+        html2.include?("rich <strong>bold</strong>"), true)
+  check("the script tag does not",
+        html2.include?("<script>") || html2.include?("&lt;script&gt;"), false)
+end
+
 puts
 unless LEDGER_FAILURES.empty?
   puts "\e[33m#{LEDGER_FAILURES.length} known gap(s) on the way past:\e[0m " \

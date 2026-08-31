@@ -58,22 +58,17 @@ const BODY = 'hello from the cable spec'
 // pointing at the cleanup line — which says nothing about what was slow.
 test.setTimeout(90_000)
 
-// FIXME, NOT SKIP, and the distinction is the point: this spec is
-// CORRECT and the app is wrong. One defect remains, ledgered in
-// docs/pipeline/runtime.md § An HTML message body renders as nothing:
-// `sanitize_allowing` is a raising façade on this target, campfire's
-// `rescue Exception` turns the raise into "", and Trix always submits
-// HTML — so every composer-posted message body renders empty, on the
-// page and in the frame alike. (The spec's other original blocker, the
-// ~30s second-client stall, closed 2026-08-31 — it was a truncated
-// /account/logo response, not a serializing server.)
-//
-// `test.fixme` runs nothing and Playwright reports it as
-// expected-broken; when the sanitizer entry closes, delete this marker
-// and the suite gains its fourth test — and raise the scripts/smoke
-// campfire floor 3 -> 4 in the same commit. Do NOT convert this to
-// `test.skip` — skip says "not applicable here", which is false.
-test.fixme('a message posted in one tab arrives live in another', async ({ browser }) => {
+// THE MILESTONE, ACTIVE. This spec spent its first day as `test.fixme`
+// over two defects it found itself: a ~30s second-client stall (a
+// truncated /account/logo response the browser waited out — closed
+// 2026-08-31) and the empty message body (the safe-list sanitizer was
+// a raising façade behind campfire's `rescue Exception`, and Trix
+// always submits HTML — closed the same day, twice: the sanitizer
+// port, then the `h()` escape-exemption for the filter chain's
+// product). The scripts/smoke campfire floor rose 3 -> 4 with this
+// marker's removal; if this spec ever stops executing, that floor is
+// what notices.
+test('a message posted in one tab arrives live in another', async ({ browser }) => {
   // Two independent contexts, not two pages in one — separate cookie
   // jars and separate cable connections, which is what "a second
   // connection" means in the milestone. Two pages in one context can

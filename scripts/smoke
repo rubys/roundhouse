@@ -241,12 +241,11 @@ case "$TARGET" in
         # browser. Counted in TESTS rather than in binaries, because the
         # count comes from Playwright, not `spin test`.
         #
-        # THREE, not four: the two-tab live-message milestone is
-        # `test.fixme` while the two defects it found are open (see
-        # docs/pipeline/runtime.md), so it does not execute. Raise this to
-        # 4 in the same commit that removes that marker — a floor that
+        # FOUR: assets, client boot, the stream-name guard, and the
+        # two-tab live-message milestone — un-fixme'd when its last
+        # blocker (the raising safe-list sanitizer) closed. A floor that
         # trails the suite is how a lost test goes unnoticed.
-        MIN_TESTS=3 ;;
+        MIN_TESTS=4 ;;
     go)
         # `go test ./...` reports "ok <pkg>" / "? <pkg> [no test files]"
         # with no count at any verbosity we drive. `ran` asserts at least
