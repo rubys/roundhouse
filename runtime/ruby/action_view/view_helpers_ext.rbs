@@ -21,6 +21,29 @@ module ActionView
     def self.strip_tags: (String html) -> String
     def self.sanitize: (String html) -> String
     def self.sanitize_allowing: (String html, Array[String] tags, Array[String] attributes) -> String
+    # The safe-list engine and its ported rule tables.
+    def self.sanitize_engine: (String s, Array[String] tags, Array[String] attributes) -> String
+    def self.sanitize_default_tags: () -> Array[String]
+    def self.sanitize_default_attributes: () -> Array[String]
+    def self.sanitize_uri_attributes: () -> Array[String]
+    def self.sanitize_allowed_protocols: () -> Array[String]
+    def self.sanitize_data_mediatypes: () -> Array[String]
+    def self.sanitize_void_elements: () -> Array[String]
+    def self.sanitize_rawtext_elements: () -> Array[String]
+    def self.sanitize_unservable_tags: () -> Array[String]
+    def self.sanitize_space?: (String c) -> bool
+    def self.sanitize_tag_name: (String raw) -> String
+    def self.sanitize_foreign_end: (String s, Integer from, String name) -> Integer
+    def self.sanitize_rawtext_close_at: (String s, Integer from, String name) -> Integer
+    def self.sanitize_open_tag: (String name, String raw, Array[String] attrs) -> String
+    def self.sanitize_blank_value?: (String value) -> bool
+    def self.sanitize_text: (String t) -> String
+    def self.sanitize_attr_value: (String value) -> String
+    def self.sanitize_uri_allowed?: (String value) -> bool
+    def self.sanitize_uri_separator_length: (String t, Integer i) -> Integer
+    def self.sanitize_uri_strip: (String value) -> String
+    def self.sanitize_uri_decode: (String value, bool first_pass) -> String
+    def self.sanitize_codepoint_char: (Integer cp) -> String?
     def self.tag_open_at?: (String s, Integer i) -> bool
     def self.tag_end_index: (String s, Integer i) -> Integer?
     def self.entity_reference_length: (String s, Integer i) -> Integer

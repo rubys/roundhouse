@@ -90,4 +90,125 @@ class ViewHelpersExtTest < Minitest::Test
     err = assert_raises(RuntimeError) { ViewHelpers.concat("x") }
     assert_match(/concat outside capture/, err.message)
   end
+
+  # ── the safe-list sanitizer ─────────────────────────────────────────
+  #
+  # The full gem-parity corpus lives in `tests/shared_sanitize.rb`
+  # (CRuby, measured against rails-html-sanitizer 1.7.1). What runs
+  # HERE is the strict-lane pricing set: one probe per code path, so a
+  # typer or codegen regression in any branch fails a test that spinel
+  # actually executes. Every expectation below is the gem's own answer
+  # unless the comment says otherwise.
+
+  # The demo path: what Trix posts is what must survive.
+  def test_sanitize_allowing_keeps_a_trix_body
+    assert_equal "<div>hello <strong>bold</strong><br>next</div>",
+                 ViewHelpers.sanitize_allowing(
+                   "<div>hello <strong>bold</strong><br>next</div>",
+                   ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # Attribute scrub: allowed names stay in source order, the rest go,
+  # names are downcased, values re-quoted double.
+  def test_sanitize_allowing_scrubs_attributes
+    assert_equal %(<div class="a b">t</div>),
+                 ViewHelpers.sanitize_allowing(
+                   %(<div class="a b" id="x" onclick="alert(1)">t</div>),
+                   ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal %(<a href="HTTPS://X.CO" class="c">up</a>),
+                 ViewHelpers.sanitize_allowing(
+                   %(<a HREF="HTTPS://X.CO" CLASS='c'>up</a>),
+                   ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # The protocol check, in its plain and entity-encoded spellings. The
+  # encoded colon and encoded scheme letter are the attack forms the
+  # two-pass decode exists for.
+  def test_sanitize_allowing_drops_unsafe_protocols
+    assert_equal "<a>j</a>",
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="javascript:alert(1)">j</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "<a>j</a>",
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="javascript&#58alert(1)">j</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "<a>j</a>",
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="&#106;avascript:x">j</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "<a>j</a>",
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href=" javascript:alert(1)">j</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  def test_sanitize_allowing_keeps_safe_urls
+    assert_equal %(<a href="https://example.com/x">l</a>),
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="https://example.com/x">l</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal %(<a href="/relative#frag">l</a>),
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="/relative#frag">l</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal %(<a href="mailto:x@y.z">l</a>),
+                 ViewHelpers.sanitize_allowing(
+                   %(<a href="mailto:x@y.z">l</a>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # A disallowed ordinary element strips to its children; a rawtext
+  # container's content is character data and comes out escaped.
+  def test_sanitize_allowing_strips_disallowed_elements
+    assert_equal "go",
+                 ViewHelpers.sanitize_allowing(
+                   %(<form action="/x"><button>go</button></form>), ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "alert(1)",
+                 ViewHelpers.sanitize_allowing(
+                   "<script>alert(1)</script>", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "&lt;b&gt;hi&lt;/b&gt;",
+                 ViewHelpers.sanitize_allowing(
+                   "<script><b>hi</b></script>", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # Foreign content is pruned whole — children, text and all.
+  def test_sanitize_allowing_prunes_foreign_content
+    assert_equal "tail",
+                 ViewHelpers.sanitize_allowing(
+                   "<svg><script>alert(1)</script></svg>tail", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # The open stack: unclosed tags are closed at end of input, a close
+  # nothing opened is dropped — both the gem's own answers.
+  def test_sanitize_allowing_balances_tags
+    assert_equal "<b>unclosed</b>",
+                 ViewHelpers.sanitize_allowing("<b>unclosed", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "stray close",
+                 ViewHelpers.sanitize_allowing("</b>stray close", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # Entity POLICY divergence, deliberate and ledgered: well-formed
+  # references stay as written (the gem decodes; identical rendering),
+  # a bare `&` is escaped as the gem escapes it.
+  def test_sanitize_allowing_entity_policy
+    assert_equal "caf&eacute; <b>bold</b>",
+                 ViewHelpers.sanitize_allowing(
+                   "caf&eacute; <b>bold</b>", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+    assert_equal "a &amp; b",
+                 ViewHelpers.sanitize_allowing("a & b", ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # `sanitize` is the same engine on the gem's default tables — `img`
+  # is in those tables and campfire's list excludes it, which is the
+  # observable difference.
+  def test_sanitize_uses_the_default_tables
+    assert_equal %(<img src="x.png">),
+                 ViewHelpers.sanitize(%(<img src="x.png" onerror="alert(1)">))
+    assert_equal "tagless stays", ViewHelpers.sanitize("tagless stays")
+  end
+
+  # The honest boundary that remains: an allow-list naming a rawtext or
+  # foreign container is refused, as is the style attribute.
+  def test_sanitize_allowing_refuses_unservable_lists
+    assert_raises(NotImplementedError) do
+      ViewHelpers.sanitize_allowing("<p>x</p>", ["p", "script"], ["class"])
+    end
+    assert_raises(NotImplementedError) do
+      ViewHelpers.sanitize_allowing("<p>x</p>", ["p"], ["class", "style"])
+    end
+  end
 end

@@ -332,35 +332,57 @@ module ActionView
       out
     end
 
-    # Rails' `sanitize` — the SAFE-LIST sanitizer, which keeps an
-    # allow-listed subset of markup (`b`, `a href`, `img src`, …) and
-    # drops the rest while keeping its text.
+    # Rails' `sanitize` — the SAFE-LIST sanitizer, PORTED as a scanner
+    # so every target compiles it. Until 2026-08-31 both entry points
+    # below refused input containing markup, on the argument that a
+    # scanner diverges from HTML5 tree construction exactly on malformed
+    # input, which is what an attacker sends. That argument confused two
+    # different obligations. FIDELITY to the gem does degrade on
+    # malformed input, and the divergences are ledgered below. SAFETY
+    # does not: this scanner never emits a tag it did not itself
+    # serialize from the allow-list, never emits an attribute value it
+    # did not itself quote and escape, and prunes what it cannot
+    # classify — so its failure direction is more-escaped, not
+    # less-sanitized. Meanwhile the refusal had a measured cost: every
+    # Trix-composed campfire message body is HTML, the raise landed in
+    # campfire's own `rescue Exception`, and every message rendered as
+    # `""` — the chat app could not display a chat message.
     #
-    # NOT IMPLEMENTED for input that contains markup, DELIBERATELY. The
-    # allow-list is a rule table (42 tags, 13 attributes, a per-attribute
-    # URL-protocol list, and CSS sanitizing behind `style`), and the two
-    # ways to fake it are both wrong in a way nobody would see: dropping
-    # every tag silently discards markup the caller asked to keep, and
-    # keeping every tag is a cross-site-scripting hole. A helper named
-    # `sanitize` is the last place to guess.
+    # MEASURED against `Rails::HTML5::SafeListSanitizer`
+    # (rails-html-sanitizer 1.7.1, loofah 2.25.2, the versions campfire
+    # locks): `tests/shared_sanitize.rb` runs the probe corpus; on
+    # well-formed input the two agree byte for byte. The known
+    # divergences, each visible there:
     #
-    # What IS implemented is the case the corpus actually has. campfire's
-    # `Opengraph::Metadata#sanitize_fields` writes
-    # `sanitize(strip_tags(title))` — by construction there is no markup
-    # left by the time `sanitize` sees it, and on tagless input Rails'
-    # safe-list sanitizer is the identity (measured, same gem version).
-    # So that call site is exactly right, and any other one raises with
-    # its own name in the message instead of returning something
-    # plausible.
+    #   * Tree construction. The gem parses and re-serializes, so it
+    #     closes unclosed tags mid-document, splits mis-nested inline
+    #     tags (`<b>a<p>b</b>c` → `<b>a</b><p><b>b</b>c</p>`), and
+    #     re-homes a `</p>` whose `<p>` was auto-closed. This scanner
+    #     keeps the source's own tag order, closing anything still open
+    #     at end of input and dropping a close that nothing opened —
+    #     the same answers on the simple malformed shapes, different
+    #     (but well-formed, and drawn from the same allow-list) nesting
+    #     on the pathological ones.
+    #   * Entities in TEXT are kept as written, not decoded — the same
+    #     policy `strip_tags` above ledgers (`&eacute;` here, `é`
+    #     there; identical rendering). Likewise inside kept attribute
+    #     values: the gem re-serializes `href="http&#58;//x"` as
+    #     `href="http://x"`; this scanner keeps the reference. The URI
+    #     PROTOCOL CHECK decodes first either way (below), so what is
+    #     kept versus dropped agrees — only the kept bytes differ.
+    #
+    # And one refusal that remains, narrowed to where it is honest: an
+    # allow-list that names a RAWTEXT container (`script`, `style`,
+    # `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes`,
+    # `plaintext`), foreign content (`svg`, `math`), or `template`
+    # raises — parsing INSIDE those is a different grammar and serving
+    # it wrong is a mutation-XSS vector — as does allowing the `style`
+    # ATTRIBUTE, whose value wants the CSS sanitizer. No caller in the
+    # corpus asks for any of them; Rails itself deletes `mglyph` and
+    # `malignmark` from caller lists (namespace confusion), which this
+    # port does too, silently, as the gem does.
     def self.sanitize(html)
-      s = html.to_s
-      if s.include?("<")
-        raise NotImplementedError,
-              "ActionView::ViewHelpers.sanitize: the safe-list sanitizer is not " \
-              "modelled; only tagless input (what `sanitize(strip_tags(x))` " \
-              "produces) is served — see runtime/ruby/action_view/view_helpers_ext.rb"
-      end
-      s
+      sanitize_engine(html.to_s, sanitize_default_tags, sanitize_default_attributes)
     end
 
     # The same sanitizer with the CALLER's allow-lists, which is the form
@@ -368,23 +390,605 @@ module ActionView
     # attributes:)`. Separate entry point rather than an optional
     # argument on `sanitize` above, because that one's arity is fixed
     # across every target and an omitted optional parameter is its own
-    # hazard on the strict ones.
-    #
-    # Same honesty and the same limit: tagless input passes, markup
-    # raises. `tags` and `attributes` are accepted and unused HERE — the
-    # overlay's override is where they mean something, because that is
-    # where a real safe-list sanitizer exists to be given them. Naming
-    # them in this signature is what lets the one call site be written
-    # once for both lanes.
+    # hazard on the strict ones. campfire reaches this for EVERY message
+    # body: `ContentFilters::SanitizeAttributes` passes the same tag
+    # list its `SanitizeTags` filter already enforced, plus the gem's
+    # default attributes, `ActionText::Attachment::ATTRIBUTES`, and
+    # `class`.
     def self.sanitize_allowing(html, tags, attributes)
-      s = html.to_s
-      if s.include?("<")
-        raise NotImplementedError,
-              "ActionView::ViewHelpers.sanitize_allowing: the safe-list sanitizer " \
-              "is not modelled on this target; only tagless input is served — see " \
-              "runtime/ruby/action_view/view_helpers_ext.rb"
+      sanitize_engine(html.to_s, tags, attributes)
+    end
+
+    # ── the safe-list engine and its rule tables ─────────────────────
+    #
+    # Every table below is PORTED from the gems named above, not
+    # derived. Defs rather than module constants: a module-const
+    # receiver reads as an unresolved class in the strict typer (same
+    # reason `sanitize_to_id` spells its alphabet inline), and the
+    # house pattern for a string-list table is a def returning a
+    # literal (`ActionText::SafeListSanitizer.allowed_attributes`).
+
+    # Rails::HTML5::SafeListSanitizer.allowed_tags, 1.7.1.
+    def self.sanitize_default_tags
+      ["a", "abbr", "acronym", "address", "b", "big", "blockquote",
+       "br", "cite", "code", "dd", "del", "dfn", "div", "dl", "dt",
+       "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img",
+       "ins", "kbd", "li", "mark", "ol", "p", "pre", "samp", "small",
+       "span", "strong", "sub", "sup", "time", "tt", "ul", "var"]
+    end
+
+    # Rails::HTML5::SafeListSanitizer.allowed_attributes, 1.7.1.
+    def self.sanitize_default_attributes
+      ["abbr", "alt", "cite", "class", "datetime", "height", "href",
+       "lang", "name", "src", "title", "width", "xml:lang"]
+    end
+
+    # Loofah::HTML5::SafeList::ATTR_VAL_IS_URI — the attributes whose
+    # value gets the protocol check.
+    def self.sanitize_uri_attributes
+      ["action", "cite", "href", "longdesc", "poster", "preload",
+       "src", "xlink:href", "xml:base"]
+    end
+
+    # Loofah::HTML5::SafeList::ALLOWED_PROTOCOLS.
+    def self.sanitize_allowed_protocols
+      ["afs", "aim", "callto", "data", "ed2k", "fax", "ftp", "gopher",
+       "http", "https", "irc", "line", "mailto", "modem", "news",
+       "nntp", "rsync", "rtsp", "sftp", "sms", "ssh", "tag", "tel",
+       "telnet", "urn", "webcal", "xmpp"]
+    end
+
+    # Loofah::HTML5::SafeList::ALLOWED_URI_DATA_MEDIATYPES.
+    def self.sanitize_data_mediatypes
+      ["image/gif", "image/jpeg", "image/png", "text/css", "text/plain"]
+    end
+
+    # Loofah::HTML5::SafeList::VOID_ELEMENTS — serialized with no close
+    # tag, never pushed on the open stack.
+    def self.sanitize_void_elements
+      ["area", "br", "hr", "img", "input"]
+    end
+
+    # HTML5 RAWTEXT / escapable-rawtext containers: their content is
+    # character data to the parser, so when one is DISALLOWED its
+    # content is emitted as escaped text (measured: the gem answers
+    # "&lt;b&gt;x&lt;/b&gt;" for "<iframe><b>x</b></iframe>").
+    # `noscript` is deliberately absent — with scripting off, which is
+    # how the gem's parser runs, its children parse as markup.
+    def self.sanitize_rawtext_elements
+      ["iframe", "noembed", "noframes", "plaintext", "script", "style",
+       "textarea", "title", "xmp"]
+    end
+
+    # Allow-list entries this port refuses to serve (see the header).
+    def self.sanitize_unservable_tags
+      sanitize_rawtext_elements + ["svg", "math", "template"]
+    end
+
+    def self.sanitize_space?(c)
+      c != "" && " \t\n\r\f".include?(c)
+    end
+
+    # The element name opening `raw` (tag innards, no angle brackets),
+    # downcased: letters up to the first space, slash or end.
+    def self.sanitize_tag_name(raw)
+      i = 0
+      n = raw.length
+      while i < n
+        c = raw[i, 1].to_s
+        break if sanitize_space?(c) || c == "/"
+        i = i + 1
       end
-      s
+      raw[0, i].to_s.downcase
+    end
+
+    def self.sanitize_engine(s, tags, attributes)
+      allowed = [""]
+      allowed.pop
+      ti = 0
+      while ti < tags.length
+        t = tags[ti].to_s.downcase
+        if sanitize_unservable_tags.include?(t)
+          raise NotImplementedError,
+                "ActionView::ViewHelpers.sanitize: allowing <" + t + "> is not " \
+                "served — rawtext, foreign and template content parse under a " \
+                "different grammar; see runtime/ruby/action_view/view_helpers_ext.rb"
+        end
+        if t != "" && t != "mglyph" && t != "malignmark" && !allowed.include?(t)
+          allowed.push(t)
+        end
+        ti = ti + 1
+      end
+      attrs = [""]
+      attrs.pop
+      ai = 0
+      while ai < attributes.length
+        a = attributes[ai].to_s.downcase
+        if a == "style"
+          raise NotImplementedError,
+                "ActionView::ViewHelpers.sanitize: the style attribute wants the " \
+                "CSS sanitizer, which is not modelled — see " \
+                "runtime/ruby/action_view/view_helpers_ext.rb"
+        end
+        attrs.push(a) if a != "" && !attrs.include?(a)
+        ai = ai + 1
+      end
+
+      open_stack = [""]
+      open_stack.pop
+      out = +""
+      i = 0
+      n = s.length
+      while i < n
+        c = s[i, 1].to_s
+        if c == "<"
+          if s[i, 4] == "<!--"
+            close = s.index("-->", i + 4)
+            i = close.nil? ? n : close + 3
+          elsif tag_open_at?(s, i)
+            after = tag_end_index(s, i)
+            if after.nil?
+              # Unterminated tag swallows the remainder, as in strip_tags.
+              i = n
+            else
+              raw = s[i + 1, after - i - 2].to_s
+              if raw[0, 1].to_s == "/"
+                name = sanitize_tag_name(raw[1, raw.length - 1].to_s)
+                if allowed.include?(name) && !sanitize_void_elements.include?(name) &&
+                   open_stack.include?(name)
+                  # Close everything opened above it too, so the output
+                  # stays well-formed when the input interleaved tags.
+                  # A close that nothing opened falls through and is
+                  # dropped, which is the gem's answer as well.
+                  while open_stack.length > 0
+                    top = open_stack.pop.to_s
+                    out = out + "</" + top + ">"
+                    break if top == name
+                  end
+                end
+                i = after
+              else
+                name = sanitize_tag_name(raw)
+                if name == "svg" || name == "math"
+                  # Foreign content is PRUNED whole — children, text and
+                  # all — matching the gem's namespace rule. A
+                  # self-closing root (`<svg/>`) contains nothing.
+                  if raw[raw.length - 1, 1].to_s == "/"
+                    i = after
+                  else
+                    i = sanitize_foreign_end(s, after, name)
+                  end
+                elsif sanitize_rawtext_elements.include?(name)
+                  # Content up to the matching close is character data:
+                  # escape it like text. (These names cannot be in
+                  # `allowed` — the engine refused them above.)
+                  close_at = sanitize_rawtext_close_at(s, after, name)
+                  out = out + sanitize_text(s[after, close_at - after].to_s)
+                  if close_at >= n
+                    i = n
+                  else
+                    gt = s.index(">", close_at)
+                    i = gt.nil? ? n : gt + 1
+                  end
+                elsif allowed.include?(name)
+                  out = out + sanitize_open_tag(name, raw, attrs)
+                  open_stack.push(name) unless sanitize_void_elements.include?(name)
+                  i = after
+                else
+                  # Disallowed ordinary element: the tag goes, the
+                  # children flow — the gem's strip semantics.
+                  i = after
+                end
+              end
+            end
+          else
+            out = out + "&lt;"
+            i = i + 1
+          end
+        elsif c == ">"
+          out = out + "&gt;"
+          i = i + 1
+        elsif c == "&"
+          len = entity_reference_length(s, i)
+          if len == 0
+            out = out + "&amp;"
+            i = i + 1
+          else
+            out = out + s[i, len].to_s
+            i = i + len
+          end
+        else
+          out = out + c
+          i = i + 1
+        end
+      end
+      # Close anything the input left open, innermost first — measured:
+      # the gem answers "<b>unclosed</b>" for "<b>unclosed".
+      while open_stack.length > 0
+        out = out + "</" + open_stack.pop.to_s + ">"
+      end
+      out
+    end
+
+    # Index just past the subtree of a foreign element whose open tag
+    # ends at `from` — the position after the matching close tag's `>`,
+    # or end of input, which prunes the rest (conservative: unclosed
+    # foreign content never reaches the output).
+    def self.sanitize_foreign_end(s, from, name)
+      depth = 1
+      j = from
+      n = s.length
+      while j < n && depth > 0
+        lt = s.index("<", j)
+        return n if lt.nil?
+        if s[lt, 4] == "<!--"
+          close = s.index("-->", lt + 4)
+          j = close.nil? ? n : close + 3
+        elsif tag_open_at?(s, lt)
+          te = tag_end_index(s, lt)
+          return n if te.nil?
+          raw = s[lt + 1, te - lt - 2].to_s
+          if raw[0, 1].to_s == "/"
+            depth = depth - 1 if sanitize_tag_name(raw[1, raw.length - 1].to_s) == name
+          elsif sanitize_tag_name(raw) == name && raw[raw.length - 1, 1].to_s != "/"
+            depth = depth + 1
+          end
+          j = te
+        else
+          j = lt + 1
+        end
+      end
+      depth > 0 ? n : j
+    end
+
+    # Index of the `</name` (case-insensitive, followed by a delimiter)
+    # that ends a rawtext element's content, or end of input. HTML5 ends
+    # rawtext ONLY at its own close tag — nothing inside is markup.
+    def self.sanitize_rawtext_close_at(s, from, name)
+      j = from
+      n = s.length
+      while j < n
+        lt = s.index("</", j)
+        return n if lt.nil?
+        if s[lt + 2, name.length].to_s.downcase == name
+          d = s[lt + 2 + name.length, 1].to_s
+          return lt if d == "" || d == ">" || d == "/" || sanitize_space?(d)
+        end
+        j = lt + 2
+      end
+      n
+    end
+
+    # Serialize an allowed element's open tag: name downcased,
+    # attributes in source order, first spelling of a duplicate wins
+    # (the HTML5 parser's rule), only allow-listed names kept, URI
+    # values protocol-checked, a blank `src` dropped (the gem does),
+    # everything double-quoted with `"` and bare `&` escaped. `<` and
+    # `>` inside a value stay raw — measured against the gem, which
+    # serializes `title="a<b>c"` exactly so.
+    def self.sanitize_open_tag(name, raw, attrs)
+      out = "<" + name
+      seen = [""]
+      seen.pop
+      i = 0
+      n = raw.length
+      # Skip the tag name itself.
+      while i < n
+        c = raw[i, 1].to_s
+        break if sanitize_space?(c)
+        i = i + 1
+      end
+      while i < n
+        c = raw[i, 1].to_s
+        if sanitize_space?(c) || c == "/"
+          i = i + 1
+        else
+          astart = i
+          while i < n
+            c = raw[i, 1].to_s
+            break if sanitize_space?(c) || c == "="
+            i = i + 1
+          end
+          aname = raw[astart, i - astart].to_s.downcase
+          while i < n && sanitize_space?(raw[i, 1].to_s)
+            i = i + 1
+          end
+          value = ""
+          if raw[i, 1].to_s == "="
+            i = i + 1
+            while i < n && sanitize_space?(raw[i, 1].to_s)
+              i = i + 1
+            end
+            q = raw[i, 1].to_s
+            if q == "\"" || q == "'"
+              i = i + 1
+              vstart = i
+              while i < n && raw[i, 1].to_s != q
+                i = i + 1
+              end
+              value = raw[vstart, i - vstart].to_s
+              i = i + 1 if i < n
+            else
+              vstart = i
+              while i < n && !sanitize_space?(raw[i, 1].to_s)
+                i = i + 1
+              end
+              value = raw[vstart, i - vstart].to_s
+            end
+          end
+          if aname != "" && !seen.include?(aname)
+            seen.push(aname)
+            keep = attrs.include?(aname)
+            if keep && sanitize_uri_attributes.include?(aname)
+              keep = sanitize_uri_allowed?(value)
+            end
+            if keep && aname == "src" && sanitize_blank_value?(value)
+              keep = false
+            end
+            if keep
+              out = out + " " + aname + "=\"" + sanitize_attr_value(value) + "\""
+            end
+          end
+        end
+      end
+      out + ">"
+    end
+
+    def self.sanitize_blank_value?(value)
+      i = 0
+      n = value.length
+      while i < n
+        return false if value[i, 1].to_s.ord > 32
+        i = i + 1
+      end
+      true
+    end
+
+    # Text policy — identical to strip_tags's character branches, as a
+    # function so the rawtext branch can apply it to a whole slice.
+    def self.sanitize_text(t)
+      out = +""
+      i = 0
+      n = t.length
+      while i < n
+        c = t[i, 1].to_s
+        if c == "<"
+          out = out + "&lt;"
+          i = i + 1
+        elsif c == ">"
+          out = out + "&gt;"
+          i = i + 1
+        elsif c == "&"
+          len = entity_reference_length(t, i)
+          if len == 0
+            out = out + "&amp;"
+            i = i + 1
+          else
+            out = out + t[i, len].to_s
+            i = i + len
+          end
+        else
+          out = out + c
+          i = i + 1
+        end
+      end
+      out
+    end
+
+    # Attribute-value serialization: `"` becomes `&quot;`, a bare `&`
+    # becomes `&amp;`, a well-formed reference stays as written, `<`
+    # and `>` stay raw.
+    def self.sanitize_attr_value(value)
+      out = +""
+      i = 0
+      n = value.length
+      while i < n
+        c = value[i, 1].to_s
+        if c == "\""
+          out = out + "&quot;"
+          i = i + 1
+        elsif c == "&"
+          len = entity_reference_length(value, i)
+          if len == 0
+            out = out + "&amp;"
+            i = i + 1
+          else
+            out = out + value[i, len].to_s
+            i = i + len
+          end
+        else
+          out = out + c
+          i = i + 1
+        end
+      end
+      out
+    end
+
+    # ── the URI protocol check — Loofah::HTML5::Scrub.allowed_uri? ───
+    #
+    # Ported step for step, because every step is load-bearing: strip
+    # control characters (which includes SPACE — ` javascript:` is an
+    # attack), decode entities the way a browser would (twice, because
+    # `&amp;#58` needs two passes), strip again (decoding can mint new
+    # control characters), remove `&Tab;`/`&NewLine;`, fold `&colon;`,
+    # downcase, and only then ask whether what is left carries a scheme
+    # and whether that scheme is on the list. No scheme — a relative
+    # URL, an anchor — is allowed.
+    def self.sanitize_uri_allowed?(value)
+      t = sanitize_uri_strip(value)
+      t = sanitize_uri_decode(t, true)
+      t = sanitize_uri_decode(t, false)
+      t = sanitize_uri_strip(t)
+      t = t.gsub("&Tab;", "")
+      t = t.gsub("&NewLine;", "")
+      t = t.gsub("&colon;", ":")
+      t = t.downcase
+      n = t.length
+      c = t[0, 1].to_s
+      return true unless c != "" && "abcdefghijklmnopqrstuvwxyz".include?(c)
+      i = 1
+      while i < n
+        c = t[i, 1].to_s
+        break unless c != "" && "abcdefghijklmnopqrstuvwxyz0123456789+-.".include?(c)
+        i = i + 1
+      end
+      sep = sanitize_uri_separator_length(t, i)
+      return true if sep == 0
+      protocol = t[0, i].to_s
+      return false unless sanitize_allowed_protocols.include?(protocol)
+      if protocol == "data"
+        m = +""
+        j = i + sep
+        while j < n
+          c = t[j, 1].to_s
+          break if c == ";" || c == ","
+          m = m + c
+          j = j + 1
+        end
+        return sanitize_data_mediatypes.include?(m)
+      end
+      true
+    end
+
+    # Loofah's PROTOCOL_SEPARATOR: a literal colon or one of the
+    # encoded-colon spellings — `&#0*58`, `&#x0*3a`, `%3a`, `&#37;3a`
+    # (all case-insensitive; `t` arrives downcased). Returns the length
+    # matched at `i`, or 0.
+    def self.sanitize_uri_separator_length(t, i)
+      return 1 if t[i, 1].to_s == ":"
+      return 3 if t[i, 3] == "%3a"
+      if t[i, 2] == "&#"
+        return 7 if t[i + 2, 5] == "37;3a"
+        j = i + 2
+        if t[j, 1].to_s == "x"
+          j = j + 1
+          while t[j, 1].to_s == "0"
+            j = j + 1
+          end
+          return j + 2 - i if t[j, 2] == "3a"
+        else
+          while t[j, 1].to_s == "0"
+            j = j + 1
+          end
+          return j + 2 - i if t[j, 2] == "58"
+        end
+      end
+      0
+    end
+
+    # Loofah's CONTROL_CHARACTERS class: everything at or below space,
+    # DEL, the C1 range up through U+0101, and backtick.
+    def self.sanitize_uri_strip(value)
+      out = +""
+      i = 0
+      n = value.length
+      while i < n
+        c = value[i, 1].to_s
+        o = c.ord
+        unless o <= 32 || o == 127 || (o >= 128 && o <= 257) || c == "`"
+          out = out + c
+        end
+        i = i + 1
+      end
+      out
+    end
+
+    # Two decode passes, as Loofah runs them. The first is
+    # CGI.unescapeHTML's grammar: the five named references and numeric
+    # ones WITH their semicolon (hex marked by a lowercase `x` only).
+    # The second is numeric references with or without the semicolon,
+    # case-insensitive — the legacy browser behaviour attackers rely
+    # on. A reference whose codepoint is out of range or a surrogate
+    # stays as written (the gem keeps it); one that decodes to a
+    # character the strip pass would remove decodes to nothing; a
+    # printable ASCII codepoint decodes to itself; anything else
+    # becomes `?`, which can never extend a scheme, join a separator
+    # spelling, or complete a mediatype — the conservative direction.
+    def self.sanitize_uri_decode(value, first_pass)
+      out = +""
+      i = 0
+      n = value.length
+      while i < n
+        if value[i, 1].to_s != "&"
+          out = out + value[i, 1].to_s
+          i = i + 1
+        else
+          rep = ""
+          len = 0
+          if first_pass
+            if value[i, 5] == "&amp;"
+              rep = "&"
+              len = 5
+            elsif value[i, 4] == "&lt;"
+              rep = "<"
+              len = 4
+            elsif value[i, 4] == "&gt;"
+              rep = ">"
+              len = 4
+            elsif value[i, 6] == "&quot;"
+              rep = "\""
+              len = 6
+            elsif value[i, 6] == "&apos;"
+              rep = "'"
+              len = 6
+            end
+          end
+          if len == 0 && value[i + 1, 1].to_s == "#"
+            j = i + 2
+            hex = false
+            marker = value[j, 1].to_s
+            if marker == "x" || (!first_pass && marker == "X")
+              hex = true
+              j = j + 1
+            end
+            digits = hex ? "0123456789abcdefABCDEF" : "0123456789"
+            dstart = j
+            while j < n && digits.include?(value[j, 1].to_s) && value[j, 1].to_s != ""
+              j = j + 1
+            end
+            if j > dstart
+              semi = value[j, 1].to_s == ";"
+              if semi || !first_pass
+                dtext = value[dstart, j - dstart].to_s
+                k = 0
+                while k < dtext.length && dtext[k, 1].to_s == "0"
+                  k = k + 1
+                end
+                sig = dtext.length - k
+                if sig <= (hex ? 6 : 7)
+                  cp = dtext.to_i(hex ? 16 : 10)
+                  ch = sanitize_codepoint_char(cp)
+                  unless ch.nil?
+                    rep = ch
+                    len = (semi ? j + 1 : j) - i
+                  end
+                end
+              end
+            end
+          end
+          if len == 0
+            out = out + "&"
+            i = i + 1
+          else
+            out = out + rep
+            i = i + len
+          end
+        end
+      end
+      out
+    end
+
+    # What a decoded codepoint contributes to the string under check.
+    # nil = keep the reference as written (out of range / surrogate).
+    def self.sanitize_codepoint_char(cp)
+      return "" if cp <= 32 || cp == 127 || (cp >= 128 && cp <= 257)
+      if cp >= 33 && cp <= 126
+        ascii = "!\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        return ascii[cp - 33, 1].to_s
+      end
+      return nil if cp >= 55296 && cp <= 57343
+      return nil if cp > 1114111
+      "?"
     end
 
     # Does a tag start at `i` (where `s[i]` is "<")? HTML5 opens an
