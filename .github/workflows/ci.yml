@@ -702,6 +702,59 @@ jobs:
   # Cheap, unlike its lobsters sibling: `campfire-suite` runs the EMIT's
   # own tests, so it needs no Rails bundle and no mise-pinned ruby — just
   # cargo, ruby, the sqlite3 gem, and the sqlite3 CLI.
+  # campfire-compare: REAL Rails campfire vs the CRuby-emit lane — the
+  # only job that boots Rails campfire. Both lanes start from the same
+  # seeded rows and take the same cable walk (sign in through the real
+  # form, two sockets, a plain and an HTML-bodied message); what each
+  # lane's wire carried is then diffed: the room page (reported) and
+  # the TURBO-STREAM FRAMES over /cable (gated) — the piece no page
+  # compare can carry. Known divergences are forgiven BY NAME against
+  # docs/pipeline/runtime.md; anything new fails.
+  #
+  # CRuby lane only, deliberately: `--spinel` is expected red on
+  # frame_html.html until matz/spinel#4240 closes (SanitizeTags is
+  # inert on the binary — a builtin-named method lost through an
+  # untyped slot), and a job born red is a job nobody reads. Grow the
+  # spinel lane here when that issue closes.
+  campfire-compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis
+        ports: ['6379:6379']
+    env:
+      # The oracle's `bundle install` lands inside build/campfire-oracle
+      # so the prepared-tree cache carries the gems with it.
+      BUNDLE_PATH: vendor/bundle
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: Fetch pinned once-campfire
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Cache the prepared oracle
+        id: oracle
+        uses: actions/cache@v4
+        with:
+          path: build/campfire-oracle
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+      - name: Prepare the Rails oracle (cache miss)
+        if: steps.oracle.outputs.cache-hit != 'true'
+        run: scripts/campfire-oracle prepare --app /tmp/campfire
+      - name: Emit-lane + walk gems
+        # Onto the DEFAULT gem path, campfire-conformance's reasoning:
+        # the emit boots via bare `ruby -S puma` and the drive script
+        # via bare `ruby`, so a bundler-scoped install would not be seen.
+        run: gem install puma nio4r websocket-driver rack sqlite3 --no-document
+      - name: scripts/campfire-compare
+        run: scripts/campfire-compare /tmp/campfire
+
   campfire-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 45

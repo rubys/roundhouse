@@ -2446,3 +2446,76 @@ it received intact.
 
 Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
 and the keep-alive serialization entry are closed.
+
+### dom_id and STI
+
+`dom_id(record)` derives its prefix from the record's CLASS, and for an
+STI row that is the subclass: room 1 is a `Rooms::Open`, so Rails names
+the room page's message list `messages_rooms_open_1`. The emit's
+`dom_prefix` is synthesized per MODEL at lowering time and association
+reads hydrate the base class, so the same list is `messages_room_1`.
+Each lane is SELF-consistent — its broadcast frames target the element
+its own pages render, which is why every behavioral gate passes on both
+— but the DOMs differ, found by `scripts/campfire-compare` on its first
+run (2026-08-31). The fix wants STI-aware hydration or a type-column
+dispatch in `dom_prefix`; until then the comparator forgives exactly
+this rewrite, by name.
+
+### Broadcast row identity: client_message_id vs database id
+
+campfire's broadcast render keys every per-message dom id off
+`client_message_id` (`message_cable-walk-1`, and with it
+`edit_message_…`, `boosting_…`, `boosts_…`, `presentation_…`), so the
+sender's optimistic client-side echo — which minted that id — is
+RECONCILED when the frame arrives. The emit keys the same ids off the
+database id (`message_505`). Consequence beyond bytes: on the emit the
+sender's tab may hold both its echo and the appended row, since nothing
+shares an id to replace. Found by `scripts/campfire-compare`
+(2026-08-31); the browser milestone passes because `toContainText` is
+satisfied by either row. Fix belongs wherever the broadcast render
+resolves `dom_id` for an unsaved-id context; forgiven by name in the
+comparator until then.
+
+### Broadcast forms and CSRF
+
+A broadcast render has no session, and Rails' `form_with` omits the
+`authenticity_token` hidden input there (campfire's JS supplies
+`X-CSRF-Token` from the page meta on submit, so the forms still work).
+The emit renders the token input unconditionally. Functionally
+identical at submit time; a byte divergence in every boost form of
+every broadcast frame. Found by `scripts/campfire-compare`
+(2026-08-31); forgiven by name in the comparator.
+
+### `SanitizeTags` is inert on the spinel binary — matz/spinel#4240
+
+`ContentFilters::SanitizeTags#apply` is `fragment.replace(selector) {
+nil }`, and on the compiled binary that call NEVER REACHES
+`ActionText::Fragment#replace`: `replace` is a builtin-owned name, the
+fragment arrives through the filter chain's untyped slot, and spinel
+routes the call to the builtin's semantics on the wrong class
+(matz/spinel#4240, filed 2026-08-31 with a 20-line repro; the family of
+#4205/#4218). The scanner itself is fine — the same selector and input
+pass under the spinel test harness, where the receiver is typed
+(`test_replace_with_campfires_own_allow_list`).
+
+**Every probe instrumented on the way to this**: the selector was
+correct (427 chars), `parse_selector` called DIRECTLY answered kind=not
+with 44 exclusions, and `replace` entered for no caller — the
+before/after lengths were equal on every message since the day the tree
+first compiled. Plain-text bodies have nothing to strip, which is how a
+dead security filter coexisted with every green gate until
+`scripts/campfire-compare` diffed an HTML-bodied frame against Rails.
+
+**Security posture, stated precisely**: no unsafe markup shipped. The
+downstream safe-list sanitizer (`sanitize_allowing`, via
+`SanitizeAttributes`) enforces the same tag allow-list with strip
+semantics, so a `<script>` still cannot render — the divergence is that
+Rails' pipeline REMOVES a disallowed element's content (`replace { nil
+}` prunes children) where the binary keeps it as escaped text:
+`alert(1)` visible as text where Rails shows nothing. Defense-in-depth
+held; fidelity did not.
+
+`scripts/campfire-compare --spinel` is expected RED on
+`frame_html.html` until #4240 closes — deliberately not masked in the
+comparator: an open defect is not a written-down decision. The ruby
+lane gates green.

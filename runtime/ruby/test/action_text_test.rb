@@ -277,6 +277,23 @@ class ActionTextFragmentTest < Minitest::Test
     assert_equal "<div>ab</div>", fragment.replace(":not(div)") { nil }.to_s
   end
 
+
+  # campfire's own allow-list, at full width — 45 `:not` segments — over
+  # the exact body `scripts/campfire-compare` first posted. Pinned
+  # because the day that comparator ran, the binary kept `alert(1)`:
+  # NOT this scanner's fault (this test passes under the spinel harness
+  # too), but matz/spinel#4240 — `replace` is a builtin-owned name, and
+  # through the filter chain's UNTYPED slot the call runs the builtin's
+  # semantics instead of this method. A green run here plus a red
+  # campfire-compare --spinel is that dispatch bug, not a scanner one.
+  def test_replace_with_campfires_own_allow_list
+    allowed = %w[ a abbr acronym address b big blockquote br cite code dd del dfn div dl dt em h1 h2 h3 h4 h5 h6 hr i ins kbd li ol
+      p pre samp small span strong sub sup time tt ul var ] + [ "action-text-attachment", "figure", "figcaption" ]
+    sel = allowed.map { |tag| ":not(#{tag})" }.join("")
+    fragment = ActionText::Content.new("<div>rich <strong>bold</strong> <script>alert(1)</script></div>").fragment
+    assert_equal "<div>rich <strong>bold</strong> </div>", fragment.replace(sel) { nil }.to_s
+  end
+
   def test_replace_leaves_an_allowed_document_alone
     html = "<div>Hello <b>world</b>!</div>"
     fragment = ActionText::Content.new(html).fragment
