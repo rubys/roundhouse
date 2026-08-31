@@ -758,7 +758,15 @@ jobs:
         # Onto the DEFAULT gem path, campfire-conformance's reasoning:
         # the emit boots via bare `ruby -S puma` and the drive script
         # via bare `ruby`, so a bundler-scoped install would not be seen.
-        run: gem install puma nio4r websocket-driver rack sqlite3 --no-document
+        #
+        # bcrypt is campfire-conformance's lesson relearned on this
+        # job's first full run: the runtime's bcrypt_facade has no
+        # `require "bcrypt"`, a dev box that has the gem hides the
+        # dependency completely — and without it the emit lane cannot
+        # verify the seeded password digests, so sign-in 302s and the
+        # walk dies at its first probe. (The spinel lane compiles its
+        # own bcrypt and never noticed.)
+        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt --no-document
       - name: scripts/campfire-compare
         run: scripts/campfire-compare /tmp/campfire
 
