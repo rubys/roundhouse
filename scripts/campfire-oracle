@@ -157,7 +157,14 @@ cmd_prepare() {
 
     step "exporting $APP @ ${sha:0:12} -> $OUT"
     rm -rf "$OUT"; mkdir -p "$OUT"
-    (cd "$APP" && git archive HEAD) | tar -x -C "$OUT"
+    if git -C "$APP" rev-parse HEAD >/dev/null 2>&1; then
+        # git archive: tracked files only, no local litter.
+        (cd "$APP" && git archive HEAD) | tar -x -C "$OUT"
+    else
+        # A tarball checkout (CI fetches the pin without .git) has no
+        # archive to give — and also nothing untracked to exclude.
+        (cd "$APP" && tar -cf - .) | tar -x -C "$OUT"
+    fi
 
     step "bundling (see the header on why this is a copy)"
     (cd "$OUT" && bundle install >/dev/null) || die "bundle install failed"
