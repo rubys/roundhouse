@@ -2157,7 +2157,7 @@ is why 13/13 walks and a green suite coexist with a chat app that
 cannot display a chat message.
 
 Two reporting gaps compounded it: `Rails.logger` is a no-op class in
-`runtime/rails.rb`, so campfire's own `Rails.logger.error` line goes
+`runtime/ruby/rails.rb`, so campfire's own `Rails.logger.error` line goes
 nowhere, and the Sentry façade prints `details unavailable` (its `e`
 arrives through an untyped parameter — see gem_facades.rb). Naming the
 exception took splicing `$stderr.puts` into the emitted rescue.
