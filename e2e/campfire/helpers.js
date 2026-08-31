@@ -125,23 +125,9 @@ export function watchForFailures(page) {
  * findings before anyone had seen them.
  */
 export const LEDGER = [
-  // Every avatar URL 500s: the lowered model has no `to_param`, and
-  // campfire's own `users/avatars_helper.rb:9` calls it
-  // (`Zlib.crc32(user.to_param)`). A lowering gap, not a page bug — the
-  // rest of the module graph loads clean. Fix is a synthesized
-  // `to_param` beside `dom_prefix`; until then this reports rather than
-  // failing, so the suite stays worth reading.
-  {
-    pattern: /\/users\/[^/]+\/avatar/,
-    why: 'docs/pipeline/runtime.md § A model has no `to_param`, so every avatar URL 500s',
-  },
-  // The console error the 500 above produces, from the other channel.
-  // Chromium reports it without a URL, so this cannot be narrower — it
-  // goes when the entry above does.
-  {
-    pattern: /^Failed to load resource: the server responded with a status of 500/,
-    why: 'docs/pipeline/runtime.md § A model has no `to_param`, so every avatar URL 500s',
-  },
+  // (Empty again — the avatar `to_param` entry retired 2026-08-31 when
+  // the lowering synthesized one; an avatar 500 is a MILESTONE failure
+  // now, which is the point of retiring entries the moment they close.)
 ]
 
 /** Partition findings into what fails the run and what is ledgered. */

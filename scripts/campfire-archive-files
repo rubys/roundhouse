@@ -85,10 +85,12 @@ Turbo channel. Each spec names which of the walk's checks it stands for.
 
 ## What is not in this archive
 
-- **Attachments and avatar variants** — no blob storage, no image
-  processor. The attachment test fixtures are stripped (they were 50 MB).
-  User avatars currently answer 500 (a \`to_param\` gap in the
-  transpiler's runtime, ledgered), so pages show broken avatar images.
+- **Attachments and uploaded-avatar variants** — no blob storage, no
+  image processor. The attachment test fixtures are stripped (they were
+  50 MB). Generated initials avatars — what campfire shows for every
+  user who has not uploaded a picture, which in a fresh install is
+  everyone — render normally; only an avatar someone UPLOADS is out of
+  scope.
 - **Web push.** Every message you post will print
 
   \`\`\`

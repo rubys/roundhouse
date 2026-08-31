@@ -1333,3 +1333,79 @@ end
         "claimed DSL must not report: {diags:?}"
     );
 }
+
+// ── to_param ─────────────────────────────────────────────────────────
+//
+// Rails gives every ActiveRecord::Base a `to_param` (`id&.to_s`); the
+// lowered model gets a synthesized `@id.to_s`. The definition that
+// existed before lived in the CRuby overlay's core_ext, which strict
+// targets never apply — campfire's avatar helper stringifies a User
+// through it on every room page, so every avatar 500'd on the binary.
+
+#[test]
+fn every_concrete_model_gains_to_param() {
+    let lc = lower("Article");
+    let m = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "to_param")
+        .expect("to_param not synthesized");
+    assert!(matches!(m.receiver, MethodReceiver::Instance));
+    assert!(m.params.is_empty());
+    // The body is the id slot stringified — pinned loosely (an ivar
+    // read under a to_s send) so the assertion survives body-typer
+    // stamping.
+    let body = format!("{:?}", m.body);
+    assert!(body.contains("to_s"), "body should stringify: {body}");
+    assert!(body.contains("Ivar"), "body should read the id slot: {body}");
+}
+
+#[test]
+fn an_abstract_model_gains_no_to_param() {
+    let lc = lower("ApplicationRecord");
+    assert!(
+        !lc.methods.iter().any(|m| m.name.as_str() == "to_param"),
+        "abstract classes are never instantiated"
+    );
+}
+
+#[test]
+fn a_models_own_to_param_wins_over_the_synthesized_one() {
+    // lobsters' User#to_param answers the username; no in-tree fixture
+    // carries an override, so inject one into Article's body and lower.
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let mut model = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .expect("Article not in real-blog")
+        .clone();
+    let own = roundhouse::dialect::MethodDef {
+        name: Symbol::from("to_param"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: roundhouse::expr::Expr::new(
+            roundhouse::span::Span::synthetic(),
+            roundhouse::expr::ExprNode::Lit {
+                value: roundhouse::expr::Literal::Str { value: "custom".into() },
+            },
+        ),
+        signature: None,
+        effects: Default::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: roundhouse::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    };
+    model.body.push(roundhouse::dialect::ModelBodyItem::Method {
+        method: own,
+        leading_comments: Vec::new(),
+        leading_blank_line: false,
+    });
+    let lc = lower_model_to_library_class(&model, &app.schema);
+    let params: Vec<_> = lc.methods.iter().filter(|m| m.name.as_str() == "to_param").collect();
+    assert_eq!(params.len(), 1, "exactly one to_param");
+    let body = format!("{:?}", params[0].body);
+    assert!(body.contains("custom"), "the model's own body should win: {body}");
+}

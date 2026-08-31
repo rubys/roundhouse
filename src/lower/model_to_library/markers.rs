@@ -58,6 +58,61 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
     });
 }
 
+/// Per-model `to_param` — Rails gives every `ActiveRecord::Base` one
+/// (`id&.to_s`), and every URL helper stringifies a record through it.
+/// Runs AFTER `push_user_methods` with a skip on an existing instance
+/// method of the name, so a model's own override wins (lobsters'
+/// `User#to_param` answers the username). Skipped for abstract models
+/// like the other instance-shaped synthesizers.
+///
+/// `@id.to_s`, not `id&.to_s`: the ivar is the lowered id slot every
+/// model carries, and on a persisted record — the only kind a URL
+/// helper ever renders — the two are byte-identical. (For an unsaved
+/// record Rails answers nil where this answers ""; no corpus call
+/// site reaches that.) Belongs to every target: the definition that
+/// existed before lived in the CRuby overlay's core_ext, which the
+/// strict targets never apply — so campfire's avatar helper
+/// (`Zlib.crc32(user.to_param)`) 500'd every avatar on the binary.
+pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) {
+    if is_abstract_class(model) {
+        return;
+    }
+    if methods
+        .iter()
+        .any(|m| m.name.as_str() == "to_param" && m.receiver == MethodReceiver::Instance)
+    {
+        return;
+    }
+    methods.push(MethodDef {
+        name: Symbol::from("to_param"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Ivar { name: Symbol::from("id") },
+                    )),
+                    method: Symbol::from("to_s"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Str,
+        ),
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
 /// True when the model body declares `primary_abstract_class` (Rails'
 /// way of marking ApplicationRecord-shaped abstract bases). Per-model
 /// synthesizers that emit instance-shaped methods skip these classes
