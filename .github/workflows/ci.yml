@@ -738,6 +738,13 @@ jobs:
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      # campfire's own config/initializers/vips.rb runs
+      # `Vips.block_untrusted(true)` at every Rails boot, and ruby-vips
+      # only defines that method against libvips >= 8.13 — the runner
+      # image's copy is older, so `bin/rails db:prepare` died on the
+      # app's own hardening line.
+      - name: System libvips
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v4
