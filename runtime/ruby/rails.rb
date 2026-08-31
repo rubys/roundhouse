@@ -203,13 +203,48 @@ module Rails
     end
   end
 
-  # No-op logger — the request path doesn't depend on log output.
+  # `Rails.logger` — a real logger, to stderr, one line per call.
+  #
+  # It was a no-op until 2026-08-31, and the no-op had a measured cost:
+  # every `Rails.logger.error` an app writes into a `rescue` is the
+  # app's own report of what went wrong, and campfire writes exactly
+  # that in the two rescues of `MessagesHelper` — so when the safe-list
+  # sanitizer raised there, the report the app was already making went
+  # nowhere, and naming the exception took splicing `$stderr.puts` into
+  # the emitted rescue and rebuilding. A binary whose only failure
+  # report is a swallowed one is harder to diagnose than Rails, not
+  # easier; the request path still doesn't DEPEND on log output, but
+  # the operator does.
+  #
+  # stderr, not stdout, matching `Tep.log_dispatch_error`: the access
+  # banner owns stdout, and a report interleaved into it is the thing
+  # you grep past. Severity is spelled out because the streams mix; the
+  # `[rails]` tag sits beside `[tep]` and `[job]`. `debug` stays
+  # silent — Rails' dev default is debug-visible, but a compiled demo
+  # binary is closer to production, whose default is info.
+  #
+  # Positional String messages only, deliberately: every call in the
+  # corpus is `Rails.logger.error "..."` (campfire: 7 sites, all
+  # rescue-path reports); the lazy block form has no caller and an
+  # optional block is its own hazard on the strict targets.
   class Logger
-    def info(message); end
-    def error(message); end
-    def warn(message); end
+    def info(message)
+      $stderr.puts("[rails] INFO " + message.to_s)
+    end
+
+    def error(message)
+      $stderr.puts("[rails] ERROR " + message.to_s)
+    end
+
+    def warn(message)
+      $stderr.puts("[rails] WARN " + message.to_s)
+    end
+
     def debug(message); end
-    def fatal(message); end
+
+    def fatal(message)
+      $stderr.puts("[rails] FATAL " + message.to_s)
+    end
   end
 
   # App-config stand-in (see module note). Otherwise empty — the app's
