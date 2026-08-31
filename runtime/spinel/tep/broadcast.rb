@@ -185,7 +185,9 @@ module Tep
       while i < subs.length
         if subs[i].topic == topic
           if subs[i].mode == 0
-            Sock.sphttp_write_str(subs[i].fd, payload)
+            # write_bytes: write_str is strlen-terminated, and a raw
+            # payload is not guaranteed NUL-free.
+            Sock.sphttp_write_bytes(subs[i].fd, payload, payload.bytesize)
           else
             Tep::WebSocket::Driver.send_frame(
               subs[i].fd, subs[i].mode, payload)

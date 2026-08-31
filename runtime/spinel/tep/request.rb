@@ -118,7 +118,11 @@ module Tep
     # callers don't reach this path).
     def consume_body(client_fd)
       cl = content_length
-      already = @raw_body.length
+      # bytesize, not length: Content-Length counts bytes, and a body
+      # carrying multibyte UTF-8 (a boost emoji, a multipart field)
+      # reads short on characters — leaving the tail of the body unread
+      # on the socket, where it corrupts the next keep-alive request.
+      already = @raw_body.bytesize
       if cl > already
         rest = Sock.sphttp_drain_body(client_fd, cl - already)
         @raw_body = @raw_body + rest
@@ -140,13 +144,16 @@ module Tep
     # consume_body (urlencoded only; multipart isn't vendored).
     def consume_body_via_scheduler(client_fd)
       cl = content_length
-      while @raw_body.length < cl
+      # bytesize throughout — same reasoning as consume_body above; on
+      # this path the char/byte gap also cost a 5s io_wait timeout per
+      # multibyte body, waiting for bytes that had already arrived.
+      while @raw_body.bytesize < cl
         ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
         if ready == 0
           break   # timeout -- client never finished sending
         end
-        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.length)
-        if chunk.length == 0
+        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize)
+        if chunk.bytesize == 0
           break   # peer closed mid-body
         end
         @raw_body = @raw_body + chunk

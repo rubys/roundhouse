@@ -59,20 +59,19 @@ const BODY = 'hello from the cable spec'
 test.setTimeout(90_000)
 
 // FIXME, NOT SKIP, and the distinction is the point: this spec is
-// CORRECT and the app is wrong. Two independent defects, both ledgered
-// in docs/pipeline/runtime.md, and both found by this spec:
+// CORRECT and the app is wrong. One defect remains, ledgered in
+// docs/pipeline/runtime.md § An HTML message body renders as nothing:
+// `sanitize_allowing` is a raising façade on this target, campfire's
+// `rescue Exception` turns the raise into "", and Trix always submits
+// HTML — so every composer-posted message body renders empty, on the
+// page and in the frame alike. (The spec's other original blocker, the
+// ~30s second-client stall, closed 2026-08-31 — it was a truncated
+// /account/logo response, not a serializing server.)
 //
-//   1. "The broadcast-rendered message row carries no body" — the frame
-//      arrives and the row is inserted, but the body is missing and
-//      `local_time`'s options hash renders as TEXT. Tab A (direct
-//      render) shows the body in 18ms; tab B never shows it.
-//   2. "A single-worker Tep server serializes on one keep-alive
-//      connection" — the second browser waits ~30s to be served at all.
-//
-// Measured 2026-08-30 on the campfire spinel binary. `test.fixme` runs
-// nothing (so the suite does not spend 90s timing out) and Playwright
-// reports it as expected-broken; when the two defects close, delete this
-// marker and the suite gains its fourth test. Do NOT convert this to
+// `test.fixme` runs nothing and Playwright reports it as
+// expected-broken; when the sanitizer entry closes, delete this marker
+// and the suite gains its fourth test — and raise the scripts/smoke
+// campfire floor 3 -> 4 in the same commit. Do NOT convert this to
 // `test.skip` — skip says "not applicable here", which is false.
 test.fixme('a message posted in one tab arrives live in another', async ({ browser }) => {
   // Two independent contexts, not two pages in one — separate cookie

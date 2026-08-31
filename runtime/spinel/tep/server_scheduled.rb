@@ -306,10 +306,19 @@ module Tep
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path)
         else
-          head << "Content-Length: " + res.body.length.to_s + "\r\n\r\n"
+          # BYTES, both times. `length` counts characters, and
+          # `write_str` crosses the FFI as a NUL-terminated C string —
+          # so a PNG served through res.body used to announce the
+          # file's size and deliver 8 bytes (everything before the
+          # first 0x00), and a page with one emoji understated its
+          # Content-Length and corrupted keep-alive framing. The
+          # browser waits out the difference: campfire's sign-in page
+          # hung ~30s on /account/logo until the keep-alive timeout
+          # closed the connection under it (ERR_CONTENT_LENGTH_MISMATCH).
+          head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          if res.body.length > 0
-            Sock.sphttp_write_str(client, res.body)
+          if res.body.bytesize > 0
+            Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
         0

@@ -17,18 +17,12 @@ import { defineConfig, devices } from '@playwright/test'
 export default defineConfig({
   testDir: '.',
   fullyParallel: false,
-  // EVERY SPEC IS A "SECOND CLIENT", so every spec pays the stall.
-  // Playwright gives each test its own browser context, and a
-  // single-worker Tep server parks inside the first connection's
-  // keep-alive loop instead of returning to accept() — measured at ~30s
-  // before a new client is served (docs/pipeline/runtime.md § A
-  // single-worker Tep server serializes on one keep-alive connection).
-  // Playwright's 30s default expires INSIDE that window, so at the
-  // default only the first spec in a run can pass.
-  //
-  // 90s is a workaround for a ledgered defect, not a considered budget.
-  // Drop it back to the default when that entry closes.
-  timeout: 90_000,
+  // The 90s timeout override that used to live here worked around the
+  // ~30s second-client stall, since closed (docs/pipeline/runtime.md
+  // § A response body crossed the FFI as a C string): the stall was a
+  // truncated /account/logo response the browser waited out, not a
+  // server that couldn't serve two clients. A second sign-in now takes
+  // ~300ms, so the default budget holds.
   workers: 1,
   forbidOnly: !!process.env.CI,
   // No retries. A retry turns a flaky asset 404 into a green run, and

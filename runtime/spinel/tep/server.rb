@@ -227,7 +227,10 @@ module Tep
       if res.body.length > 0 && !res.headers.key?("Content-Type")
         res.headers["Content-Type"] = "text/html; charset=utf-8"
       end
-      res.headers["Content-Length"] = res.body.length.to_s
+      # BYTES, both times — `length` counts characters and `write_str`
+      # stops at the first NUL. See the twin comment in
+      # server_scheduled.rb#write_response for the failure this caused.
+      res.headers["Content-Length"] = res.body.bytesize.to_s
       if keep_alive
         res.headers["Connection"] = "keep-alive"
       else
@@ -236,8 +239,8 @@ module Tep
 
       head = build_head(req, res)
       Sock.sphttp_write_str(client, head)
-      if res.body.length > 0
-        Sock.sphttp_write_str(client, res.body)
+      if res.body.bytesize > 0
+        Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
       end
     end
 

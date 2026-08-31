@@ -2018,56 +2018,64 @@ to the ruby overlay.
 Until then `e2e/campfire/helpers.js` carries it as a LEDGER entry so the
 asset spec reports it without failing the run.
 
-### A single-worker Tep server serializes on one keep-alive connection
+### A response body crossed the FFI as a C string — FIXED, and the "keep-alive serialization" diagnosis with it
 
-`Tep::Server#worker_loop` accepts one connection and calls
-`handle_connection`, which loops `handle_one` on THAT socket until the
-peer closes or a request declines keep-alive:
+**FIXED 2026-08-31.** The ~30 s second-browser stall this entry used to
+attribute to a single worker parking in one connection's keep-alive loop
+had a different cause entirely, and the correction matters because the
+wrong version argued the demo needed `-w N` + Redis. It doesn't.
 
-```ruby
-def worker_loop(sfd)
-  loop do
-    client = Sock.sphttp_accept(sfd)
-    if client < 0 then next end
-    handle_connection(client)   # does not return while the peer holds the socket
-  end
-end
-```
+**What was actually wrong.** `Tep::Server::Scheduled#write_response`
+wrote inline bodies with `sp_net_write_str` — a strlen-terminated C
+string across the FFI — while announcing `Content-Length` from the same
+string. A body with a NUL byte truncates at the NUL: `GET /account/logo`
+(a PNG served through `res.body`; a PNG's 9th byte is 0x00) promised
+405,666 bytes and delivered **8**. The sign-in page's `<img>` for that
+logo therefore never finished; the browser held the request open waiting
+for the difference, the page's load event hung, and only the server's
+30 s `KEEPALIVE_TIMEOUT` closing the connection released it
+(`net::ERR_CONTENT_LENGTH_MISMATCH`, then a retry that succeeded). The
+"consistently ~30 s" signature was our own keep-alive timeout, observed
+from the outside. Same family, same fix: `Content-Length` computed from
+`length` (characters) understated the byte count of any page carrying
+multibyte UTF-8, corrupting keep-alive framing, and the request-body
+readers compared `raw_body.length` against a byte count. All wire
+lengths are `bytesize` now and bodies go out through `write_bytes`
+(both server variants, the request drains, and the raw-mode fan-out).
 
-A browser holds its connections open. So with `workers=1` — the default,
-and what the campfire archive boots — the worker parks inside the FIRST
-browser's keep-alive loop and does not call `accept()` again. A second
-browser waits in the backlog.
+**What was wrong with the old diagnosis.** It quoted
+`Tep::Server#worker_loop` — the blocking prefork server — but the
+scaffold's `main.rb` has booted `Tep::Server::Scheduled`
+(fiber-per-connection) since cable landed. That server never serialized
+on keep-alive; idle-holder probes against it answer in single-digit
+milliseconds. The stale-comment lesson again: the quoted code was real,
+just not the code that runs.
 
-**Measured 2026-08-30**, campfire spinel binary, two Playwright browser
-contexts:
+**Verified**: `e2e/campfire` two-context sign-in went 30,422 ms →
+**303 ms**; `/account/logo` delivers all 405,666 bytes and `file(1)`
+parses the result as a complete PNG; `scripts/campfire-cable-walk
+--spinel` 13/13; `scripts/compare spinel` 7/7.
 
-| | sign-in |
-|---|---|
-| tab A | **878 ms** |
-| tab B | **30 413 ms** |
+**Why no existing gate saw it.** The walk and the suite never fetch a
+binary body over the wire and byte-count it against the header;
+`assets.spec.js` watches for 404s and console errors, and a truncated
+200 is neither. It took a browser waiting on the missing bytes.
 
-Reproducible across runs, and consistently ~30 s rather than a spread,
-so it is a timeout expiring rather than load.
+Still true and worth keeping from the old entry: `-w N` preforks
+processes whose `Tep::Broadcast` registries are per-worker, so
+cross-worker fan-out still needs the opt-in `Tep::RedisFeed`. That is a
+scaling limit, not — as this entry used to claim — a prerequisite for
+"two tabs, one room, one live message" on one worker.
 
-**The obvious fix is blocked by the broadcast.** The server takes `-w N`
-and preforks with SO_REUSEPORT, which fixes the stall — but workers are
-separate PROCESSES and `Tep::Broadcast`'s registry is in-memory per
-worker. Cross-worker fan-out needs `Tep::RedisFeed`, which is opt-in and
-depends on the `redis` spin package that campfire's tree does not carry.
-So:
+### `send_file`'s content type is dropped on the tep lane
 
-* `workers=1` → fan-out reaches both tabs; the second tab stalls ~30 s.
-* `workers>1` → both tabs served promptly; a broadcast published in one
-  worker never reaches a socket held by another.
-
-Neither setting delivers "two tabs, one room, one live message" cleanly,
-which is the milestone campfire exists here to demonstrate.
-
-**Why no existing gate sees it.** `scripts/campfire-cable-drive.rb` opens
-two RAW sockets that upgrade to WebSockets immediately and move to the
-poll reactor; it never has two clients holding idle HTTP keep-alive
-connections. It takes a browser — two of them.
+`Accounts::LogosController#send_png_file` passes
+`content_type: "image/png"`; the binary serves the logo as
+`text/html; charset=utf-8` (the inline-body default). Browsers sniff
+`<img>` payloads when `X-Content-Type-Options: nosniff` is absent, so
+the image renders anyway — but the type is wrong on the wire, and any
+future nosniff default would break every `send_file` image. Found
+2026-08-31 while closing the truncation entry above.
 
 ### A `tag.<el>` whose arguments are all keywords rendered its attributes as TEXT — FIXED
 
@@ -2101,8 +2109,10 @@ what looked like a direct render in the browser was campfire's own
 CLIENT-side optimistic echo (`app/views/messages/_template.rb`, the
 `$messageDatetime$` template), which is why its element carried a
 client-generated id. Why tab B's DOM did not display a body that is in
-the HTML it received is UNEXPLAINED and still open; it needs re-measuring
-now that the `<time>` defect is gone.
+the HTML it received was unexplained here until 2026-08-31; the answer
+is in the sanitizer entry below — the body was never in the frame for a
+*Trix-composed* message, and every direct-over-HTTP measurement had
+posted plain text, which takes the one path that works.
 
 **A near-miss worth keeping.** The first version of the fix routed to the
 `content_tag` fallback, which `return`s before the inline path's
@@ -2118,9 +2128,44 @@ the usual assumption. Qualification now happens inside
 `content_tag_fallback`, so every fallback path is covered.
 
 
+### An HTML message body renders as nothing: the safe-list sanitizer is a raising façade behind a `rescue Exception`
+
 A message posted in one browser tab reaches a second tab's DOM and is
 inserted — and arrives EMPTY. The two render paths disagree about the
 same message, in the same run.
+
+**ROOT CAUSE FOUND 2026-08-31, and it is not the fan-out.**
+`MessagesHelper#message_presentation` runs the body through
+`ContentFilters::TextMessagePresentationFilters` and the sanitizer;
+`ActionView::ViewHelpers.sanitize_allowing` is a deliberately RAISING
+façade on this target ("the safe-list sanitizer is not modelled … only
+tagless input is served"), and campfire wraps the whole helper in
+`rescue Exception` → `Sentry.capture_exception` → `""`. So:
+
+* a PLAIN-TEXT body (`message[body]=hello`) renders everywhere — page,
+  frame, both tabs;
+* an HTML body (`message[body]=<div>hello</div>`) renders as `""`
+  everywhere — page AND frame.
+
+**Trix always submits HTML.** Every message composed in the browser is
+`<div>…</div>` at minimum, so every composer-posted message body
+vanishes on every server-rendered path, while the DB row is correct
+(`action_text_rich_texts.body` holds the full HTML). Tab A only ever
+saw its own client-side echo. Every wire-level gate posts urlencoded
+plain text (`campfire-cable-drive.rb`, the suite, curl probes), which
+is why 13/13 walks and a green suite coexist with a chat app that
+cannot display a chat message.
+
+Two reporting gaps compounded it: `Rails.logger` is a no-op class in
+`runtime/rails.rb`, so campfire's own `Rails.logger.error` line goes
+nowhere, and the Sentry façade prints `details unavailable` (its `e`
+arrives through an untyped parameter — see gem_facades.rb). Naming the
+exception took splicing `$stderr.puts` into the emitted rescue.
+
+**The fix is modelling the safe-list sanitizer for this target** (or
+lowering campfire's filter chain onto the HTML infrastructure
+`strip_tags` already uses). Until then this entry is what keeps
+`cable.spec.js` at `test.fixme`.
 
 **Measured 2026-08-30**, campfire spinel binary, two browser contexts,
 one room. Tab A posts; both tabs are subscribed and `connected`:
@@ -2158,8 +2203,9 @@ is the same shape as [[project_campfire_empty_message_bodies]]'s lesson
 opposite direction: a wire test cannot see a renderer that drops content
 downstream of the bytes it checked.
 
-Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
-and the keep-alive serialization entry above are closed.
+Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until
+this entry closes (the truncation entry above, its former co-gate, is
+closed).
 ### A forwarded `**` bundle bound the OPTIONAL KEYWORD beside it — FIXED
 
 **FIXED 2026-08-31.** The other half of the `<time>` defect above, and
