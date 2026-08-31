@@ -73,6 +73,7 @@ module ActionText
     def fragment: () -> ActionText::Fragment
     def to_html: () -> String
     def to_s: () -> String
+    def rendered_html: () -> String
     def as_json: () -> String
     def blank?: () -> bool
     def empty?: () -> bool

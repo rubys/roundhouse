@@ -1312,6 +1312,41 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// Route `ActionText::Content#to_s` through the app's own
+/// `layouts/action_text/contents/_content` layout — Rails' contract,
+/// and how a rich text arrives wrapped (campfire's layout is
+/// `<div class="trix-content">`, and its stylesheet keys on the
+/// class). The layout is per-APP and the strict targets resolve every
+/// call statically, so the dispatch is generated exactly when the
+/// emitted tree carries the lowered view module; a tree without one
+/// keeps the bare fragment, which is Rails' own fallback. Found by
+/// `scripts/campfire-compare`: the CRuby overlay had already grown
+/// this (guarded on `defined?`, which a static target has no lane
+/// for), so the binary rendered every message body one div short of
+/// both Rails and the ruby lane.
+fn apply_content_layout(files: &mut [(String, String)], _app: &App) {
+    const HEAD: &str = "    # >>> generated: content-layout\n";
+    const TAIL: &str = "    # <<< generated: content-layout\n";
+    const VIEW: &str = "app/views/layouts/action_text/contents/_content.rb";
+
+    if !files.iter().any(|(path, _)| path.ends_with(VIEW)) {
+        return;
+    }
+    let generated = format!(
+        "{HEAD}    def rendered_html\n      \
+         Views::Layouts::ActionText::Contents.content(@html)\n    end\n{TAIL}"
+    );
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/action_text.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// Write one arm per app channel into `runtime/cable.rb`'s
 /// `Cable.build_channel`, so a subscribe frame reaches the class it
 /// NAMES and the app's own `subscribed` runs.
@@ -2453,6 +2488,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // `cable.rb`, which has its own identity path and its own test.
     apply_cable_connection(&mut files, app);
     apply_cable_channels(&mut files, app);
+    apply_content_layout(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names
@@ -4948,6 +4984,47 @@ mod tests {
         let mut files = vec![("runtime/action_cable.rb".to_string(), action_cable.clone())];
         apply_cable_connection(&mut files, &app2);
         assert_eq!(files[0].1, action_cable, "action_cable.rb was rewritten");
+    }
+
+    /// `Content#to_s` renders through the app's own content layout —
+    /// exactly when the tree carries one. Found by
+    /// `scripts/campfire-compare`: the binary rendered every message
+    /// body one `<div class="trix-content">` short of Rails, while the
+    /// CRuby overlay had already grown the wrapper behind a `defined?`
+    /// guard no static target can spell.
+    #[test]
+    fn content_layout_dispatch_is_generated_when_the_app_ships_one() {
+        let runtime = fs::read_to_string("runtime/ruby/action_text.rb").unwrap();
+        let layout_path =
+            "app/views/layouts/action_text/contents/_content.rb".to_string();
+
+        // The tree carries the layout: the marked span calls it.
+        let mut files = vec![
+            ("runtime/action_text.rb".to_string(), runtime.clone()),
+            (layout_path.clone(), "module Views; end\n".to_string()),
+        ];
+        apply_content_layout(&mut files, &App::new());
+        let out = &files[0].1;
+        assert!(
+            out.contains(
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(@html)\n    end\n"
+            ),
+            "generated dispatch not written:\n{out}"
+        );
+        assert!(
+            !out.contains("    def rendered_html\n      @html\n    end\n"),
+            "default body survived alongside the generated one:\n{out}"
+        );
+        // Re-appliable: a second pass must not nest or duplicate.
+        let once = files[0].1.clone();
+        apply_content_layout(&mut files, &App::new());
+        assert_eq!(files[0].1, once, "second application changed the file");
+
+        // No layout in the tree: the default bare fragment ships
+        // untouched — the blog fixture has no Action Text layout.
+        let mut files = vec![("runtime/action_text.rb".to_string(), runtime.clone())];
+        apply_content_layout(&mut files, &App::new());
+        assert_eq!(files[0].1, runtime, "a layout-less app had its runtime rewritten");
     }
 
     /// The spinel tree PERFORMS its mixins, as a class reopen.

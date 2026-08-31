@@ -540,19 +540,38 @@ module ActionText
       ActionText::Fragment.new(@html)
     end
 
-    # The stored markup, unchanged. `to_s` is the same string: Rails'
-    # `to_s` renders through the `action_text/contents/_content`
-    # layout, which only wraps the fragment in a `<div
-    # class="rich-text">`; the wrapper is view-side decoration that the
-    # emitted views apply themselves, so the value object stays the
-    # fragment.
+    # The stored markup, unchanged — `to_html` is the FRAGMENT, which
+    # is what the filter chain and persistence read.
     def to_html
       @html
     end
 
+    # `to_s` RENDERS: Rails routes it through the app's
+    # `layouts/action_text/contents/_content` layout, which is how a
+    # rich text arrives wrapped (campfire's is
+    # `<div class="trix-content">`, and its CSS keys on that class).
+    # This comment used to claim the wrapper was "view-side decoration
+    # that the emitted views apply themselves"; measured, no emitted
+    # view applies it — the CRuby overlay corrected it first
+    # (action_view_safe_buffer.rb), and `scripts/campfire-compare`
+    # caught the strict lane rendering one div short of Rails.
+    #
+    # The layout is per-APP and the strict targets resolve every call
+    # statically, so the dispatch below is GENERATED: when the emitted
+    # tree carries the layout view module, `project.rs` rewrites the
+    # marked span to call it (`apply_content_layout`, the same
+    # re-appliable span replace as `apply_cable_connection`); a tree
+    # without the layout keeps the bare fragment, which is Rails'
+    # fallback too.
     def to_s
+      rendered_html
+    end
+
+    # >>> generated: content-layout
+    def rendered_html
       @html
     end
+    # <<< generated: content-layout
 
     def as_json
       @html
