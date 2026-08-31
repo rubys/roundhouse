@@ -34,11 +34,10 @@
 #   --reuse DIR   Skip transpiling; use an emit prepared earlier.
 #   --keep        Keep the emit + dumps and print their paths.
 #   --spinel      Drive the spinel BINARY as the emit lane (default: ruby).
-#                 EXPECTED RED on frame_html.html until matz/spinel#4240
-#                 closes: `SanitizeTags` is inert there (a builtin-named
-#                 method lost through an untyped slot — see
-#                 docs/pipeline/runtime.md § SanitizeTags is inert), and
-#                 an open defect is deliberately not a comparator mask.
+#                 A real gate since matz/spinel#4240 closed (fixed
+#                 c178fc15, the day it was filed): both frames
+#                 equivalent to Rails on the compiled binary. Needs
+#                 `spinel` >= that commit on PATH.
 #
 # Requires: the Rails oracle prepared at build/campfire-oracle
 # (scripts/campfire-oracle prepare), redis-server running (Action Cable's
@@ -92,8 +91,16 @@ APP_SHA=$(git -C "$APP" rev-parse HEAD 2>/dev/null || echo unknown)
 if [[ "$ORACLE_SHA" != "unknown" && "$APP_SHA" != "unknown" && "$ORACLE_SHA" != "$APP_SHA" ]]; then
     die "oracle is campfire $ORACLE_SHA but $APP is $APP_SHA — re-run scripts/campfire-oracle prepare"
 fi
-redis-cli ping >/dev/null 2>&1 \
-    || die "redis is not running — the Rails lane's Action Cable adapter needs it"
+# redis-cli where it exists; a bare TCP probe where it doesn't (CI's
+# redis is a service container — port mapped, no client binary on the
+# runner).
+if command -v redis-cli >/dev/null 2>&1; then
+    redis-cli ping >/dev/null 2>&1 \
+        || die "redis is not running — the Rails lane's Action Cable adapter needs it"
+else
+    ruby -rsocket -e 'TCPSocket.new("127.0.0.1", 6379).close' 2>/dev/null \
+        || die "redis is not reachable on :6379 — the Rails lane's Action Cable adapter needs it"
+fi
 
 # ── 1. one pristine seed, staged into BOTH lanes ─────────────────────
 # The oracle's serve DB accumulates every walk's POSTs; equivalence

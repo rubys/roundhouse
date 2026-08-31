@@ -2486,7 +2486,21 @@ identical at submit time; a byte divergence in every boost form of
 every broadcast frame. Found by `scripts/campfire-compare`
 (2026-08-31); forgiven by name in the comparator.
 
-### `SanitizeTags` is inert on the spinel binary — matz/spinel#4240
+### `SanitizeTags` is inert on the spinel binary — matz/spinel#4240 — FIXED upstream
+
+**FIXED 2026-08-31, hours after filing** (`c178fc15`): the block was not
+even the discriminator — the no-block form took the same wrong path.
+Two mechanisms agreed on the wrong answer: container-read alias
+promotion bound the local to a string HANDLE on the evidence that the
+mutator-name table matched `replace` and the container held a string
+SOMEWHERE, and the poly `replace` arm took the builtin without asking
+whether a user class owns the name (the question its `pack` sibling
+always asked). Verified by RUNNING the repro (both columns answer
+CRuby now) and then by the gate that found it:
+`scripts/campfire-compare --spinel` is **fully green** — both frames
+equivalent to Rails on the compiled binary, `<script>` content pruned
+exactly as Rails prunes it. The comparator's spinel lane is a real
+gate from this day. The original entry follows.
 
 `ContentFilters::SanitizeTags#apply` is `fragment.replace(selector) {
 nil }`, and on the compiled binary that call NEVER REACHES

@@ -762,6 +762,62 @@ jobs:
       - name: scripts/campfire-compare
         run: scripts/campfire-compare /tmp/campfire
 
+  # campfire-compare-spinel: the same equivalence, with the compiled
+  # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
+  # A real gate since matz/spinel#4240 (SanitizeTags inert through an
+  # untyped slot) was fixed the day it was filed; its first green run
+  # is the strongest claim this repo makes about the demo artifact.
+  # `continue-on-error` for the same reason framework-tests-spinel is:
+  # spinel is tracked unpinned, and upstream churn must not gate
+  # unrelated work — with the known cost that a break here is invisible
+  # in the run conclusion, so check this job BY NAME when campfire
+  # moves.
+  campfire-compare-spinel:
+    needs: build-spinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    services:
+      redis:
+        image: redis
+        ports: ['6379:6379']
+    env:
+      BUNDLE_PATH: vendor/bundle
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: System libvips + libsqlite3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev
+      - name: Fetch pinned once-campfire
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Cache the prepared oracle
+        id: oracle
+        uses: actions/cache@v4
+        with:
+          path: build/campfire-oracle
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+      - name: Prepare the Rails oracle (cache miss)
+        if: steps.oracle.outputs.cache-hit != 'true'
+        run: scripts/campfire-oracle prepare --app /tmp/campfire
+      - name: Walk gems
+        run: gem install websocket-driver --no-document
+      - name: scripts/campfire-compare --spinel
+        run: scripts/campfire-compare --spinel /tmp/campfire
+
   campfire-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 45
