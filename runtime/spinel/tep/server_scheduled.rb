@@ -110,6 +110,16 @@ module Tep
         f = Fiber.new { Tep::Server::Scheduled.accept_loop(sfd) }
         Tep::Scheduler.spawn_fiber(f)
         while Tep::Scheduler.alive_count > 0
+          # Shutdown is the WORKER's exit condition, not the fibers'.
+          # The accept fiber honours the term flag and dies, but any
+          # perpetual fiber an app registered (the scaffold's job-queue
+          # drain runs `loop { pause; drain }`) keeps alive_count > 0
+          # forever — so a SIGTERM/SIGINT used to leave the process
+          # squatting on the port, accepting connections into the
+          # backlog and serving none of them. Ctrl-C must mean exit.
+          if Sock.sphttp_shutdown_requested != 0
+            break
+          end
           Tep::Scheduler.tick(1000)
         end
         0
