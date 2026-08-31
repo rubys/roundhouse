@@ -926,6 +926,15 @@ pub(super) fn ingest_library_method(
         // count = 1)`). Neither parses. Keep the keyword group honest
         // in those defs; elsewhere the approximation stands, because
         // the trailing-kwargs normalize path depends on it.
+        //
+        // A `**kwrest` BESIDE an optional keyword (`def f(x, style:
+        // :time, **attributes)`) parses fine flattened, so it stays on
+        // the approximation — but the two adjacent positionals are
+        // indistinguishable to a caller forwarding a bundle, which
+        // silently binds the keyword instead of the rest. That is why
+        // both flattenings are MARKED below: `lower::kwrest_forward`
+        // repairs the call, and the marks are the only record that
+        // these slots were not positional in the source.
         let keeps_keywords = params.iter().any(|p| p.rest)
             || pn
                 .keywords()
@@ -960,7 +969,15 @@ pub(super) fn ingest_library_method(
                     params.push(if keeps_keywords {
                         Param::keyword(Symbol::from(s), Some(default))
                     } else {
-                        Param::with_default(Symbol::from(s), default)
+                        // Flattened to a positional-with-default, and
+                        // MARKED as flattened: the emitted shape says
+                        // "an optional positional you may fill", which
+                        // the original Ruby did not offer. A caller that
+                        // appears to fill it is an erased `**`, and
+                        // `lower::kwrest_forward` needs that fact.
+                        let mut p = Param::with_default(Symbol::from(s), default);
+                        p.from_keyword = true;
+                        p
                     });
                 }
             }
@@ -976,13 +993,15 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        params.push(Param::with_default(
+                        let mut p = Param::with_default(
                             Symbol::from(s),
                             Expr::new(
                                 Span::synthetic(),
                                 ExprNode::Hash { entries: vec![], kwargs: false },
                             ),
-                        ));
+                        );
+                        p.from_kwrest = true;
+                        params.push(p);
                     }
                 }
             }

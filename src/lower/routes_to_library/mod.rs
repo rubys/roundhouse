@@ -1905,6 +1905,8 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             default: None,
             keyword: false,
             rest: false,
+            from_keyword: false,
+            from_kwrest: false,
         }],
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![assign, tail] }),
         signature: Some(fn_sig(

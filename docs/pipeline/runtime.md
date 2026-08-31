@@ -2160,6 +2160,64 @@ downstream of the bytes it checked.
 
 Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
 and the keep-alive serialization entry above are closed.
+### A forwarded `**` bundle bound the OPTIONAL KEYWORD beside it — FIXED
+
+**FIXED 2026-08-31.** The other half of the `<time>` defect above, and
+the one the `tag_builder` fix could not reach. campfire writes
+
+```ruby
+def local_datetime_tag(datetime, style: :time, **attributes)   # time_helper
+def message_timestamp(message, **attributes)                   # messages_helper
+  local_datetime_tag message.created_at, **attributes
+```
+
+`ingest::library_class` flattens BOTH keyword forms to positionals —
+`style:` to a positional-with-default, `**attributes` to a trailing
+positional defaulting to `{}` — and `ingest::expr` erases the call's `**`
+into the `merge` chain it is defined to be, which is likewise positional.
+Each half is individually sound. Together they slid the bundle one slot
+left:
+
+```ruby
+def self.local_datetime_tag(datetime, style = :time, attributes = {})
+TimeHelper.local_datetime_tag(message.created_at, attributes)   # → style
+```
+
+so `style` bound the whole hash and `attributes` bound `{}`. Every
+message permalink rendered
+
+```html
+<time datetime="…" data-local-time-target="{class: &quot;message__timestamp&quot;}">
+```
+
+— the `class` dropped and the `data` attribute carrying an inspected
+Hash. Now `local_datetime_tag(message.created_at, :time, attributes)`.
+
+**Why an argument in that slot can only be an erased `**`.** The same
+inference `lower::kwsplat` makes from arity, made from position instead:
+`style:` is a KEYWORD in the source, so Ruby offers no way to fill it
+positionally, and a positional argument sitting there cannot have been
+written by the app's author. It is ingest's own flattening showing
+through. That reasoning needs a fact the flattening destroys, so ingest
+now records it — `Param::from_keyword` and `Param::from_kwrest` mark the
+two flattened shapes. Both are inert in emit (the emitted parameter list
+is byte-identical) and read only by `lower::kwrest_forward`.
+
+**The one thing that did NOT change is the emitted parameter list.** The
+repair is entirely at the call site. Across all of campfire the pass
+rewrites exactly one line, and raises no residue diagnostic.
+
+**KNOWN DIVERGENCE.** A bundle that actually CARRIES one of the named
+keywords — `message_timestamp(message, style: :date)` — keeps it in the
+rest hash instead of binding the parameter, so the callee sees its
+default and the key renders as a stray attribute. Ruby distributes by key
+at call time; nothing static knows the keys of a hash forwarded through a
+method boundary. The previous behaviour was wrong for EVERY bundle, this
+one for the subset that names a keyword, and campfire's two call sites
+are both outside that subset. A literal keyword list is unaffected —
+`local_datetime_tag ts, style: :date` is `lower::helper_kwargs`' case and
+still splices by name, which is why the two passes run in that order.
+
 ### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
 
 Narrowed, not solved. Two browser tabs, one room; tab A posts. Tab B's

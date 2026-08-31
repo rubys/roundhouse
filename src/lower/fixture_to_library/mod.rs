@@ -215,6 +215,8 @@ fn build_fixture_class(
             default: None,
             keyword: false,
             rest: false,
+            from_keyword: false,
+            from_kwrest: false,
         }],
         body: build_by_label_body(&f.class, &f.records),
         signature: Some(fn_sig(

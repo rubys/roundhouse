@@ -219,10 +219,14 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
         return None;
     }
 
-    // `**rest` needs no special case: ingest models it as an ordinary
-    // trailing positional (`library_class.rs`), which is exactly the
-    // shape the desugar is already correct for — so it raises the
-    // positional count and the excess test below declines on its own.
+    // `**rest` needs no special case HERE: ingest models it as an
+    // ordinary trailing positional (`library_class.rs`), so it raises
+    // the positional count and the excess test below declines on its
+    // own. That the desugar is therefore already correct holds only
+    // while the `**rest` slot is the FIRST unfilled one. An optional
+    // keyword beside it is also flattened to a positional, and the
+    // bundle then lands in THAT slot — see `lower::kwrest_forward`,
+    // which owns the case this pass declines.
     let positional = params.iter().filter(|p| !p.keyword && !p.rest).count();
     let keywords: Vec<Symbol> = params
         .iter()

@@ -201,6 +201,8 @@ fn stamp_inheritance_column(lc: &mut crate::dialect::LibraryClass) {
                 default: Some(syn(ExprNode::Hash { entries: Vec::new(), kwargs: false })),
                 keyword: false,
                 rest: false,
+            from_keyword: false,
+            from_kwrest: false,
             }],
             body,
             signature: None,

@@ -490,6 +490,25 @@ pub struct Param {
     /// correct only while no transpiled call site passes extra args).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rest: bool,
+    /// Ingest flattened a source OPTIONAL KEYWORD (`style: :time`) into
+    /// this positional-with-default. See `keeps_keywords` in
+    /// `ingest::library_class` for when it does and does not.
+    ///
+    /// Nothing in emit reads this: the emitted parameter is an ordinary
+    /// optional positional, which is the whole point of the
+    /// approximation. It records the one fact the flattening destroys —
+    /// that the ORIGINAL Ruby had no way to fill this slot positionally
+    /// — which is what lets `lower::kwrest_forward` conclude that an
+    /// argument sitting here can only be an erased `**`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_keyword: bool,
+    /// Ingest flattened a source KEYWORD-REST (`**attributes`) into this
+    /// trailing positional defaulting to `{}`. Same contract as
+    /// [`Param::from_keyword`]: inert in emit, read only by
+    /// `lower::kwrest_forward`, which needs to know which slot a
+    /// forwarded keyword bundle is actually aimed at.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_kwrest: bool,
 }
 
 impl Param {
@@ -520,19 +539,19 @@ impl Param {
     }
 
     pub fn positional(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: false }
+        Self { name, default: None, keyword: false, rest: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn with_default(name: Symbol, default: Expr) -> Self {
-        Self { name, default: Some(default), keyword: false, rest: false }
+        Self { name, default: Some(default), keyword: false, rest: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn keyword(name: Symbol, default: Option<Expr>) -> Self {
-        Self { name, default, keyword: true, rest: false }
+        Self { name, default, keyword: true, rest: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn rest(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: true }
+        Self { name, default: None, keyword: false, rest: true, from_keyword: false, from_kwrest: false }
     }
 
     pub fn as_str(&self) -> &str {

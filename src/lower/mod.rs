@@ -116,6 +116,7 @@ pub(crate) mod secure_password;
 pub mod attached;
 pub mod send_file;
 pub mod helper_kwargs;
+pub mod kwrest_forward;
 pub mod column_ops;
 pub mod signed_id;
 pub(crate) mod secure_token;
@@ -498,10 +499,17 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // move for the same reason: the file read belongs at the call site,
     // where the app pays for it, not in a runtime every target shares.
     ("send_file", &[]),
+    // Moves a forwarded `**` bundle out of an optional keyword's
+    // flattened slot and into the `**rest` slot it was aimed at. BEFORE
+    // helper_kwargs, which splices literal keywords into those same
+    // slots: run after it, a spliced value would be indistinguishable
+    // from a forwarded bundle and get padded a second time.
+    ("kwrest_forward", &[]),
     // Moves a helper call's named keyword into the positional slot its
-    // definition lowered to. No ordering constraint: it matches on the
-    // spelling the source wrote, which no earlier pass rewrites.
-    ("helper_kwargs", &[]),
+    // definition lowered to. Matches on the spelling the source wrote,
+    // which only kwrest_forward rewrites — and that one leaves no
+    // trailing kwargs Hash behind, so the two cannot both fire.
+    ("helper_kwargs", &["kwrest_forward"]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -732,6 +740,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("attach");
     send_file::apply_send_file_lowering(app);
     ran!("send_file");
+    diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));
+    ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
     broadcast_calls::apply_broadcast_calls_lowering(app);
