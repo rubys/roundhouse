@@ -43,6 +43,18 @@ URL  = URI(BASE)
 MILESTONE_FAILURES = []
 LEDGER_FAILURES = []
 
+# CABLE_WALK_DUMP=<dir>: write what the wire carried — the room page and
+# the broadcast frames — so `scripts/campfire-compare` can diff this
+# lane's artifacts against another lane's. Off by default; the walk
+# asserts, the dump is for the comparator.
+DUMP_DIR = ENV["CABLE_WALK_DUMP"]
+def dump(name, content)
+  return unless DUMP_DIR
+  require "fileutils"
+  FileUtils.mkdir_p(DUMP_DIR)
+  File.write(File.join(DUMP_DIR, name), content.to_s)
+end
+
 def check(label, got, want, ledger: nil)
   if got == want
     puts "  \e[32mok\e[0m   #{label}"
@@ -58,17 +70,33 @@ end
 
 # ── the HTTP half ─────────────────────────────────────────────────────
 $jar = {}
+$csrf = nil
+
+# Sign-in credentials. The defaults are what the walk's own /first_run
+# branch creates on a fresh database; a run against a SEEDED tree — the
+# Rails oracle, or an emit staged with the oracle's rows — passes the
+# seed's `user1@example.com` / `secret123456` instead.
+EMAIL    = ENV["CAMPFIRE_EMAIL"] || "walker@example.com"
+PASSWORD = ENV["CAMPFIRE_PASSWORD"] || "secret123"
 
 def req(verb, path, form = nil, accept: "text/html")
   uri = URI("#{BASE}#{path}")
   r = verb == "GET" ? Net::HTTP::Get.new(uri) : Net::HTTP::Post.new(uri)
   r["Accept"] = accept
   r["Cookie"] = $jar.map { |k, v| "#{k}=#{v}" }.join("; ") unless $jar.empty?
+  # Real Rails enforces CSRF on every POST; the emitted lanes accept the
+  # header and ignore it. The token is whatever the most recent page's
+  # `csrf-token` meta carried — which is how campfire's own JavaScript
+  # authenticates its fetches.
+  r["X-CSRF-Token"] = $csrf if verb == "POST" && $csrf
   r.set_form_data(form) if form
   res = Net::HTTP.start(uri.host, uri.port) { |h| h.request(r) }
   Array(res.get_fields("set-cookie")).each do |c|
     k, v = c.split(";", 2)[0].split("=", 2)
     $jar[k] = v
+  end
+  if verb == "GET" && (token = res.body.to_s[/<meta name="csrf-token" content="([^"]+)"/, 1])
+    $csrf = token
   end
   res
 end
@@ -89,6 +117,11 @@ class Client
     @messages = []
     @driver = WebSocket::Driver.client(self, protocols: ["actioncable-v1-json"])
     @driver.set_header("Cookie", cookie)
+    # Same-origin, spelled out: Action Cable's request-forgery check
+    # rejects a handshake whose Origin doesn't match the host, and a
+    # bare websocket-driver client sends none. The emitted lanes don't
+    # check; real Rails does.
+    @driver.set_header("Origin", "#{URL.scheme}://#{URL.host}:#{URL.port}")
     @driver.on(:message) { |e| @messages << (JSON.parse(e.data) rescue {}) }
     @driver.start
   end
@@ -135,12 +168,15 @@ puts "\n\e[1;34m==>\e[0m sign in"
 if req("GET", "/first_run").code == "200"
   req("POST", "/first_run", {
     "user[name]" => "Walker",
-    "user[email_address]" => "walker@example.com",
-    "user[password]" => "secret123",
+    "user[email_address]" => EMAIL,
+    "user[password]" => PASSWORD,
   })
 else
+  # A seeded tree: through the real form, scraping its CSRF token on
+  # the way past — real Rails 422s a naked /session POST.
+  req("GET", "/session/new")
   req("POST", "/session", {
-    "email_address" => "walker@example.com", "password" => "secret123",
+    "email_address" => EMAIL, "password" => PASSWORD,
   })
 end
 cookie = $jar.map { |k, v| "#{k}=#{v}" }.join("; ")
@@ -149,6 +185,7 @@ check("the account has a session cookie", $jar.key?("session_token"), true)
 # ── the page names the channel and the stream ─────────────────────────
 puts "\n\e[1;34m==>\e[0m read the room"
 room = req("GET", "/rooms/1")
+dump("room.html", room.body)
 check("GET /rooms/1", room.code, "200")
 tag = room.body.to_s[/<turbo-cable-stream-source[^>]*>/]
 check("the room page carries a stream source", !tag.nil?, true)
@@ -211,10 +248,21 @@ check("connection A receives the broadcast", received?(a, before[0]), true)
 check("connection B receives the broadcast", received?(b, before[1]), true)
 
 frame = a.payloads.drop(before[0]).find { |m| m["message"].to_s.include?("turbo-stream") }
+dump("frame_text.html", frame ? frame["message"] : "")
 if frame
   html = frame["message"].to_s
-  check("it is an append to the room's message list",
-        !html[/<turbo-stream action="append" target="messages_room_1">/].nil?, true)
+  # The frame must APPEND, and it must target a list the room page
+  # actually renders — scraped from the page rather than spelled here,
+  # because the name is dom_id's and the lanes disagree about it today:
+  # room 1 is an STI `Rooms::Open`, Rails' dom_id says
+  # `messages_rooms_open_1`, the emit's dom_prefix says
+  # `messages_room_1`. Each lane is SELF-consistent (its frame targets
+  # its own page's element), which is what this probe asserts; the
+  # cross-lane naming divergence is scripts/campfire-compare's to
+  # report.
+  target = html[/<turbo-stream action="append" target="([^"]+)">/, 1].to_s
+  check("it is an append to a list the room page renders",
+        target != "" && room.body.to_s.include?("id=\"#{target}\""), true)
   # A MILESTONE probe, and it earned the promotion. It was a ledger probe
   # for one commit, when an inherited class-side `new` built the abstract
   # filter and the app's own `rescue Exception` turned the resulting
@@ -247,6 +295,7 @@ req("POST", "/rooms/1/messages",
     accept: "text/vnd.turbo-stream.html, text/html")
 check("connection A receives the HTML-bodied broadcast", received?(a, before2), true)
 frame2 = a.payloads.drop(before2).find { |m| m["message"].to_s.include?("turbo-stream") }
+dump("frame_html.html", frame2 ? frame2["message"] : "")
 if frame2
   html2 = frame2["message"].to_s
   check("the markup survives sanitizing un-escaped",
