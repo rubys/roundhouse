@@ -428,19 +428,25 @@ module Main
     # the CRuby overlay dispatch.
     res.body = controller.body
     res.headers["Location"] = controller.location unless controller.location.nil?
-    # Content-Type for the non-html formats. Tep stamps
+    # Content-Type: any render that named its own type carries it to
+    # the wire — jbuilder's application/json, turbo's
+    # text/vnd.turbo-stream.html (which turbo REQUIRES; it ignores a
+    # response typed text/html), an avatar's image/svg+xml. The html
+    # default stays a no-op here because tep stamps
     # `text/html; charset=utf-8` on any inline body that names no type
-    # (server_scheduled.rb), so the html path stays a no-op here. JSON
-    # takes the controller's own type — a jbuilder-lowered action sets it
-    # through `render content_type:` — and RSS the fixed feed type, which
-    # is what the CRuby overlay's dispatch returns for the same routes.
-    if request_format == :json || request_format == :turbo_stream
-      # Both carry their own type from the render call site. Turbo
-      # REQUIRES `text/vnd.turbo-stream.html` — it ignores a response
-      # typed text/html.
-      res.headers["Content-Type"] = controller.content_type
-    elsif request_format == :rss
+    # (server_scheduled.rb). This used to forward only for the :json
+    # and :turbo_stream request formats, which left campfire's
+    # initials-avatar SVG — `render …, content_type: "image/svg+xml"`
+    # under an extensionless URL — served as text/html, and browsers do
+    # NOT sniff SVG in an <img>: a 200 the page showed as a broken
+    # image. The CRuby overlay's dispatch has always forwarded the
+    # controller's type unconditionally (ruby_overlay/main.rb); this is
+    # the same contract. RSS keeps its fixed feed type, matching what
+    # that overlay dispatch returns for the same routes.
+    if request_format == :rss
       res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"
+    elsif controller.content_type != "text/html; charset=utf-8"
+      res.headers["Content-Type"] = controller.content_type
     end
 
     # Outbound flash: persist messages set THIS request for the NEXT one.

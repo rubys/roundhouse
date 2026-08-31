@@ -1976,7 +1976,26 @@ what spinel's `sp_Class` wants — but a chain through it stays dynamic.
 Closing that means a singleton variant in `Ty`, which every target's
 exhaustive `match` would have to answer for.
 
-### A model has no `to_param`, so every avatar URL 500s
+### A model has no `to_param`, so every avatar URL 500s — FIXED
+
+**FIXED 2026-08-31**, exactly as scoped below: `push_to_param_method`
+synthesizes `@id.to_s` beside `dom_prefix`
+(`model_to_library/markers.rs`), skipping abstract models and any model
+carrying its own `to_param` (it runs after `push_user_methods` with a
+skip guard, because that pass's dedup runs the other way — a
+synthesized name pushed first would SHADOW the model's override, the
+opposite of what the original wording here assumed). Behind the fixed
+wall stood nothing: `Zlib.crc32` and the initials-SVG template both ran
+first try, and the avatar answered 200 with the full SVG. The demo's
+avatars are the initials arm — Active Storage only serves an avatar a
+user UPLOADED, which the archive excludes anyway.
+
+The browser then found the second half, below: 200 with
+`text/html`, and browsers do NOT sniff SVG in an `<img>` — a correct
+body rendered as a broken image. Both halves verified together:
+`image/svg+xml` on the wire, `naturalWidth` 150 in Chromium, and the
+e2e LEDGER entry in `helpers.js` retired so an avatar 500 FAILS the
+suite now. The original entry follows.
 
 Rails gives every `ActiveRecord::Base` a `to_param` (`id&.to_s`), which a
 model may override — lobsters' `User#to_param` answers the username. The
@@ -2067,15 +2086,21 @@ cross-worker fan-out still needs the opt-in `Tep::RedisFeed`. That is a
 scaling limit, not — as this entry used to claim — a prerequisite for
 "two tabs, one room, one live message" on one worker.
 
-### `send_file`'s content type is dropped on the tep lane
+### `send_file`'s content type is dropped on the tep lane — FIXED
 
-`Accounts::LogosController#send_png_file` passes
-`content_type: "image/png"`; the binary serves the logo as
-`text/html; charset=utf-8` (the inline-body default). Browsers sniff
-`<img>` payloads when `X-Content-Type-Options: nosniff` is absent, so
-the image renders anyway — but the type is wrong on the wire, and any
-future nosniff default would break every `send_file` image. Found
-2026-08-31 while closing the truncation entry above.
+**FIXED 2026-08-31.** The controller runtime was never the problem —
+`render`/`send_file`/`send_data` all store `@content_type` — the
+scaffold's dispatch glue forwarded it to the response only for the
+`:json` and `:turbo_stream` request formats. Everything else fell to
+tep's inline-body default (`text/html`): the account logo's
+`image/png`, and — the case that made it urgent — the initials
+avatar's `image/svg+xml`, because browsers do NOT sniff SVG in an
+`<img>` and rendered a correct 200 as a broken image. The glue now
+forwards ANY controller content type that differs from the html
+default, which is the contract the CRuby overlay dispatch has always
+had (`ruby_overlay/main.rb` passes it unconditionally). Verified:
+logo `image/png`, avatar `image/svg+xml`, turbo-stream POSTs still
+`text/vnd.turbo-stream.html`.
 
 ### A `tag.<el>` whose arguments are all keywords rendered its attributes as TEXT — FIXED
 
