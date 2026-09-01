@@ -60,6 +60,14 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Broadcasts", "append" | "prepend" | "replace" | "remove") => {
             Some(vec![hash_str_untyped()])
         }
+        // The broadcast-render bracket pair the broadcast lowerings
+        // wrap synthesized payloads in. Both params render as `&str`
+        // on the rust runtime, so the owned-String args (a
+        // `begin_broadcast_render()` call and a `Views::…` render)
+        // each need the `&(...)` borrow the coercer inserts from
+        // these declared types.
+        ("ViewHelpers", "broadcast_render") => Some(vec![Ty::Str, Ty::Str]),
+        ("ViewHelpers", "begin_broadcast_render") => Some(vec![]),
         _ => None,
     }
 }

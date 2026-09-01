@@ -5764,6 +5764,11 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
             walk_const_paths(body, out);
         }
         ExprNode::Lambda { body, .. } => walk_const_paths(body, out),
+        // A type-assertion wrapper is transparent to reference edges —
+        // the broadcast lowerings wrap their `Views::…` payload render
+        // in `Cast { …, Str }`, and skipping it dropped the model →
+        // views require.
+        ExprNode::Cast { value, .. } => walk_const_paths(value, out),
         ExprNode::If { cond, then_branch, else_branch } => {
             walk_const_paths(cond, out);
             walk_const_paths(then_branch, out);

@@ -205,6 +205,12 @@ use crate::params::{self, Params};
 use crate::db::Db;
 #[allow(unused_imports)]
 use crate::broadcasts::Broadcasts;
+// The broadcast-render bracket pair around synthesized broadcast
+// payloads (`ViewHelpers::broadcast_render(
+// &ViewHelpers::begin_broadcast_render(), …)` in the `after_*_commit`
+// expansions).
+#[allow(unused_imports)]
+use crate::view_helpers::{self, ViewHelpers};
 // Sibling-model glob so cross-file refs (Article ↔ Comment, the
 // `<Model>Row` typed-row pair) resolve through the `pub use` chain
 // that `emit_models_mod_rs` lays into `src/models/mod.rs`. Rust

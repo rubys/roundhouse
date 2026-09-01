@@ -138,6 +138,13 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
                 // instance dispatch (`record.dom_prefix()`). Classify
                 // those as `&self` methods so the call site resolves.
                 && !is_raise_only_body(&m.body)
+                // The OVERRIDES of those markers get the same shape by
+                // NAME: a non-STI model's `dom_prefix` body is a bare
+                // string literal (reads no self), but the broadcast
+                // lowerings call it through a typed receiver
+                // (`parent.dom_prefix()`), and a static override of an
+                // instance contract strands that call site.
+                && !matches!(m.name.as_str(), "dom_prefix" | "dom_record_key" | "to_param")
         })
         .map(|m| m.name.as_str().to_string())
         .collect();

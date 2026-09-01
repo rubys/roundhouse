@@ -691,7 +691,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Var { name, .. } => name.to_string(),
         // A bare module-state `@ivar` read → the whole process-dictionary
         // store. (Element/method access is intercepted in `emit_send`.)
-        ExprNode::Ivar { name } => ivar_pd_get(name.as_str()),
+        ExprNode::Ivar { name } => ivar_pd_get_typed(name.as_str(), e.ty.as_ref()),
         ExprNode::Send { recv, method, args, block, .. } => match block {
             Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
             None => emit_send(recv.as_ref(), method.as_str(), args),
@@ -1977,10 +1977,26 @@ fn ivar_pd_key(name: &str) -> String {
 }
 
 /// Read a module-singleton's `@ivar` state — the whole stored value,
-/// defaulting to an empty map (the only mutable-state shape these runtime
-/// modules use is a hash store).
+/// defaulting to an empty map (the hash-store shape most of these
+/// runtime modules use).
 fn ivar_pd_get(name: &str) -> String {
     format!("Process.get({}, %{{}})", ivar_pd_key(name))
+}
+
+/// Type-aware variant: a SCALAR module var takes its scalar zero as
+/// the unset default. The map default is not just wrong for those —
+/// it INVERTS a boolean guard, because `%{}` is truthy in Elixir:
+/// `if Process.get(:…_broadcast_rendering, %{})` stripped the CSRF
+/// input from every page render on this lane.
+fn ivar_pd_get_typed(name: &str, ty: Option<&crate::ty::Ty>) -> String {
+    use crate::ty::Ty;
+    let default = match ty {
+        Some(Ty::Bool) => "false",
+        Some(Ty::Int) => "0",
+        Some(Ty::Str) => "\"\"",
+        _ => "%{}",
+    };
+    format!("Process.get({}, {default})", ivar_pd_key(name))
 }
 
 /// Ruby stdlib module calls → Elixir equivalents. `Base64.strict_encode64`

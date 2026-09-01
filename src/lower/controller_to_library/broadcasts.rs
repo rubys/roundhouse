@@ -284,6 +284,19 @@ fn record_dom_id(_singular: &str, record: &Expr, span: Span) -> Expr {
 /// and a proc argument needs `.call` + function-type arms in all nine
 /// target emitters the runtime file lowers through.
 fn wrap_broadcast_render(html: Expr) -> Expr {
+    // The render answers String by contract, but the model lowering's
+    // typing registry has no Views surface (views lower AFTER models),
+    // so a bare stamp gets overwritten to `Var` by the body-typer and
+    // rust's owned-String → `&str` borrow coercion goes blind. `Cast`
+    // is the IR's assertion node for exactly this: the typer answers
+    // its target type, and the emitters that coerce args peek through
+    // it (ruby renders it as identity here — the inner ty is not
+    // poly).
+    let mut html = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Cast { value: html, target_ty: Ty::Str },
+    );
+    html.ty = Some(Ty::Str);
     let vh_const = || {
         Expr::new(
             crate::span::Span::synthetic(),

@@ -706,7 +706,12 @@ module ActionView
     # output is for OTHER sessions' pages". Found as a per-form byte
     # divergence in every broadcast frame by scripts/campfire-compare.
     def self.csrf_token_hidden_input
-      return "" if @broadcast_rendering
+      # `== true`, not truthiness: what an UNSET module var reads as
+      # is target-dependent (elixir's process-dictionary default was a
+      # truthy `%{}`, which stripped this input from every page render
+      # on that lane). The explicit comparison is false for every
+      # target's unset shape and for `false` alike.
+      return "" if @broadcast_rendering == true
       %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
     end
 
