@@ -433,6 +433,27 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
         true,
     );
 
+    // `_preload_rich_text_<attr>(rec)` — the batch loader's setter
+    // (`with_rich_text_<attr>` through `_preload_dispatch`). Installs the
+    // row the loader found, or nil when it found none, and sets the
+    // load-once flag either way: "looked, found nothing" is exactly the
+    // state the reader above must not re-query.
+    let rec = Symbol::from("rec");
+    push(
+        methods,
+        model,
+        preload_setter_name(attr),
+        vec![Param::positional(rec.clone())],
+        seq(vec![
+            assign_ivar(&cache, var_ref(rec.clone())),
+            assign_ivar(&loaded, lit_true()),
+            nil_lit(),
+        ]),
+        Some(fn_sig(vec![(rec, maybe_record.clone())], Ty::Nil)),
+        AccessorKind::Method,
+        true,
+    );
+
     // `message.body` — never nil, which is why the reader can be typed
     // as the record rather than as a nullable one. This is the method
     // that makes `message.body.to_plain_text` work on a message that
@@ -733,27 +754,50 @@ pub fn preload_scope_names(model: &Model) -> Vec<Symbol> {
     out
 }
 
+/// Each preload scope with the association it preloads: both
+/// `with_rich_text_body` and `with_rich_text_body_and_embeds` preload
+/// `rich_text_body` — embeds (the attachments inside a rich text) are
+/// not modeled, so the `_and_embeds` spelling buys the same one query.
+/// The emitter's relation delegate and the class-side body both read
+/// this, so they cannot disagree about what the scope does.
+pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
+    let mut out = Vec::new();
+    for (_span, attr) in rich_text_attrs(model) {
+        let assoc = Symbol::from(format!("rich_text_{}", attr.as_str()));
+        out.push((Symbol::from(format!("with_rich_text_{}", attr.as_str())), assoc.clone()));
+        out.push((
+            Symbol::from(format!("with_rich_text_{}_and_embeds", attr.as_str())),
+            assoc,
+        ));
+    }
+    out
+}
+
+/// `_preload_rich_text_<attr>` — the setter the batch loader calls.
+pub fn preload_setter_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("_preload_rich_text_{}", attr.as_str()))
+}
+
 /// Give the preload scopes bodies: `def self.with_rich_text_body(__rel
-/// = ActiveRecord::Relation.new(self)) = __rel`.
+/// = ActiveRecord::Relation.new(self)) = __rel.preload(:rich_text_body)`.
 ///
-/// IDENTITY, and that is the whole implementation. In Rails these are
-/// `includes(...)` — a QUERY PLAN hint that changes how many round
-/// trips a page costs and nothing about what it returns. The rich-text
-/// reader synthesized above fetches per record, so the hint has nothing
-/// to attach to and the scope has nothing to do but pass the relation
-/// along.
-///
-/// The cost is real and is stated here rather than hidden: a page that
-/// renders N messages issues N rich-text queries where Rails issues
-/// one. That is an N+1, not a wrong answer — and the alternative,
-/// dropping the method, turns a performance difference into a
-/// NoMethodError on every call site that chains through it.
+/// In Rails these are `includes(...)` — a query-plan hint that changes
+/// how many round trips a page costs and nothing about what it returns.
+/// They used to be IDENTITY here because the reader above fetched per
+/// record and the hint had nothing to attach to: an N+1 stated rather
+/// than hidden, and 40 of campfire's 233 round trips on a room page.
+/// `_preload_dispatch` carries an arm for `rich_text_<attr>` now
+/// (`emit::ruby::library::preload_targets`), which loads every record's
+/// row in one query and installs it through `_preload_rich_text_<attr>`
+/// below, so the reader's load-once flag is already set when the page
+/// asks. Dropping the method was never an option: a NoMethodError on
+/// every call site that chains through it.
 ///
 /// Ruby-family only, for the same reason `push_scope_methods` is:
 /// `ActiveRecord::Relation` is a CRuby/JRuby runtime class.
 pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let rel = Symbol::from("__rel");
-    for name in preload_scope_names(model) {
+    for (name, assoc) in preload_scopes(model) {
         if methods
             .iter()
             .any(|m| m.receiver == MethodReceiver::Class && m.name == name)
@@ -767,7 +811,19 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
                 rel.clone(),
                 super::model_to_library::relation_new_self(),
             )],
-            body: var_ref(rel.clone()),
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(rel.clone())),
+                    method: Symbol::from("preload"),
+                    args: vec![Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: assoc.clone() } },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
             // No signature, matching `push_scope_methods` — a declared
             // `scope` leaves this None too. A `Ty::Relation` in the
             // signature is a relation REACHING EMIT, which every

@@ -41,6 +41,14 @@ const SCHEMA: &str = r#"ActiveRecord::Schema.define do
     t.integer "room_id", null: false
     t.datetime "created_at", null: false
   end
+  create_table "action_text_rich_texts", force: :cascade do |t|
+    t.text "body"
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
 end
 "#;
 
@@ -89,13 +97,13 @@ fn the_bare_preload_scope_call_is_threaded() {
     assert!(body.contains("with_rich_text_body_and_embeds(__rel)"), "{body}");
 }
 
-/// The delegate the same name gets ON A RELATION stays identity — these
-/// scopes return their argument, so a `__scope_` hop to a body that
-/// answers `__rel` would be a dispatch for nothing. Registering them in
-/// the scope registry (which the threading above needs) must not turn
-/// that into the general path.
+/// The delegate the same name gets ON A RELATION preloads the same
+/// association the class-side body does, with no `__scope_` hop: there
+/// is no arity to detect and no model to pick. Registering these in the
+/// scope registry (which the threading above needs) must not turn that
+/// into the general path.
 #[test]
-fn the_relation_delegate_stays_identity() {
+fn the_relation_delegate_preloads() {
     let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
     tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
     tree.insert(
@@ -112,8 +120,49 @@ fn the_relation_delegate_stays_identity() {
         .content;
     let at = src.find("def with_attached_attachment").unwrap_or_else(|| panic!("{src}"));
     assert!(
-        src[at..].starts_with("def with_attached_attachment\n      self\n"),
+        src[at..].starts_with("def with_attached_attachment\n      preload(:attachment_attachment)\n"),
         "{}",
         &src[at..(at + 80).min(src.len())]
     );
+    let at = src.find("def with_rich_text_body_and_embeds").unwrap_or_else(|| panic!("{src}"));
+    assert!(
+        src[at..].starts_with("def with_rich_text_body_and_embeds\n      preload(:rich_text_body)\n"),
+        "{}",
+        &src[at..(at + 80).min(src.len())]
+    );
+}
+
+/// What the preload spec lands on: the model carries a batch loader for
+/// the attachment under Rails' association name, and the dispatch
+/// answers it. This is the machinery that takes campfire's room page
+/// from 80 attachment lookups to one.
+#[test]
+fn the_attachment_preload_has_a_batch_loader() {
+    let src = emitted();
+    assert!(
+        src.contains("def self._preload_batch_attachment_attachment(records)"),
+        "{src}"
+    );
+    assert!(src.contains("when :attachment_attachment"), "{src}");
+    assert!(
+        src.contains("FROM active_storage_attachments a JOIN active_storage_blobs b"),
+        "one join for the whole record set:\n{src}"
+    );
+    assert!(src.contains("r._preload_attachment_attachment(att)"), "{src}");
+}
+
+/// The rich-text twin: one `IN` over `action_text_rich_texts`, handed to
+/// the owner's load-once setter, with `ActionText::RichText` as the
+/// nested-preload target.
+#[test]
+fn the_rich_text_preload_has_a_batch_loader() {
+    let src = emitted();
+    assert!(src.contains("def self._preload_batch_rich_text_body(records)"), "{src}");
+    assert!(src.contains("when :rich_text_body"), "{src}");
+    assert!(
+        src.contains(r#"ActiveRecord::Relation.new(ActionText::RichText).where(record_type: "Message", name: "body", record_id: ids)"#),
+        "{src}"
+    );
+    assert!(src.contains("r._preload_rich_text_body(by_id[r.id])"), "{src}");
+    assert!(src.contains("def _preload_rich_text_body(rec)"), "the owner's setter is emitted:\n{src}");
 }

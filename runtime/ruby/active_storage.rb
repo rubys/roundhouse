@@ -20,25 +20,66 @@
 module ActiveStorage
   class Attached
     # Constructed with the three columns Rails scopes an attachment on,
-    # NOT with a pre-computed boolean: the query has to run at ASK time
-    # (a record can be attached to between two reads), and a boolean
-    # argument would also have meant folding a `where(...).exists?`
-    # chain into the reader — which the query specializer inlines into
-    # a multi-statement SQL block that cannot sit in an argument
-    # position. Raw SQL through the adapter, the way `Relation` itself
-    # composes, keeps the reader a plain constructor call.
+    # NOT with a pre-computed boolean: a boolean argument would have
+    # meant folding a `where(...).exists?` chain into the reader — which
+    # the query specializer inlines into a multi-statement SQL block that
+    # cannot sit in an argument position. Raw SQL through the adapter,
+    # the way `Relation` itself composes, keeps the reader a plain
+    # constructor call.
+    #
+    # The row is read ONCE and remembered, as Rails' `Attached::One`
+    # remembers its attachment until `reload`. An earlier version of
+    # this class argued the other way — a record can be attached to
+    # between two reads, so ask every time — and that argument was
+    # overturned deliberately: it cost two round trips per message on
+    # campfire's room page (`content_type` asks `attached?` twice), and
+    # it is not what Rails does. `attach` and `purge` forget the row, so
+    # a write through this proxy is seen by its next read.
     def initialize(record_type, record_id, name)
       @record_type = record_type
       @record_id = record_id
       @name = name
+      @row_loaded = false
+      @attachment_id = 0
+      @blob_filename = ""
+      @blob_content_type = ""
+    end
+
+    # The attachment row and the two blob columns the readers answer
+    # from, in one join. `attachment_id` 0 means nothing is attached.
+    def load_row
+      return nil if @row_loaded
+      @row_loaded = true
+      sql = "SELECT a.id AS attachment_id, b.filename AS filename, b.content_type AS content_type " +
+            "FROM active_storage_attachments a " +
+            "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
+            ActiveRecord.adapter.escape_value(@record_type) +
+            " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
+            " AND a.name = " + ActiveRecord.adapter.escape_value(@name) + " LIMIT 1"
+      rows = ActiveRecord.adapter.select_rows(sql)
+      if rows.length > 0
+        @attachment_id = rows[0]["attachment_id"].to_i
+        @blob_filename = rows[0]["filename"].to_s
+        @blob_content_type = rows[0]["content_type"].to_s
+      end
+      nil
+    end
+
+    # The batch loader's entry (`Model._preload_batch_<attr>_attachment`,
+    # driven by `with_attached_<attr>`): the row for this record, found
+    # in one query for the whole page, or `0` and blanks when the page's
+    # query found none for it.
+    def _preload_row(attachment_id, filename, content_type)
+      @row_loaded = true
+      @attachment_id = attachment_id
+      @blob_filename = filename
+      @blob_content_type = content_type
+      nil
     end
 
     def attached?
-      sql = "SELECT id FROM active_storage_attachments WHERE record_type = " +
-            ActiveRecord.adapter.escape_value(@record_type) +
-            " AND record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
-            " AND name = " + ActiveRecord.adapter.escape_value(@name) + " LIMIT 1"
-      ActiveRecord.adapter.select_rows(sql).length > 0
+      load_row
+      @attachment_id != 0
     end
 
     # Rails: "can a variant be produced from this blob's content type?"
@@ -65,32 +106,18 @@ module ActiveStorage
     # `attachment&.filename&.to_s` on every message.
     #
     def filename
-      blob_column("filename")
-    end
-
-    # One blob column of the attached blob, or nil when nothing is
-    # attached. METADATA, not bytes — the values live in columns, so
-    # this is a join away and needs no storage service, which is why
-    # these can answer where `variant` / `url` / `download` still raise.
-    #
-    # Column name interpolated rather than escaped: every caller is a
-    # method on this class passing a literal, so there is no untrusted
-    # value here — and a column name is not a value SQLite would take
-    # a bound parameter for anyway.
-    def blob_column(column)
-      sql = "SELECT b." + column + " FROM active_storage_attachments a " +
-            "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
-            ActiveRecord.adapter.escape_value(@record_type) +
-            " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
-            " AND a.name = " + ActiveRecord.adapter.escape_value(@name) + " LIMIT 1"
-      rows = ActiveRecord.adapter.select_rows(sql)
-      rows.length > 0 ? rows[0][column] : nil
+      load_row
+      @attachment_id == 0 ? nil : @blob_filename
     end
 
     # The blob's content type, or nil when nothing is attached — same
-    # column, same join, same `allow_nil` contract as `filename`.
+    # row, same `allow_nil` contract as `filename`. METADATA, not bytes:
+    # the values live in columns, so they are a join away and need no
+    # storage service, which is why these can answer where `variant` /
+    # `url` / `download` still raise.
     def content_type
-      blob_column("content_type")
+      load_row
+      @attachment_id == 0 ? nil : @blob_content_type
     end
 
     # Rails' media predicates, which are content-type questions and so
@@ -155,6 +182,7 @@ module ActiveStorage
     # answer for a file no longer attached, so the row goes with it.
     def attach(data, filename, content_type)
       purge
+      @row_loaded = false
       blob_id = ActiveRecord.adapter.insert("active_storage_blobs", {
         "key" => blob_key(filename),
         "filename" => filename,
@@ -208,6 +236,7 @@ module ActiveStorage
         ActiveRecord.adapter.delete("active_storage_attachments", row["attachment_id"].to_i)
         ActiveRecord.adapter.delete("active_storage_blobs", row["blob_id"].to_i)
       end
+      @row_loaded = false
       nil
     end
 

@@ -306,3 +306,14 @@ fn autosave_skips_a_rich_text_that_was_only_read() {
         "the emptiness test must not go through a renderer:\n{body}"
     );
 }
+
+/// The batch loader's setter: `with_rich_text_body` preloads
+/// `rich_text_body`, and the loader installs each record's row (or its
+/// absence) through this, with the load-once flag set either way.
+#[test]
+fn the_owner_has_a_preload_setter() {
+    let app = app();
+    let lc = lower(&app, "Message");
+    let setter = instance_method(&lc, "_preload_rich_text_body").expect("_preload_rich_text_body");
+    assert_eq!(setter.params.len(), 1, "takes the record (or nil): {:?}", setter.params);
+}

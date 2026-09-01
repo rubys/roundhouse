@@ -156,7 +156,31 @@ pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model)
     }
 }
 
-/// `def logo; ActiveStorage::Attached.new("Account", @id, "logo"); end`
+/// ```ruby
+/// def logo
+///   cached = @logo_cache
+///   return cached unless cached.nil?
+///   fresh = ActiveStorage::Attached.new("Account", @id, "logo")
+///   @logo_cache = fresh
+///   fresh
+/// end
+///
+/// def _preload_logo_attachment(att)   # the batch loader's setter
+///   @logo_cache = att
+///   nil
+/// end
+/// ```
+///
+/// ONE proxy per record, as in Rails: `record.logo` hands back the same
+/// `Attached::One` on every read, and the proxy remembers its
+/// attachment row until `reload`. The proxy used to be constructed
+/// fresh on every call, and it queries at ask time, so two reads of
+/// `message.attachment.attached?` in one render were two round trips —
+/// campfire's `Message#content_type` asks twice per message, and the
+/// room page paid 80 attachment lookups for 40 messages. The memo makes
+/// it one per record, and `_preload_<attr>_attachment` (which
+/// `with_attached_<attr>` drives through the batch loader) makes it
+/// one per PAGE.
 ///
 /// A plain constructor, NOT a folded `ActiveStorage::Attachment
 /// .where(...).exists?` chain: the query specializer inlines such a
@@ -164,9 +188,11 @@ pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model)
 /// results = []; while Db.step?(stmt) …`), which cannot sit in an
 /// argument position — the emit was syntactically invalid and took the
 /// whole suite from 47 passing tests to 0. The query belongs in the
-/// value object, which runs it at ASK time; a record can be attached to
-/// between two reads, so a boolean captured at construction would be
-/// stale anyway.
+/// value object.
+///
+/// The cache ivar is nilable and never seeded, so a strict target types
+/// it `Attached?`; the reader answers the NON-nil local it just checked
+/// or built, which keeps the never-nil contract in the signature.
 fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     if super::model_to_library::model_defines_instance_method(model, attr)
         || methods
@@ -175,40 +201,66 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     {
         return;
     }
-    let str_lit = |v: &str| {
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Lit { value: Literal::Str { value: v.to_string() } },
-        )
-    };
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(Expr::new(
-                Span::synthetic(),
-                ExprNode::Const {
-                    path: attached_class().0.as_str().split("::").map(Symbol::from).collect(),
-                },
-            )),
-            method: Symbol::from("new"),
-            args: vec![
-                str_lit(model.name.0.as_str()),
-                Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
-                str_lit(attr.as_str()),
-            ],
-            block: None,
-            parenthesized: true,
-        },
-    );
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let str_lit = |v: &str| syn(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    let cache = Symbol::from(format!("{}_cache", attr.as_str()));
+    let cached = Symbol::from("cached");
+    let fresh = Symbol::from("fresh");
+    let var = |name: &Symbol| syn(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let construct = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: attached_class().0.as_str().split("::").map(Symbol::from).collect(),
+        })),
+        method: Symbol::from("new"),
+        args: vec![
+            str_lit(model.name.0.as_str()),
+            syn(ExprNode::Ivar { name: Symbol::from("id") }),
+            str_lit(attr.as_str()),
+        ],
+        block: None,
+        parenthesized: true,
+    });
+    let body = syn(ExprNode::Seq {
+        exprs: vec![
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: cached.clone() },
+                value: syn(ExprNode::Ivar { name: cache.clone() }),
+            }),
+            syn(ExprNode::If {
+                cond: syn(ExprNode::Send {
+                    recv: Some(syn(ExprNode::Send {
+                        recv: Some(var(&cached)),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    })),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                }),
+                then_branch: syn(ExprNode::Return { value: var(&cached) }),
+                else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            }),
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: fresh.clone() },
+                value: construct,
+            }),
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: cache.clone() },
+                value: var(&fresh),
+            }),
+            var(&fresh),
+        ],
+    });
+    let attached_ty = Ty::Class { id: attached_class(), args: vec![] };
     methods.push(MethodDef {
         name: attr.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(super::model_to_library::fn_sig(
-            vec![],
-            Ty::Class { id: attached_class(), args: vec![] },
-        )),
+        signature: Some(super::model_to_library::fn_sig(vec![], attached_ty.clone())),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,
@@ -216,6 +268,45 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         mutates_self: false,
         block_param: None,
     });
+
+    // The batch loader's setter: `with_attached_<attr>` preloads one
+    // proxy per record, row already known, and installs it here.
+    let att = Symbol::from("att");
+    methods.push(MethodDef {
+        name: preload_setter_name(attr),
+        receiver: MethodReceiver::Instance,
+        params: vec![crate::dialect::Param::positional(att.clone())],
+        body: syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: cache },
+                    value: var(&att),
+                }),
+                syn(ExprNode::Lit { value: Literal::Nil }),
+            ],
+        }),
+        signature: Some(super::model_to_library::fn_sig(vec![(att, attached_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
+}
+
+/// Rails' name for the attachment association behind `has_one_attached
+/// :<attr>`: `<attr>_attachment`. It is the spec `with_attached_<attr>`
+/// preloads and the arm `_preload_dispatch` answers, so an app that
+/// writes Rails' own `includes(logo_attachment: :blob)` lands on the
+/// same loader.
+pub fn attachment_assoc_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_attachment", attr.as_str()))
+}
+
+/// `_preload_<attr>_attachment` — the setter the batch loader calls.
+pub fn preload_setter_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("_preload_{}", attachment_assoc_name(attr).as_str()))
 }
 
 // ── the preload scope ──────────────────────────────────────────
@@ -229,36 +320,47 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
 /// the same split `rich_text::preload_scope_names` uses, and for the
 /// same reason.
 pub fn preload_scope_names(model: &Model) -> Vec<Symbol> {
+    preload_scopes(model).into_iter().map(|(scope, _assoc)| scope).collect()
+}
+
+/// Each preload scope with the association it preloads:
+/// `(with_attached_logo, logo_attachment)`. The emitter's relation
+/// delegate and the class-side body both read this, so they cannot
+/// disagree about what the scope does.
+pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
     attached_attrs(model)
         .into_iter()
-        .map(|(_span, attr)| Symbol::from(format!("with_attached_{}", attr.as_str())))
+        .map(|(_span, attr)| {
+            (
+                Symbol::from(format!("with_attached_{}", attr.as_str())),
+                attachment_assoc_name(&attr),
+            )
+        })
         .collect()
 }
 
 /// Give the preload scope a body: `def self.with_attached_avatar(__rel
-/// = ActiveRecord::Relation.new(self)) = __rel`.
+/// = ActiveRecord::Relation.new(self)) = __rel.preload(:avatar_attachment)`.
 ///
-/// IDENTITY, and that is the whole implementation, exactly as it is for
-/// `with_rich_text_<attr>`. In Rails this is `includes(<name>_attachment:
-/// :blob)` — a QUERY PLAN hint that changes how many round trips a page
-/// costs and NOTHING about which rows come back. The attachment reader
-/// this pass synthesizes runs its query per record at ASK time, so the
-/// hint has nothing to attach to and the scope has nothing to do but
-/// pass the relation along.
-///
-/// The cost is real and stated rather than hidden: a page rendering N
-/// records issues N attachment queries where Rails issues one. That is
-/// an N+1, not a wrong answer — and the alternative, leaving the method
-/// undefined, turns a performance difference into a NameError on every
-/// call site that chains through it (campfire's
-/// `Message.with_attached_attachment` is inside the `ordered` scope
-/// chain that `rooms#show` renders from, so it was every room page).
+/// In Rails this is `includes(<attr>_attachment: :blob)` — a query-plan
+/// hint that changes how many round trips a page costs and nothing
+/// about which rows come back. It used to be IDENTITY here, because the
+/// reader queried per record at ask time and the hint had nothing to
+/// attach to; that was an N+1 stated rather than hidden, and on
+/// campfire's room page it was 80 of 233 round trips. The reader
+/// memoizes now (`push_reader`) and `_preload_dispatch` carries an arm
+/// for `<attr>_attachment` (`emit::ruby::library::preload_targets`),
+/// so the relation's `to_a` batches every record's attachment row into
+/// one query and installs a row-bearing proxy on each record. Leaving
+/// the method undefined was never an option: campfire's
+/// `Message.with_attached_attachment` is inside the scope chain
+/// `rooms#show` renders from, so a NameError there is every room page.
 ///
 /// Ruby-family only, for the same reason `push_scope_methods` is:
 /// `ActiveRecord::Relation` is a CRuby/JRuby runtime class.
 pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let rel = Symbol::from("__rel");
-    for name in preload_scope_names(model) {
+    for (name, assoc) in preload_scopes(model) {
         if methods
             .iter()
             .any(|m| m.receiver == MethodReceiver::Class && m.name == name)
@@ -274,7 +376,19 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             )],
             body: Expr::new(
                 Span::synthetic(),
-                ExprNode::Var { id: crate::ident::VarId(0), name: rel.clone() },
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: crate::ident::VarId(0), name: rel.clone() },
+                    )),
+                    method: Symbol::from("preload"),
+                    args: vec![Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: assoc.clone() } },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
             ),
             // No signature — see the note on the rich-text twin: a
             // `Ty::Relation` in a signature is a relation REACHING EMIT,

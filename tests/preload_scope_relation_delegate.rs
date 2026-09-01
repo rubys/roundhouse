@@ -63,7 +63,7 @@ fn delegates() -> String {
 }
 
 #[test]
-fn a_synthesized_preload_scope_gets_an_identity_delegate() {
+fn a_synthesized_preload_scope_gets_a_preloading_delegate() {
     let src = delegates();
     assert!(
         src.contains("def with_attached_avatar"),
@@ -71,8 +71,8 @@ fn a_synthesized_preload_scope_gets_an_identity_delegate() {
     );
     let at = src.find("def with_attached_avatar").unwrap();
     assert!(
-        src[at..].starts_with("def with_attached_avatar\n      self\n"),
-        "the delegate is identity, with no __scope_ dispatch:\n{}",
+        src[at..].starts_with("def with_attached_avatar\n      preload(:avatar_attachment)\n"),
+        "the delegate preloads the attachment, with no __scope_ dispatch:\n{}",
         &src[at..(at + 80).min(src.len())]
     );
 }

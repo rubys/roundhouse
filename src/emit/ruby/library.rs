@@ -370,31 +370,32 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // NoMethodError on a class method that plainly exists, because the
     // receiver is a relation value and not the class.
     //
-    // The delegate is `self`, with no `__scope_` dispatch behind it,
-    // because these scopes ARE identity — Rails' `includes(...)` is a
-    // query-plan hint and the per-record readers this compiler
-    // synthesizes have nothing for it to attach to (the class-side
-    // bodies say the same thing by returning `__rel`). So there is no
-    // arity to detect and no model to pick: every model that declares
-    // the attachment answers the relation unchanged, and a model that
-    // does not never has the name reached on it.
-    let mut identity: std::collections::BTreeSet<String> = Default::default();
+    // The delegate is `preload(:<assoc>)`, with no `__scope_` dispatch
+    // behind it: there is no arity to detect and no model to pick,
+    // because every model that declares the attachment preloads the
+    // same named association (`<attr>_attachment`, `rich_text_<attr>`),
+    // and a model that does not never has the name reached on it. It
+    // used to answer `self` — the scopes were identity while the
+    // readers queried per record — and a delegate that preloads is
+    // what lets the batch loader run when the scope is reached
+    // mid-chain, not only from the class.
+    let mut preloads: std::collections::BTreeMap<String, String> = Default::default();
     for model in &app.models {
-        let names = crate::lower::rich_text::preload_scope_names(model)
+        let scopes = crate::lower::rich_text::preload_scopes(model)
             .into_iter()
-            .chain(crate::lower::attached::preload_scope_names(model));
-        for n in names {
+            .chain(crate::lower::attached::preload_scopes(model));
+        for (n, assoc) in scopes {
             let n = n.as_str().to_string();
             // A declared scope of the same name wins — it has a real
-            // body, and shadowing it with identity would drop a filter.
+            // body, and shadowing it would drop a filter.
             // A Relation builtin is never delegated, same rule as above.
             if by_name.contains_key(&n) || RELATION_BUILTINS.contains(&n.as_str()) {
                 continue;
             }
-            identity.insert(n);
+            preloads.insert(n, assoc.as_str().to_string());
         }
     }
-    if by_name.is_empty() && identity.is_empty() {
+    if by_name.is_empty() && preloads.is_empty() {
         return None;
     }
     let mut skipped: Vec<String> = Vec::new();
@@ -408,11 +409,11 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
             }
         }
     }
-    for name in &identity {
-        body.push_str("\n    # Preload scope (Rails' `includes`) — identity here, so\n");
-        body.push_str("    # the relation passes through unchanged.\n");
+    for (name, assoc) in &preloads {
+        body.push_str("\n    # Preload scope (Rails' `includes`): the association it names\n");
+        body.push_str("    # joins this relation's preload specs, batched at `to_a`.\n");
         writeln!(body, "    def {name}").unwrap();
-        body.push_str("      self\n    end\n");
+        writeln!(body, "      preload(:{assoc})\n    end").unwrap();
     }
     let mut s = String::from(
         "# Generated Relation scope delegation (see\n\
@@ -6127,6 +6128,16 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 // as Ruby source and parsed back through `runtime_src::parse_methods`
 // (templates are fixed; identifiers come from assoc/table names).
 //
+// Two framework-owned associations batch the same way, under Rails'
+// own names: `has_one_attached :<attr>` as `<attr>_attachment` (one
+// join over the attachment and blob tables, installing a row-bearing
+// `ActiveStorage::Attached` on each record) and `has_rich_text :<attr>`
+// as `rich_text_<attr>` (one `IN` over `action_text_rich_texts`,
+// installing the record through the owner's load-once setter). The
+// `with_attached_*` / `with_rich_text_*` scopes preload these names, so
+// campfire's `Message.with_attachment_details` costs the room page two
+// queries where it cost eighty.
+//
 // Known gaps, deliberate: has_one and scope-carrying through-assocs
 // (other than a plain `order("...")`) get no batch arm — the dispatch
 // falls through and the lazy reader stays correct (just N+1, matching
@@ -6264,6 +6275,13 @@ enum PreloadKind {
     /// `SELECT <t>.*, <thr>.<thr_fk> AS __src FROM <t> JOIN <thr> ON
     /// <thr>.<src_fk> = <t>.id WHERE <thr>.<thr_fk> IN (...)`.
     Through { target: String, join: String, group_col: String, order: Option<String> },
+    /// `has_one_attached :<attr>`: one join over the attachment and blob
+    /// tables for the whole record set, installing a row-bearing
+    /// `ActiveStorage::Attached` on each record (`attr`, owner class).
+    Attached { attr: String, owner: String },
+    /// `has_rich_text :<attr>`: one `IN` over `action_text_rich_texts`,
+    /// installed through the owner's load-once setter.
+    RichText { attr: String, owner: String },
 }
 
 fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
@@ -6348,6 +6366,27 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 ));
             }
             _ => {}
+        }
+    }
+    // The framework-owned pairs, under Rails' own association names.
+    for (_span, attr) in crate::lower::attached::attached_attrs(model) {
+        out.push((
+            crate::lower::attached::attachment_assoc_name(&attr).as_str().to_string(),
+            PreloadKind::Attached {
+                attr: attr.as_str().to_string(),
+                owner: model.name.0.as_str().to_string(),
+            },
+        ));
+    }
+    if model_exists(&crate::lower::rich_text::record_class()) {
+        for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+            out.push((
+                format!("rich_text_{}", attr.as_str()),
+                PreloadKind::RichText {
+                    attr: attr.as_str().to_string(),
+                    owner: model.name.0.as_str().to_string(),
+                },
+            ));
         }
     }
     out
@@ -6473,6 +6512,74 @@ end
 "#
                 );
             }
+            // One join for every record's attachment row; a record the
+            // query did not name gets a proxy that already knows it has
+            // nothing (id 0), so its `attached?` is a field read too.
+            // Three typed hashes rather than one hash of rows: every
+            // value keeps its own type.
+            PreloadKind::Attached { attr, owner } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  att_ids = {{}}
+  filenames = {{}}
+  content_types = {{}}
+  if ids.length > 0
+    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, b.filename AS filename, b.content_type AS content_type FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.escape_int_list(ids) + ")").each do |row|
+      rid = row["record_id"].to_i
+      att_ids[rid] = row["attachment_id"].to_i
+      filenames[rid] = row["filename"].to_s
+      content_types[rid] = row["content_type"].to_s
+    end
+  end
+  records.each do |r|
+    att = ActiveStorage::Attached.new("{owner}", r.id, "{attr}")
+    found = att_ids[r.id]
+    if found.nil?
+      att._preload_row(0, "", "")
+    else
+      att._preload_row(found, filenames[r.id] || "", content_types[r.id] || "")
+    end
+    r._preload_{name}(att)
+  end
+  []
+end
+"#
+                );
+            }
+            // One IN over the rich-text table; a record with no row is
+            // told so, which is the state the load-once reader must not
+            // re-query.
+            PreloadKind::RichText { attr, owner } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  by_id = {{}}
+  loaded = []
+  if ids.length > 0
+    loaded = ActiveRecord::Relation.new(ActionText::RichText).where(record_type: "{owner}", name: "{attr}", record_id: ids).to_a
+  end
+  loaded.each do |rec|
+    by_id[rec.record_id] = rec
+  end
+  records.each do |r|
+    r._preload_{name}(by_id[r.id])
+  end
+  loaded
+end
+"#
+                );
+            }
         }
     }
 
@@ -6486,14 +6593,26 @@ end
         src.push_str("  case name\n");
         for (name, kind) in &targets {
             let target = match kind {
-                PreloadKind::BelongsTo { target, .. } => target,
-                PreloadKind::HasMany { target, .. } => target,
-                PreloadKind::Through { target, .. } => target,
+                PreloadKind::BelongsTo { target, .. } => Some(target.as_str()),
+                PreloadKind::HasMany { target, .. } => Some(target.as_str()),
+                PreloadKind::Through { target, .. } => Some(target.as_str()),
+                PreloadKind::RichText { .. } => Some("ActionText::RichText"),
+                // `includes(logo_attachment: :blob)`: the blob is already
+                // in the row the loader fetched; there is no model to
+                // recurse into.
+                PreloadKind::Attached { .. } => None,
             };
-            let _ = write!(
-                src,
-                "  when :{name}\n    loaded = _preload_batch_{name}(records)\n    {target}.preload_associations(loaded, [nested]) unless nested.nil?\n"
-            );
+            match target {
+                Some(target) => {
+                    let _ = write!(
+                        src,
+                        "  when :{name}\n    loaded = _preload_batch_{name}(records)\n    {target}.preload_associations(loaded, [nested]) unless nested.nil?\n"
+                    );
+                }
+                None => {
+                    let _ = write!(src, "  when :{name}\n    _preload_batch_{name}(records)\n");
+                }
+            }
         }
         src.push_str("  end\n  nil\nend\n");
     }

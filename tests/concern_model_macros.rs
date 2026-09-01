@@ -85,12 +85,11 @@ fn model_src(name: &str) -> String {
 
 /// Rails' macro declares `with_attached_<attr>` beside the attachment,
 /// and campfire's `Message.ordered` chains through it — so leaving it
-/// undefined was a NameError on every room page, not a slow query.
-/// IDENTITY, like the `with_rich_text_*` twin: the scope is an
-/// `includes` hint in Rails, and the synthesized reader queries per
-/// record, so there is nothing for the hint to attach to.
+/// undefined was a NameError on every room page, not a slow query. It
+/// preloads Rails' own association name for the attachment, so the
+/// relation's `to_a` batches every record's row into one query.
 #[test]
-fn the_attachment_preload_scope_exists_and_is_the_identity() {
+fn the_attachment_preload_scope_exists_and_preloads_the_attachment() {
     let app = app();
     let model = app.models.iter().find(|m| m.name.0.as_str() == "Message").unwrap();
     let names: Vec<String> = roundhouse::lower::attached::preload_scope_names(model)
@@ -110,8 +109,27 @@ fn the_attachment_preload_scope_exists_and_is_the_identity() {
         .and_then(|s| s.split("\n  end").next())
         .unwrap_or_default();
     assert!(
-        body.contains("__rel"),
-        "the scope must answer its relation unchanged:\n{body}"
+        body.contains("__rel.preload(:attachment_attachment)"),
+        "the scope must preload the attachment association:\n{body}"
+    );
+}
+
+/// One proxy per record, as in Rails: the reader remembers the
+/// `Attached` it built, and the batch loader has a setter to install a
+/// row-bearing one.
+#[test]
+fn the_attachment_reader_memoizes_its_proxy() {
+    let src = model_src("message.rb");
+    let at = src.find("def attachment\n").unwrap_or_else(|| panic!("{src}"));
+    let body = &src[at..src[at..].find("\n  end").map(|i| at + i).unwrap_or(src.len())];
+    assert!(body.contains("@attachment_cache"), "the reader keeps the proxy:\n{body}");
+    assert!(
+        body.contains(r#"ActiveStorage::Attached.new("Message", @id, "attachment")"#),
+        "and builds it on the first read:\n{body}"
+    );
+    assert!(
+        src.contains("def _preload_attachment_attachment(att)"),
+        "the batch loader's setter exists:\n{src}"
     );
 }
 
