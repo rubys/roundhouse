@@ -3,7 +3,8 @@
 # page cost on the compiled binary, and how many does real Rails spend on the
 # same page from the same rows?
 #
-#   scripts/campfire-queries [--reuse EMIT] [--keep] [--route PATH]... [APP]
+#   scripts/campfire-queries [--reuse EMIT] [--keep] [--no-fragment-cache]
+#                            [--route PATH]... [APP]
 #
 # Boots the Rails oracle (build/campfire-oracle, from scripts/campfire-oracle
 # prepare) at RAILS_LOG_LEVEL=debug and the spinel binary under RH_SQL_TRACE=1,
@@ -27,6 +28,18 @@
 # profile, the messages index, and searches. --route adds to (does not
 # replace) the defaults; give --route before APP.
 #
+# Rails is served AS DEPLOYED, fragment cache and all. campfire renders the
+# message list `cached: true` against a Redis store, so a warm Rails reads
+# the message fragments back and never runs the partials: its room page
+# costs 13 queries, and the boosts, rich-text, and attachment reads the
+# partials would make never happen. That is the number campfire's users
+# get, so it is the bar. The binary has no fragment cache; if that is why
+# it spends more, that is ours to fix -- by caching, or by not needing to.
+# `--no-fragment-cache` serves Rails with `perform_caching = false`, which
+# shows what campfire's own renderer costs (93 on the room page: the app
+# has N+1s of its own that the cache absorbs) -- a diagnostic view, not
+# the comparison.
+#
 # Requires: the oracle prepared, redis-server running (Rails' Action Cable
 # adapter), cargo, ruby, spinel + a C toolchain. --reuse skips the emit and
 # build, so a runtime edit can be measured with `make build` in the reused
@@ -40,6 +53,7 @@ ORACLE="$REPO_ROOT/build/campfire-oracle"
 OUT=""
 KEEP=0
 REUSE=""
+NOCACHE=()
 ROUTES=(/rooms/1 /rooms/1 /users/1 /rooms/1/messages /searches)
 EXTRA=()
 
@@ -48,7 +62,8 @@ while [[ $# -gt 0 ]]; do
         --reuse)  REUSE="$2"; shift 2 ;;
         --keep)   KEEP=1; shift ;;
         --route)  EXTRA+=("$2"); shift 2 ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        --no-fragment-cache) NOCACHE=(--no-fragment-cache); shift ;;
+        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
         *) APP="$1"; shift ;;
     esac
 done
@@ -111,8 +126,8 @@ EMIT_PORT=4185
 DUMPS="$OUT-queries"
 rm -rf "$DUMPS"; mkdir -p "$DUMPS"
 
-step "booting the Rails oracle on :$ORACLE_PORT (RAILS_LOG_LEVEL=debug)"
-RAILS_LOG_LEVEL=debug "$REPO_ROOT/scripts/campfire-oracle" serve --out "$ORACLE" --port "$ORACLE_PORT" \
+step "booting the Rails oracle on :$ORACLE_PORT (RAILS_LOG_LEVEL=debug${NOCACHE:+, fragment cache OFF})"
+RAILS_LOG_LEVEL=debug "$REPO_ROOT/scripts/campfire-oracle" serve --out "$ORACLE" --port "$ORACLE_PORT" "${NOCACHE[@]}" \
     > "$DUMPS/rails.log" 2>&1 &
 ORACLE_PID=$!
 
