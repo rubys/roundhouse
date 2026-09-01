@@ -2665,3 +2665,28 @@ held; fidelity did not.
 `frame_html.html` until #4240 closes — deliberately not masked in the
 comparator: an open defect is not a written-down decision. The ruby
 lane gates green.
+
+### A form holding a file field is not multipart
+
+Rails' form builder flips a form to `enctype="multipart/form-data"`
+the moment a `file_field` renders inside it. The emitted `<form>`
+carries no enctype, so the browser posts `application/x-www-form-
+urlencoded` — and a file input in a urlencoded form submits its
+FILENAME as a plain string, never its bytes. campfire's join page is
+the corpus case: the signup form carries an avatar picker, so a new
+user who chooses an avatar posts `user[avatar]=<name>.png` and no
+attachment is created. An empty picker posts an empty string, which is
+why signup itself works.
+
+Closing this needs two halves in one commit: the form lowering
+emitting the enctype when a file field is in the tree, and the request
+side parsing a multipart body into the same `Hash[String, ParamValue]`
+shape the urlencoded parser fills — shipping the enctype alone would
+turn a silently-wrong filename into a request the server cannot read
+at all. Attachment upload is already outside the archive's scope (the
+Active Storage tail), so this rides with that work, written down here
+so the form's spelling is a decision rather than a surprise.
+
+Found 2026-09-01 by the join-form probe that closed the view-params
+symbol-key defect (the form's `action` was the visible half; the
+enctype was sitting beside it).

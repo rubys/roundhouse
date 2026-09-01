@@ -2692,6 +2692,23 @@ fn rewrite_helper_calls(
                         Symbol::from(m),
                     )
                 };
+                // The typed receiver is what arms the emitter's
+                // string-key coercion (`is_string_keyed_hash`):
+                // `@params` inside a controller is declared
+                // `Hash[String, ParamValue]`, and a view's
+                // `params[:join_code]` must not lose that fact on its
+                // way through `Current.controller` — a Symbol key
+                // against the string-keyed store reads nil, and
+                // campfire's join form rendered `action="/join/"`.
+                if m == "params" {
+                    expr.ty = Some(crate::ty::Ty::Hash {
+                        key: Box::new(crate::ty::Ty::Str),
+                        value: Box::new(crate::ty::Ty::Class {
+                            id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+                            args: vec![],
+                        }),
+                    });
+                }
                 *expr.node = ExprNode::Send {
                     recv: Some(recv),
                     method: meth,

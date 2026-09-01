@@ -198,3 +198,23 @@ fn params_in_a_view_reaches_the_controller() {
         "bare `params` must reach the controller instance:\n{body}"
     );
 }
+
+/// …and the read must keep the STRING key the store is keyed by:
+/// `@params` is a plain `Hash[String, ParamValue]`, so a Symbol key
+/// finds nothing — campfire's join form rendered `action="/join/"`
+/// because the view's `params[:join_code]` read nil through this seam
+/// while the controller's own `@params["join_code"]` guard passed.
+/// The grounding stamps the chain's type so the emitter's string-key
+/// coercion fires exactly as it does inside a controller body.
+#[test]
+fn a_view_params_read_coerces_its_symbol_key() {
+    let body = view_body("<p><%= params[:id] %></p>\n");
+    assert!(
+        body.contains("params[\"id\"]"),
+        "the symbol key must coerce to the string the store is keyed by:\n{body}"
+    );
+    assert!(
+        !body.contains("params[:id]"),
+        "no symbol key may survive the grounding:\n{body}"
+    );
+}
