@@ -3461,7 +3461,13 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
         helper_param_tys: &helper_param_tys,
+        controller_names: app
+            .controllers
+            .iter()
+            .filter_map(|c| c.name.0.as_str().rsplit("::").next().map(str::to_string))
+            .collect(),
         self_returns: std::collections::HashMap::new(),
+        local_records: std::collections::HashMap::new(),
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
     //
@@ -3473,34 +3479,58 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     // uniqueness rule below is what keeps a slice-wide map honest, and
     // it is the same standard the association maps hold.
     //
+    // Surveyed from the CONTROLLERS TOO, off `app.controllers` rather
+    // than the slice: the slice being rewritten is routinely the
+    // models/helpers or views one, and the method a helper names lives
+    // in a controller — campfire's
+    // `RoomsHelper.link_back_to_last_room_visited` reads
+    // `Current.controller.last_room_visited`, declared on
+    // `ApplicationController`. On the controllers slice the same
+    // methods are surveyed twice and agree, which the uniqueness rule
+    // absorbs.
+    //
     // A FIXPOINT because the methods call each other:
     // `last_room_visited` is `…find_by(id: cookie) || default_room`,
     // and `default_room` has to be resolved first. Bounded by the
     // method count; two rounds in practice.
     {
+        let controller_methods: Vec<(&str, &Expr)> = app
+            .controllers
+            .iter()
+            .flat_map(|c| c.body.iter())
+            .filter_map(|item| match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    Some((action.name.as_str(), &action.body))
+                }
+                _ => None,
+            })
+            .collect();
         let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
         for _ in 0..8 {
             let mut grew = false;
-            for lc in lcs.iter() {
-                for m in &lc.methods {
-                    let name = m.name.as_str().to_string();
-                    if m.receiver != MethodReceiver::Instance || ambiguous.contains(&name) {
-                        continue;
+            let slice_methods = lcs.iter().flat_map(|lc| {
+                lc.methods
+                    .iter()
+                    .filter(|m| m.receiver == MethodReceiver::Instance)
+                    .map(|m| (m.name.as_str(), &m.body))
+            });
+            for (name, body) in slice_methods.chain(controller_methods.iter().copied()) {
+                if ambiguous.contains(name) {
+                    continue;
+                }
+                let Some(model) = arg_record_model(body_tail(body), &sig) else {
+                    continue;
+                };
+                match sig.self_returns.get(name) {
+                    Some(existing) if existing == &model => {}
+                    Some(_) => {
+                        ambiguous.insert(name.to_string());
+                        sig.self_returns.remove(name);
+                        grew = true;
                     }
-                    let Some(model) = arg_record_model(body_tail(&m.body), &sig) else {
-                        continue;
-                    };
-                    match sig.self_returns.get(&name) {
-                        Some(existing) if existing == &model => {}
-                        Some(_) => {
-                            ambiguous.insert(name.clone());
-                            sig.self_returns.remove(&name);
-                            grew = true;
-                        }
-                        None => {
-                            sig.self_returns.insert(name, model);
-                            grew = true;
-                        }
+                    None => {
+                        sig.self_returns.insert(name.to_string(), model);
+                        grew = true;
                     }
                 }
             }
@@ -3511,9 +3541,77 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
+            sig.local_records.clear();
+            sig.local_records = collect_local_records(&m.body, &sig);
             rewrite_route_params(&mut m.body, &sig);
         }
     }
+}
+
+/// Locals a body binds to ONE resolvable record, by name — the map
+/// behind `arg_record_model`'s local-variable signal. campfire's
+///
+/// ```text
+/// if last_room = last_room_visited
+///   link_back_to room_path(last_room)
+/// ```
+///
+/// hands the helper a plain local; every signal the pass reads is
+/// gone from the name itself, but the ASSIGNMENT still says what it
+/// holds. Held to the standard every map here shares: a name every
+/// assignment resolves to the same model answers that model; a name
+/// any assignment does not resolve (or two disagree about) answers
+/// nothing — including through `OpAssign`/`MultiAssign`, which this
+/// pass cannot read.
+fn collect_local_records(
+    body: &Expr,
+    sig: &RecordSignals<'_>,
+) -> std::collections::HashMap<String, String> {
+    fn walk(
+        e: &Expr,
+        sig: &RecordSignals<'_>,
+        out: &mut std::collections::HashMap<String, String>,
+        poisoned: &mut std::collections::HashSet<String>,
+    ) {
+        let unresolve = |name: &Symbol,
+                             out: &mut std::collections::HashMap<String, String>,
+                             poisoned: &mut std::collections::HashSet<String>| {
+            out.remove(name.as_str());
+            poisoned.insert(name.as_str().to_string());
+        };
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+                match arg_record_model(value, sig) {
+                    Some(model) if !poisoned.contains(name.as_str()) => {
+                        match out.get(name.as_str()) {
+                            Some(existing) if existing == &model => {}
+                            Some(_) => unresolve(name, out, poisoned),
+                            None => {
+                                out.insert(name.as_str().to_string(), model);
+                            }
+                        }
+                    }
+                    _ => unresolve(name, out, poisoned),
+                }
+            }
+            ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
+                unresolve(name, out, poisoned);
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for t in targets {
+                    if let LValue::Var { name, .. } = t {
+                        unresolve(name, out, poisoned);
+                    }
+                }
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, sig, out, poisoned));
+    }
+    let mut out = std::collections::HashMap::new();
+    let mut poisoned = std::collections::HashSet::new();
+    walk(body, sig, &mut out, &mut poisoned);
+    out
 }
 
 /// The last expression a body evaluates to — its return value for
@@ -3703,7 +3801,18 @@ pub(crate) struct RecordSignals<'a> {
     direct_helpers: &'a std::collections::HashSet<String>,
     /// `<helper>_path` -> declared type per positional parameter.
     helper_param_tys: &'a std::collections::HashMap<String, Vec<crate::ty::Ty>>,
+    /// Controller class names (last path segment), so a class-side
+    /// respelling (`ApplicationController.last_room_visited`) is
+    /// recognized as the controller-method read it is.
+    controller_names: std::collections::HashSet<String>,
     self_returns: std::collections::HashMap<String, String>,
+    /// Locals THE BODY BEING REWRITTEN binds to a resolvable record —
+    /// campfire's `if last_room = last_room_visited` puts the record
+    /// behind a name no other signal can read. Rebuilt per method;
+    /// a name is held to the same standard as every map here: every
+    /// assignment must resolve, and to the same model, or the name
+    /// answers nothing.
+    local_records: std::collections::HashMap<String, String>,
 }
 
 fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
@@ -3863,6 +3972,37 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
                     return Some(model.clone());
                 }
             }
+            // (7c) The helper-module spelling of (7): once a helper
+            // method leaves its controller for a module function, the
+            // helper lowering rewrites its bare controller-method
+            // reads to `ActionController::Current.controller.<method>`
+            // — the receiver is by construction the same controller
+            // instance (7) resolves against, so the same map answers.
+            if let ExprNode::Send { recv: Some(cr), method: cm, args: cargs, block: None, .. } =
+                &*r.node
+            {
+                if cm.as_str() == "controller"
+                    && cargs.is_empty()
+                    && matches!(&*cr.node, ExprNode::Const { path }
+                        if path.last().map(|s| s.as_str() == "Current").unwrap_or(false))
+                {
+                    if let Some(model) = sig.self_returns.get(method.as_str()) {
+                        return Some(model.clone());
+                    }
+                }
+            }
+            // (7d) The other helper-module spelling: a state-free
+            // controller method gets a class-side twin, and the helper
+            // reads `ApplicationController.last_room_visited`. The
+            // receiver must NAME a controller — a model's class-side
+            // call stays with (6).
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().is_some_and(|s| sig.controller_names.contains(s.as_str())) {
+                    if let Some(model) = sig.self_returns.get(method.as_str()) {
+                        return Some(model.clone());
+                    }
+                }
+            }
             // (6) A model CLASS METHOD that answers one record —
             // campfire's `Current.user.rooms.original`, where `Room
             // .original` is `order(:created_at).first`. The receiver's
@@ -3920,7 +4060,18 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
         // `scope_chain::owner_model_from_name` carries.
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
             let camel = crate::naming::camelize(name.as_str());
-            all_models.contains(&camel).then_some(camel)
+            if all_models.contains(&camel) {
+                return Some(camel);
+            }
+            // (3b) A local whose ASSIGNMENT resolved — campfire's
+            // `if last_room = last_room_visited` binds the record
+            // behind a name that is no model's. Locals only: an ivar's
+            // writes live in other methods this body-scoped map never
+            // saw.
+            if matches!(&*arg.node, ExprNode::Var { .. }) {
+                return sig.local_records.get(name.as_str()).cloned();
+            }
+            None
         }
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
             let camel = crate::naming::camelize(method.as_str());

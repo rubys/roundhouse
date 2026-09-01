@@ -17,7 +17,34 @@ use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app_from_tree;
 
 fn emit(app_controller_body: &str, welcome_body: &str) -> String {
-    let files: Vec<(&str, String)> = vec![
+    emit_tree(app_controller_body, welcome_body, None, false)
+}
+
+/// Same fixture with an `app/helpers/` module, emitted through the
+/// LIBRARY slice (`emit_library` — where `app/helpers/` modules land,
+/// as `app/models/<stem>.rb`). Controllers are not in that slice, so
+/// `last_room_visited` resolves only through the `app.controllers`
+/// survey; the controller declares it `helper_method`, so the helper's
+/// bare call is respelled `ActionController::Current.controller.…` —
+/// campfire's exact shape.
+fn emit_helper(app_controller_body: &str, helper_body: &str) -> String {
+    emit_tree(app_controller_body, "  def index\n    head :ok\n  end\n", Some(helper_body), true)
+}
+
+fn emit_tree(
+    app_controller_body: &str,
+    welcome_body: &str,
+    helper_body: Option<&str>,
+    library_slice: bool,
+) -> String {
+    let mut extra: Vec<(&str, String)> = Vec::new();
+    if let Some(h) = helper_body {
+        extra.push((
+            "app/helpers/rooms_helper.rb",
+            format!("module RoomsHelper\n{h}end\n"),
+        ));
+    }
+    let files: Vec<(&str, String)> = extra.into_iter().chain(vec![
         (
             "db/schema.rb",
             "ActiveRecord::Schema.define(version: 1) do\n  \
@@ -72,13 +99,16 @@ fn emit(app_controller_body: &str, welcome_body: &str) -> String {
              get \"welcome\", to: \"welcome#index\"\nend\n"
                 .to_string(),
         ),
-    ];
+    ])
+    .collect();
     let tree = files
         .into_iter()
         .map(|(p, c)| (std::path::PathBuf::from(p), c.into_bytes()))
         .collect();
     let app = ingest_app_from_tree(tree).expect("ingest tree");
-    ruby::emit_lowered_controllers(&app)
+    let emitted =
+        if library_slice { ruby::emit_library(&app) } else { ruby::emit_lowered_controllers(&app) };
+    emitted
         .into_iter()
         .filter(|f| f.path.extension().is_some_and(|e| e == "rb"))
         .map(|f| f.content)
@@ -162,4 +192,72 @@ fn a_method_answering_an_unclassifiable_value_is_left_alone() {
         "an unclassifiable body must not project:\n{out}"
     );
     assert!(!out.contains("whatever.id"), "must not project:\n{out}");
+}
+
+/// A record bound to a LOCAL by campfire's guard-assignment shape —
+/// `if last_room = last_room_visited` — projects the same way the
+/// direct-argument spelling does: the name carries no signal, the
+/// assignment does.
+#[test]
+fn a_local_bound_by_a_guard_assignment_projects_to_its_id() {
+    let out = emit(
+        "  def last_room_visited\n    \
+           current_user.rooms.find_by(id: 1) || self.default_room\n  end\n  \
+         def default_room\n    current_user.rooms.original\n  end\n  \
+         def current_user\n    User.first\n  end\n",
+        "  def index\n    \
+           if last_room = last_room_visited\n      \
+             redirect_to RouteHelpers.room_path(last_room)\n    \
+           end\n  end\n",
+    );
+    assert!(
+        out.contains("RouteHelpers.room_path(last_room.id)"),
+        "a guard-assigned local must project to its id:\n{out}"
+    );
+}
+
+/// The same shape from a HELPER MODULE, emitted through the models
+/// slice — where `last_room_visited` lives in a controller the slice
+/// never carries (the survey reads `app.controllers`), and where the
+/// helper lowering may respell the call as
+/// `ActionController::Current.controller.last_room_visited` (7c).
+#[test]
+fn a_helper_local_resolves_through_the_controller_survey() {
+    let out = emit_helper(
+        "  helper_method :last_room_visited\n  \
+         def last_room_visited\n    \
+           current_user.rooms.find_by(id: 1) || self.default_room\n  end\n  \
+         def default_room\n    current_user.rooms.original\n  end\n  \
+         def current_user\n    User.first\n  end\n",
+        "  def back_link\n    \
+           if last_room = last_room_visited\n      \
+             room_path(last_room)\n    \
+           end\n  end\n",
+    );
+    assert!(
+        out.contains("room_path(last_room.id)"),
+        "the helper-module spelling must project through the controller survey:\n{out}"
+    );
+}
+
+/// A local REBOUND to something this pass cannot classify answers
+/// nothing — one honest assignment does not speak for a name whose
+/// other assignment it cannot read.
+#[test]
+fn a_local_rebound_to_an_unclassifiable_value_stays_unprojected() {
+    let out = emit(
+        "  def current_user\n    User.first\n  end\n",
+        "  def index\n    \
+           chosen = current_user.rooms.find_by(id: 1)\n    \
+           chosen = params[:x]\n    \
+           redirect_to RouteHelpers.room_path(chosen)\n  end\n",
+    );
+    assert!(
+        !out.contains("chosen.id"),
+        "a rebound local must not project:\n{out}"
+    );
+    assert!(
+        out.contains("RouteHelpers.room_path(chosen)"),
+        "the call itself must survive untouched:\n{out}"
+    );
 }
