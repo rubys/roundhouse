@@ -875,11 +875,45 @@ module ActionView
             # need explicit stringification.
             pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
           end
+        elsif boolean_attr?(name)
+          # A boolean attribute's mere presence is its value — Rails
+          # renders `hidden: true` as `hidden="hidden"` and OMITS a
+          # falsy one entirely, because `disabled="false"` still reads
+          # as disabled to a browser. Any other value (Rails: any
+          # truthy value) also renders as `name="name"`. `== false`
+          # rather than truthiness: nil is already gone above, and the
+          # explicit comparison is the shape every target spells the
+          # same way.
+          pairs << " #{name}=\"#{name}\"" unless v == false
         else
           pairs << " #{name}=\"#{html_escape(v.to_s)}\""
         end
       end
       pairs.join
+    end
+
+    # Rails ActionView's `BOOLEAN_ATTRIBUTES`, verbatim — the attributes
+    # whose presence alone is the value. The compile-time attribute
+    # loops carry the same list in `attr_parts::is_boolean_attr`, and
+    # the two must not drift. An Array + `include?` rather than a
+    # `case`, because a runtime construct must be spellable by the
+    # weakest of the nine target emitters and the TypeScript lowering
+    # has no `case` arm.
+    BOOLEAN_ATTRIBUTES = [
+      "allowfullscreen", "allowpaymentrequest", "async", "autofocus",
+      "autoplay", "checked", "compact", "controls", "declare",
+      "default", "defaultchecked", "defaultmuted", "defaultselected",
+      "defer", "disabled", "enabled", "formnovalidate", "hidden",
+      "indeterminate", "inert", "ismap", "itemscope", "loop",
+      "multiple", "muted", "nohref", "nomodule", "noresize",
+      "noshade", "novalidate", "nowrap", "open", "pauseonexit",
+      "playsinline", "pubdate", "readonly", "required", "reversed",
+      "scoped", "seamless", "selected", "sortable", "truespeed",
+      "typemustmatch", "visible"
+    ]
+
+    def self.boolean_attr?(name)
+      BOOLEAN_ATTRIBUTES.include?(name)
     end
   end
 end

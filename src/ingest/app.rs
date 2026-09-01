@@ -828,6 +828,27 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             }
         }
     }
+    // Propshaft's load path is wider than the app's two dirs: a GEM can
+    // ship stylesheets, and the `:all` expansion links those too. The
+    // one the corpus meets is `trix.css` — `action_text-trix` ships it,
+    // and Rails links it on every Action Text app's pages. The app-tree
+    // evidence that Trix is in the bundle is its own importmap pin
+    // (campfire: `pin "trix"`); inserted in sorted position because the
+    // expansion is alphabetical, and skipped when the app carries its
+    // own copy. The Makefile generator emits the copy-from-gem rule for
+    // exactly this stem (`apply_makefile_asset_list`).
+    let pins_trix = app
+        .importmap
+        .iter()
+        .flat_map(|m| &m.pins)
+        .any(|p| p.name == "trix");
+    if pins_trix && !stylesheets.iter().any(|s| s == "trix") {
+        let pos = stylesheets
+            .iter()
+            .position(|s| s.as_str() > "trix")
+            .unwrap_or(stylesheets.len());
+        stylesheets.insert(pos, "trix".to_string());
+    }
     app.stylesheets = stylesheets;
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the

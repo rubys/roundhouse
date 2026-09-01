@@ -1621,14 +1621,17 @@ const EDITOR_DEFAULT_CLASS: &str = "trix-content";
 /// Active Storage's conventional mount points, which Trix reads to
 /// upload a dropped file and to build a blob URL.
 ///
-/// LITERAL, and stated as such: Rails fills these from
+/// LITERAL PATHS, and stated as such: Rails fills these from
 /// `rails_direct_uploads_url` / `rails_service_blob_url`, route
 /// helpers the Active Storage engine installs. Active Storage is not
 /// modeled, so the routes do not exist here and neither does anything
-/// that could serve an upload. Emitting the conventional paths keeps
-/// the markup Rails-shaped for the editor's own initialization (Trix
-/// reads both attributes at connect time) and costs nothing; what it
-/// does NOT do is make attachments work.
+/// that could serve an upload. Emitting the conventional locations
+/// keeps the markup Rails-shaped for the editor's own initialization
+/// (Trix reads both attributes at connect time) and costs nothing;
+/// what it does NOT do is make attachments work. Both Rails helpers
+/// are `_url` (absolute) forms, so the emission prefixes
+/// `http://#{Rails.application.domain}` — the same grounding every
+/// bare `_url` helper gets (`absolute_url_interp`).
 const DIRECT_UPLOAD_URL: &str = "/rails/active_storage/direct_uploads";
 const BLOB_URL_TEMPLATE: &str =
     "/rails/active_storage/blobs/redirect/:signed_id/:filename";
@@ -1648,19 +1651,27 @@ const BLOB_URL_TEMPLATE: &str =
 /// and lands on the `body=` writer `has_rich_text` synthesized. The
 /// editor element carries the id pairing (`input=`) that binds them.
 ///
-/// Two departures from Rails, both deliberate:
+/// The input's id is Rails' spelling: `dom_id(record,
+/// "<field_id>_trix_input")` — `message_body_trix_input_message` for a
+/// new record, `…_message_<key>` for a saved one — resolved by the
+/// runtime `dom_id` at render time, because persistence is a runtime
+/// question. (Rails needs the record suffix because two forms for
+/// DIFFERENT records can share a page.) Only a builder with no record
+/// (`model_name` empty) keeps the bare `<field_id>_trix_input`; Rails
+/// there falls back to a process-global counter no emit could match
+/// anyway.
 ///
-/// * The input's id is `<field_id>_trix_input`, where Rails appends
-///   the record's dom id (`message_body_trix_input_message_5`). Rails
-///   needs the suffix because two forms for DIFFERENT records can
-///   share a page; the suffix is what keeps their hidden inputs
-///   distinct. Same-page duplicates are therefore a real (and
-///   detectable) divergence — and the fix is a `dom_id(record, …)`
-///   call here once a fixture exercises it.
+/// `class:` REPLACES `trix-content` rather than adding to it, which
+/// is Rails' own `options[:class] ||=` semantics — campfire passes
+/// `class: "input"` and gets exactly that.
 ///
-/// * `class:` REPLACES `trix-content` rather than adding to it, which
-///   is Rails' own `options[:class] ||=` semantics — campfire passes
-///   `class: "input"` and gets exactly that.
+/// The `value` attribute rides `optional_value_attr`, so an empty
+/// markup read drops the attribute the way Rails' nil-valued
+/// `hidden_field_tag` does. (The synthesized rich-text reader answers
+/// `""` where Rails answers nil for a record with no rich-text row —
+/// one conditional covers both spellings. A PERSISTED row whose
+/// markup is genuinely empty would render `value=""` on Rails and
+/// nothing here; no fixture writes one.)
 fn emit_rich_text_area(
     field: Option<&Expr>,
     opts: &[(Expr, Expr)],
@@ -1672,11 +1683,37 @@ fn emit_rich_text_area(
     };
     let field_str = field_sym.as_str();
     let editor_id = super::field_id(&binding.id_prefix, &binding.model_name, field_str);
-    let input_id = format!("{editor_id}_trix_input");
     let name = if binding.model_name.is_empty() {
         field_str.to_string()
     } else {
         format!("{}[{field_str}]", binding.model_name)
+    };
+    // Rails: `dom_id(record, "<field_id>_trix_input")` — a runtime
+    // resolution because the record's persistence decides the suffix.
+    // Emitted TWICE (the input's `id`, the editor's `input=` pairing);
+    // `dom_id` is a pure read, so the second call answers the same.
+    let input_id_part = || -> InterpPart {
+        if binding.model_name.is_empty() {
+            InterpPart::Text { value: format!("{editor_id}_trix_input") }
+        } else {
+            let record = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+            );
+            // A Symbol suffix, matching `dom_id`'s declared contract
+            // (`?Symbol? suffix`) and Rails' own call spelling.
+            let suffix = Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Sym {
+                        value: Symbol::from(format!("{editor_id}_trix_input").as_str()),
+                    },
+                },
+            );
+            InterpPart::Expr {
+                expr: view_helpers_call("dom_id", vec![record, suffix]),
+            }
+        }
     };
 
     let mut opts = opts.to_vec();
@@ -1689,16 +1726,18 @@ fn emit_rich_text_area(
 
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!("<input type=\"hidden\" name=\"{name}\" id=\"{input_id}\" value=\""),
+        value: format!("<input type=\"hidden\" name=\"{name}\" id=\""),
     });
+    parts.push(input_id_part());
+    parts.push(InterpPart::Text { value: "\"".to_string() });
     parts.push(InterpPart::Expr {
-        expr: view_helpers_call("escape_or_empty", vec![value]),
+        expr: view_helpers_call("optional_value_attr", vec![value]),
     });
     parts.push(InterpPart::Text {
-        value: format!(
-            "\" autocomplete=\"off\"><{EDITOR_TAG} id=\"{editor_id}\" input=\"{input_id}\""
-        ),
+        value: format!("><{EDITOR_TAG} id=\"{editor_id}\" input=\""),
     });
+    parts.push(input_id_part());
+    parts.push(InterpPart::Text { value: "\"".to_string() });
     // `class:` from the call site wins; otherwise Rails' default. Taken
     // out of `opts` either way so `append_attr_parts` cannot emit a
     // second `class=`.
@@ -1714,17 +1753,41 @@ fn emit_rich_text_area(
             value: format!(" class=\"{EDITOR_DEFAULT_CLASS}\""),
         }),
     }
+    // Rails fills both from `_url` (absolute) helpers, so each takes
+    // the request-host grounding every bare `_url` helper gets.
     parts.push(InterpPart::Text {
-        value: format!(
-            " data-direct-upload-url=\"{DIRECT_UPLOAD_URL}\" \
-             data-blob-url-template=\"{BLOB_URL_TEMPLATE}\""
-        ),
+        value: " data-direct-upload-url=\"http://".to_string(),
+    });
+    parts.push(InterpPart::Expr { expr: rails_domain_expr() });
+    parts.push(InterpPart::Text {
+        value: format!("{DIRECT_UPLOAD_URL}\" data-blob-url-template=\"http://"),
+    });
+    parts.push(InterpPart::Expr { expr: rails_domain_expr() });
+    parts.push(InterpPart::Text {
+        value: format!("{BLOB_URL_TEMPLATE}\""),
     });
     append_attr_parts(&mut parts, &opts);
     parts.push(InterpPart::Text {
         value: format!("></{EDITOR_TAG}>"),
     });
     vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `Rails.application.domain` as an Expr — the host half of the
+/// absolute-URL grounding (`absolute_url_interp`'s), rebuilt here for
+/// attribute values whose PATH is a literal rather than a route helper.
+fn rails_domain_expr() -> Expr {
+    let rails_app = send(
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("Rails")] },
+        )),
+        "application",
+        Vec::new(),
+        None,
+        false,
+    );
+    send(Some(rails_app), "domain", Vec::new(), None, false)
 }
 
 /// The markup the hidden input carries: `record.<field>.to_trix_html`.
@@ -1951,15 +2014,9 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
         } else {
             v.clone()
         };
-        parts.push(InterpPart::Text {
-            value: format!(" {}=\"", key.as_str()),
-        });
-        parts.push(InterpPart::Expr {
-            expr: view_helpers_call("html_escape", vec![lit_str_coerce(simplified)]),
-        });
-        parts.push(InterpPart::Text {
-            value: "\"".to_string(),
-        });
+        // Rails' nil-drops-the-attribute rule, shared with the tag
+        // builder's loop — see `attr_parts::push_escaped_attr`.
+        super::attr_parts::push_escaped_attr(parts, key.as_str(), &simplified);
     }
 }
 

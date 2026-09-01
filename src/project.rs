@@ -3024,7 +3024,7 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
         list.push_str(&joined);
     }
 
-    let rules = gems
+    let mut rules = gems
         .iter()
         .map(|(file, gem)| {
             format!(
@@ -3035,6 +3035,27 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+
+    // The one CSS a gem ships in this corpus: `trix.css`, from
+    // `action_text-trix`. Ingest inserts the `trix` stem into
+    // `app.stylesheets` when the importmap pins Trix (the page links it
+    // because Rails' `:all` expansion walks gem asset paths), so
+    // `ASSET_CSS` names `$(ASSETS)/trix.css` — and with no
+    // `app/assets/**/trix.css` for the pattern rules to copy, the stem
+    // needs the same explicit copy-from-gem rule the JS bundles get.
+    let needs_gem_trix_css = app.stylesheets.iter().any(|s| s == "trix")
+        && !has("app/assets/stylesheets/trix.css")
+        && !has("app/assets/builds/trix.css");
+    if needs_gem_trix_css {
+        if !rules.is_empty() {
+            rules.push_str("\n\n");
+        }
+        rules.push_str(
+            "$(ASSETS)/trix.css:\n\
+             \t@mkdir -p $(dir $@)\n\
+             \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(action_text-trix)).gem_dir')/app/assets/stylesheets/trix.css\" $@",
+        );
+    }
 
     apply_makefile_asset_blocks(files, BLOG_LIST, &list, &rules);
 
@@ -3050,6 +3071,13 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
         if !names.contains(&gem.as_str()) {
             names.push(gem);
         }
+    }
+    // The trix.css rule shells out to the same `find_by_name`, so its
+    // gem rides the same group. (`actiontext` already depends on it,
+    // but naming it keeps rule and bundle agreeing by construction
+    // rather than by transitivity.)
+    if needs_gem_trix_css && !names.contains(&"action_text-trix") {
+        names.push("action_text-trix");
     }
     apply_gemfile_asset_group(files, &names);
 }

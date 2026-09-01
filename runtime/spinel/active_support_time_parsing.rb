@@ -91,10 +91,33 @@ module ActiveSupport
   def self.parse_db_time(str)
     return nil if str.nil?
     return nil if str.length < 19
-    Time.utc(
+    t = Time.utc(
       str[0, 4].to_i, str[5, 2].to_i, str[8, 2].to_i,
       str[11, 2].to_i, str[14, 2].to_i, str[17, 2].to_i
-    ).getlocal
+    )
+    # The stored TEXT carries fractional seconds — Rails' datetime(6)
+    # writes ".418418" and so does our own db_now — and the CRuby
+    # overlay's twin reads them (usec, via its regex). Reading whole
+    # seconds only truncated every hydrated timestamp: campfire's
+    # `updated_at.to_fs(:epoch)` answered `…596000` where Rails said
+    # `…596418`, found by the room-page compare gate on the binary.
+    # Fixed-position slicing with a digit walk, same no-regex rationale
+    # as the fields above; digits beyond micros are ignored, a
+    # non-digit ends the read (so a legacy "…16Z" contributes nothing).
+    # Plain reassignment, not `+=` — spinel has no operator-assignment
+    # node for locals (LocalVariableOperatorWriteNode is refused).
+    if str.length > 20 && str[19, 1] == "."
+      digits = 0
+      while digits < 6
+        c = str[20 + digits, 1]
+        break if c.nil? || c.empty? || c < "0" || c > "9"
+        digits = digits + 1
+      end
+      if digits > 0
+        t = t + "#{str[20, digits]}000000"[0, 6].to_i / 1_000_000.0
+      end
+    end
+    t.getlocal
   end
 
   def self.db_now
@@ -115,10 +138,11 @@ module ActiveSupport
   # `parse_db_time` above now lands the instant in the app's zone, so
   # the offset is the receiver's own — NOT a hardcoded "+00:00", which
   # would label local clock fields as UTC and be wrong by the offset.
-  # Still second-granularity (no sub-second read), so the fraction is
-  # literal ".000". Nothing on this tree exercises it yet: the spinel
-  # emit drops the json respond_to arm, so /hottest renders HTML here
-  # where Rails renders JSON — see src/lower/controller/body.rs.
+  # `parse_db_time` carries the sub-second fraction now, but this
+  # format still spells a literal ".000" — strftime here has no
+  # millisecond directive. Nothing on this tree exercises it yet: the
+  # spinel emit drops the json respond_to arm, so /hottest renders HTML
+  # here where Rails renders JSON — see src/lower/controller/body.rs.
   def self.json_time(str)
     t = parse_db_time(str)
     return nil if t.nil?

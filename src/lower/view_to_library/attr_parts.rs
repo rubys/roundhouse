@@ -60,15 +60,7 @@ pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
                     continue;
                 }
                 let kebab = inner_key.replace('_', "-");
-                parts.push(InterpPart::Text {
-                    value: format!(" {}-{}=\"", key.as_str(), kebab),
-                });
-                parts.push(InterpPart::Expr {
-                    expr: view_helpers_call("html_escape", vec![lit_str_coerce(iv.clone())]),
-                });
-                parts.push(InterpPart::Text {
-                    value: "\"".to_string(),
-                });
+                push_escaped_attr(parts, &format!("{}-{}", key.as_str(), kebab), iv);
             }
             continue;
         }
@@ -106,16 +98,45 @@ pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
         } else {
             v.clone()
         };
-        parts.push(InterpPart::Text {
-            value: format!(" {}=\"", key.as_str()),
-        });
-        parts.push(InterpPart::Expr {
-            expr: view_helpers_call("html_escape", vec![lit_str_coerce(simplified)]),
-        });
-        parts.push(InterpPart::Text {
-            value: "\"".to_string(),
-        });
+        push_escaped_attr(parts, key.as_str(), &simplified);
     }
+}
+
+/// The generic ` key="value"` tail both attribute loops share. A
+/// literal (or interpolated-string) value renders inline — it cannot be
+/// nil at run time. A DYNAMIC value gets Rails' `elsif !value.nil?`
+/// rule as an inline conditional, because nil means NO ATTRIBUTE:
+/// campfire's layout writes `tag.meta name: "vapid-public-key",
+/// content: <config read>`, and with no key configured Rails renders
+/// `<meta name="vapid-public-key">` where the unguarded emit said
+/// `content=""` — the room-page comparator's find. Same guard shape as
+/// the nested-`data:` conditional form_builder's loop already carries
+/// (an `If` inside an `InterpPart::Expr`, proven on every lane).
+pub(crate) fn push_escaped_attr(parts: &mut Vec<InterpPart>, key: &str, value: &Expr) {
+    let open = InterpPart::Text { value: format!(" {key}=\"") };
+    let escaped = InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![lit_str_coerce(value.clone())]),
+    };
+    let close = InterpPart::Text { value: "\"".to_string() };
+    if matches!(
+        &*value.node,
+        ExprNode::Lit { .. } | ExprNode::StringInterp { .. }
+    ) {
+        parts.push(open);
+        parts.push(escaped);
+        parts.push(close);
+        return;
+    }
+    parts.push(InterpPart::Expr {
+        expr: Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(Some(value.clone()), "nil?", Vec::new(), None, false),
+                then_branch: lit_str(String::new()),
+                else_branch: string_interp(vec![open, escaped, close]),
+            },
+        ),
+    });
 }
 
 /// The part of Rails' `tag_options` that decides whether an attribute

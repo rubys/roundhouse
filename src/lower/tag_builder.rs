@@ -115,7 +115,34 @@ pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
     // `route_format_suffix` and `route_url_options` key off, so the three
     // passes cannot disagree about what a route helper is.
     let helpers = super::route_format_suffix::route_helper_names(app);
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &models, &helpers, &mut diags));
+    // STI base → subclass dom stems (`room` → `["rooms_open", …]`),
+    // from the same `sti_subclass_names` stamp `dom_prefix` dispatches
+    // on (`sti_scope` has run by this point in the pipeline). A
+    // polymorphic URL names its route through the record's CLASS, and
+    // for an STI base the class is a runtime question.
+    let sti_stems: std::collections::HashMap<String, Vec<String>> = app
+        .models
+        .iter()
+        .filter(|m| !m.sti_subclass_names.is_empty())
+        .map(|m| {
+            let stems = m
+                .sti_subclass_names
+                .iter()
+                .map(|sub| {
+                    sub.0
+                        .as_str()
+                        .split("::")
+                        .map(crate::naming::snake_case)
+                        .collect::<Vec<_>>()
+                        .join("_")
+                })
+                .collect();
+            (crate::naming::snake_case(m.name.0.as_str()), stems)
+        })
+        .collect();
+    super::for_each_hook_body(app, &mut |body| {
+        rewrite(body, &models, &helpers, &sti_stems, &mut diags)
+    });
     diags
 }
 
@@ -269,10 +296,11 @@ fn rewrite(
     expr: &mut Expr,
     models: &std::collections::HashSet<String>,
     helpers: &std::collections::HashSet<String>,
+    sti_stems: &std::collections::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
     expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, models, helpers, diags));
+        .for_each_child_mut(&mut |child| rewrite(child, models, helpers, sti_stems, diags));
 
     if rewrite_turbo_frame_tag(expr, models) {
         return;
@@ -286,7 +314,7 @@ fn rewrite(
     if rewrite_button_to_block(expr) {
         return;
     }
-    if rewrite_link_to_block(expr, models, helpers, diags) {
+    if rewrite_link_to_block(expr, models, helpers, sti_stems, diags) {
         return;
     }
 
@@ -530,6 +558,7 @@ fn polymorphic_route_call(
     url: &Expr,
     models: &std::collections::HashSet<String>,
     helpers: &std::collections::HashSet<String>,
+    sti_stems: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<Expr> {
     let ExprNode::Array { elements, .. } = &*url.node else {
         return None;
@@ -539,29 +568,88 @@ fn polymorphic_route_call(
     if !models.contains(&singular) {
         return None;
     }
-    let mut name = String::new();
+    let mut joined_prefix = String::new();
     for prefix in prefixes {
         let ExprNode::Lit { value: Literal::Sym { value } } = &*prefix.node else {
             return None;
         };
-        name.push_str(value.as_str());
-        name.push('_');
+        joined_prefix.push_str(value.as_str());
+        joined_prefix.push('_');
     }
-    name.push_str(&singular);
-    name.push_str("_path");
+    let name = format!("{joined_prefix}{singular}_path");
     if !helpers.contains(&name) {
         return None;
     }
-    Some(Expr::new(
-        url.span,
-        ExprNode::Send {
-            recv: None,
-            method: Symbol::from(name),
-            args: vec![record.clone()],
-            block: None,
-            parenthesized: true,
-        },
-    ))
+    let route_call = |helper: &str| {
+        Expr::new(
+            url.span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(helper),
+                args: vec![record.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    // An STI base's rows belong to subclasses, and Rails'
+    // `polymorphic_url` names the route from the record's CLASS: room 1
+    // is a `Rooms::Open`, so `[ :edit, @room ]` is
+    // `edit_rooms_open_path` (`/rooms/opens/1/edit`), not
+    // `edit_room_path`. Hydration here is base-classed, so the call
+    // dispatches on `dom_prefix()` — the type-column dispatch
+    // `sti_scope`'s stamp synthesizes, whose answer IS the route stem
+    // (both are the underscored class name). A subclass whose helper
+    // the app does not declare folds into the base arm, same posture as
+    // the base-helper guard above; a base with no subclasses keeps the
+    // plain call. A nested `If` chain rather than a `Case`, because
+    // this lands in app helper code every target compiles and the
+    // weakest emitter (TypeScript) has no `case` arm — `if` in value
+    // position is the proven shape (the attribute guards ride it).
+    let routable: Vec<&String> = sti_stems
+        .get(&singular)
+        .map(|stems| {
+            stems
+                .iter()
+                .filter(|stem| helpers.contains(&format!("{joined_prefix}{stem}_path")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut dispatch = route_call(&name);
+    for stem in routable.iter().rev() {
+        let dom_prefix = Expr::new(
+            url.span,
+            ExprNode::Send {
+                recv: Some(record.clone()),
+                method: Symbol::from("dom_prefix"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let cond = Expr::new(
+            url.span,
+            ExprNode::Send {
+                recv: Some(dom_prefix),
+                method: Symbol::from("=="),
+                args: vec![Expr::new(
+                    url.span,
+                    ExprNode::Lit { value: Literal::Str { value: (*stem).clone() } },
+                )],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        dispatch = Expr::new(
+            url.span,
+            ExprNode::If {
+                cond,
+                then_branch: route_call(&format!("{joined_prefix}{stem}_path")),
+                else_branch: dispatch,
+            },
+        );
+    }
+    Some(dispatch)
 }
 
 /// `link_to url, opts do … end` written in a HELPER body — Rails'
@@ -587,6 +675,7 @@ fn rewrite_link_to_block(
     expr: &mut Expr,
     models: &std::collections::HashSet<String>,
     helpers: &std::collections::HashSet<String>,
+    sti_stems: &std::collections::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) -> bool {
     let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
@@ -604,7 +693,7 @@ fn rewrite_link_to_block(
     // interpolated as-is the array reaches `html_escape` as an Array and
     // renders the record's `inspect` into the page.
     let url = match &*url.node {
-        ExprNode::Array { .. } => match polymorphic_route_call(url, models, helpers) {
+        ExprNode::Array { .. } => match polymorphic_route_call(url, models, helpers, sti_stems) {
             Some(call) => call,
             None => {
                 diags.push(super::residue_diagnostic(
@@ -1020,11 +1109,18 @@ mod tests {
     /// The campfire site this exists for: `link_to [ :edit, @room ]` in
     /// `RoomsHelper#link_to_edit_room`, which rendered the room's
     /// `inspect` into every room page's nav.
+    /// No STI in play for most of these — the empty map is the plain
+    /// (non-dispatching) shape.
+    fn no_sti() -> std::collections::HashMap<String, Vec<String>> {
+        Default::default()
+    }
+
     #[test]
     fn a_prefixed_polymorphic_array_becomes_its_route_helper() {
         let url = array(vec![sym("edit"), ivar("room")]);
-        let call = polymorphic_route_call(&url, &set(&["room"]), &set(&["edit_room_path"]))
-            .expect("[:edit, @room] should resolve");
+        let call =
+            polymorphic_route_call(&url, &set(&["room"]), &set(&["edit_room_path"]), &no_sti())
+                .expect("[:edit, @room] should resolve");
         let ExprNode::Send { recv: None, method, args, .. } = &*call.node else {
             panic!("expected a bare call, got {:?}", call.node);
         };
@@ -1038,7 +1134,7 @@ mod tests {
     #[test]
     fn a_bare_record_array_is_the_plain_helper() {
         let url = array(vec![ivar("room")]);
-        let call = polymorphic_route_call(&url, &set(&["room"]), &set(&["room_path"]))
+        let call = polymorphic_route_call(&url, &set(&["room"]), &set(&["room_path"]), &no_sti())
             .expect("[@room] should resolve");
         let ExprNode::Send { method, .. } = &*call.node else { panic!() };
         assert_eq!(method.as_str(), "room_path");
@@ -1057,6 +1153,7 @@ mod tests {
                 &array(vec![sym("edit"), ivar("widget")]),
                 &set(&["room"]),
                 &set(&["edit_room_path", "edit_widget_path"]),
+                &no_sti(),
             )
             .is_none(),
             "a name that is not a model must not resolve"
@@ -1067,6 +1164,7 @@ mod tests {
                 &array(vec![sym("edit"), ivar("room")]),
                 &set(&["room"]),
                 &set(&["room_path"]),
+                &no_sti(),
             )
             .is_none(),
             "an undeclared route must not be invented"
@@ -1077,9 +1175,74 @@ mod tests {
                 &array(vec![ivar("scope"), ivar("room")]),
                 &set(&["room", "scope"]),
                 &set(&["edit_room_path"]),
+                &no_sti(),
             )
             .is_none(),
             "a non-symbol prefix must not resolve"
         );
+    }
+
+    /// An STI base names its route through the record's RUNTIME class:
+    /// campfire's room 1 is a `Rooms::Open`, so Rails' `[ :edit, @room ]`
+    /// answers `/rooms/opens/1/edit`. The resolved call is a nested `if`
+    /// chain over `dom_prefix()` — the same type-column dispatch the dom
+    /// id rides, spelled `if` because the weakest emitter has no `case`
+    /// arm — ending in the base helper.
+    #[test]
+    fn an_sti_base_dispatches_on_its_subclass_stems() {
+        let mut sti = std::collections::HashMap::new();
+        sti.insert(
+            "room".to_string(),
+            vec!["rooms_open".to_string(), "rooms_closed".to_string()],
+        );
+        let call = polymorphic_route_call(
+            &array(vec![sym("edit"), ivar("room")]),
+            &set(&["room"]),
+            &set(&["edit_room_path", "edit_rooms_open_path", "edit_rooms_closed_path"]),
+            &sti,
+        )
+        .expect("[:edit, @room] should resolve");
+        let ExprNode::If { cond, then_branch, else_branch } = &*call.node else {
+            panic!("expected a dom_prefix dispatch, got {:?}", call.node);
+        };
+        let ExprNode::Send { recv: Some(recv), method, .. } = &*cond.node else {
+            panic!("expected a `dom_prefix() == \"…\"` condition")
+        };
+        assert_eq!(method.as_str(), "==");
+        let ExprNode::Send { method, parenthesized, .. } = &*recv.node else {
+            panic!("expected a dom_prefix() send")
+        };
+        assert_eq!(method.as_str(), "dom_prefix");
+        assert!(*parenthesized, "zero-arg send needs parens (TS emit)");
+        let ExprNode::Send { method, .. } = &*then_branch.node else { panic!() };
+        assert_eq!(method.as_str(), "edit_rooms_open_path");
+        let ExprNode::If { then_branch: second, else_branch: last, .. } = &*else_branch.node
+        else {
+            panic!("expected the second subclass arm");
+        };
+        let ExprNode::Send { method, .. } = &*second.node else { panic!() };
+        assert_eq!(method.as_str(), "edit_rooms_closed_path");
+        let ExprNode::Send { method, .. } = &*last.node else { panic!() };
+        assert_eq!(method.as_str(), "edit_room_path");
+    }
+
+    /// A subclass whose helper the app does not declare folds into the
+    /// base arm rather than inventing a call — and when NO subclass has
+    /// a route, the plain base call comes back with no dispatch at all.
+    #[test]
+    fn a_routeless_subclass_folds_into_the_base_arm() {
+        let mut sti = std::collections::HashMap::new();
+        sti.insert("room".to_string(), vec!["rooms_open".to_string()]);
+        let call = polymorphic_route_call(
+            &array(vec![sym("edit"), ivar("room")]),
+            &set(&["room"]),
+            &set(&["edit_room_path"]),
+            &sti,
+        )
+        .expect("[:edit, @room] should resolve");
+        let ExprNode::Send { method, .. } = &*call.node else {
+            panic!("with no routable subclass the base call should be plain");
+        };
+        assert_eq!(method.as_str(), "edit_room_path");
     }
 }

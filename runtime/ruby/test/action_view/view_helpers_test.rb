@@ -397,6 +397,20 @@ class ViewHelpersTest < Minitest::Test
     refute_includes out, %(channel="Turbo::StreamsChannel")
   end
 
+  # Rails' BOOLEAN_ATTRIBUTES rule: presence is the value, so a truthy
+  # value renders `name="name"` and a false one renders NOTHING —
+  # `hidden="true"` is what the campfire room page shipped (Rails says
+  # `hidden="hidden"`), and `disabled="false"` reads as disabled to a
+  # browser. Non-boolean attributes keep their spelling: `data-turbo:
+  # "false"` really renders "false".
+  def test_render_attrs_spells_boolean_attributes_by_name
+    assert_equal %( hidden="hidden"), ViewHelpers.render_attrs({ hidden: true })
+    assert_equal %( hidden="hidden"), ViewHelpers.render_attrs({ hidden: "true" })
+    assert_equal "", ViewHelpers.render_attrs({ disabled: false })
+    assert_equal "", ViewHelpers.render_attrs({ checked: nil })
+    assert_equal %( data-turbo="false"), ViewHelpers.render_attrs({ "data-turbo": false })
+  end
+
   # FormBuilder + form_with tests retired alongside the runtime
   # classes themselves — the lowerer macro-inlines form_with and
   # form.label/text_field/text_area/submit at lower time (Stages 1a
