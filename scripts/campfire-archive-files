@@ -90,7 +90,9 @@ Turbo channel. Each spec names which of the walk's checks it stands for.
   50 MB). Generated initials avatars — what campfire shows for every
   user who has not uploaded a picture, which in a fresh install is
   everyone — render normally; only an avatar someone UPLOADS is out of
-  scope.
+  scope. The signup form's avatar picker is part of that gap: the form
+  is not yet marked multipart, so a chosen image posts as its filename
+  and no upload happens (\`docs/pipeline/runtime.md\` carries the entry).
 - **Web push.** Every message you post will print
 
   \`\`\`
