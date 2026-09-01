@@ -870,12 +870,18 @@ module ActionView
       return "" if attrs.empty?
       pairs = []
       attrs.each do |k, v|
+        # The name bindings sit ABOVE the nil guards on purpose: the
+        # TypeScript emitter declares a local where it is FIRST
+        # assigned, and a first assignment inside the `unless` came out
+        # as a bare (undeclared) assignment — to `name`, which in DOM
+        # scope is a const global (TS2588), and to an `inner_name` the
+        # sibling lines then couldn't find (TS2304).
+        name = k.to_s
         unless v.nil?
-          name = k.to_s
           if v.is_a?(Hash)
             v.each do |inner_k, inner_v|
+              inner_name = inner_k.to_s.tr("_", "-")
               unless inner_v.nil?
-                inner_name = inner_k.to_s.tr("_", "-")
                 # Coerce untyped Hash values to String before
                 # html_escape; html_escape's contract is
                 # `(String) -> String` and the untyped values flowing
