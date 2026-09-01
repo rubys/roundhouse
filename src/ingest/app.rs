@@ -937,6 +937,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     expand_class_body_macros(&mut app);
+    // After both: the chain is complete, so a repeated declaration can
+    // find the one it replaces.
+    dedup_repeated_filters(&mut app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
@@ -1426,6 +1429,54 @@ fn splice_concerns_into_controllers(app: &mut App) {
         controller.body = filters;
     }
     app.concern_spliced_actions = spliced_origin;
+}
+
+/// Rails' `remove_duplicates`: declaring `before_action :set_room` a
+/// second time REPLACES the earlier callback rather than adding one.
+/// `ActiveSupport::Callbacks::CallbackChain#append` deletes every entry
+/// whose kind and filter match before pushing the new one, so the later
+/// declaration's `only:` / `except:` are the ones that apply, and the
+/// body runs once. campfire writes exactly this: its `RoomScoped` concern
+/// says `before_action :set_room` and `MessagesController` says
+/// `before_action :set_room, except: :create` — Rails runs `set_room`
+/// once, and not at all for `create`; the emit ran it twice, a
+/// `find_by!` and a `room` read each time.
+///
+/// The chain here is body order with a concern's filters ahead of the
+/// includer's own (`splice_concerns_into_controllers`), which is Rails'
+/// order too, so keeping the LAST of each (kind, target) is the same
+/// rule. Conditions (`if:` / `unless:`) do not enter the match, as in
+/// Rails. `skip_*` entries are subtractions, not declarations, and are
+/// left alone.
+fn dedup_repeated_filters(app: &mut App) {
+    for controller in app.controllers.iter_mut() {
+        let body = &controller.body;
+        let superseded: Vec<bool> = body
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let crate::dialect::ControllerBodyItem::Filter { filter, .. } = item else {
+                    return false;
+                };
+                if matches!(filter.kind, crate::dialect::FilterKind::Skip) {
+                    return false;
+                }
+                body[i + 1..].iter().any(|later| {
+                    matches!(later, crate::dialect::ControllerBodyItem::Filter { filter: f, .. }
+                        if f.kind == filter.kind && f.target == filter.target)
+                })
+            })
+            .collect();
+        if !superseded.iter().any(|s| *s) {
+            continue;
+        }
+        let mut i = 0;
+        controller.body.retain(|_| {
+            let keep = !superseded[i];
+            i += 1;
+            keep
+        });
+    }
 }
 
 /// Qualify the bare constant references in a body being lifted out of

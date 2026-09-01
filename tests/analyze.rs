@@ -3454,3 +3454,81 @@ end
         );
     }
 }
+
+#[test]
+fn repeated_before_action_replaces_the_earlier_declaration() {
+    // campfire's shape: the RoomScoped concern declares
+    // `before_action :set_room`, and MessagesController, which includes
+    // it, declares `before_action :set_room, except: :create` again.
+    // ActiveSupport::Callbacks removes the earlier callback when a later
+    // one has the same kind and filter, so Rails runs `set_room` ONCE per
+    // action, and not at all for `create`. The emit used to prepend it
+    // twice — two `find_by!` round trips where Rails spends one.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/concerns/room_scoped.rb",
+            r#"module RoomScoped
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :set_room
+  end
+
+  private
+    def set_room
+      @room = Room.find(params[:room_id])
+    end
+end
+"#,
+        ),
+        (
+            "app/controllers/messages_controller.rb",
+            r#"class MessagesController < ApplicationController
+  include RoomScoped
+
+  before_action :set_room, except: :create
+
+  def index
+  end
+
+  def create
+  end
+end
+"#,
+        ),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/views/messages/index.html.erb", "<p><%= @room %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+    let ctrl = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "MessagesController")
+        .expect("MessagesController ingested");
+    let set_room: Vec<_> = ctrl.filters().filter(|f| f.target.as_str() == "set_room").collect();
+    assert_eq!(
+        set_room.len(),
+        1,
+        "one set_room callback survives, as in Rails; chain = {:?}",
+        ctrl.filters().map(|f| (f.target.as_str().to_string(), f.only.clone(), f.except.clone())).collect::<Vec<_>>()
+    );
+    // The survivor is the LATER declaration, with its own `except:`.
+    assert!(
+        set_room[0].except.iter().any(|s| s.as_str() == "create"),
+        "the later declaration's except: is the one that applies; got {:?}",
+        set_room[0]
+    );
+    assert!(set_room[0].from_concern.is_none(), "the controller's own declaration won, not the concern's");
+}
