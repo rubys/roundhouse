@@ -271,41 +271,47 @@ fn record_dom_id(_singular: &str, record: &Expr, span: Span) -> Expr {
     )
 }
 
-/// `ViewHelpers.broadcast_render(-> { <render> })` — the runtime
-/// brackets the render so `csrf_token_hidden_input` omits the token
-/// input, matching Rails' session-less broadcast renderer (a broadcast
-/// here runs inside the triggering request, so the session would
-/// otherwise be at hand). `ensure`-guarded in the runtime.
+/// `ViewHelpers.broadcast_render(ViewHelpers.begin_broadcast_render,
+/// <render>)` — the runtime pair brackets the render so
+/// `csrf_token_hidden_input` omits the token input, matching Rails'
+/// session-less broadcast renderer (a broadcast here runs inside the
+/// triggering request, so the session would otherwise be at hand).
 ///
-/// AN ARGUMENT, NOT A BLOCK — the `ActiveJob.enqueue` contract: RBS
-/// names the `^() -> String` parameter, and a yielding method's return
-/// type dissolves on the AOT lane when its block captures a poly local
-/// (matz/spinel#4245).
+/// TWO PLAIN CALLS, NOT A BLOCK OR A PROC: left-to-right argument
+/// evaluation raises the flag (first argument) before the render
+/// (second argument) runs, on every target. A block dissolves on the
+/// AOT lane when it captures into a heap poly proc (matz/spinel#4245),
+/// and a proc argument needs `.call` + function-type arms in all nine
+/// target emitters the runtime file lowers through.
 fn wrap_broadcast_render(html: Expr) -> Expr {
-    let lambda = Expr::new(
+    let vh_const = || {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Const {
+                path: vec![
+                    Symbol::from("ActionView"),
+                    Symbol::from("ViewHelpers"),
+                ],
+            },
+        )
+    };
+    let mut armed = Expr::new(
         crate::span::Span::synthetic(),
-        ExprNode::Lambda {
-            params: vec![],
-            body: html,
-            block_param: None,
-            block_style: Default::default(),
-            rest_param: None,
+        ExprNode::Send {
+            recv: Some(vh_const()),
+            method: Symbol::from("begin_broadcast_render"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
         },
     );
+    armed.ty = Some(Ty::Str);
     let mut call = Expr::new(
         crate::span::Span::synthetic(),
         ExprNode::Send {
-            recv: Some(Expr::new(
-                crate::span::Span::synthetic(),
-                ExprNode::Const {
-                    path: vec![
-                        Symbol::from("ActionView"),
-                        Symbol::from("ViewHelpers"),
-                    ],
-                },
-            )),
+            recv: Some(vh_const()),
             method: Symbol::from("broadcast_render"),
-            args: vec![lambda],
+            args: vec![armed, html],
             block: None,
             parenthesized: true,
         },

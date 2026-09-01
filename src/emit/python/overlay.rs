@@ -279,6 +279,12 @@ fn emit_models(models: &[LibraryClass]) -> Result<String, String> {
         ("Roundhouse.RhDateTime", "from app.rh_datetime import Roundhouse\n"),
         // Turbo Stream broadcast hooks (`after_*_commit`).
         ("Broadcasts.", "from app.cable import Broadcasts\n"),
+        // The broadcast-render bracket pair around synthesized
+        // broadcast payloads (`ViewHelpers.broadcast_render(
+        // ViewHelpers.begin_broadcast_render(), …)`). Safe at the
+        // top: view_helpers.py imports only Base and the stdlib —
+        // no models↔view_helpers cycle to break.
+        ("ViewHelpers.", "from app.v2.view_helpers import ViewHelpers\n"),
     ] {
         if body.contains(needle) {
             out.push_str(import);

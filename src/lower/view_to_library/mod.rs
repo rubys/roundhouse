@@ -1247,17 +1247,21 @@ pub(crate) fn insert_framework_stubs(
             Ty::Str,
         ),
     );
-    // `broadcast_render(^() -> String) -> String` — the broadcast
-    // lowerings bracket their SYNTHESIZED renders in this so
+    // The broadcast-render bracket pair — the broadcast lowerings wrap
+    // their SYNTHESIZED renders as
+    // `broadcast_render(begin_broadcast_render, <render>)` so
     // `csrf_token_hidden_input` omits the token input, matching Rails'
-    // session-less broadcast renderer. The render rides as a zero-arg
-    // lambda ARGUMENT (the `ActiveJob.enqueue` contract — see
-    // matz/spinel#4245 for why not a block), and the call answers the
-    // rendered String.
+    // session-less broadcast renderer. Two plain calls (left-to-right
+    // argument evaluation raises the flag before the render runs) —
+    // see the runtime method's comment for why not a block or a proc.
+    vh.class_methods.insert(
+        Symbol::from("begin_broadcast_render"),
+        fn_sig(vec![], Ty::Str),
+    );
     vh.class_methods.insert(
         Symbol::from("broadcast_render"),
         fn_sig(
-            vec![(Symbol::from("blk"), fn_sig(vec![], Ty::Str))],
+            vec![(Symbol::from("_armed"), Ty::Str), (Symbol::from("html"), Ty::Str)],
             Ty::Str,
         ),
     );

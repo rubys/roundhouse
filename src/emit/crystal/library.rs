@@ -431,7 +431,25 @@ fn render_class(lc: &LibraryClass) -> String {
         for m in &lc.methods {
             collect_classvar_index_types(&m.body, &mut classvar_index_types);
         }
-        for (name, _ty) in &ivars {
+        for (name, ty) in &ivars {
+            // A SCALAR module var (`@broadcast_rendering = false` —
+            // ViewHelpers' broadcast-render flag) declares as its
+            // assigned scalar type with a zero default; the Hash
+            // declaration below was written when every class-var
+            // module ivar WAS a hash, and declaring a Bool as
+            // `Hash(String, String)` is a type error at the first
+            // assignment.
+            let scalar = match ty {
+                crate::ty::Ty::Bool => Some(("Bool", "false")),
+                crate::ty::Ty::Int => Some(("Int64", "0_i64")),
+                crate::ty::Ty::Str => Some(("String", "\"\"")),
+                _ => None,
+            };
+            if let Some((ty_s, default)) = scalar {
+                writeln!(s, "{body_pad}@@{name} : {ty_s} = {default}").unwrap();
+                wrote_header_lines = true;
+                continue;
+            }
             let (k_ty, v_ty) = classvar_index_types.get(name).cloned().unwrap_or_else(|| {
                 (crate::ty::Ty::Str, crate::ty::Ty::Str)
             });

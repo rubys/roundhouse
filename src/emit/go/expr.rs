@@ -3182,8 +3182,10 @@ fn is_known_class_method(name: &str) -> bool {
     matches!(
         name,
         // ActiveRecord::Base lowerer-synthesized panic-overridden
-        // per-model method — view_helpers' dom_id relies on parens.
-        "dom_prefix"
+        // per-model methods — view_helpers' dom_id and the broadcast
+        // targets rely on parens. `dom_record_key` is dom_id's row-key
+        // half (`push_dom_record_key_method`), same synthesis pass.
+        "dom_prefix" | "dom_record_key" | "to_param"
         // AR::Base instance method that subclasses inherit via Go
         // embedding (`Article` embeds `*ApplicationRecord` →
         // `*ActiveRecordBase`). The 0-arg call site

@@ -4,16 +4,18 @@ module ActiveJob
   def self.performed: () -> Array[String]
 
   ENQUEUE_ONLY: Array[String]
-  # `untyped` rather than `^() -> nil`: the RBS reader does not
-  # support ProcType yet, and a Proc is opaque to this analyzer anyway.
-  PENDING: Array[untyped]
+  # `^() -> nil` for real now — the RBS reader grew ProcType (and the
+  # analyzer `.call` on a function type) when `broadcast_render` tried
+  # the proc-argument contract; the queue keeps the typed spelling so
+  # both arms stay exercised.
+  PENDING: Array[^() -> nil]
   DRAINED: Array[String]
   def self.enqueue_only: () -> bool
   def self.enqueue_without_running: () -> nil
   def self.run_enqueued: () -> nil
   def self.drain_registered: () -> bool
   def self.register_drain: () -> nil
-  def self.enqueue: (untyped work) -> nil
+  def self.enqueue: (^() -> nil work) -> nil
   def self.pending_count: () -> Integer
   def self.drain: () -> Integer
 

@@ -2508,37 +2508,50 @@ comparator until then.
 
 **FIXED 2026-08-31.** The renders the broadcast lowerings SYNTHESIZE
 (the `broadcasts_to` expansions, `partial:` forms, and the
-receiver-convention default) now ride inside
-`ActionView::ViewHelpers.broadcast_render(-> { … })`, and
-`csrf_token_hidden_input` — the one choke point every form's token
-input flows through, `button_to`'s included now — answers `""` under
-it. That is Rails' semantics arrived at honestly: its broadcast
-renderer has no session, ours runs inside the triggering request and
-had one at hand. An app-SUPPLIED `html:` expression passes through
-unwrapped, which is also Rails: campfire's closeds controller hands in
-a `render_to_string` rendered inside the request — session, token and
-all — and Rails broadcasts those bytes untouched.
+receiver-convention default) now ride inside the bracket pair
 
-Three shapes were tried before this one landed, and the survivors of
-each are load-bearing:
+```ruby
+ViewHelpers.broadcast_render(ViewHelpers.begin_broadcast_render,
+                             Views::Messages.message(self))
+```
+
+and `csrf_token_hidden_input` — the one choke point every form's token
+input flows through, `button_to`'s included now — answers `""` while
+the flag is up. That is Rails' semantics arrived at honestly: its
+broadcast renderer has no session, ours runs inside the triggering
+request and had one at hand. An app-SUPPLIED `html:` expression passes
+through unwrapped, which is also Rails: campfire's closeds controller
+hands in a `render_to_string` rendered inside the request — session,
+token and all — and Rails broadcasts those bytes untouched.
+
+The bracket is TWO PLAIN CALLS riding left-to-right argument
+evaluation — the first argument raises the flag before the render (the
+second) runs. Three richer shapes were tried first, and each was
+backed out by a lane that could not spell it:
 
   * a BLOCK (`broadcast_render { … }`) dissolves on the AOT lane —
-    a yielding method's return type never resolves when its block
-    captures a poly local (matz/spinel#4245, filed with a 22-line
-    repro). The render rides as a `^() -> String` ARGUMENT instead,
-    the `ActiveJob.enqueue` contract — which also taught the RBS
-    reader `ProcType` and the analyzer `.call`-on-`Ty::Fn`.
-  * begin/`ensure` around `blk.call` is a construct half the transpile
-    targets have no statement arm for, so the runtime body carries
-    none. The flag self-heals instead: `reset_slots!` — every lane's
-    per-request dispatch entry — clears it, so a render that raises
-    can leave at most the REMAINDER of its own request token-less.
-  * the one poly capture in campfire (`room` through
-    `Rooms::Direct.find_or_create_for`) was itself a typing gap worth
-    closing: `transaction { }` now answers its block, `tap` its
-    receiver, and controller private-helper params take the
-    analyzer's call-site-unified types (`broadcast_create_room(Room
-    room)` where `(untyped room)` had poisoned every chain under it).
+    on the real tree the discriminator is an ensure-guarded
+    `x = yield` inlined into a heap poly proc (matz/spinel#4245,
+    rediagnosed with matz; small mirrors pass).
+  * a `^() -> String` proc ARGUMENT (`blk.call`, the
+    `ActiveJob.enqueue` contract) compiles on spinel but needs a
+    `.call` + function-type arm in all nine target emitters the
+    runtime file lowers through — CI showed kotlin (`Unresolved
+    reference 'call'`), rust (unstable `fn_traits`) and five compare
+    lanes red at once. The detour still paid: the RBS reader grew
+    `ProcType`, the analyzer `.call`-on-`Ty::Fn`, and
+    `active_job.rbs` now declares its queue `Array[^() -> nil]`
+    instead of the documented `untyped` wart.
+  * begin/`ensure` is a construct half the targets have no statement
+    arm for, so the runtime body carries none. The flag self-heals
+    instead: `reset_slots!` — every lane's per-request dispatch entry
+    — clears it, so a render that raises can leave at most the
+    REMAINDER of its own request token-less.
+
+The chase also closed real typing gaps: `transaction { }` answers its
+block, `tap` its receiver, and controller private-helper params take
+the analyzer's call-site-unified types (`broadcast_create_room(Room
+room)` where `(untyped room)` had poisoned every chain under it).
 
 The comparator's last frame mask retires with this; the frames now
 compare against Rails with NO forgivenesses on either lane. The

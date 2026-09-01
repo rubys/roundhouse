@@ -114,7 +114,7 @@ fn a_literal_stream_lowers_with_the_named_partial_as_its_payload() {
     assert!(
         src.contains(
             "Broadcasts.prepend(stream: \"rooms\", target: \"shared_rooms\", \
-             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }))"
+             html: ActionView::ViewHelpers.broadcast_render(ActionView::ViewHelpers.begin_broadcast_render, Views::Rooms.row(@room)))"
         ),
         "{src}",
     );
@@ -164,7 +164,7 @@ fn attributes_render_to_element_text_ahead_of_action_and_target() {
     assert!(
         src.contains(
             "Broadcasts.append(stream: \"rooms\", target: \"shared_rooms\", \
-             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }), \
+             html: ActionView::ViewHelpers.broadcast_render(ActionView::ViewHelpers.begin_broadcast_render, Views::Rooms.row(@room)), \
              attributes: \" maintain_scroll=\\\"true\\\" tone=\\\"quiet\\\"\")"
         ),
         "{src}",
@@ -180,7 +180,7 @@ fn a_broadcast_without_attributes_gains_no_argument() {
     assert!(
         src.contains(
             "Broadcasts.prepend(stream: \"rooms\", target: \"shared_rooms\", \
-             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }))"
+             html: ActionView::ViewHelpers.broadcast_render(ActionView::ViewHelpers.begin_broadcast_render, Views::Rooms.row(@room)))"
         ),
         "{src}",
     );

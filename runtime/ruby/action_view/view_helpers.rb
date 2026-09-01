@@ -711,27 +711,34 @@ module ActionView
     end
 
     # Bracket a broadcast partial render (the lowered
-    # `Broadcasts.<action>(html: …)` sites generate this wrapper).
+    # `Broadcasts.<action>(html: …)` sites generate the pair):
     #
-    # AN ARGUMENT, NOT A BLOCK — the same contract `ActiveJob.enqueue`
-    # carries, for the same two reasons: RBS can name a `^() -> String`
-    # parameter where it has no syntax for a block, and a yielding
-    # method's return type dissolves on the AOT lane when its block
-    # captures a poly local (matz/spinel#4245; campfire's
-    # `memberships.each do |membership| … end` is the capture).
+    #   ViewHelpers.broadcast_render(ViewHelpers.begin_broadcast_render,
+    #                                Views::Messages.message(self))
     #
-    # NO `ensure`, deliberately. A raise inside `blk.call` leaves the
-    # flag set for the REMAINDER of that one request (an error page a
-    # broad `rescue Exception` renders in the same request would omit
-    # its token input); `reset_slots!` — which every lane's dispatch
-    # entry already runs per request — clears it, so nothing leaks into
-    # later requests. The ensure-guarded spelling was written first and
-    # backed out: statement-position begin/ensure is a construct half
-    # the transpile targets have no arm for, and this file must lower
-    # everywhere.
-    def self.broadcast_render(blk)
+    # TWO PLAIN CALLS, NOT A BLOCK OR A PROC — the load-bearing part is
+    # left-to-right argument evaluation, which every target this file
+    # transpiles to guarantees: the first argument SETS the flag, so the
+    # render (the second argument) evaluates with it up, and the outer
+    # call clears it and answers the html. The other spellings were
+    # each written and backed out: a BLOCK dissolves on the AOT lane
+    # when it captures into a heap poly proc (matz/spinel#4245), and a
+    # `^() -> String` proc ARGUMENT needs a `.call` + function-type arm
+    # in every one of the nine target emitters this file must lower
+    # through — a wide toll for one flag toggle.
+    #
+    # NO `ensure`, also deliberately. A raise inside the render leaves
+    # the flag set for the REMAINDER of that one request only;
+    # `reset_slots!` — every lane's per-request dispatch entry — clears
+    # it, so nothing leaks into later requests. (Statement-position
+    # begin/ensure is likewise a construct half the targets have no
+    # arm for.)
+    def self.begin_broadcast_render
       @broadcast_rendering = true
-      html = blk.call
+      ""
+    end
+
+    def self.broadcast_render(_armed, html)
       @broadcast_rendering = false
       html
     end

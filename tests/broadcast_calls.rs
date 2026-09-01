@@ -94,7 +94,7 @@ fn append_lowers_to_a_broadcasts_call_with_the_records_own_partial() {
         src.contains(
             "Broadcasts.append(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", \
              target: \"messages_#{bc_owner.dom_prefix}_#{bc_owner.dom_record_key}\", \
-             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Messages.message(self) }))"
+             html: ActionView::ViewHelpers.broadcast_render(ActionView::ViewHelpers.begin_broadcast_render, Views::Messages.message(self)))"
         ),
         "{src}",
     );
