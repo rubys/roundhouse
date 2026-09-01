@@ -252,8 +252,9 @@ use crate::inflector::Inflector;
 use crate::json_builder::JsonBuilder;
 #[allow(unused_imports)]
 use crate::router::{MatchResult, Route, Router};
-#[allow(unused_imports)]
-use crate::view_helpers::ViewHelpers;
+// No ViewHelpers row: this block is only ever concatenated after
+// MODEL_IMPORTS, which imports `view_helpers::{self, ViewHelpers}` —
+// a second `use` of the same NAME is E0252, not an unused-import.
 #[allow(unused_imports)]
 use crate::flash::Flash;
 #[allow(unused_imports)]
