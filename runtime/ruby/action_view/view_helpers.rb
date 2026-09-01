@@ -859,34 +859,50 @@ module ActionView
     # turbo_confirm: ... }`) render as `data-turbo-confirm="…"`;
     # underscores in the inner key map to hyphens to match Rails'
     # tag-helper convention.
+    # A nil value means NO attribute, spelled `unless …nil?` around each
+    # body rather than `next if …nil?`: the kotlin emitter stubs `next`
+    # inside a `forEach` lambda as an EMPTY statement (`/* TODO Next */`,
+    # `return@forEach` never emitted), so a nil value fell through and
+    # rendered `checked="checked"`. The wrap is the one control shape
+    # every lane compiles. (`active_record/connection.rb` still carries
+    # a `next unless` — the same kotlin gap sits latent there.)
     def self.render_attrs(attrs)
       return "" if attrs.empty?
       pairs = []
       attrs.each do |k, v|
-        next if v.nil?
-        name = k.to_s
-        if v.is_a?(Hash)
-          v.each do |inner_k, inner_v|
-            next if inner_v.nil?
-            inner_name = inner_k.to_s.tr("_", "-")
-            # Coerce untyped Hash values to String before html_escape;
-            # html_escape's contract is `(String) -> String` and the
-            # untyped values flowing through Hash[String, untyped]
-            # need explicit stringification.
-            pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+        unless v.nil?
+          name = k.to_s
+          if v.is_a?(Hash)
+            v.each do |inner_k, inner_v|
+              unless inner_v.nil?
+                inner_name = inner_k.to_s.tr("_", "-")
+                # Coerce untyped Hash values to String before
+                # html_escape; html_escape's contract is
+                # `(String) -> String` and the untyped values flowing
+                # through Hash[String, untyped] need explicit
+                # stringification.
+                pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+              end
+            end
+          elsif boolean_attr?(name)
+            # A boolean attribute's mere presence is its value — Rails
+            # renders `hidden: true` as `hidden="hidden"` and OMITS a
+            # falsy one entirely, because `disabled="false"` still
+            # reads as disabled to a browser. Any other value (Rails:
+            # any truthy value) also renders as `name="name"`. The
+            # check is `v.to_s == "false"` — not `v == false`, which
+            # C# refuses (no `object == bool` operator), and not
+            # truthiness, which not every emitter can ask of an untyped
+            # Hash value; `.to_s` on `v` is what the branch below
+            # already does on every lane. The one divergence: a literal
+            # String "false" handed to a boolean attribute renders in
+            # Rails (truthy) and is omitted here — no corpus site
+            # writes one, and literal sites lower through the
+            # compile-time loops, not this method.
+            pairs << " #{name}=\"#{name}\"" unless v.to_s == "false"
+          else
+            pairs << " #{name}=\"#{html_escape(v.to_s)}\""
           end
-        elsif boolean_attr?(name)
-          # A boolean attribute's mere presence is its value — Rails
-          # renders `hidden: true` as `hidden="hidden"` and OMITS a
-          # falsy one entirely, because `disabled="false"` still reads
-          # as disabled to a browser. Any other value (Rails: any
-          # truthy value) also renders as `name="name"`. `== false`
-          # rather than truthiness: nil is already gone above, and the
-          # explicit comparison is the shape every target spells the
-          # same way.
-          pairs << " #{name}=\"#{name}\"" unless v == false
-        else
-          pairs << " #{name}=\"#{html_escape(v.to_s)}\""
         end
       end
       pairs.join
@@ -895,25 +911,38 @@ module ActionView
     # Rails ActionView's `BOOLEAN_ATTRIBUTES`, verbatim — the attributes
     # whose presence alone is the value. The compile-time attribute
     # loops carry the same list in `attr_parts::is_boolean_attr`, and
-    # the two must not drift. An Array + `include?` rather than a
-    # `case`, because a runtime construct must be spellable by the
-    # weakest of the nine target emitters and the TypeScript lowering
-    # has no `case` arm.
-    BOOLEAN_ATTRIBUTES = [
-      "allowfullscreen", "allowpaymentrequest", "async", "autofocus",
-      "autoplay", "checked", "compact", "controls", "declare",
-      "default", "defaultchecked", "defaultmuted", "defaultselected",
-      "defer", "disabled", "enabled", "formnovalidate", "hidden",
-      "indeterminate", "inert", "ismap", "itemscope", "loop",
-      "multiple", "muted", "nohref", "nomodule", "noresize",
-      "noshade", "novalidate", "nowrap", "open", "pauseonexit",
-      "playsinline", "pubdate", "readonly", "required", "reversed",
-      "scoped", "seamless", "selected", "sortable", "truespeed",
-      "typemustmatch", "visible"
-    ]
-
+    # the two must not drift.
+    #
+    # The SHAPE is the story: one `||` chain of `String == literal`,
+    # because a runtime construct must be spellable by the weakest of
+    # the nine target emitters and every richer spelling lost a lane. A
+    # `case` has no TypeScript arm; an Array constant mis-types on rust
+    # (`&str == str`, E0277) and go (`[]interface{}` vs
+    # `slices.Contains`) and throws on kotlin; a String CONSTANT
+    # receiver lowers as a TYPE on rust (`BOOLEAN_ATTRIBUTES::contains`)
+    # and as `object` on C# (CS1929); a `" a" \` continuation is a
+    # StringInterp the rust const emitter declines; and `include?` with
+    # a String-typed ARGUMENT loses rust again (bridged `contains`
+    # passes the arg unborrowed — `String: Pattern` E0277). String
+    # equality against a literal is the one comparison every lane
+    # already spells.
     def self.boolean_attr?(name)
-      BOOLEAN_ATTRIBUTES.include?(name)
+      name == "allowfullscreen" || name == "allowpaymentrequest" ||
+        name == "async" || name == "autofocus" || name == "autoplay" ||
+        name == "checked" || name == "compact" || name == "controls" ||
+        name == "declare" || name == "default" || name == "defaultchecked" ||
+        name == "defaultmuted" || name == "defaultselected" || name == "defer" ||
+        name == "disabled" || name == "enabled" || name == "formnovalidate" ||
+        name == "hidden" || name == "indeterminate" || name == "inert" ||
+        name == "ismap" || name == "itemscope" || name == "loop" ||
+        name == "multiple" || name == "muted" || name == "nohref" ||
+        name == "nomodule" || name == "noresize" || name == "noshade" ||
+        name == "novalidate" || name == "nowrap" || name == "open" ||
+        name == "pauseonexit" || name == "playsinline" || name == "pubdate" ||
+        name == "readonly" || name == "required" || name == "reversed" ||
+        name == "scoped" || name == "seamless" || name == "selected" ||
+        name == "sortable" || name == "truespeed" || name == "typemustmatch" ||
+        name == "visible"
     end
   end
 end
