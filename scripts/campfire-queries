@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# scripts/campfire-queries -- how many sqlite3 round trips does each campfire
+# page cost on the compiled binary, and how many does real Rails spend on the
+# same page from the same rows?
+#
+#   scripts/campfire-queries [--reuse EMIT] [--keep] [--route PATH]... [APP]
+#
+# Boots the Rails oracle (build/campfire-oracle, from scripts/campfire-oracle
+# prepare) at RAILS_LOG_LEVEL=debug and the spinel binary under RH_SQL_TRACE=1,
+# both on the pristine seed, signs in to each as the seeded user, GETs the
+# same routes in the same order, and reads each lane's own query log back:
+#
+#   * Rails logs "Completed ... (N queries, M cached)" per request. Its query
+#     cache replays identical SELECTs within one request, so N - M is what
+#     reached sqlite.
+#   * The binary prints one "  SQL ..." line per prepare (runtime/spinel/db.rb,
+#     RH_SQL_TRACE). That lane has a prepared-statement cache and no
+#     per-request result cache, so every line is a round trip.
+#
+# The table is rails-real vs binary per route, and the binary's SQL shapes
+# behind each route land in the dumps dir (and on stderr for the worst one),
+# most frequent first -- an N+1 names the reader that runs it. This is the
+# oracle for query amplification: campfire-compare proves the PAGE matches
+# Rails; this proves the WORK to build it does. Routes: /session/new is
+# measured unauthenticated (it is also the CSRF source for the sign-in POST);
+# the defaults after sign-in are the room page twice (cold, then warm), a
+# profile, the messages index, and searches. --route adds to (does not
+# replace) the defaults; give --route before APP.
+#
+# Requires: the oracle prepared, redis-server running (Rails' Action Cable
+# adapter), cargo, ruby, spinel + a C toolchain. --reuse skips the emit and
+# build, so a runtime edit can be measured with `make build` in the reused
+# tree and a rerun.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$HOME/git/once-campfire"
+ORACLE="$REPO_ROOT/build/campfire-oracle"
+OUT=""
+KEEP=0
+REUSE=""
+ROUTES=(/rooms/1 /rooms/1 /users/1 /rooms/1/messages /searches)
+EXTRA=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reuse)  REUSE="$2"; shift 2 ;;
+        --keep)   KEEP=1; shift ;;
+        --route)  EXTRA+=("$2"); shift 2 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        *) APP="$1"; shift ;;
+    esac
+done
+ROUTES+=("${EXTRA[@]}")
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
+fail() { printf '\033[1;31m%s\033[0m\n' "$1"; }
+die()  { fail "$1"; exit 1; }
+
+ORACLE_PID=""
+EMIT_PID=""
+cleanup() {
+    [[ -n "$ORACLE_PID" ]] && kill "$ORACLE_PID" 2>/dev/null || true
+    [[ -n "$EMIT_PID" ]] && kill "$EMIT_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+    if [[ -n "$OUT" && $KEEP -eq 0 && -z "$REUSE" ]]; then rm -rf "$OUT"; fi
+}
+trap cleanup EXIT INT TERM
+
+# -- 0. preconditions -------------------------------------------------------
+[[ -f "$ORACLE/oracle.json" ]] \
+    || die "no oracle at $ORACLE -- run scripts/campfire-oracle prepare first"
+if command -v redis-cli >/dev/null 2>&1; then
+    redis-cli ping >/dev/null 2>&1 || die "redis is not running -- the Rails lane's Action Cable adapter needs it"
+else
+    ruby -rsocket -e 'TCPSocket.new("127.0.0.1", 6379).close' 2>/dev/null \
+        || die "redis is not reachable on :6379 -- the Rails lane's Action Cable adapter needs it"
+fi
+command -v spinel >/dev/null 2>&1 || die "spinel is not on PATH"
+
+# -- 1. one pristine seed, staged into BOTH lanes ---------------------------
+PRISTINE="$ORACLE/storage/db/seed-pristine.sqlite3"
+SERVE_DB="$ORACLE/storage/db/production.sqlite3"
+[[ -f "$PRISTINE" ]] || cp "$SERVE_DB" "$PRISTINE"
+cp "$PRISTINE" "$SERVE_DB"
+rm -f "$SERVE_DB-wal" "$SERVE_DB-shm"
+
+# -- 2. the emit ------------------------------------------------------------
+if [[ -n "$REUSE" ]]; then
+    OUT="$REUSE"
+    [[ -x "$OUT/build/blog" ]] || die "no binary at $OUT/build/blog"
+    step "reusing emit at $OUT"
+else
+    OUT="$(mktemp -d -t roundhouse-campfire-queries.XXXXXX)"
+    step "transpiling $APP -> $OUT (target: spinel)"
+    rm -rf "$OUT"
+    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+        --target spinel "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    step "building the binary"
+    (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \
+        || { tail -20 "$OUT/build.log"; die "spinel build failed"; }
+fi
+mkdir -p "$OUT/storage"
+cp "$PRISTINE" "$OUT/storage/development.sqlite3"
+rm -f "$OUT/storage/development.sqlite3-wal" "$OUT/storage/development.sqlite3-shm"
+
+# -- 3. boot both lanes -----------------------------------------------------
+ORACLE_PORT=4184
+EMIT_PORT=4185
+DUMPS="$OUT-queries"
+rm -rf "$DUMPS"; mkdir -p "$DUMPS"
+
+step "booting the Rails oracle on :$ORACLE_PORT (RAILS_LOG_LEVEL=debug)"
+RAILS_LOG_LEVEL=debug "$REPO_ROOT/scripts/campfire-oracle" serve --out "$ORACLE" --port "$ORACLE_PORT" \
+    > "$DUMPS/rails.log" 2>&1 &
+ORACLE_PID=$!
+
+step "booting the binary on :$EMIT_PORT (RH_SQL_TRACE=1)"
+( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" RH_SQL_TRACE=1 \
+    exec ./build/blog ) > "$DUMPS/binary.log" 2>&1 &
+EMIT_PID=$!
+
+wait_up() {
+    local port="$1" pid="$2" log="$3"
+    for _ in $(seq 1 90); do
+        curl -so /dev/null "http://127.0.0.1:$port/" 2>/dev/null && return 0
+        kill -0 "$pid" 2>/dev/null || { tail -20 "$log"; return 1; }
+        sleep 1
+    done
+    tail -20 "$log"; return 1
+}
+wait_up "$ORACLE_PORT" "$ORACLE_PID" "$DUMPS/rails.log" || die "the oracle never came up"
+wait_up "$EMIT_PORT" "$EMIT_PID" "$DUMPS/binary.log" || die "the binary never came up"
+
+# -- 4. the same walk through each lane -------------------------------------
+DRIVE="$REPO_ROOT/scripts/campfire-queries-drive.rb"
+step "walking the Rails lane"
+ruby "$DRIVE" walk "http://127.0.0.1:$ORACLE_PORT" "${ROUTES[@]}" | tee "$DUMPS/rails-walk.txt"
+step "walking the binary"
+ruby "$DRIVE" walk "http://127.0.0.1:$EMIT_PORT" "${ROUTES[@]}" | tee "$DUMPS/binary-walk.txt"
+
+# Both logs are complete once the servers have flushed; stopping them here
+# also keeps a straggling request out of the count.
+sleep 1
+kill "$ORACLE_PID" "$EMIT_PID" 2>/dev/null || true
+wait 2>/dev/null || true
+ORACLE_PID=""; EMIT_PID=""
+
+# -- 5. read the logs back, one JSON line per route per lane ----------------
+step "reading the query logs"
+ruby "$DRIVE" rails  "$DUMPS/rails.log"  "${ROUTES[@]}" > "$DUMPS/rails.jsonl"
+ruby "$DRIVE" binary "$DUMPS/binary.log" "${ROUTES[@]}" > "$DUMPS/binary.jsonl" 2> "$DUMPS/binary-shapes.txt"
+
+ruby -rjson - "$DUMPS/rails.jsonl" "$DUMPS/binary.jsonl" "$DUMPS" <<'RB'
+rails, binary, dumps = ARGV
+r = File.readlines(rails).map { |l| JSON.parse(l) }
+b = File.readlines(binary).map { |l| JSON.parse(l) }
+# Each lane's status comes from its own walk ("path -> status bytes", in
+# the same order as the routes), not from the other lane's log.
+status_of = lambda do |name|
+  File.readlines(File.join(dumps, name)).map { |l| l[/-> (\d+)/, 1].to_i }
+end
+rs = status_of.call("rails-walk.txt"); bs = status_of.call("binary-walk.txt")
+r.each_with_index { |row, i| row["status"] = rs[i] if rs[i] }
+b.each_with_index { |row, i| row["status"] = bs[i] if bs[i] }
+rows = r.zip(b)
+puts
+puts format("%-24s %8s %8s %8s   %-6s %8s   %s", "route", "rails", "cached", "real", "status", "binary", "binary / rails-real")
+puts "-" * 96
+worst = nil
+rows.each do |ra, bi|
+  real = ra["real"]; n = bi["real"]
+  ratio = (real && n && real > 0) ? format("%.1fx", n.to_f / real) : "-"
+  status = bi["status"]
+  flag = (bi["status"] && ra["status"] && bi["status"] != ra["status"]) ? "  <-- rails answered #{ra["status"]}" : ""
+  puts format("%-24s %8s %8s %8s   %-6s %8s   %s%s", ra["path"], ra["queries"] || "-", ra["cached"] || "-", real || "-", status || "-", n || "-", ratio, flag)
+  worst = [bi["path"], n] if n && (worst.nil? || n > worst[1])
+end
+summary = rows.map { |ra, bi| { path: ra["path"], rails: ra.reject { |k, _| k == "path" }, binary: bi.reject { |k, _| k == "path" } } }
+File.write(File.join(dumps, "summary.json"), JSON.pretty_generate({ generated_at: Time.now.utc.iso8601, routes: summary }))
+puts
+puts "shapes behind every binary route: #{dumps}/binary-shapes.txt; worst is #{worst[0]} at #{worst[1]} round trips" if worst
+RB
+step "done; dumps in $DUMPS"

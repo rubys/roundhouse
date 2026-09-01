@@ -395,12 +395,19 @@ module Db
   # accumulate the SQL each prepare/exec issues. Kept in parity with the
   # cruby shim (db_cruby.rb); see `capture_sql` below.
   @query_log = nil
+  # RH_SQL_TRACE=1 prints every SQL string this process prepares to
+  # stderr, the way `RAILS_LOG_LEVEL=debug` shows Rails' queries. This
+  # lane has a prepared-statement cache but NO per-request result cache,
+  # so every line here is a real sqlite3 round trip -- which is the
+  # number a query-amplification comparison against Rails needs.
+  @sql_trace = false
 
   # Pool size: kwarg wins; otherwise DATABASE_POOL_SIZE env (the same
   # knob the rust target reads — set it to the server's max concurrent
   # connections so no fiber parks waiting for a handle); else a modest
   # default. Each entry is one FFI sqlite3 handle to `path`.
   def self.configure(path, pool_size: 8)
+    @sql_trace = ENV.fetch("RH_SQL_TRACE", "") != ""
     n = pool_size
     ev = ENV["DATABASE_POOL_SIZE"]
     if !ev.nil? && ev != ""
@@ -570,6 +577,13 @@ module Db
   # No-op (single nil check) when no capture is installed.
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if @sql_trace
+      $stderr.puts "  SQL " + sql
+    end
+  end
+
+  def self.sql_trace?
+    @sql_trace
   end
 
   def self.step?(stmt)

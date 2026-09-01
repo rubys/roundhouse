@@ -240,6 +240,11 @@ module Main
   def self.dispatch(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
+    # Under RH_SQL_TRACE the request line brackets its queries, so a
+    # tally script can attribute each SQL line to the request that ran it.
+    if Db.sql_trace?
+      $stderr.puts "-- " + req.verb + " " + req.path
+    end
 
     # Action Cable: upgrade /cable to a WebSocket and hand off to the
     # Cable glue. Tep::Server::Scheduled's write path runs the recv
