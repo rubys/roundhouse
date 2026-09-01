@@ -2588,7 +2588,17 @@ still fails the run (that ratchet is the "Broadcast forms and CSRF"
 fix above). Found by `scripts/campfire-compare` when the room page was
 triaged for gating (2026-09-01).
 
-### An advisory `String?` erases nil on the binary — matz/spinel#4250
+### An advisory `String?` erases nil on the binary — matz/spinel#4250 — FIXED upstream
+
+**FIXED 2026-09-01** (spinel `2d59b3cd`, "Keep the nil arm an advisory
+nilable seed promises"), the day it was filed; the fix landed with its
+own regression test (`test/rbs-seed/nilable_return.rb`, our repro's
+shape). Verified by the gate that found it:
+`scripts/campfire-compare --spinel` is **fully green** — room page and
+both frames equivalent to Rails on the compiled binary, with only the
+fragment-cache forgiveness above still applied (a Rails-side
+history-dependence, not a spinel gap). No mask to retire, because none
+was worn. The original entry follows.
 
 Under `--rbs sig`, a method sidecar-declared `() -> String?` stops
 returning nil for its valueless-if else path on the compiled binary:
