@@ -15,11 +15,11 @@
 #
 #   ruby campfire-queries-drive.rb binary LOG ROUTE...
 #       Reads the binary's stderr written under RH_SQL_TRACE=1: a "-- VERB
-#       /path" marker per request followed by one "  SQL ..." line per
-#       sqlite3 prepare. That lane has no per-request result cache, so every
-#       line is a real round trip. Answers one line per route with the
-#       count, and (to stderr) the SQL shapes behind it, most frequent first,
-#       so the N+1 names itself.
+#       /path" marker per request, then one "  SQL ..." line per real
+#       sqlite3 round trip and one "  CACHE ..." line per replay from the
+#       request's query cache (runtime/spinel/db.rb). Answers one line per
+#       route with both counts, and (to stderr) the SQL shapes behind the
+#       real ones, most frequent first, so the N+1 names itself.
 #
 # Both readers walk the log in request order and match each measured route
 # to the next request for the same path, so a route GET twice (a cold and a
@@ -73,18 +73,20 @@ def binary(log, routes)
   File.foreach(log) do |line|
     if (m = line.match(/^-- (\w+) (\S+)/))
       done << cur if cur
-      cur = { verb: m[1], path: m[2].sub(/\?.*/, ""), sqls: [] }
+      cur = { verb: m[1], path: m[2].sub(/\?.*/, ""), sqls: [], cached: 0 }
     elsif cur && line.start_with?("  SQL ")
       cur[:sqls] << line[6..].chomp
+    elsif cur && line.start_with?("  CACHE ")
+      cur[:cached] += 1
     end
   end
   done << cur if cur
   report(done, routes) do |r|
     shapes = r[:sqls].map { |s| s.gsub(/'[^']*'/, "'?'").gsub(/\b\d+\b/, "?").gsub(/\(\?(, \?)+\)/, "(?...)") }
                      .tally.sort_by { |s, n| [-n, s] }
-    $stderr.puts "#{r[:path]}: #{r[:sqls].size} round trips"
+    $stderr.puts "#{r[:path]}: #{r[:sqls].size} round trips, #{r[:cached]} replayed from the query cache"
     shapes.first(12).each { |s, n| $stderr.puts format("  %4d  %s", n, s[0, 150]) }
-    { real: r[:sqls].size }
+    { real: r[:sqls].size, cached: r[:cached] }
   end
 end
 

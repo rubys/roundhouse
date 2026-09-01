@@ -14,9 +14,9 @@
 #   * Rails logs "Completed ... (N queries, M cached)" per request. Its query
 #     cache replays identical SELECTs within one request, so N - M is what
 #     reached sqlite.
-#   * The binary prints one "  SQL ..." line per prepare (runtime/spinel/db.rb,
-#     RH_SQL_TRACE). That lane has a prepared-statement cache and no
-#     per-request result cache, so every line is a round trip.
+#   * The binary prints one "  SQL ..." line per real prepare and one
+#     "  CACHE ..." line per replay from its own per-request query cache
+#     (runtime/spinel/db.rb, RH_SQL_TRACE) -- the same two numbers.
 #
 # The table is rails-real vs binary per route, and the binary's SQL shapes
 # behind each route land in the dumps dir (and on stderr for the worst one),
@@ -181,15 +181,15 @@ r.each_with_index { |row, i| row["status"] = rs[i] if rs[i] }
 b.each_with_index { |row, i| row["status"] = bs[i] if bs[i] }
 rows = r.zip(b)
 puts
-puts format("%-24s %8s %8s %8s   %-6s %8s   %s", "route", "rails", "cached", "real", "status", "binary", "binary / rails-real")
-puts "-" * 96
+puts format("%-24s %8s %8s %8s   %-6s %8s %8s   %s", "route", "rails", "cached", "real", "status", "binary", "cached", "binary / rails-real")
+puts "-" * 104
 worst = nil
 rows.each do |ra, bi|
   real = ra["real"]; n = bi["real"]
   ratio = (real && n && real > 0) ? format("%.1fx", n.to_f / real) : "-"
   status = bi["status"]
   flag = (bi["status"] && ra["status"] && bi["status"] != ra["status"]) ? "  <-- rails answered #{ra["status"]}" : ""
-  puts format("%-24s %8s %8s %8s   %-6s %8s   %s%s", ra["path"], ra["queries"] || "-", ra["cached"] || "-", real || "-", status || "-", n || "-", ratio, flag)
+  puts format("%-24s %8s %8s %8s   %-6s %8s %8s   %s%s", ra["path"], ra["queries"] || "-", ra["cached"] || "-", real || "-", status || "-", n || "-", bi["cached"] || "-", ratio, flag)
   worst = [bi["path"], n] if n && (worst.nil? || n > worst[1])
 end
 summary = rows.map { |ra, bi| { path: ra["path"], rails: ra.reject { |k, _| k == "path" }, binary: bi.reject { |k, _| k == "path" } } }

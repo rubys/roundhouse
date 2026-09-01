@@ -192,7 +192,6 @@ module Db
   end
 
   def self.prepare(sql)
-    record_query(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on the runtime binds set AFTER prepare, which
     # aren't in the SQL key — so it must NOT participate in the
@@ -204,10 +203,14 @@ module Db
     parameterized = sql.include?("?")
     qcache = Fiber[:rh_qcache]
     if !qcache.nil? && !parameterized && (hit = qcache[sql])
+      # A replay is not a round trip, and `capture_sql` does not count
+      # it — the same rule as Rails' SQLCounter, which skips CACHE
+      # events, and as the spinel lane's `Db.prepare`.
       @next_id += 1
       @rows[@next_id] = { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
       return @next_id
     end
+    record_query(sql)
     conn  = current_dbh
     cache = conn.instance_variable_get(:@rh_stmt_cache)
     if cache.nil?

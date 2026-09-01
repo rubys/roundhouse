@@ -200,12 +200,159 @@ class Stmt
   end
 end
 
+# One cached SELECT result in a request's query cache: the rows as they
+# were stepped, every column of each, plus whether the consumer reached
+# the end. Cells are stored by STORAGE CLASS in four parallel typed
+# arrays (kind + int + float + text, indexed row * ncols + col) rather
+# than as one poly row array, so a replayed read is a typed array index
+# and nothing is boxed. `eof` false means the first consumer stopped
+# early (a `LIMIT 1` reader steps once and never asks again); a replay
+# that wants more than the recorded prefix promotes to a real
+# re-execution (see DbConn#qc_step?), the same rule as db_cruby.rb.
+class QcEntry
+  def initialize(sql, ncols, names)
+    @sql = sql
+    @ncols = ncols
+    @names = names
+    @kinds = []
+    @ints = []
+    @floats = [0.0]
+    @floats.pop
+    @texts = [""]
+    @texts.pop
+    @nrows = 0
+    @eof = false
+  end
+
+  def qc_sql
+    @sql
+  end
+
+  def ncols
+    @ncols
+  end
+
+  def col_names
+    @names
+  end
+
+  def nrows
+    @nrows
+  end
+
+  def eof
+    @eof
+  end
+
+  def mark_eof
+    @eof = true
+    nil
+  end
+
+  # Copy the current row of a real stmt, every column, by storage class:
+  # 0 NULL, 1 INTEGER, 2 REAL, 3 TEXT (BLOB reads as text, as
+  # Db.column_value does).
+  def record_row(stmt)
+    i = 0
+    while i < @ncols
+      t = SQL.sqlite3_column_type(stmt, i)
+      if t == SQL::NULL_TYPE
+        @kinds.push(0)
+        @ints.push(0)
+        @floats.push(0.0)
+        @texts.push("")
+      elsif t == SQL::INTEGER_TYPE
+        @kinds.push(1)
+        @ints.push(SQL.sqlite3_column_int(stmt, i))
+        @floats.push(0.0)
+        @texts.push("")
+      elsif t == SQL::FLOAT_TYPE
+        @kinds.push(2)
+        @ints.push(0)
+        @floats.push(SQL.sqlite3_column_double(stmt, i))
+        @texts.push("")
+      else
+        @kinds.push(3)
+        @ints.push(0)
+        @floats.push(0.0)
+        v = SQL.sqlite3_column_text(stmt, i)
+        @texts.push(v.nil? ? "" : v + "")
+      end
+      i += 1
+    end
+    @nrows += 1
+    nil
+  end
+
+  def cell_kind(row, i)
+    @kinds[row * @ncols + i]
+  end
+
+  def cell_int(row, i)
+    @ints[row * @ncols + i]
+  end
+
+  def cell_float(row, i)
+    @floats[row * @ncols + i]
+  end
+
+  def cell_text(row, i)
+    @texts[row * @ncols + i]
+  end
+end
+
+# A replay in progress: which entry, which row the cursor sits on (-1
+# before the first step), and the real stmt it promoted to when the
+# recorded prefix ran out (0 = still replaying).
+class QcCursor
+  def initialize(entry)
+    @entry = entry
+    @pos = -1
+    @promoted = false
+    @real_ptr = nil
+  end
+
+  def promoted
+    @promoted
+  end
+
+  def qc_entry
+    @entry
+  end
+
+  def row_pos
+    @pos
+  end
+
+  def advance_row
+    @pos += 1
+    nil
+  end
+
+  def real_ptr
+    @real_ptr
+  end
+
+  def promote_to(ptr)
+    @promoted = true
+    @real_ptr = ptr
+    nil
+  end
+end
+
 class DbConn
   CAP = 128
 
   def initialize(dbh)
     @dbh = dbh
     @entries = []
+    # The per-request query cache (see `qc_begin`). Off until a request
+    # leases this connection, so scripts and tests that call Db directly
+    # see plain round trips unless they ask.
+    @qc_on = false
+    @qc_by_sql = {}
+    @qc_recording = {}
+    @qc_cursors = []
   end
 
   def dbh
@@ -262,6 +409,191 @@ class DbConn
     end
     @entries = keep
     nil
+  end
+
+  # ── the per-request query cache ─────────────────────────────────────
+  #
+  # Rails wraps every request in the Active Record query cache: an
+  # identical SELECT within one request replays the first result, and
+  # any write empties the cache. The CRuby shim (db_cruby.rb) has had
+  # the same discipline since issue #12; this lane had only the
+  # prepared-statement cache above, so every repeat was a round trip —
+  # campfire's `Current.account` is `Account.first`, asked 23 times per
+  # page, and a message's `room` 40 times on a room page. Rails answers
+  # those from this cache, which is why its count is what it is.
+  #
+  # The cache lives on the CONNECTION, which `Db.with_connection` leases
+  # to exactly one request at a time — so it needs no fiber-local, and
+  # a thread-per-connection server leases the same way.
+  #
+  # Handles: a replay is an INTEGER, the 1-based index of its cursor in
+  # `@qc_cursors`; a real stmt is its FFI POINTER, as before. The two are
+  # different kinds of value, and the `Db.step?` / `Db.column_*` /
+  # `Db.finalize` funnel asks `is_a?(Integer)` to tell them apart, so the
+  # emitted readers are unchanged. (Not a sign bit: a pointer cannot be
+  # compared with 0.)
+  #
+  # Only non-parameterized SQL participates: a `?`-bearing string's
+  # result depends on binds set after prepare, which are not in the key.
+  def qc_begin
+    @qc_on = true
+    @qc_by_sql = {}
+    @qc_recording = {}
+    @qc_cursors = []
+    nil
+  end
+
+  def qc_end
+    @qc_on = false
+    @qc_by_sql = {}
+    @qc_recording = {}
+    @qc_cursors = []
+    nil
+  end
+
+  # A write: Rails empties the whole cache. In-flight captures are
+  # abandoned too, so a SELECT that began before the write cannot
+  # install pre-write rows after it.
+  def qc_clear
+    @qc_by_sql = {}
+    @qc_recording = {}
+    nil
+  end
+
+  # The handle for `sql`: a replay handle on a hit, else the real stmt
+  # (recording its rows as they are stepped, when the cache is on).
+  # Returns 0 as "no replay" so `Db.prepare` can tell the two apart.
+  def qc_lookup(sql)
+    return 0 if !@qc_on || sql.include?("?")
+    e = @qc_by_sql[sql]
+    return 0 if e.nil?
+    @qc_cursors.push(QcCursor.new(e))
+    @qc_cursors.length
+  end
+
+  # Start recording a real stmt's rows for `sql`. A stmt already being
+  # recorded (the same SQL re-prepared while its first cursor is still
+  # open hands back the same pointer) is left alone.
+  def qc_record(sql, ptr)
+    return nil if !@qc_on || sql.include?("?")
+    return nil if !@qc_recording[ptr].nil?
+    ncols = SQL.sqlite3_column_count(ptr)
+    names = []
+    i = 0
+    while i < ncols
+      n = SQL.sqlite3_column_name(ptr, i)
+      names.push(n.nil? ? "" : n + "")
+      i += 1
+    end
+    @qc_recording[ptr] = QcEntry.new(sql, ncols, names)
+    nil
+  end
+
+  # Called after every real step. Appends the row (or marks eof).
+  def qc_record_step(ptr, has_row)
+    return nil if !@qc_on
+    e = @qc_recording[ptr]
+    return nil if e.nil?
+    if has_row
+      e.record_row(ptr)
+    else
+      e.mark_eof
+    end
+    nil
+  end
+
+  # Called at a real stmt's finalize: publish its capture, even a
+  # partial one — the next identical SELECT replays the consumed prefix
+  # and promotes past it only if it wants more.
+  def qc_install(ptr)
+    return nil if !@qc_on
+    e = @qc_recording[ptr]
+    return nil if e.nil?
+    @qc_recording.delete(ptr)
+    @qc_by_sql[e.qc_sql] = e if @qc_by_sql[e.qc_sql].nil?
+    nil
+  end
+
+  def qc_cursor(handle)
+    @qc_cursors[handle - 1]
+  end
+
+  # The real stmt a replay promoted to, or nil while it is still replaying.
+  def qc_ptr(handle)
+    c = qc_cursor(handle)
+    return nil if !c.promoted
+    c.real_ptr
+  end
+
+  def qc_step?(handle)
+    c = qc_cursor(handle)
+    return SQL.sqlite3_step(c.real_ptr) == SQL::ROW if c.promoted
+    e = c.qc_entry
+    if c.row_pos + 1 < e.nrows
+      c.advance_row
+      return true
+    end
+    return false if e.eof
+    # The first consumer stopped before the end and this one wants more:
+    # re-run the real statement and fast-forward past what was replayed.
+    ptr = prepare_cached(e.qc_sql)
+    n = 0
+    while n < e.nrows
+      SQL.sqlite3_step(ptr)
+      n += 1
+    end
+    c.promote_to(ptr)
+    SQL.sqlite3_step(ptr) == SQL::ROW
+  end
+
+  def qc_finalize(handle)
+    c = qc_cursor(handle)
+    if c.promoted
+      SQL.sqlite3_reset(c.real_ptr)
+      SQL.sqlite3_clear_bindings(c.real_ptr)
+    end
+    nil
+  end
+
+  # Cell reads for a replaying cursor, by the recorded storage class.
+  def qc_kind(handle, i)
+    c = qc_cursor(handle)
+    c.qc_entry.cell_kind(c.row_pos, i)
+  end
+
+  def qc_int(handle, i)
+    c = qc_cursor(handle)
+    k = c.qc_entry.cell_kind(c.row_pos, i)
+    return c.qc_entry.cell_int(c.row_pos, i) if k == 1
+    return c.qc_entry.cell_float(c.row_pos, i).to_i if k == 2
+    return c.qc_entry.cell_text(c.row_pos, i).to_i if k == 3
+    0
+  end
+
+  def qc_float(handle, i)
+    c = qc_cursor(handle)
+    k = c.qc_entry.cell_kind(c.row_pos, i)
+    return c.qc_entry.cell_float(c.row_pos, i) if k == 2
+    return c.qc_entry.cell_int(c.row_pos, i).to_f if k == 1
+    return c.qc_entry.cell_text(c.row_pos, i).to_f if k == 3
+    0.0
+  end
+
+  def qc_text(handle, i)
+    c = qc_cursor(handle)
+    k = c.qc_entry.cell_kind(c.row_pos, i)
+    return c.qc_entry.cell_text(c.row_pos, i) if k == 3
+    return c.qc_entry.cell_int(c.row_pos, i).to_s if k == 1
+    return c.qc_entry.cell_float(c.row_pos, i).to_s if k == 2
+    ""
+  end
+
+  def qc_column_count(handle)
+    qc_cursor(handle).qc_entry.ncols
+  end
+
+  def qc_column_name(handle, i)
+    qc_cursor(handle).qc_entry.col_names[i]
   end
 
   # Real finalize of every cached stmt — pool-shutdown path only.
@@ -396,10 +728,10 @@ module Db
   # cruby shim (db_cruby.rb); see `capture_sql` below.
   @query_log = nil
   # RH_SQL_TRACE=1 prints every SQL string this process prepares to
-  # stderr, the way `RAILS_LOG_LEVEL=debug` shows Rails' queries. This
-  # lane has a prepared-statement cache but NO per-request result cache,
-  # so every line here is a real sqlite3 round trip -- which is the
-  # number a query-amplification comparison against Rails needs.
+  # stderr, the way `RAILS_LOG_LEVEL=debug` shows Rails' queries: a real
+  # sqlite3 round trip as `  SQL ...`, a replay from the request's query
+  # cache (DbConn#qc_*) as `  CACHE ...`, which is Rails' own spelling.
+  # scripts/campfire-queries counts the two apart.
   @sql_trace = false
 
   # Pool size: kwarg wins; otherwise DATABASE_POOL_SIZE env (the same
@@ -498,7 +830,10 @@ module Db
     idx = @pool.lease
     conn = @pool.conn(idx)
     Fiber[:db_conn] = conn
+    # Rails wraps every request in the query cache; so does this lease.
+    conn.qc_begin
     result = yield
+    conn.qc_end
     # Every cursor this request opened is closed by now, so trimming the
     # stmt cache here can't close a live one. This is the only place the
     # cache is bounded — `prepare_cached` deliberately caps nothing, since
@@ -518,9 +853,23 @@ module Db
   # DDL + INSERT/UPDATE/DELETE. `sqlite3_exec` doesn't return rows;
   # callers that want last_insert_rowid / changes consult those
   # accessors immediately after.
+  # The query cache, by hand — for tests and scripts that call Db outside
+  # a `with_connection` lease (the lease brackets it on its own).
+  def self.query_cache_begin
+    current_conn.qc_begin
+  end
+
+  def self.query_cache_end
+    current_conn.qc_end
+  end
+
   def self.exec(sql)
     record_query(sql)
-    h = current_conn.dbh
+    conn = current_conn
+    # Any exec is (per the Db contract) DDL or a write — Rails
+    # invalidates the whole query cache on write; so do we.
+    conn.qc_clear
+    h = conn.dbh
     rc = SQL.sqlite3_exec(h, sql, nil, nil, nil)
     if rc != SQL::OK
       msg = SQL.sqlite3_errmsg(h)
@@ -553,8 +902,20 @@ module Db
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
+    conn = current_conn
+    handle = conn.qc_lookup(sql)
+    if handle != 0
+      # A replay is not a round trip: the capture log (Rails' SQLCounter
+      # ignores CACHE events too) and the trace both say so.
+      if @sql_trace
+        $stderr.puts "  CACHE " + sql
+      end
+      return handle
+    end
     record_query(sql)
-    current_conn.prepare_cached(sql)
+    ptr = conn.prepare_cached(sql)
+    conn.qc_record(sql, ptr)
+    ptr
   end
 
   # Query-log capture — see db_cruby.rb for the full rationale (the
@@ -587,14 +948,36 @@ module Db
   end
 
   def self.step?(stmt)
-    SQL.sqlite3_step(stmt) == SQL::ROW
+    if stmt.is_a?(Integer)
+      return current_conn.qc_step?(stmt)
+    end
+    has_row = SQL.sqlite3_step(stmt) == SQL::ROW
+    current_conn.qc_record_step(stmt, has_row)
+    has_row
+  end
+
+  # A replay handle that has promoted to a real stmt reads through that
+  # stmt; one still replaying reads its recorded cells. Returns the
+  # pointer to read through, or nil for "answer from the cells".
+  def self.replay_ptr(stmt)
+    current_conn.qc_ptr(stmt)
   end
 
   def self.column_int(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      return current_conn.qc_int(stmt, i) if p.nil?
+      stmt = p
+    end
     SQL.sqlite3_column_int(stmt, i)
   end
 
   def self.column_float(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      return current_conn.qc_float(stmt, i) if p.nil?
+      stmt = p
+    end
     SQL.sqlite3_column_double(stmt, i)
   end
 
@@ -603,6 +986,11 @@ module Db
   # string so the value survives downstream use. Mirrors the pattern
   # in spinel's reference blog.rb FFI example.
   def self.column_text(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      return current_conn.qc_text(stmt, i) if p.nil?
+      stmt = p
+    end
     s = SQL.sqlite3_column_text(stmt, i)
     if s.nil?
       ""
@@ -637,6 +1025,18 @@ module Db
   # together, not just here. BLOB falls to the text read — no corpus
   # caller stores one, and text is a more useful stand-in than raising.
   def self.column_value(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      if p.nil?
+        conn = current_conn
+        k = conn.qc_kind(stmt, i)
+        return nil if k == 0
+        return conn.qc_int(stmt, i) if k == 1
+        return conn.qc_float(stmt, i) if k == 2
+        return conn.qc_text(stmt, i)
+      end
+      stmt = p
+    end
     t = SQL.sqlite3_column_type(stmt, i)
     if t == SQL::NULL_TYPE
       nil
@@ -661,6 +1061,15 @@ module Db
   # native value to inspect, so these dispatch on the column's storage
   # class first.
   def self.column_int_opt(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      if p.nil?
+        conn = current_conn
+        return nil if conn.qc_kind(stmt, i) == 0
+        return conn.qc_int(stmt, i)
+      end
+      stmt = p
+    end
     if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
       nil
     else
@@ -669,6 +1078,15 @@ module Db
   end
 
   def self.column_float_opt(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      if p.nil?
+        conn = current_conn
+        return nil if conn.qc_kind(stmt, i) == 0
+        return conn.qc_float(stmt, i)
+      end
+      stmt = p
+    end
     if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
       nil
     else
@@ -677,6 +1095,15 @@ module Db
   end
 
   def self.column_text_opt(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      if p.nil?
+        conn = current_conn
+        return nil if conn.qc_kind(stmt, i) == 0
+        return conn.qc_text(stmt, i)
+      end
+      stmt = p
+    end
     s = SQL.sqlite3_column_text(stmt, i)
     if s.nil?
       nil
@@ -686,6 +1113,15 @@ module Db
   end
 
   def self.column_bool_opt(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      if p.nil?
+        conn = current_conn
+        return nil if conn.qc_kind(stmt, i) == 0
+        return conn.qc_int(stmt, i) != 0
+      end
+      stmt = p
+    end
     if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
       nil
     else
@@ -694,6 +1130,11 @@ module Db
   end
 
   def self.column_count(stmt)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      return current_conn.qc_column_count(stmt) if p.nil?
+      stmt = p
+    end
     SQL.sqlite3_column_count(stmt)
   end
 
@@ -701,6 +1142,11 @@ module Db
   # stmt; force a copy by appending an empty string so the value
   # survives the next step / finalize, mirroring `column_text`.
   def self.column_name(stmt, i)
+    if stmt.is_a?(Integer)
+      p = Db.replay_ptr(stmt)
+      return current_conn.qc_column_name(stmt, i) if p.nil?
+      stmt = p
+    end
     s = SQL.sqlite3_column_name(stmt, i)
     if s.nil?
       ""
@@ -713,8 +1159,15 @@ module Db
   # cached stmt (reset cursor + clear any bound params) so the next call
   # reuses it. Real sqlite3_finalize runs only at pool close.
   def self.finalize(stmt)
+    conn = current_conn
+    if stmt.is_a?(Integer)
+      conn.qc_finalize(stmt)
+      return nil
+    end
+    conn.qc_install(stmt)
     SQL.sqlite3_reset(stmt)
     SQL.sqlite3_clear_bindings(stmt)
+    nil
   end
 
   # Placeholder binding (roundhouse#12, Path A.2). Bind one `?` param
@@ -726,16 +1179,19 @@ module Db
   # reset + clear_bindings'd at its previous `finalize`, so re-binding
   # here starts clean.
   def self.bind_int(stmt, idx, value)
+    return nil if stmt.is_a?(Integer)
     SQL.sqlite3_bind_int64(stmt, idx, value)
   end
 
   def self.bind_text(stmt, idx, value)
+    return nil if stmt.is_a?(Integer)
     SQL.sqlite3_bind_text(stmt, idx, value, -1, -1)
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline
   # form and the INTEGER affinity `t.boolean` columns get.
   def self.bind_bool(stmt, idx, value)
+    return nil if stmt.is_a?(Integer)
     SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0)
   end
 

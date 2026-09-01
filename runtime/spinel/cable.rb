@@ -92,8 +92,8 @@ module Cable
   # could be closed but not given a reason.
   #
   # No DB lease is taken here: `connect` loads a `Session`, and
-  # main.rb's `Db.with_connection { Main.dispatch(req, res) }` already
-  # wraps the whole dispatch, cable branch included.
+  # `Tep::App#dispatch`'s `Db.with_connection` already wraps the whole
+  # dispatch, cable branch included.
   def self.identify(req)
     conn = Cable.build_connection(ActionController::CookieJar.new(req.cookies))
     refused = false

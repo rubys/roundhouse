@@ -79,6 +79,33 @@ class QueryCountTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # Rails wraps every request in the Active Record query cache: an
+  # identical SELECT within one request replays the first result and is
+  # not counted as a query (`SQLCounter` skips CACHE events). Both Db
+  # shims carry that cache; `Db.with_connection` brackets it per request
+  # and these two calls bracket it by hand. campfire's `Current.account`
+  # is `Account.first`, asked 23 times per page — Rails pays once.
+  def test_identical_selects_within_a_request_replay_from_the_query_cache
+    Db.query_cache_begin
+    sql = Db.capture_sql do
+      first = 0
+      second = 0
+      stmt = Db.prepare("SELECT COUNT(*) FROM articles")
+      first = Db.column_int(stmt, 0) if Db.step?(stmt)
+      Db.finalize(stmt)
+      stmt = Db.prepare("SELECT COUNT(*) FROM articles")
+      second = Db.column_int(stmt, 0) if Db.step?(stmt)
+      Db.finalize(stmt)
+      raise "replay answered #{second}, the round trip #{first}" if first != second
+      raise "fixture seeded no articles" if first == 0
+    end
+    Db.query_cache_end
+    unless sql.length == 1
+      raise "expected the second identical SELECT to replay from the query " \
+            "cache and count 1 round trip, got #{sql.length}:\n#{sql.join("\n")}"
+    end
+  end
+
   # The flip side: chaining after a terminal (`rel.where(...)` mutates
   # and returns the same object) must drop the cache — serving the
   # pre-refinement rows would be a correctness bug, not a perf feature.
@@ -114,4 +141,8 @@ __t3 = QueryCountTest.new
 __t3.setup
 __t3.test_rechaining_a_loaded_relation_requeries
 __t3.teardown
-puts "QueryCountTest: 3 tests passed"
+__t4 = QueryCountTest.new
+__t4.setup
+__t4.test_identical_selects_within_a_request_replay_from_the_query_cache
+__t4.teardown
+puts "QueryCountTest: 4 tests passed"

@@ -57,9 +57,20 @@ module Tep
     # Tep::Server::Scheduled calls Tep::APP.dispatch(req, res) per
     # request (its cmeth handler bodies can't carry instance state, so
     # the app handle lives on the singleton). Roundhouse's request
-    # pipeline is Main.dispatch; delegate straight to it.
+    # pipeline is Main.dispatch.
+    #
+    # THE LEASE LIVES HERE, because this is the path every request takes.
+    # `Db.with_connection` leases one pooled connection to the request,
+    # switches on the per-request query cache, and trims the statement
+    # cache at the boundary. It used to sit on `MainApp#dispatch` in the
+    # scaffold, which the server is handed but never calls -- so no
+    # request leased anything: every fiber shared the pool's first
+    # handle, the statement cache was never trimmed in the binary, and a
+    # query cache wired to the lease could never turn on. The `/cable`
+    # upgrade is dispatched under this lease too; the socket's recv loop
+    # runs after the response and outside it, as before.
     def dispatch(req, res)
-      Main.dispatch(req, res)
+      Db.with_connection { Main.dispatch(req, res) }
     end
   end
 

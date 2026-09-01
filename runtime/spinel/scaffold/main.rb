@@ -536,16 +536,14 @@ end
 # Tep::Server::Scheduled expects an app object with a `dispatch(req,
 # res)` instance method. Wrap Main's class-method dispatch in a thin
 # instance so spinel resolves @app.dispatch through normal user-class
-# dispatch instead of trying to call a module method. (The scheduled
-# server's cmeth handlers actually dispatch via Tep::APP.dispatch,
-# which Tep::App delegates to Main.dispatch — same destination.)
+# dispatch instead of trying to call a module method. The scheduled
+# server's cmeth handlers actually dispatch via Tep::APP.dispatch, so
+# this delegates THERE: that is where the per-request connection lease
+# (and with it the query cache and the statement-cache trim) lives, and
+# a lease here as well would take two connections for one request.
 class MainApp
   def dispatch(req, res)
-    # Lease one pooled DB connection for the whole request so concurrent
-    # connection-fibers each read/write through their own handle rather
-    # than serializing on a single shared one. Mirrors the ruby target's
-    # config.ru wrap; the cooperative-fiber analog of Puma's thread pool.
-    Db.with_connection { Main.dispatch(req, res) }
+    Tep::APP.dispatch(req, res)
   end
 end
 
