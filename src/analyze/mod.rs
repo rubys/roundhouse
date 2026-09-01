@@ -733,6 +733,13 @@ impl Analyzer {
         // and makes the two agree.
         self.harvest_returns_to_registry(app);
 
+        // Publish the converged param table onto the App for lowerings
+        // that build signatures after analysis (the controller lowering
+        // reads it for private-helper params). Published AFTER the
+        // fixpoint on purpose: mid-loop copies would carry a round's
+        // under-informed answers.
+        app.inferred_method_params = self.inferred_params.clone();
+
         if let Ok(name) = std::env::var("RH_DEBUG_CLASS") {
             let id = ClassId(Symbol::from(name.as_str()));
             if let Some(ci) = self.classes.get(&id) {

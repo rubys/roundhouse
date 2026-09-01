@@ -309,6 +309,12 @@ module ActiveRecord
       raise NotImplementedError, "dom_prefix must be overridden by subclass"
     end
 
+    # `dom_id`'s row-key half (see dom_prefix above) — same abstract
+    # contract, same reason for the raising body.
+    def dom_record_key
+      raise NotImplementedError, "dom_record_key must be overridden by subclass"
+    end
+
     # ---- Persistence state ------------------------------------------
 
     def persisted?

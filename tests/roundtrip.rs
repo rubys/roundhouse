@@ -58,6 +58,7 @@ fn tiny_blog_round_trips() {
         attributes: Row { fields: attrs, rest: None },
         body: vec![],
         enums: Default::default(),
+        sti_subclass_names: Vec::new(),
         span: Span::synthetic(),
     };
 
@@ -117,6 +118,7 @@ fn tiny_blog_round_trips() {
         // Passthrough-only and `serde(skip)` — it never round-trips, so
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
+        inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
         current_attribute_classes: vec![],

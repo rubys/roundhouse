@@ -171,6 +171,7 @@ pub fn synthesize_record_model(app: &mut App) {
         span: Span::synthetic(),
     }];
     app.models.push(Model {
+        sti_subclass_names: Vec::new(),
         name: class,
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
         table: TableRef(Symbol::from(RECORD_TABLE)),

@@ -38,7 +38,7 @@ import { signIn, watchForFailures, triage, report } from './helpers.js'
 //   POST /rooms/1/messages                       | submitting the composer
 //   connection A receives the broadcast          | the message in tab A
 //   connection B receives the broadcast          | the message in tab B
-//   it is an append to the room's message list   | asserted INSIDE #messages_room_1
+//   it is an append to the room's message list   | asserted INSIDE the messages list
 //   it carries the message that was posted       | the body text
 //   the frame echoes the subscription identifier | NOT OBSERVABLE — walk only
 //   the stock channel refuses the stream         | cable_guard.spec.js
@@ -47,7 +47,10 @@ import { signIn, watchForFailures, triage, report } from './helpers.js'
 // unsigned stream names on purpose (the guard, not the signature, is what
 // authorizes a subscribe — see cable_guard.spec.js).
 
-const BODY = 'hello from the cable spec'
+// Unique per run: the archive database persists across runs, and an
+// exactly-once assertion against a repeated literal would count the
+// previous run's rows.
+const BODY = `hello from the cable spec ${Date.now()}`
 
 // Playwright's default is 30s for a whole test, and this one does more
 // than any other in the suite: two sign-ins (the first of which completes
@@ -120,14 +123,32 @@ test('a message posted in one tab arrives live in another', async ({ browser }) 
     // The assertion is scoped INSIDE the room's message list, which is
     // what makes it the "append to the room's message list" check rather
     // than "the text appears somewhere on the page".
+    // `[id^="messages_"]`, not a literal id: the list is named by
+    // dom_id(room, :messages), and room 1 is an STI Rooms::Open — the
+    // element is `messages_rooms_open_1` now that dom_prefix
+    // dispatches on the type column, exactly as it is on Rails.
+    // Hardcoding either spelling would re-couple this spec to a
+    // divergence the comparator retired.
+    const list = '[id^="messages_"]'
     await expect(
-      pageB.locator('#messages_room_1'),
+      pageB.locator(list),
       'tab B received the broadcast',
     ).toContainText(BODY, { timeout: 20_000 })
     await expect(
-      pageA.locator('#messages_room_1'),
+      pageA.locator(list),
       'tab A received the broadcast',
     ).toContainText(BODY, { timeout: 20_000 })
+
+    // …and holds it EXACTLY ONCE. The sender's page minted an
+    // optimistic client-side echo whose dom id is the
+    // client_message_id (campfire's Message#to_key), and the broadcast
+    // row now carries the SAME id — so Turbo's append replaces the
+    // echo. Two rows here is the broadcast-row-identity divergence
+    // come back (docs/pipeline/runtime.md § Broadcast row identity).
+    await expect(
+      pageA.locator(`${list} .message`).filter({ hasText: BODY }),
+      "the sender's tab shows the message exactly once",
+    ).toHaveCount(1)
 
     // REPORTED, NOT ASSERTED. A live message that arrived over a page
     // whose modules 404'd is worth knowing about, so the findings are

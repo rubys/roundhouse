@@ -74,6 +74,18 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// Call-site-unified parameter types, written by the analyzer's
+    /// fixpoint (`unify_params_from_call_sites`) as its last act and
+    /// read by lowerings that build method signatures — the controller
+    /// lowering's private-helper params were pinned `untyped` before
+    /// this channel existed, which dissolved everything reached
+    /// through such a param (campfire's `broadcast_create_room(room)`
+    /// took the typed `Room` its one caller passes, and `room` still
+    /// widened every chain under it to poly). Keyed like the
+    /// analyzer's own table: (declaring class, method) → positional
+    /// param types, `Ty::Var` where no call site contributed.
+    #[serde(skip)]
+    pub inferred_method_params: HashMap<(ClassId, Symbol), Vec<Ty>>,
     /// Source files the text pipeline cannot represent — every emitted
     /// file's content is a `String`, so an app's images, fonts and
     /// binary test fixtures were silently dropped on the floor. Carried
@@ -460,6 +472,7 @@ impl App {
             importmap: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
+            inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),
             global_id_locate_models: BTreeSet::new(),

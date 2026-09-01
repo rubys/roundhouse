@@ -409,6 +409,28 @@ impl<'a> BodyTyper<'a> {
                 return ty.clone();
             }
         }
+        // `tap` is receiver-identity too — the block's value is
+        // discarded and the receiver handed back — so it belongs with
+        // `freeze`/`itself`, not in the receiver-agnostic
+        // `universal_method` table (whose Untyped answer swallowed
+        // `create!(…).tap { |room| … }` — the campfire idiom — into
+        // the gradual escape). No-receiver falls through like the
+        // pair above.
+        if method.as_str() == "tap" {
+            if let Some(ty) = recv_ty {
+                return ty.clone();
+            }
+        }
+        // `.call` on a value TYPED as a function (an RBS `^() -> T`
+        // parameter — `broadcast_render(blk)`'s `blk.call` is the
+        // runtime site) answers the function's declared return. Only
+        // a `Ty::Fn` receiver claims this; anything else keeps its
+        // own `call` (a callable app class, an untyped proc).
+        if method.as_str() == "call" {
+            if let Some(Ty::Fn { ret, .. }) = recv_ty {
+                return (**ret).clone();
+            }
+        }
         // `then` / `yield_self` are the receiver-identity pair's mirror:
         // where `tap` discards the block's value and hands the receiver
         // back, these hand the BLOCK's value back. Kernel methods, so
@@ -419,6 +441,29 @@ impl<'a> BodyTyper<'a> {
         // shape any corpus app writes; `Untyped` is the honest answer.
         if matches!(method.as_str(), "then" | "yield_self") && recv_ty.is_some() {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
+        }
+        // `Model.transaction { … }` / `ActiveRecord::Base.transaction
+        // { … }` returns its block's value (commit) — the registered
+        // class-side entry says Untyped ("we don't statically track"),
+        // but right here the block's return IS tracked, so hand it
+        // back. Class receivers only: that is the AR idiom's shape,
+        // and it keeps an app's own instance method named
+        // `transaction` out of this arm. Campfire's
+        // `Room.create_for` is the beneficiary — `transaction do
+        // create!(…).tap { … } end` now answers the model instead of
+        // dissolving the whole `find_or_create_for` chain to poly.
+        // Only an INFORMATIVE block type is adopted: a `Var` block
+        // (e.g. `transaction { @story.save }` over an unmodeled ivar)
+        // falls through to the registered `Untyped`, which is the
+        // gradual answer and not a dispatch failure.
+        if method.as_str() == "transaction"
+            && matches!(recv_ty, Some(Ty::Class { .. }))
+        {
+            if let Some(ret) = block_ret {
+                if !matches!(ret, Ty::Var { .. }) {
+                    return ret.clone();
+                }
+            }
         }
         // `recv.send(:m, …)` / `public_send` / `__send__` — Ruby's
         // reflective dispatch. With a LITERAL symbol/string argument

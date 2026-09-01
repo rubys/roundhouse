@@ -62,6 +62,13 @@ class Article < ActiveRecord::Base
   def dom_prefix
     "article"
   end
+
+  # …and `dom_record_key`, its identity half (`push_dom_record_key_
+  # method` — `@id.to_s` for a model without its own `to_key`, which
+  # this stub stands for).
+  def dom_record_key
+    @id.to_s
+  end
 end
 
 class ViewHelpersTest < Minitest::Test

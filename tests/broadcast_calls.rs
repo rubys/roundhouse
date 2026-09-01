@@ -93,7 +93,8 @@ fn append_lowers_to_a_broadcasts_call_with_the_records_own_partial() {
     assert!(
         src.contains(
             "Broadcasts.append(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", \
-             target: \"messages_room_#{bc_owner.id}\", html: Views::Messages.message(self))"
+             target: \"messages_#{bc_owner.dom_prefix}_#{bc_owner.dom_record_key}\", \
+             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Messages.message(self) }))"
         ),
         "{src}",
     );
@@ -118,7 +119,7 @@ fn remove_defaults_its_target_to_the_record_and_carries_no_html() {
     let src = find(&lowered(), "broadcasts.rb");
     assert!(
         src.contains(
-            "Broadcasts.remove(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", target: \"message_#{@id}\")"
+            "Broadcasts.remove(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", target: \"#{dom_prefix}_#{dom_record_key}\")"
         ),
         "{src}",
     );

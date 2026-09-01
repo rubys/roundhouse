@@ -659,6 +659,27 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
             }
             Ok(Ty::Record { row: crate::ty::Row { fields, rest: None } })
         }
+        // RBS proc literal `^(T) -> U` → `Ty::Fn`. Reuses the same
+        // function-type parser method signatures go through — a proc
+        // type IS a function type at a deeper position (its own block
+        // and self-type clauses are not modeled; no runtime signature
+        // writes them). What made this land: the broadcast lowerings
+        // pass their render as a `^() -> String` ARGUMENT (the
+        // `ActiveJob.enqueue` contract, see matz/spinel#4245), and
+        // `active_job.rbs` had already downgraded its own parameter to
+        // `untyped` over this very gap.
+        Node::ProcType(p) => {
+            let Node::FunctionType(fn_type) = p.type_() else {
+                return Err("proc-type payload is not a FunctionType".to_string());
+            };
+            let (params, ret) = parse_function_type_to_fn(&fn_type, "(proc)", scope)?;
+            Ok(Ty::Fn {
+                params,
+                block: None,
+                ret: Box::new(ret),
+                effects: EffectSet::default(),
+            })
+        }
         other => Err(format!(
             "unsupported RBS type node: {}",
             type_node_kind(other)

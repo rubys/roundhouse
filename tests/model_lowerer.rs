@@ -1409,3 +1409,100 @@ fn a_models_own_to_param_wins_over_the_synthesized_one() {
     let body = format!("{:?}", params[0].body);
     assert!(body.contains("custom"), "the model's own body should win: {body}");
 }
+
+// ── dom_record_key ───────────────────────────────────────────────────
+//
+// The identity half of dom_id, as one String per model — Rails derives
+// it from `record.to_key.join("_")`, which campfire's Message overrides
+// to `[client_message_id]` (that match is what lets Turbo's append
+// replace the sender's optimistic echo instead of duplicating the row).
+
+#[test]
+fn every_concrete_model_gains_dom_record_key_from_its_id() {
+    let lc = lower("Article");
+    let m = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "dom_record_key")
+        .expect("dom_record_key not synthesized");
+    assert!(matches!(m.receiver, MethodReceiver::Instance));
+    let body = format!("{:?}", m.body);
+    assert!(body.contains("Ivar"), "default body reads the id slot: {body}");
+    assert!(body.contains("to_s"), "default body stringifies: {body}");
+    assert!(!body.contains("join"), "no to_key, no join: {body}");
+}
+
+#[test]
+fn a_models_own_to_key_feeds_dom_record_key() {
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let mut model = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .expect("Article not in real-blog")
+        .clone();
+    let own = roundhouse::dialect::MethodDef {
+        name: Symbol::from("to_key"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: roundhouse::expr::Expr::new(
+            roundhouse::span::Span::synthetic(),
+            roundhouse::expr::ExprNode::Lit {
+                value: roundhouse::expr::Literal::Str { value: "stub".into() },
+            },
+        ),
+        signature: None,
+        effects: Default::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: roundhouse::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    };
+    model.body.push(roundhouse::dialect::ModelBodyItem::Method {
+        method: own,
+        leading_comments: Vec::new(),
+        leading_blank_line: false,
+    });
+    let lc = lower_model_to_library_class(&model, &app.schema);
+    let m = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "dom_record_key")
+        .expect("dom_record_key not synthesized");
+    let body = format!("{:?}", m.body);
+    assert!(
+        body.contains("to_key") && body.contains("join"),
+        "an own to_key should feed the key via join: {body}"
+    );
+}
+
+#[test]
+fn an_sti_base_dom_prefix_dispatches_on_the_type_column() {
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let mut model = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .expect("Article not in real-blog")
+        .clone();
+    // What lower::sti_scope stamps for a base with subclasses.
+    model.sti_subclass_names =
+        vec![ClassId(Symbol::from("Articles::Draft")), ClassId(Symbol::from("Articles::Pinned"))];
+    let lc = lower_model_to_library_class(&model, &app.schema);
+    let m = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "dom_prefix")
+        .expect("dom_prefix not synthesized");
+    let body = format!("{:?}", m.body);
+    assert!(body.contains("Case"), "an STI base dispatches: {body}");
+    assert!(
+        body.contains("articles_draft") && body.contains("articles_pinned"),
+        "each subclass answers its own dom class: {body}"
+    );
+    assert!(
+        body.contains("\"article\""),
+        "the wildcard arm keeps the base's prefix: {body}"
+    );
+}

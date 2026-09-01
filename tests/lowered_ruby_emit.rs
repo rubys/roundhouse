@@ -315,19 +315,19 @@ fn article_broadcasts_to_synthesizes_three_lifecycle_methods() {
     let src = find(&files, "article.rb");
     assert!(
         src.contains(
-            "Broadcasts.prepend(stream: \"articles\", target: \"articles\", html: Views::Articles.article(self))"
+            "Broadcasts.prepend(stream: \"articles\", target: \"articles\", html: ActionView::ViewHelpers.broadcast_render(-> { Views::Articles.article(self) }))"
         ),
         "{src}",
     );
     assert!(
         src.contains(
-            "Broadcasts.replace(stream: \"articles\", target: \"article_#{@id}\", html: Views::Articles.article(self))"
+            "Broadcasts.replace(stream: \"articles\", target: \"#{self.dom_prefix}_#{self.dom_record_key}\", html: ActionView::ViewHelpers.broadcast_render(-> { Views::Articles.article(self) }))"
         ),
         "{src}",
     );
     assert!(
         src.contains(
-            "Broadcasts.remove(stream: \"articles\", target: \"article_#{@id}\")"
+            "Broadcasts.remove(stream: \"articles\", target: \"#{self.dom_prefix}_#{self.dom_record_key}\")"
         ),
         "{src}",
     );
@@ -353,7 +353,7 @@ fn comment_broadcasts_rewrite_lambda_param_to_ivar() {
     // update uses the canonical per-record target, NOT the override
     // (Rails turbo convention: target: only governs create-time DOM).
     assert!(
-        src.contains("Broadcasts.replace(stream: \"article_#{@article_id}_comments\", target: \"comment_#{@id}\""),
+        src.contains("Broadcasts.replace(stream: \"article_#{@article_id}_comments\", target: \"#{self.dom_prefix}_#{self.dom_record_key}\""),
         "{src}",
     );
 }
@@ -404,7 +404,7 @@ fn comment_emits_view_require_for_own_partial_and_parent() {
     // broadcasts_to expansion's `html:` payload. It also references
     // `Views::Articles` via the rewritten parent-cascade in
     // `after_<x>_commit` (Rails-side `article.broadcast_replace_to(...)`
-    // → spinel `Broadcasts.replace(stream:, target:, html: Views::Articles.article(parent))`).
+    // → spinel `Broadcasts.replace(stream:, target:, html: ActionView::ViewHelpers.broadcast_render(-> { Views::Articles.article(parent) }))`).
     // Both resolve through the per-app aggregator at `app/views.rb`.
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
@@ -446,7 +446,7 @@ fn comment_block_callbacks_render_as_methods() {
     // Rails-API broadcast call rewritten to spinel-shape:
     //   parent = article
     //   return if parent.nil?
-    //   Broadcasts.replace(stream:, target:, html: Views::Articles.article(parent))
+    //   Broadcasts.replace(stream:, target:, html: ActionView::ViewHelpers.broadcast_render(-> { Views::Articles.article(parent) }))
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
     assert!(src.contains("def after_create_commit"), "{src}");
@@ -456,7 +456,7 @@ fn comment_block_callbacks_render_as_methods() {
     assert!(src.contains("parent = self.article"), "{src}");
     assert!(src.contains("return if parent.nil?"), "{src}");
     assert!(
-        src.contains("Broadcasts.replace(stream: \"articles\", target: \"article_#{parent.id}\", html: Views::Articles.article(parent))"),
+        src.contains("Broadcasts.replace(stream: \"articles\", target: \"#{parent.dom_prefix}_#{parent.dom_record_key}\", html: ActionView::ViewHelpers.broadcast_render(-> { Views::Articles.article(parent) }))"),
         "expected spinel-shape parent-cascade; got:\n{src}",
     );
     assert!(

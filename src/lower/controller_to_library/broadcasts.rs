@@ -157,6 +157,13 @@ fn element_attributes(value: &Expr, span: Span) -> Option<String> {
 /// The payload: `html:` verbatim, `partial:` bound the way a
 /// `render partial:` is bound, or — with neither — the receiver's own
 /// partial, which is what the model-side rewriter renders.
+///
+/// Only the renders THIS lowering synthesizes go through
+/// `broadcast_render` (Rails hands them to its session-less broadcast
+/// renderer, so no CSRF token input). An app-supplied `html:` was
+/// rendered by the app's own `render_to_string` inside the request —
+/// with the session, token and all — and Rails broadcasts those bytes
+/// untouched, so we pass the expression through unwrapped.
 fn payload(
     opts: &[(Symbol, Expr)],
     recv: Option<&Expr>,
@@ -176,6 +183,7 @@ fn payload(
             None => Vec::new(),
         };
         return partial_view_call_with_record(name, &locals, recv, module_name, partials, span)
+            .map(wrap_broadcast_render)
             .or_else(|| decline(span, &format!("partial `{name}` has no def-site contract")));
     }
     // No payload option: render the receiver's own partial, the
@@ -184,7 +192,7 @@ fn payload(
     let singular = record_singular(recv)
         .or_else(|| decline(span, "broadcast payload receiver is not a nameable record"))?;
     let plural_camel = crate::naming::camelize(&crate::naming::pluralize_snake(&singular));
-    Some(Expr::new(
+    Some(wrap_broadcast_render(Expr::new(
         span,
         ExprNode::Send {
             recv: Some(Expr::new(
@@ -196,7 +204,7 @@ fn payload(
             block: None,
             parenthesized: true,
         },
-    ))
+    )))
 }
 
 /// `target: :shared_rooms` → `"shared_rooms"`; `target: [@room, :list]`
@@ -216,14 +224,25 @@ fn dom_target(value: &Expr, span: Span) -> Option<Expr> {
             };
             let prefix = literal_text(prefix)
                 .or_else(|| decline(span, "target: prefix is not a literal"))?;
-            let singular = record_singular(record)
+            // `record_singular` still gates (only a nameable record
+            // qualifies); the STRING comes from the synthesized
+            // identity methods, so STI prefixes and `to_key`-keyed
+            // rows spell what the pages spell — the same correction
+            // model_to_library/broadcasts.rs carries.
+            record_singular(record)
                 .or_else(|| decline(span, "target: record is not a nameable record"))?;
             Some(Expr::new(
                 span,
                 ExprNode::StringInterp {
                     parts: vec![
-                        crate::expr::InterpPart::Text { value: format!("{prefix}_{singular}_") },
-                        crate::expr::InterpPart::Expr { expr: read_id(record.clone(), span) },
+                        crate::expr::InterpPart::Text { value: format!("{prefix}_") },
+                        crate::expr::InterpPart::Expr {
+                            expr: dom_identity_call(record.clone(), "dom_prefix"),
+                        },
+                        crate::expr::InterpPart::Text { value: "_".to_string() },
+                        crate::expr::InterpPart::Expr {
+                            expr: dom_identity_call(record.clone(), "dom_record_key"),
+                        },
                     ],
                 },
             ))
@@ -232,15 +251,80 @@ fn dom_target(value: &Expr, span: Span) -> Option<Expr> {
     }
 }
 
-/// `"<singular>_#{record.id}"` — the per-record DOM id.
-fn record_dom_id(singular: &str, record: &Expr, span: Span) -> Expr {
+/// `"#{record.dom_prefix()}_#{record.dom_record_key()}"` — the
+/// per-record DOM id, through the synthesized identity methods (see
+/// the note above).
+fn record_dom_id(_singular: &str, record: &Expr, span: Span) -> Expr {
     Expr::new(
         span,
         ExprNode::StringInterp {
             parts: vec![
-                crate::expr::InterpPart::Text { value: format!("{singular}_") },
-                crate::expr::InterpPart::Expr { expr: read_id(record.clone(), span) },
+                crate::expr::InterpPart::Expr {
+                    expr: dom_identity_call(record.clone(), "dom_prefix"),
+                },
+                crate::expr::InterpPart::Text { value: "_".to_string() },
+                crate::expr::InterpPart::Expr {
+                    expr: dom_identity_call(record.clone(), "dom_record_key"),
+                },
             ],
+        },
+    )
+}
+
+/// `ViewHelpers.broadcast_render(-> { <render> })` — the runtime
+/// brackets the render so `csrf_token_hidden_input` omits the token
+/// input, matching Rails' session-less broadcast renderer (a broadcast
+/// here runs inside the triggering request, so the session would
+/// otherwise be at hand). `ensure`-guarded in the runtime.
+///
+/// AN ARGUMENT, NOT A BLOCK — the `ActiveJob.enqueue` contract: RBS
+/// names the `^() -> String` parameter, and a yielding method's return
+/// type dissolves on the AOT lane when its block captures a poly local
+/// (matz/spinel#4245).
+fn wrap_broadcast_render(html: Expr) -> Expr {
+    let lambda = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![],
+            body: html,
+            block_param: None,
+            block_style: Default::default(),
+            rest_param: None,
+        },
+    );
+    let mut call = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                crate::span::Span::synthetic(),
+                ExprNode::Const {
+                    path: vec![
+                        Symbol::from("ActionView"),
+                        Symbol::from("ViewHelpers"),
+                    ],
+                },
+            )),
+            method: Symbol::from("broadcast_render"),
+            args: vec![lambda],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    call.ty = Some(Ty::Str);
+    call
+}
+
+/// A parenthesized zero-arg call to a synthesized dom-identity method
+/// (`dom_prefix` / `dom_record_key`).
+fn dom_identity_call(recv: Expr, name: &str) -> Expr {
+    Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(name),
+            args: vec![],
+            block: None,
+            parenthesized: true,
         },
     )
 }
@@ -351,6 +435,9 @@ fn broadcasts_call(
         (lit_sym("stream", span), stream),
         (lit_sym("target", span), target),
     ];
+    // `payload` already bracketed synthesized renders in
+    // `broadcast_render`; an app-supplied `html:` arrives here unwrapped
+    // and stays that way.
     if let Some(h) = html {
         entries.push((lit_sym("html", span), h));
     }

@@ -117,6 +117,26 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
         }
     }
     push_becomes_from(app, &bases, &recast);
+    stamp_sti_subclasses(app, &bases);
+}
+
+/// Record each base model's STI subclasses on the model itself
+/// ([`Model::sti_subclass_names`]) — the fact `push_dom_prefix_method`
+/// needs to make the base's `dom_prefix` a type-column dispatch, and
+/// which only this pass derives (subclasses are library classes, not
+/// Models, so the per-model synthesizer can't see them). Sorted, so
+/// the generated `case` arms are deterministic.
+fn stamp_sti_subclasses(app: &mut App, bases: &HashMap<ClassId, ClassId>) {
+    let mut by_base: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+    for (subclass, base) in bases {
+        by_base.entry(base.clone()).or_default().push(subclass.clone());
+    }
+    for (base, mut subs) in by_base {
+        subs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        if let Some(model) = app.models.iter_mut().find(|m| m.name == base) {
+            model.sti_subclass_names = subs;
+        }
+    }
 }
 
 /// Give every recast target a `self.becomes_from(source)`:

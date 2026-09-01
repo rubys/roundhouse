@@ -41,28 +41,20 @@ VOLATILE = [
 ]
 
 KNOWN = [
-  {
-    name: "dom_id names the STI subclass on Rails, the base model on the emit " \
-          "(docs/pipeline/runtime.md § dom_id and STI)",
-    apply: ->(s) { s.gsub(/(id|target)="([a-z_]*)rooms_open_(\d+)"/) { "#{$1}=\"#{$2}room_#{$3}\"" } },
-  },
-  {
-    name: "a broadcast row is keyed by client_message_id on Rails, by database id " \
-          "on the emit — dom_id derives every per-message id in the partial " \
-          "(docs/pipeline/runtime.md § broadcast row identity)",
-    apply: ->(s) {
-      s.gsub(/((?:id|target|data-turbo-frame)=")((?:edit_|boosting_|boosts_|new_boost_|presentation_)?message)_(?:cable-walk-\d+|\d+)"/) {
-        "#{$1}#{$2}_X\""
-      }
-    },
-  },
-  {
-    name: "a broadcast-rendered form carries an authenticity_token input on the " \
-          "emit; Rails' session-less broadcast render omits it — campfire's JS " \
-          "posts with X-CSRF-Token either way (docs/pipeline/runtime.md § " \
-          "broadcast forms and CSRF)",
-    apply: ->(s) { s.gsub(%r{<input type="hidden" name="authenticity_token" value="CSRF"( /)?>}, "") },
-  },
+  # (Retired 2026-08-31: "dom_id and STI" — the base model's dom_prefix
+  # dispatches on the type column now, so an STI row answers the
+  # subclass's dom class on every lane, exactly as Rails does. A
+  # difference here fails the run again.)
+  # (Retired 2026-08-31: "broadcast row identity" — dom_id now derives
+  # its key from the model's own `to_key`, so every per-message id
+  # matches Rails byte for byte, client_message_id and all. A
+  # difference here fails the run again, which is the point of
+  # retiring the mask with the fix.)
+  # (Retired 2026-08-31: "broadcast forms and CSRF" — the lowered
+  # broadcast html renders inside ViewHelpers.broadcast_render, whose
+  # flag makes csrf_token_hidden_input answer "", matching Rails'
+  # session-less broadcast renderer. A token input in a frame fails the
+  # run again.)
 ]
 
 # ── DOM-shape canonicalization ─────────────────────────────────────────

@@ -134,6 +134,7 @@ module ActionView
     # expansions. See view_helpers.rb for the runtime/macro split
     # rationale.
     def self.csrf_token_hidden_input: () -> String
+    def self.broadcast_render: (^() -> String blk) -> String
     # `untyped`, not `Symbol`: the body's whole use of it is `to_s` and
     # two string comparisons, and `form_with` below reads the method out
     # of an untyped options hash. Declaring `Symbol` made the honest

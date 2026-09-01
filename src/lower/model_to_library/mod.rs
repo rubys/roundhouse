@@ -885,6 +885,9 @@ fn build_methods(
     // reads the accumulated list, so a model's own `to_param` (already
     // pushed) wins over the synthesized `@id.to_s`.
     self::markers::push_to_param_method(&mut methods, model);
+    // Also after push_user_methods: its BODY branches on whether the
+    // model carries its own `to_key` (campfire's Message does).
+    self::markers::push_dom_record_key_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
     // `has_secure_token` — the token default folds into the
     // `before_create` hook, so it runs BEFORE `push_callback_methods`:

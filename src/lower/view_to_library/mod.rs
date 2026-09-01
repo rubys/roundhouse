@@ -1247,6 +1247,20 @@ pub(crate) fn insert_framework_stubs(
             Ty::Str,
         ),
     );
+    // `broadcast_render(^() -> String) -> String` — the broadcast
+    // lowerings bracket their SYNTHESIZED renders in this so
+    // `csrf_token_hidden_input` omits the token input, matching Rails'
+    // session-less broadcast renderer. The render rides as a zero-arg
+    // lambda ARGUMENT (the `ActiveJob.enqueue` contract — see
+    // matz/spinel#4245 for why not a block), and the call answers the
+    // rendered String.
+    vh.class_methods.insert(
+        Symbol::from("broadcast_render"),
+        fn_sig(
+            vec![(Symbol::from("blk"), fn_sig(vec![], Ty::Str))],
+            Ty::Str,
+        ),
+    );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(

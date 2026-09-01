@@ -266,6 +266,7 @@ mod tests {
             attributes: Row::default(),
             body,
             enums: indexmap::IndexMap::new(),
+            sti_subclass_names: Vec::new(),
             span: crate::span::Span::synthetic(),
         }
     }

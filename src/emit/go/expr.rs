@@ -502,6 +502,24 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                  }}()",
             )
         }
+        // A standalone zero-param lambda ARGUMENT (`-> { <expr> }` —
+        // the broadcast lowerings pass their render this way, the
+        // `ActiveJob.enqueue` contract) → a Go closure. The return
+        // type comes from the lambda's inferred `Ty::Fn` (`string` for
+        // the render wrap); an untyped or parameterized lambda keeps
+        // the unsupported report — Go param types have nowhere honest
+        // to come from at this site.
+        ExprNode::Lambda { params, body, .. }
+            if params.is_empty()
+                && matches!(e.ty.as_ref(), Some(Ty::Fn { .. })) =>
+        {
+            let Some(Ty::Fn { ret, .. }) = e.ty.as_ref() else { unreachable!() };
+            let ret_s = super::ty::go_ty(ret);
+            format!(
+                "func() {ret_s} {{\n\treturn {}\n}}",
+                emit_expr(&ctx.enter_scope(), body)
+            )
+        }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
         // Ruby `next` inside a block → Go `continue`. The `each`/`map`

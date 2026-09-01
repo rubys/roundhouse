@@ -521,6 +521,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             routed_by_controller: Some(&routed),
             format_breadth,
             route_id_segments: Some(&route_ids),
+            inferred_params: Some(&app.inferred_method_params),
         },
     )
 }

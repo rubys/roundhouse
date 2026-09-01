@@ -2447,7 +2447,20 @@ it received intact.
 Tracked by `e2e/campfire/cable.spec.js`, which is `test.fixme` until this
 and the keep-alive serialization entry are closed.
 
-### dom_id and STI
+### dom_id and STI — FIXED
+
+**FIXED 2026-08-31.** The base model's synthesized `dom_prefix` is a
+type-column dispatch now: `lower::sti_scope` — which already derives
+the subclass→base map for relation scoping and `becomes!` — stamps the
+subclass set onto the base Model (`sti_subclass_names`, the
+self-describing-IR move), and `push_dom_prefix_method` emits
+`case @type; when "Rooms::Open" then "rooms_open"; …; else "room"`.
+Every lane answers the subclass's dom class for an STI row, exactly as
+Rails' `dom_class` does, hydration class notwithstanding. The
+comparator's mask is retired — a divergence here fails CI again — and
+the browser spec's list locator went lane-agnostic
+(`[id^="messages_"]`) so no spec re-couples to either spelling. The
+original entry follows.
 
 `dom_id(record)` derives its prefix from the record's CLASS, and for an
 STI row that is the subclass: room 1 is a `Rooms::Open`, so Rails names
@@ -2461,7 +2474,22 @@ run (2026-08-31). The fix wants STI-aware hydration or a type-column
 dispatch in `dom_prefix`; until then the comparator forgives exactly
 this rewrite, by name.
 
-### Broadcast row identity: client_message_id vs database id
+### Broadcast row identity: client_message_id vs database id — FIXED
+
+**FIXED 2026-08-31.** The mechanism was `Message#to_key` — campfire
+overrides it to `[client_message_id]`, and Rails' `dom_id` derives its
+identity half from `to_key.join("_")`, everywhere: page rows, broadcast
+rows, and every `edit_`/`boosting_`/`presentation_` derivative. The
+runtime's `dom_id` read `record.id` directly. Now the lowerer
+synthesizes a per-model `dom_record_key` — `@id.to_s` by default, the
+model's own `to_key.join("_")` when it defines one (one String per
+model, so the strict targets never union `Array[Integer]` with
+`Array[String?]` across a poly slot) — and `dom_id` consumes it. The
+comparator's mask is retired with the fix: every per-message id now
+matches Rails byte for byte, and a divergence here fails CI again.
+The user-visible half — Turbo's append replacing the sender's
+optimistic echo instead of standing a duplicate row beside it — is
+pinned by the browser milestone spec. The original entry follows.
 
 campfire's broadcast render keys every per-message dom id off
 `client_message_id` (`message_cable-walk-1`, and with it
@@ -2476,7 +2504,45 @@ satisfied by either row. Fix belongs wherever the broadcast render
 resolves `dom_id` for an unsaved-id context; forgiven by name in the
 comparator until then.
 
-### Broadcast forms and CSRF
+### Broadcast forms and CSRF — FIXED
+
+**FIXED 2026-08-31.** The renders the broadcast lowerings SYNTHESIZE
+(the `broadcasts_to` expansions, `partial:` forms, and the
+receiver-convention default) now ride inside
+`ActionView::ViewHelpers.broadcast_render(-> { … })`, and
+`csrf_token_hidden_input` — the one choke point every form's token
+input flows through, `button_to`'s included now — answers `""` under
+it. That is Rails' semantics arrived at honestly: its broadcast
+renderer has no session, ours runs inside the triggering request and
+had one at hand. An app-SUPPLIED `html:` expression passes through
+unwrapped, which is also Rails: campfire's closeds controller hands in
+a `render_to_string` rendered inside the request — session, token and
+all — and Rails broadcasts those bytes untouched.
+
+Three shapes were tried before this one landed, and the survivors of
+each are load-bearing:
+
+  * a BLOCK (`broadcast_render { … }`) dissolves on the AOT lane —
+    a yielding method's return type never resolves when its block
+    captures a poly local (matz/spinel#4245, filed with a 22-line
+    repro). The render rides as a `^() -> String` ARGUMENT instead,
+    the `ActiveJob.enqueue` contract — which also taught the RBS
+    reader `ProcType` and the analyzer `.call`-on-`Ty::Fn`.
+  * begin/`ensure` around `blk.call` is a construct half the transpile
+    targets have no statement arm for, so the runtime body carries
+    none. The flag self-heals instead: `reset_slots!` — every lane's
+    per-request dispatch entry — clears it, so a render that raises
+    can leave at most the REMAINDER of its own request token-less.
+  * the one poly capture in campfire (`room` through
+    `Rooms::Direct.find_or_create_for`) was itself a typing gap worth
+    closing: `transaction { }` now answers its block, `tap` its
+    receiver, and controller private-helper params take the
+    analyzer's call-site-unified types (`broadcast_create_room(Room
+    room)` where `(untyped room)` had poisoned every chain under it).
+
+The comparator's last frame mask retires with this; the frames now
+compare against Rails with NO forgivenesses on either lane. The
+original entry follows.
 
 A broadcast render has no session, and Rails' `form_with` omits the
 `authenticity_token` hidden input there (campfire's JS supplies

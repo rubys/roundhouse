@@ -80,6 +80,15 @@ pub struct Model {
     /// an included concern, folded in by the concern splice.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enums: IndexMap<Symbol, Vec<(String, crate::expr::Literal)>>,
+
+    /// STI subclass class-ids whose rows live in THIS model's table
+    /// (stamped by `lower::sti_scope`, which already derives the
+    /// subclass->base map for scoping and `becomes!`). Non-empty turns
+    /// the synthesized `dom_prefix` into a type-column dispatch, so a
+    /// base-hydrated row answers the dom class Rails answers —
+    /// `Rooms::Open` rows say `rooms_open`, not `room`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sti_subclass_names: Vec<ClassId>,
 }
 
 impl Model {

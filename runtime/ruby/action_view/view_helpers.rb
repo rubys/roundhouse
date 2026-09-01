@@ -30,9 +30,15 @@ module ActionView
     # migration so existing transpiled call sites in
     # TS/Crystal/Rust/Go/Spinel keep working.
     @slots = {}
+    @broadcast_rendering = false
 
     def self.reset_slots!
       @slots = {}
+      # Per-request self-healing for the broadcast-render flag: a render
+      # that raised inside `broadcast_render` (which has no `ensure` —
+      # see its comment) must not leave a LATER request's forms
+      # token-less. Every lane's dispatch entry runs this first.
+      @broadcast_rendering = false
     end
 
     # The DEPOSIT form of `content_for` (its getter pair is
@@ -262,12 +268,21 @@ module ActionView
           "#{suffix}_#{record.dom_prefix()}"
         end
       elsif suffix.nil?
-        # `dom_id(article)` -> "article_3"
-        "#{record.dom_prefix()}_#{record.id}"
+        # `dom_id(article)` -> "article_3". `dom_record_key()`, not
+        # `record.id`: Rails derives the identity half from
+        # `record.to_key.join("_")`, which a model may override —
+        # campfire's `Message#to_key` answers `[client_message_id]`,
+        # and matching that is what lets Turbo's append REPLACE the
+        # sender's optimistic echo (same dom id) instead of standing a
+        # duplicate row beside it. The lowerer synthesizes the method
+        # per model (`push_dom_record_key_method`): `@id.to_s` by
+        # default, the model's own `to_key.join("_")` when it defines
+        # one. Parens for the same TS-emit reason as `dom_prefix()`.
+        "#{record.dom_prefix()}_#{record.dom_record_key()}"
       else
         # `dom_id(article, :comments_count)` -> "comments_count_article_3"
         # (Rails order: suffix BEFORE model name in the resulting id.)
-        "#{suffix}_#{record.dom_prefix()}_#{record.id}"
+        "#{suffix}_#{record.dom_prefix()}_#{record.dom_record_key()}"
       end
     end
   
@@ -409,7 +424,9 @@ module ActionView
       # button; value via form_authenticity_token like the other csrf
       # emitters. Keeps the element in the DOM tree at the same
       # position Rails puts it.
-      auth_token_input = %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
+      # Through the one choke point, so the broadcast-render omission
+      # above covers button_to forms too.
+      auth_token_input = csrf_token_hidden_input
       %(<form#{render_attrs(form_attrs)}>#{method_input}<button#{button_attrs}>#{html_escape(text)}</button>#{auth_token_input}</form>)
     end
   
@@ -680,8 +697,43 @@ module ActionView
     # blanks the attribute anyway), real on CRuby where the overlay
     # supplies a session-backed token (the lobsters benchmark scrapes
     # it off GET /login and POSTs it back).
+    # Omitted entirely inside a broadcast render, matching Rails: a
+    # turbo broadcast renders through a session-less renderer, where
+    # `protect_against_forgery?` is false and `form_with` writes no
+    # token input. Our broadcast renders run INSIDE the triggering
+    # request (in-process after_commit), so the session — and a token —
+    # would otherwise be at hand; the flag is what says "this render's
+    # output is for OTHER sessions' pages". Found as a per-form byte
+    # divergence in every broadcast frame by scripts/campfire-compare.
     def self.csrf_token_hidden_input
+      return "" if @broadcast_rendering
       %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
+    end
+
+    # Bracket a broadcast partial render (the lowered
+    # `Broadcasts.<action>(html: …)` sites generate this wrapper).
+    #
+    # AN ARGUMENT, NOT A BLOCK — the same contract `ActiveJob.enqueue`
+    # carries, for the same two reasons: RBS can name a `^() -> String`
+    # parameter where it has no syntax for a block, and a yielding
+    # method's return type dissolves on the AOT lane when its block
+    # captures a poly local (matz/spinel#4245; campfire's
+    # `memberships.each do |membership| … end` is the capture).
+    #
+    # NO `ensure`, deliberately. A raise inside `blk.call` leaves the
+    # flag set for the REMAINDER of that one request (an error page a
+    # broad `rescue Exception` renders in the same request would omit
+    # its token input); `reset_slots!` — which every lane's dispatch
+    # entry already runs per request — clears it, so nothing leaks into
+    # later requests. The ensure-guarded spelling was written first and
+    # backed out: statement-position begin/ensure is a construct half
+    # the transpile targets have no arm for, and this file must lower
+    # everywhere.
+    def self.broadcast_render(blk)
+      @broadcast_rendering = true
+      html = blk.call
+      @broadcast_rendering = false
+      html
     end
 
     # Rails emits `<input type="hidden" name="_method" value="patch">`

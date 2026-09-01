@@ -114,7 +114,7 @@ fn a_literal_stream_lowers_with_the_named_partial_as_its_payload() {
     assert!(
         src.contains(
             "Broadcasts.prepend(stream: \"rooms\", target: \"shared_rooms\", \
-             html: Views::Rooms.row(@room))"
+             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }))"
         ),
         "{src}",
     );
@@ -129,7 +129,7 @@ fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
     assert!(
         src.contains(
             "Broadcasts.replace(stream: \"#{GlobalID.param(\"User\", user.id)}:rooms\", \
-             target: \"list_room_#{@room.id}\""
+             target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\""
         ),
         "{src}",
     );
@@ -140,11 +140,11 @@ fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
 fn remove_carries_no_html() {
     let src = controller_src();
     assert!(
-        src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_room_#{@room.id}\")"),
+        src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\")"),
         "{src}",
     );
     assert!(
-        !src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_room_#{@room.id}\", html"),
+        !src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\", html"),
         "remove must not carry html:\n{src}",
     );
 }
@@ -164,7 +164,7 @@ fn attributes_render_to_element_text_ahead_of_action_and_target() {
     assert!(
         src.contains(
             "Broadcasts.append(stream: \"rooms\", target: \"shared_rooms\", \
-             html: Views::Rooms.row(@room), \
+             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }), \
              attributes: \" maintain_scroll=\\\"true\\\" tone=\\\"quiet\\\"\")"
         ),
         "{src}",
@@ -180,7 +180,7 @@ fn a_broadcast_without_attributes_gains_no_argument() {
     assert!(
         src.contains(
             "Broadcasts.prepend(stream: \"rooms\", target: \"shared_rooms\", \
-             html: Views::Rooms.row(@room))"
+             html: ActionView::ViewHelpers.broadcast_render(-> { Views::Rooms.row(@room) }))"
         ),
         "{src}",
     );

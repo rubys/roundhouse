@@ -529,6 +529,39 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 crate::emit::diagnostics::report_unsupported(e.span, "python", "each-block", "")
             })
         }
+        // `begin … rescue … ensure … end` in STATEMENT position →
+        // `try:/except:/finally:`. Statement position only — Python has
+        // no try-expression, and the one runtime body that needs this
+        // (`broadcast_render`'s ensure-guarded `blk.call`) reads its
+        // result from a local AFTER the construct. A value-position
+        // BeginRescue still reports unsupported through `emit_expr`.
+        // An empty `classes` list is Ruby's implicit StandardError;
+        // `Exception` is the nearest Python spelling that still catches
+        // what the ensure must survive.
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. }
+            if !is_last || void_return =>
+        {
+            let mut out = format!("try:\n{}", emit_block_body(body, true));
+            for r in rescues {
+                let classes: Vec<String> = r.classes.iter().map(emit_expr).collect();
+                let head = match (classes.is_empty(), &r.binding) {
+                    (true, None) => "except Exception:".to_string(),
+                    (true, Some(b)) => format!("except Exception as {}:", b.as_str()),
+                    (false, None) => format!("except ({}):", classes.join(", ")),
+                    (false, Some(b)) => {
+                        format!("except ({}) as {}:", classes.join(", "), b.as_str())
+                    }
+                };
+                out.push_str(&format!("\n{head}\n{}", emit_block_body(&r.body, true)));
+            }
+            if let Some(eb) = else_branch {
+                out.push_str(&format!("\nelse:\n{}", emit_block_body(eb, true)));
+            }
+            if let Some(en) = ensure {
+                out.push_str(&format!("\nfinally:\n{}", emit_block_body(en, true)));
+            }
+            out
+        }
         // `case scrutinee; when X then …; else …; end` → an `if/elif/else`
         // chain comparing the scrutinee against each `when` literal (the
         // per-column `[]`/`[]=` indexer the model lowering emits). Arm
@@ -927,6 +960,30 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("_block({})", args_s.join(", "))
+        }
+        // A standalone lambda ARGUMENT (`-> { <expr> }` — the broadcast
+        // lowerings pass their render this way, the `ActiveJob.enqueue`
+        // contract). Python's `lambda` is expression-bodied, so only
+        // expression-shaped bodies qualify — a Seq or a BeginRescue
+        // (the enqueue lambda's shape) has no lambda spelling and keeps
+        // the unsupported report.
+        ExprNode::Lambda { params, body, .. }
+            if matches!(
+                &*body.node,
+                ExprNode::Send { .. }
+                    | ExprNode::Lit { .. }
+                    | ExprNode::StringInterp { .. }
+                    | ExprNode::Var { .. }
+                    | ExprNode::Ivar { .. }
+                    | ExprNode::Const { .. }
+            ) =>
+        {
+            let names: Vec<&str> = params.iter().map(|p| p.as_str()).collect();
+            if names.is_empty() {
+                format!("lambda: {}", emit_expr(body))
+            } else {
+                format!("lambda {}: {}", names.join(", "), emit_expr(body))
+            }
         }
         other => crate::emit::diagnostics::report_unsupported(e.span, "python", other.kind_str(), ""),
     }

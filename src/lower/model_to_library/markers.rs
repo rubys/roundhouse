@@ -37,17 +37,72 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
         return;
     }
     let prefix = crate::naming::snake_case(model.name.0.as_str());
+    // An STI base's rows belong to subclasses, and Rails' dom_class
+    // answers the SUBCLASS (`Rooms::Open` rows are `rooms_open`, on
+    // the page and in every broadcast target). Hydration here is
+    // base-classed, so the base's prefix dispatches on the type
+    // column — the same stamp the subclass constructors write and
+    // `sti_scope`'s relation rewrites filter by. A row whose type
+    // names no known subclass (or a plain base row) keeps the base's
+    // own prefix, which is also Rails' answer for a base-classed row.
+    let body = if model.sti_subclass_names.is_empty() {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: prefix } },
+        )
+    } else {
+        let mut arms: Vec<crate::expr::Arm> = model
+            .sti_subclass_names
+            .iter()
+            .map(|sub| {
+                let fqn = sub.0.as_str();
+                let dom_class = fqn
+                    .split("::")
+                    .map(crate::naming::snake_case)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                crate::expr::Arm {
+                    pattern: crate::expr::Pattern::Lit {
+                        value: Literal::Str { value: fqn.to_string() },
+                    },
+                    guard: None,
+                    body: with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Str { value: dom_class } },
+                        ),
+                        Ty::Str,
+                    ),
+                }
+            })
+            .collect();
+        arms.push(crate::expr::Arm {
+            pattern: crate::expr::Pattern::Wildcard,
+            guard: None,
+            body: with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Str { value: prefix } },
+                ),
+                Ty::Str,
+            ),
+        });
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Case {
+                scrutinee: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Ivar { name: Symbol::from("type") },
+                ),
+                arms,
+            },
+        )
+    };
     methods.push(MethodDef {
         name: Symbol::from("dom_prefix"),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
-        body: with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Str { value: prefix } },
-            ),
-            Ty::Str,
-        ),
+        body: with_ty(body, Ty::Str),
         signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
@@ -103,6 +158,79 @@ pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) 
             ),
             Ty::Str,
         ),
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// Per-model `dom_record_key` — the identity half of `dom_id`, as one
+/// String. Rails' `dom_id` derives it from `record.to_key.join("_")`,
+/// which a model may override: campfire's `Message#to_key` answers
+/// `[client_message_id]`, and that is the mechanism by which a
+/// broadcast row carries the SAME dom id the sender's optimistic
+/// client-side echo minted — Turbo's append then replaces the echo
+/// instead of standing a duplicate beside it. The runtime's `dom_id`
+/// used `record.id` directly, so every message id on the emitted lanes
+/// diverged from Rails and the sender's tab could show its message
+/// twice (found by `scripts/campfire-compare`).
+///
+/// Synthesized rather than read dynamically because the strict targets
+/// want one String per model, not `Array[Integer] | Array[String?]`
+/// unioning across a poly slot: a model with its own `to_key` gets
+/// `to_key.join("_")` (typed by ITS return), everything else gets
+/// `@id.to_s`. Runs after `push_user_methods` so the check can see the
+/// model's own `to_key` in the accumulated list.
+pub(super) fn push_dom_record_key_method(methods: &mut Vec<MethodDef>, model: &Model) {
+    if is_abstract_class(model) {
+        return;
+    }
+    let has_to_key = methods
+        .iter()
+        .any(|m| m.name.as_str() == "to_key" && m.receiver == MethodReceiver::Instance);
+    let body = if has_to_key {
+        // `to_key.join("_")` — Rails' record_key_for_dom_id, on the
+        // model's own answer.
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("to_key"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("join"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: "_".to_string() } },
+            )],
+            block: None,
+            parenthesized: false,
+        }
+    } else {
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: Symbol::from("id") },
+            )),
+            method: Symbol::from("to_s"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        }
+    };
+    methods.push(MethodDef {
+        name: Symbol::from("dom_record_key"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: with_ty(Expr::new(Span::synthetic(), body), Ty::Str),
         signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),

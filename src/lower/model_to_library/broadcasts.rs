@@ -133,7 +133,7 @@ fn broadcasts_call(
         (lit_sym(Symbol::from("target")), target),
     ];
     if let Some(h) = html {
-        entries.push((lit_sym(Symbol::from("html")), h));
+        entries.push((lit_sym(Symbol::from("html")), wrap_broadcast_render(h)));
     }
     let kwargs = Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true });
     Expr::new(
@@ -151,22 +151,85 @@ fn broadcasts_call(
     )
 }
 
-/// `"<class_singular>_#{@id}"` — the canonical per-record DOM target
-/// Rails turbo uses on update + destroy regardless of `target:` option.
-fn canonical_record_target(class_name: &ClassId) -> Expr {
-    let singular = crate::naming::snake_case(class_name.0.as_str());
+/// `"#{dom_prefix()}_#{dom_record_key()}"` — the canonical per-record
+/// DOM target Rails turbo uses on update + destroy regardless of
+/// `target:` option. Through the SYNTHESIZED identity methods rather
+/// than a static singular + `@id`, because that static spelling was a
+/// second copy of dom_id's semantics and it drifted twice at once: an
+/// STI row's prefix is the subclass's (`rooms_open`, dispatched on the
+/// type column), and a model with its own `to_key` keys rows by it
+/// (campfire's Message → client_message_id — a `broadcast_remove`
+/// aimed at `message_#{@id}` would MISS every row the pages render).
+fn canonical_record_target(_class_name: &ClassId) -> Expr {
     Expr::new(
         Span::synthetic(),
         ExprNode::StringInterp {
             parts: vec![
-                crate::expr::InterpPart::Text { value: format!("{singular}_") },
+                crate::expr::InterpPart::Expr { expr: dom_identity_call(None, "dom_prefix") },
+                crate::expr::InterpPart::Text { value: "_".to_string() },
                 crate::expr::InterpPart::Expr {
-                    expr: Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Ivar { name: Symbol::from("id") },
-                    ),
+                    expr: dom_identity_call(None, "dom_record_key"),
                 },
             ],
+        },
+    )
+}
+
+/// `ViewHelpers.broadcast_render(-> { <render> })` — the runtime
+/// brackets the render so `csrf_token_hidden_input` omits the token
+/// input, matching Rails' session-less broadcast renderer (a broadcast
+/// here runs inside the triggering request, so the session would
+/// otherwise be at hand). `ensure`-guarded in the runtime.
+///
+/// AN ARGUMENT, NOT A BLOCK — the `ActiveJob.enqueue` contract: RBS
+/// names the `^() -> String` parameter, and a yielding method's return
+/// type dissolves on the AOT lane when its block captures a poly local
+/// (matz/spinel#4245).
+fn wrap_broadcast_render(html: Expr) -> Expr {
+    let lambda = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![],
+            body: html,
+            block_param: None,
+            block_style: Default::default(),
+            rest_param: None,
+        },
+    );
+    let mut call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const {
+                    path: vec![
+                        Symbol::from("ActionView"),
+                        Symbol::from("ViewHelpers"),
+                    ],
+                },
+            )),
+            method: Symbol::from("broadcast_render"),
+            args: vec![lambda],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
+/// A zero-arg call to one of the synthesized dom-identity methods.
+/// Parenthesized, for the same TS-collapse reason
+/// `ViewHelpers.dom_id` spells `record.dom_prefix()` with parens.
+fn dom_identity_call(recv: Option<Expr>, name: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv,
+            method: Symbol::from(name),
+            args: vec![],
+            block: None,
+            parenthesized: true,
         },
     )
 }
@@ -383,12 +446,21 @@ fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
             parenthesized: false,
         },
     );
+    let _ = parent_id;
+    // Through the synthesized identity methods, not `{singular}_` +
+    // `.id` — the same one-spelling rule canonical_record_target
+    // documents (STI prefixes, `to_key`-keyed rows).
     let target_str = Expr::new(
         Span::synthetic(),
         ExprNode::StringInterp {
             parts: vec![
-                crate::expr::InterpPart::Text { value: format!("{singular}_") },
-                crate::expr::InterpPart::Expr { expr: parent_id },
+                crate::expr::InterpPart::Expr {
+                    expr: dom_identity_call(Some(var_ref(parent_sym.clone())), "dom_prefix"),
+                },
+                crate::expr::InterpPart::Text { value: "_".to_string() },
+                crate::expr::InterpPart::Expr {
+                    expr: dom_identity_call(Some(var_ref(parent_sym.clone())), "dom_record_key"),
+                },
             ],
         },
     );
@@ -600,16 +672,25 @@ fn dom_target(value: &Expr, _model: &Model, owner: Option<&OwnerRef>, span: Span
             // The record must be the one already bound; a second
             // association read here would be a second query AND could
             // disagree with the stream it is paired with.
-            let owner = owner.filter(|o| same_bare_name(record, &o.expr))?;
+            let _owner = owner.filter(|o| same_bare_name(record, &o.expr))?;
+            // `"#{prefix}_#{owner.dom_prefix()}_#{owner.dom_record_key()}"`
+            // — dom_id(owner, prefix) through the synthesized identity
+            // methods, so an STI owner names the subclass the page
+            // names (see canonical_record_target's note).
             Some(Expr::new(
                 span,
                 ExprNode::StringInterp {
                     parts: vec![
-                        crate::expr::InterpPart::Text {
-                            value: format!("{prefix}_{}_", owner.singular),
-                        },
+                        crate::expr::InterpPart::Text { value: format!("{prefix}_") },
                         crate::expr::InterpPart::Expr {
-                            expr: read_id(var_ref(owner_local())),
+                            expr: dom_identity_call(Some(var_ref(owner_local())), "dom_prefix"),
+                        },
+                        crate::expr::InterpPart::Text { value: "_".to_string() },
+                        crate::expr::InterpPart::Expr {
+                            expr: dom_identity_call(
+                                Some(var_ref(owner_local())),
+                                "dom_record_key",
+                            ),
                         },
                     ],
                 },

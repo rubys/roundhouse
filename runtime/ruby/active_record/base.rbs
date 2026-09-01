@@ -121,6 +121,13 @@ module ActiveRecord
     %a{abstract}
     def dom_prefix: () -> String
 
+    # Per-model DOM row key (`"42"`, or `to_key.join("_")` on a model
+    # that overrides `to_key` — campfire's Message keys rows by
+    # client_message_id). `dom_id`'s other half; synthesized per-model
+    # by `push_dom_record_key_method`, abstract here like dom_prefix.
+    %a{abstract}
+    def dom_record_key: () -> String
+
     # `[]/[]=` are defined on Base as raise-NotImplementedError
     # markers; subclasses (per-model emitted classes) override with
     # their column-specific indexer. The Base body is required so

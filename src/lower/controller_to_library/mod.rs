@@ -255,6 +255,13 @@ pub struct LowerControllerOptions<'a> {
     /// means the record→`.id` projection stays purely shape-directed,
     /// which is what it was before the table existed.
     pub route_id_segments: Option<&'a std::collections::HashMap<String, Vec<bool>>>,
+    /// The analyzer's converged call-site param table
+    /// (`App::inferred_method_params`) — types private-helper params
+    /// in the built signatures. `None` (the default) pins them
+    /// `untyped`, which is what every param was before the channel
+    /// existed.
+    pub inferred_params:
+        Option<&'a std::collections::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -270,6 +277,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         routed_by_controller,
         format_breadth,
         route_id_segments,
+        inferred_params,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
@@ -300,7 +308,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params);
         all_methods.push((methods, controller));
     }
 
@@ -582,6 +590,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &partials,
         FormatBreadth::NARROW,
         &std::collections::HashMap::new(),
+        None,
     );
     LibraryClass {
         name: controller.name.clone(),
@@ -635,6 +644,7 @@ fn build_methods(
     // html(+simple-json) flatten, emit unchanged.
     format_breadth: FormatBreadth,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -839,8 +849,8 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
             params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, &deferred_renders,
-            &mut deferred_tails,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            &deferred_renders, &mut deferred_tails,
         ));
     }
     if let Some(preamble) = pending_dispatcher {
@@ -865,8 +875,8 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, &no_deferred,
-            &mut std::collections::HashMap::new(),
+            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -878,8 +888,8 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, &no_deferred,
-            &mut std::collections::HashMap::new(),
+            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
 
@@ -1822,6 +1832,7 @@ fn action_to_method(
     format_breadth: FormatBreadth,
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
     deferred_renders: &std::collections::HashSet<Symbol>,
     deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
@@ -1916,9 +1927,32 @@ fn action_to_method(
         // Untyped lets the compiler infer from the body instead.
         Ty::Untyped
     };
+    // Private-helper params take the analyzer's call-site-unified type
+    // when one landed (campfire's `broadcast_create_room(room)` has one
+    // caller, and it passes a `Room`); `Var` entries and rest slots
+    // stay `Untyped` — a slot no call site informed is still gradual.
+    // Positional alignment matches `unify_params_from_call_sites`
+    // (required positionals first, then optionals — the same order
+    // `params` was just built in).
+    // Keyed by the SOURCE name (`a.name`) — the analyzer typed the app
+    // before `method_name_for_action`'s renames (`new` → `new_action`).
+    let unified = inferred_params
+        .and_then(|t| t.get(&(controller.name.clone(), a.name.clone())));
     let sig_params: Vec<(Symbol, Ty)> = params
         .iter()
-        .map(|p| (p.name.clone(), Ty::Untyped))
+        .enumerate()
+        .map(|(i, p)| {
+            let ty = if p.rest {
+                Ty::Untyped
+            } else {
+                unified
+                    .and_then(|v| v.get(i))
+                    .filter(|t| !matches!(t, Ty::Var { .. }))
+                    .cloned()
+                    .unwrap_or(Ty::Untyped)
+            };
+            (p.name.clone(), ty)
+        })
         .collect();
     // All actions (public + private) are Method — bodies are
     // imperative and computed. AttributeReader is reserved for

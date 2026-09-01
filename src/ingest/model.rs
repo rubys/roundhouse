@@ -243,6 +243,7 @@ pub fn ingest_model(
     Ok(Some(Model {
         name: owner,
         parent,
+        sti_subclass_names: Vec::new(),
         table: TableRef(Symbol::from(table_name)),
         primary_key,
         attributes,
