@@ -2565,6 +2565,49 @@ identical at submit time; a byte divergence in every boost form of
 every broadcast frame. Found by `scripts/campfire-compare`
 (2026-08-31); forgiven by name in the comparator.
 
+### Room-page boost forms and the fragment cache
+
+Rails fragment-caches each message row (`cache [ message,
+"presentation-v2" ]`), and the cache keeps whatever render FIRST warmed
+it: a page GET renders with a session, so the row's eight quick-boost
+forms carry the `authenticity_token` hidden input; a broadcast renders
+without one, so they don't. Token presence in the room page's boost
+forms therefore encodes each row's RENDER HISTORY — after a cable post,
+Rails' own page serves both spellings side by side (36 seeded rows with
+tokens, the 4 cable-posted rows without, on the compare walk). The emit
+has no fragment cache and re-renders every request inside a session, so
+its forms always carry the token. Neither spelling is wrong to the app:
+the JS submits with `X-CSRF-Token` from the page meta, which is why
+Rails can ship the token-less cached copy at all.
+
+Matching Rails here would mean reproducing not its renderer but its
+cache's history-dependence, which no per-request renderer can do —
+so the comparator forgives exactly this, by name, and ONLY on the room
+page: the mask is scoped so a token reappearing in a broadcast FRAME
+still fails the run (that ratchet is the "Broadcast forms and CSRF"
+fix above). Found by `scripts/campfire-compare` when the room page was
+triaged for gating (2026-09-01).
+
+### An advisory `String?` erases nil on the binary — matz/spinel#4250
+
+Under `--rbs sig`, a method sidecar-declared `() -> String?` stops
+returning nil for its valueless-if else path on the compiled binary:
+`.nil?` answers false and `compact` keeps the slot. campfire's
+`body_classes` joins three such guard-if helpers, so every page the
+binary serves says `<body class="sidebar admin ">` — trailing space —
+where Rails (and the CRuby lane, and the binary WITHOUT the sidecars)
+says `sidebar admin`. Found by the room-page gate the day it was
+promoted (2026-09-01); no behavioral test can see it, because a
+trailing space in `class` changes no selector. Filed with a 12-line
+repro. `--spinel` is expected RED on room.html until #4250 closes —
+deliberately NOT masked, the same posture #4240 held: an open defect
+is not a written-down decision.
+
+(The gate's other binary-only find the same day was ours, and is
+fixed: `runtime/spinel`'s `parse_db_time` read whole seconds where the
+CRuby overlay's twin reads micros, so `updated_at.to_fs(:epoch)`
+answered `…000` for Rails' `…418`.)
+
 ### `SanitizeTags` is inert on the spinel binary — matz/spinel#4240 — FIXED upstream
 
 **FIXED 2026-08-31, hours after filing** (`c178fc15`): the block was not

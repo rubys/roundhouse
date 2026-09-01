@@ -11,8 +11,13 @@
 #     entry and is PRINTED when it fires, so the run says what it
 #     forgave; retire the rewrite when the entry closes.
 #
-# The frames gate (non-zero exit on a residual diff). The room page is
-# reported only — promote it once its findings are triaged.
+# Every artifact GATES (non-zero exit on a residual diff): the two
+# broadcast frames since 2026-08-31, and the room page since 2026-09-01
+# — its triage closed with five emit fixes (nil-attr rule, boolean-attr
+# spelling, STI polymorphic routes, Rails' trix-input spelling, the
+# gem-shipped trix.css) plus one ledgered forgiveness (the
+# fragment-cache CSRF entry above). `:report` remains the mode a NEW
+# artifact starts in until its findings are triaged.
 #
 # Usage: campfire-compare-diff.rb RAILS_DIR EMIT_DIR
 
@@ -33,14 +38,28 @@ VOLATILE = [
   [/signed-stream-name="[^"]*"/, 'signed-stream-name="SIGNED"'],
   [/\?v=\d+/, "?v=V"],
   # Rails production serves digested assets (propshaft); the emit serves
-  # plain paths. Same logical asset, different spelling.
-  [/(\/assets\/[A-Za-z0-9_\/.-]+?)-[0-9a-f]{8,}\.(\w+)/, '\1.\2'],
+  # plain paths. Same logical asset, different spelling. `@` because
+  # importmap pins scoped packages (`@rails--request-3fc8489d.js`).
+  [/(\/assets\/[@A-Za-z0-9_\/.-]+?)-[0-9a-f]{8,}\.(\w+)/, '\1.\2'],
   # Each lane serves on its own port, and absolute self-URLs (the
   # copy-link button) embed it.
   [%r{http://127\.0\.0\.1(:\d+)?/}, "http://HOST/"],
 ]
 
 KNOWN = [
+  # Rails' message-fragment cache serves whatever render FIRST warmed it:
+  # a page GET (session → boost forms carry the authenticity_token input)
+  # or a broadcast (session-less → they don't). So token presence in the
+  # room page's boost forms encodes each row's RENDER HISTORY, not the
+  # app — Rails' own page mixes both spellings after a cable post. The
+  # emit re-renders per request (it has no fragment cache) and always
+  # carries the token. Both submit fine: the JS posts X-CSRF-Token from
+  # the page meta. Scoped to the room page so the FRAME gate keeps
+  # failing on a token that reappears in a broadcast.
+  # See "Room-page boost forms and the fragment cache" in runtime.md.
+  { name: "room-page boost forms and the fragment cache",
+    only: "room.html",
+    apply: ->(s) { s.gsub(%r{(<form[^>]*/boosts"[^>]*>)\s*<input[^>]*name="authenticity_token"[^>]*>}, '\1') } },
   # (Retired 2026-08-31: "dom_id and STI" — the base model's dom_prefix
   # dispatches on the type column now, so an STI row answers the
   # subclass's dom class on every lane, exactly as Rails does. A
@@ -131,14 +150,28 @@ def canonical_tag(raw)
       attrs << [aname, nil]
     end
   end
-  serialized = attrs.sort_by(&:first).map { |k, v| v.nil? ? k : %(#{k}="#{v}") }.join(" ")
+  serialized = attrs.sort_by(&:first).map { |k, v| v.nil? ? k : %(#{k}="#{canonical_value(v)}") }.join(" ")
   serialized.empty? ? "<#{name}>" : "<#{name} #{serialized}>"
 end
 
-def normalize(text, lane_label, fired)
+# A browser reads `data-action="click-&gt;popup#close"` and
+# `data-action="click->popup#close"` as the SAME attribute value — ERB's
+# tag helpers escape `>` where hand-written template HTML doesn't, and
+# the two lanes disagree in BOTH directions. Decode the named entities
+# (one pass, so `&amp;gt;` stays the text `&gt;`), then re-encode only
+# what a double-quoted serialization requires, so every value has ONE
+# canonical spelling.
+ENTITIES = { "&gt;" => ">", "&lt;" => "<", "&quot;" => '"', "&#39;" => "'", "&apos;" => "'", "&amp;" => "&" }.freeze
+def canonical_value(v)
+  v.gsub(/&(?:gt|lt|quot|#39|apos|amp);/) { |m| ENTITIES[m] }
+   .gsub("&", "&amp;").gsub('"', "&quot;")
+end
+
+def normalize(text, artifact_name, fired)
   out = text.dup
   VOLATILE.each { |(re, rep)| out.gsub!(re, rep) }
   KNOWN.each do |k|
+    next if k[:only] && k[:only] != artifact_name
     before = out
     out = k[:apply].call(out)
     fired << k[:name] if out != before
@@ -155,8 +188,9 @@ end
 # before a closing tag or between two tags goes entirely. The
 # `.normalized` files keep their line structure so the human diff stays
 # readable; this tighter form is only what == runs on. (Imprecise
-# inside <pre>, where whitespace is real — acceptable while the page is
-# report-only; revisit if a code-block message ever gates.)
+# inside <pre>, where whitespace is real — no gated artifact carries a
+# <pre> today; the day a seeded code-block message adds one, this
+# collapse needs a pre-guard.)
 def tighten(s)
   s.gsub(/\s+/, " ").gsub(%r{ +</}, "</").gsub(/> +</, "><")
 end
@@ -164,7 +198,7 @@ end
 failed = false
 report = []
 
-{ "frame_text.html" => :gate, "frame_html.html" => :gate, "room.html" => :report }.each do |name, mode|
+{ "frame_text.html" => :gate, "frame_html.html" => :gate, "room.html" => :gate }.each do |name, mode|
   a = File.join(rails_dir, name)
   b = File.join(emit_dir, name)
   unless File.exist?(a) && File.exist?(b)
@@ -173,8 +207,8 @@ report = []
     next
   end
   fired = []
-  na = normalize(File.read(a), "rails", fired)
-  nb = normalize(File.read(b), "emit", fired)
+  na = normalize(File.read(a), name, fired)
+  nb = normalize(File.read(b), name, fired)
   File.write(a + ".normalized", na)
   File.write(b + ".normalized", nb)
   if tighten(na) == tighten(nb)
@@ -186,7 +220,9 @@ report = []
       puts "  \e[31mFAIL\e[0m #{name}: lanes disagree beyond the known divergences"
       failed = true
     else
-      diffs = na.lines.zip(nb.lines).count { |x, y| x != y }
+      # Count the diff's own lines, not a positional zip — one inserted
+      # line early in the file must not count everything after it.
+      diffs = `diff #{a}.normalized #{b}.normalized 2>/dev/null`.lines.count { |l| l.start_with?("< ", "> ") }
       puts "  \e[33mreport\e[0m #{name}: #{diffs} differing line(s) — reported, not gated"
     end
     fired.uniq.each { |f| puts "       forgiven: #{f}" }
@@ -197,7 +233,7 @@ end
 puts
 report.each { |r| puts r; puts }
 if failed
-  puts "\e[1;31mcampfire compare failed\e[0m — a frame diverged beyond the ledger"
+  puts "\e[1;31mcampfire compare failed\e[0m — an artifact diverged beyond the ledger"
   exit 1
 end
-puts "\e[1;32mcampfire compare complete\e[0m — the frames the two lanes broadcast are equivalent"
+puts "\e[1;32mcampfire compare complete\e[0m — the room page and the frames the two lanes serve are equivalent"

@@ -23,11 +23,12 @@
 #     written-down gaps don't drown it. Retire each mask when its entry
 #     closes.
 #
-# The FRAME diffs are the gate (exit non-zero on a mismatch). The ROOM
-# PAGE diff is REPORTED but does not fail the run yet: 100 seeded rich-
-# text messages exercise far more rendering surface than any gate has
-# compared before, and a page gate starts failing the day it is born
-# unless the findings are triaged first — report, ledger, then promote.
+# EVERY artifact diff is a gate (exit non-zero on a mismatch): the two
+# broadcast frames and, since its triage closed (2026-09-01), the room
+# page — 100 seeded rich-text messages of rendering surface, held to
+# DOM-shaped equality against Rails with ONE ledgered forgiveness (the
+# fragment-cache CSRF entry in runtime.md). The report→ledger→promote
+# ladder remains the path for any NEW artifact this harness grows.
 #
 # Usage:  scripts/campfire-compare [options]
 #
