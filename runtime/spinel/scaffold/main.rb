@@ -140,9 +140,9 @@ module Main
   end
 
   # Resolve a (pre-validated) static URL to its on-disk path under
-  # static/ and hand it to the Tep server to sendfile. sphttp can't
-  # infer Content-Type, so set it from the extension here; a missing
-  # file 404s (Sock.sphttp_filesize returns -1 when stat fails). The
+  # static/ and hand it to the Tep server to sendfile. The server
+  # doesn't infer Content-Type, so set it from the extension here; a
+  # missing file 404s (Sock.sphttp_filesize returns -1 when stat fails). The
   # working directory is the app root — where `make assets` writes
   # static/ and `./build/blog` is launched from.
   def self.serve_static(path, res)
@@ -533,10 +533,10 @@ end
 # `__FILE__ == $PROGRAM_NAME` guard because under Puma the file is
 # required, not invoked directly.
 #
-# Tep::Server::Scheduled expects an app object with a `dispatch(req,
+# Tep::Server::Threaded expects an app object with a `dispatch(req,
 # res)` instance method. Wrap Main's class-method dispatch in a thin
 # instance so spinel resolves @app.dispatch through normal user-class
-# dispatch instead of trying to call a module method. The scheduled
+# dispatch instead of trying to call a module method. The threaded
 # server's cmeth handlers actually dispatch via Tep::APP.dispatch, so
 # this delegates THERE: that is where the per-request connection lease
 # (and with it the query cache and the statement-cache trim) lives, and
@@ -567,9 +567,10 @@ while i < ARGV.length
     puts "usage: " + $PROGRAM_NAME + " [options]"
     puts ""
     puts "  -p, --port N     listen port (default 3000; PORT env)"
-    puts "  -w, --workers N  prefork workers (default 1; WORKERS env)"
+    puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
     puts "  -h, --help       show this help and exit"
     puts ""
+    puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
     puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
     exit(0)
   elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
@@ -601,6 +602,10 @@ ActiveJob.register_drain
 Thread.new do
   Main.job_loop
 end
+# The server announces itself by the app's own name (the underscored
+# module wrapping its Rails::Application, which ingest writes into
+# config/application.rb), not by the binary's file name.
+Tep::APP.name = Rails.application.global_id_app
 # Tep::Server::Threaded is the thread-per-connection server: a green
 # thread per connection, every wait a park (recv, write, sleep, and the
 # timed idle waits), so a held-open WebSocket costs a small stack and

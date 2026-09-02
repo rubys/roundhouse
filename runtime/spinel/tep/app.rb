@@ -26,7 +26,12 @@ module Tep
     # rationale that puts broadcast_subs here rather than on a module.
     attr_accessor :cable_identifiers, :cable_lock
 
+    # The app's own name, for the startup banner and the log prefix
+    # (Tep.display_name). Set by scaffold/main.rb; empty until then.
+    attr_accessor :name
+
     def initialize
+      @name = ""
       # Type-seed the Broadcast subscriber registry: a first push pins
       # the element type, then it is dropped.
       @broadcast_subs = [Tep::BroadcastSubscription.new(

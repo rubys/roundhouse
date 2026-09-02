@@ -1,20 +1,21 @@
 # Cable — Action Cable (actioncable-v1-json) WebSocket endpoint for the
-# spinel target, built on tep's WebSocket + Scheduler + Broadcast stack.
+# spinel target, built on the Tep::WebSocket codec + Tep::Broadcast fan-out
+# under Tep::Server::Threaded.
 #
 # This is the spinel-subset sibling of the CRuby overlay's
 # `ruby_overlay/cable.rb` (which rides Puma's rack-hijack +
 # websocket-driver gem). Both satisfy the same surface — Turbo's
 # `<turbo-cable-stream-source>` opens a WebSocket to `/cable`, and
 # `Broadcasts.set_transport(...)` fans model after-commit fragments out
-# to subscribers in real time — but this one uses no threads, no gems:
-# tep's fiber-scheduled server holds the connection open, tep's
-# WebSocket codec frames the traffic, and Tep::Broadcast does the
-# per-fd fan-out.
+# to subscribers in real time — but this one uses no gems: the
+# connection is a green thread that parks between frames, the
+# Tep::WebSocket codec frames the traffic, and Tep::Broadcast does the
+# per-connection fan-out.
 #
 # Protocol implemented (Action Cable v1 JSON):
 #   - Server -> client {"type":"welcome"} on open
 #   - Server -> client {"type":"ping","message":<unix-ts>} every 3s
-#     (a per-connection scheduler fiber; Turbo reconnects without it)
+#     (a per-connection ping thread; Turbo reconnects without it)
 #   - Client -> server {"command":"subscribe","identifier":"<json>"}
 #     where the identifier JSON carries
 #     {"channel":"Turbo::StreamsChannel","signed_stream_name":"<sig>"}
@@ -256,7 +257,7 @@ module Cable
     0
   end
 
-  # on_open handler: greet + start the ping fiber.
+  # on_open handler: greet + start the ping thread.
   class WsOpen < Tep::WebSocket::Handler
     attr_accessor :ws
 
@@ -317,7 +318,7 @@ module Cable
   # Perform the `/cable` upgrade from inside Main.dispatch. Mirrors the
   # manual shape bin/tep's translator lowers a `websocket` block into:
   # validate the handshake, build one Driver shared by both event
-  # handlers, and flip res.start_websocket so Tep::Server::Scheduled
+  # handlers, and flip res.start_websocket so Tep::Server::Threaded
   # writes the 101 and runs the recv loop. Returns true if it handled
   # an upgrade (caller returns early), false if the request wasn't a
   # valid WS upgrade.
@@ -331,7 +332,7 @@ module Cable
 
     # IDENTITY RESOLVES BEFORE THE SOCKET IS TAKEN OVER. `res.status`
     # below is only answerable while this is still an ordinary HTTP
-    # response; once `res.start_websocket` runs, Tep::Server::Scheduled
+    # response; once `res.start_websocket` runs, Tep::Server::Threaded
     # has written the 101 and a refusal could only be a silent close.
     # 401 rather than a quiet welcome, and 401 rather than Rails' 404,
     # because it is what the CRuby overlay's config.ru already answers —

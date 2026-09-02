@@ -69,13 +69,17 @@ module Tep
       def run(port, workers, quiet)
         sfd = Sock.sphttp_listen(port, workers > 1 ? 1 : 0)
         if sfd < 0
-          $stderr.puts "tep: cannot bind to port " + port.to_s +
-                       " (already in use?)"
+          $stderr.puts Tep.display_name + ": cannot bind to port " +
+                       port.to_s + " (already in use?)"
           exit(1)
         end
         if !quiet
-          puts "[tep " + Tep::VERSION + "] listening on http://0.0.0.0:" +
-               port.to_s + " (workers=" + workers.to_s + ")"
+          puts Tep.display_name + " (" + RUBY_ENGINE +
+               ") listening on http://0.0.0.0:" + port.to_s +
+               ", pid " + Sock.sphttp_getpid.to_s
+          puts "  one green thread per connection; OS workers: " +
+               Tep.os_workers_desc + "; processes: " +
+               Tep.processes_desc(workers)
           $stdout.flush
         end
 

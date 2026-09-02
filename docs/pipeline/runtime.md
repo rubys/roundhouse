@@ -1318,8 +1318,9 @@ follows.
 
 **Why the split.** The two lanes share `runtime/spinel/turbo_streams.rb`
 and the channel classes, but not the transport: the overlay rides Puma's
-rack-hijack plus a nio4r reactor, spinel rides tep's fiber-scheduled
-server. Dispatch was built on the overlay first on purpose — if the
+rack-hijack plus a nio4r reactor, spinel rides its own server, a green
+thread per connection (`Tep::Server::Threaded`). Dispatch was built on
+the overlay first on purpose — if the
 frames do not match between Rails and the Ruby emit they were never
 going to match on spinel, and that is far cheaper to find while
 debugging one runtime instead of two (rubys/roundhouse#71).

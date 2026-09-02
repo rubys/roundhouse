@@ -43,12 +43,13 @@ module Tep
   # a no-op stub unless `--debug`), so both are normal and neither is
   # worth a line. The summary keeps Puma's shape whatever happens.
   def self.log_dispatch_error(verb, path, e)
-    $stderr.puts("[tep] 500 " + verb + " " + path + " -- " +
+    tag = "[" + Tep.display_name + "]"
+    $stderr.puts(tag + " 500 " + verb + " " + path + " -- " +
                  e.class.to_s + ": " + e.message)
     frames = e.backtrace
     if !frames.nil?
       frames.each do |frame|
-        $stderr.puts("[tep]        " + frame)
+        $stderr.puts(tag + "        " + frame)
       end
     end
   end
@@ -62,15 +63,18 @@ module Tep
 
     def run(port, workers, quiet)
       if !quiet
-        puts "[tep " + VERSION + "] listening on http://0.0.0.0:" + port.to_s +
-             " (workers=" + workers.to_s + ")"
+        puts Tep.display_name + " (" + RUBY_ENGINE +
+             ") listening on http://0.0.0.0:" + port.to_s +
+             ", pid " + Sock.sphttp_getpid.to_s
+        puts "  blocking accept loop, one request at a time per process; " +
+             "processes: " + Tep.processes_desc(workers)
       end
 
       if workers <= 1
         sfd = Sock.sphttp_listen(port, 0)
         if sfd < 0
-          $stderr.puts "tep: cannot bind to port " + port.to_s +
-                       " (already in use?)"
+          $stderr.puts Tep.display_name + ": cannot bind to port " +
+                       port.to_s + " (already in use?)"
           exit(1)
         end
         worker_loop(sfd)
@@ -85,7 +89,8 @@ module Tep
         if pid == 0
           sfd = Sock.sphttp_listen(port, 1)
           if sfd < 0
-            puts "tep: worker " + Sock.sphttp_getpid.to_s + " bind failed"
+            puts Tep.display_name + ": worker " + Sock.sphttp_getpid.to_s +
+                 " bind failed"
             exit(1)
           end
           worker_loop(sfd)

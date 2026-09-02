@@ -21,8 +21,9 @@ require_relative "server"
 # calls Tep::Presence.untrack_by_fd.
 require_relative "presence"
 require_relative "broadcast"
-# App owns the cooperative-scheduler + broadcast-subscriber state on
-# the Tep::APP singleton; scheduler + server_scheduled read it.
+# App owns the broadcast-subscriber registries (and the app's display
+# name) on the Tep::APP singleton; broadcast.rb, cable.rb and the
+# server read it.
 require_relative "app"
 require_relative "server_threaded"
 

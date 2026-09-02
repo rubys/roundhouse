@@ -25,7 +25,7 @@ module Tep
       @streamer    = Streamer.new   # default no-op; only used when @streaming
       @streaming   = false
       # WebSocket upgrade slots. When @upgrading_ws is set (by
-      # start_websocket, from the /cable handler), Tep::Server::Scheduled's
+      # start_websocket, from the /cable handler), Tep::Server::Threaded's
       # write path emits the 101 Switching Protocols handshake and then
       # drives Tep::WebSocket::Connection's recv loop instead of writing
       # a normal body.

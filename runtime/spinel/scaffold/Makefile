@@ -43,7 +43,7 @@ all: assets test lint
 # Files land under static/assets/<name> to match the Propshaft-shape
 # URLs the importmap pins (config/importmap.rb) and the layout's
 # stylesheet_link_tag emit — `/assets/<name>.{css,js}`. The spinel
-# binary's Main.dispatch serves these via sphttp sendfile; the CRuby
+# binary's Main.dispatch serves these via sendfile over sp_net; the CRuby
 # overlay's config.ru serves the identical layout via Rack::Static.
 # Root icons land at static/<icon> to match the layout's /icon.* hrefs.
 
@@ -278,8 +278,8 @@ cruby-test:
 # Thread/Mutex/module_function usage (fundamentally outside the
 # spinel subset). Spinel-target builds don't ship the overlay; for
 # those, `make dev` errors because no rake task exists, which is the
-# correct behavior — the spinel binary's HTTP layer is civetweb +
-# FFI, not a Ruby dev server. See memory: project_ruby_dev_server_retirement.
+# correct behavior — the spinel binary carries its own HTTP server
+# (runtime/tep/server_threaded.rb over sp_net), not a Ruby dev server.
 dev:
 	bundle exec rake dev
 

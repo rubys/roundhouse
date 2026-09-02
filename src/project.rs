@@ -2330,9 +2330,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // `ruby_runtime_files` / `jruby_runtime_files`.
     files.retain(|(p, _)| p != "runtime/module_delegate.rb");
 
-    // Vendored Tep transport (FFI HTTP server). Both .rb files and
-    // sphttp.c (precompiled to sphttp.o at transpile-post time).
-    // Recursive walk picks the whole subtree.
+    // The HTTP/WebSocket server (runtime/spinel/tep, over spinel's
+    // sp_net; no C of its own) plus its NOTICE. Recursive walk picks
+    // the whole subtree.
     walk_dir_into(Path::new("runtime/spinel/tep"), "runtime/tep/", &mut files)?;
 
     for sub in [

@@ -1,8 +1,8 @@
 # Tep::WebSocket::Connection -- per-connection recv loop.
 #
-# Designed to run inside a Tep::Scheduler-managed fiber spawned by
-# the upgrade route after the 101 response is written. The fiber:
-#   1. Parks on Tep::Scheduler.io_wait(fd, READ, timeout) for bytes.
+# Runs on the connection's green thread (Tep::Server::Threaded) after
+# the upgrade route has written the 101 response. The loop:
+#   1. Parks on the IO wrapper's timed `wait_readable` for bytes.
 #   2. Reads via Sock.sp_net_recv_some(:binstr) into a binary String,
 #      appended to a per-connection accumulator (binary-safe `+`).
 #   3. Walks the accumulator with Frame.parse_from_buf, dispatching
@@ -10,11 +10,9 @@
 #      frame forward via byteslice.
 #   4. On close (sent OR received), exits cleanly + closes the fd.
 #
-# The accumulator is a per-fiber Ruby String (binary-safe via :binstr +
-# pack), so it needs no shared static buffer. A future Phase 2.1 (or
-# whenever multi-fiber WS
-# concurrency-per-worker becomes a goal) replaces this with
-# per-fiber buffers via Fiber.storage (matz/spinel#578).
+# The accumulator is a per-connection Ruby String (binary-safe via
+# :binstr + pack), owned by this thread, so it needs no shared static
+# buffer.
 module Tep
   module WebSocket
     class Connection
