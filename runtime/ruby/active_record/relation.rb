@@ -139,9 +139,43 @@ module ActiveRecord
       true
     end
 
+    # `order` on a LOADED relation sorts the loaded records in memory
+    # rather than dropping them and re-querying. This is the shape a
+    # preloaded association takes through a scope: campfire's message
+    # partial renders `message.boosts.ordered` for every message on the
+    # page, and with `includes(boosts: :booster)` already loaded those
+    # boosts, re-querying them was one round trip per message -- the room
+    # page's last N+1. (Rails re-queries here too, and hides it behind
+    # its fragment cache; a per-request renderer cannot.)
+    #
+    # Only a term that names a bare column, optionally with a table
+    # prefix and ASC/DESC, sorts in memory; anything else (an expression,
+    # a function, RANDOM()) drops the memo and the SQL path answers. The
+    # sort is STABLE and applies the terms last-to-first, so ties under
+    # the first term keep the loaded order -- which is the table's row
+    # order, the same order SQLite hands back for tied keys -- and a
+    # page sorted here matches one sorted by the database byte for byte.
     def order(*parts)
-      @records = nil
-      parts.each { |p| @orders << order_term(p) }
+      terms = parts.map { |p| order_term(p) }
+      terms.each { |t| @orders << t }
+      loaded = @records
+      return self if loaded.nil?
+      # An explicit copy rather than `dup`: built by pushes, the copy has
+      # the records array's own type where a `dup` of a nilable read does
+      # not, and it is assigned back into `@records` below. An index loop
+      # rather than `each`, whose block parameter the typer cannot derive
+      # from a receiver it only knows as nilable.
+      sorted = []
+      i = 0
+      while i < loaded.length
+        sorted << loaded[i]
+        i += 1
+      end
+      if sort_in_place!(sorted, terms)
+        @records = sorted
+      else
+        @records = nil
+      end
       self
     end
 
@@ -155,9 +189,107 @@ module ActiveRecord
     end
 
     def order!(*parts)
-      @records = nil
-      parts.each { |p| @orders << order_term(p) }
+      terms = parts.map { |p| order_term(p) }
+      terms.each { |t| @orders << t }
+      loaded = @records
+      return self if loaded.nil?
+      # An explicit copy rather than `dup`: built by pushes, the copy has
+      # the records array's own type where a `dup` of a nilable read does
+      # not, and it is assigned back into `@records` below. An index loop
+      # rather than `each`, whose block parameter the typer cannot derive
+      # from a receiver it only knows as nilable.
+      sorted = []
+      i = 0
+      while i < loaded.length
+        sorted << loaded[i]
+        i += 1
+      end
+      if sort_in_place!(sorted, terms)
+        @records = sorted
+      else
+        @records = nil
+      end
       self
+    end
+
+    # Sort `sorted` (a copy of the loaded records) by `terms` in place;
+    # true when every term was a bare column, false when one was not --
+    # the caller then drops the memo and the database orders instead.
+    # Stable insertion sort: the memo is a page, not a table, and
+    # stability is the property that keeps tied rows in database order.
+    def sort_in_place!(sorted, terms)
+      i = terms.length - 1
+      while i >= 0
+        col = order_column(terms[i])
+        return false if col.nil?
+        desc = order_descending?(terms[i])
+        # Keys once per row, not once per comparison: `attributes` builds
+        # a Hash on every call.
+        keys = sorted.map { |r| order_key_of(r, col) }
+        n = sorted.length
+        j = 1
+        while j < n
+          moving = sorted[j]
+          key = keys[j]
+          k = j - 1
+          while k >= 0
+            cmp = compare_order_keys(keys[k], key)
+            return false if cmp.nil?
+            cmp = -cmp if desc
+            break if cmp <= 0
+            sorted[k + 1] = sorted[k]
+            keys[k + 1] = keys[k]
+            k -= 1
+          end
+          sorted[k + 1] = moving
+          keys[k + 1] = key
+          j += 1
+        end
+        i -= 1
+      end
+      true
+    end
+
+    # One row's value under `col`, as the database would order it. The
+    # synthesized `attributes` hash carries every column BUT the primary
+    # key, and datetimes as their raw stored text (which orders as the
+    # database orders them); `id` is read off the record itself.
+    def order_key_of(record, col)
+      return record.id if col == "id"
+      record.attributes[col]
+    end
+
+    # The bare column an order term names -- `"created_at"` and
+    # `"boosts.created_at DESC"` both answer `"created_at"` -- or nil for
+    # anything that is not one column with an optional ASC/DESC.
+    def order_column(term)
+      words = term.strip.split(/\s+/)
+      return nil if words.length == 0 || words.length > 2
+      col = words[0]
+      dot = col.rindex(".")
+      col = col[(dot + 1)..] unless dot.nil?
+      return nil unless col.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+      if words.length == 2
+        dir = words[1].upcase
+        return nil unless dir == "ASC" || dir == "DESC"
+      end
+      col
+    end
+
+    # Whether an order term (already accepted by `order_column`) says DESC.
+    def order_descending?(term)
+      words = term.strip.split(/\s+/)
+      words.length == 2 && words[1].upcase == "DESC"
+    end
+
+    # SQLite's ordering of two attribute values: NULL sorts first, then
+    # like compares with like. nil for a pair this cannot order, which
+    # sends the caller back to the database.
+    def compare_order_keys(a, b)
+      return 0 if a.nil? && b.nil?
+      return -1 if a.nil?
+      return 1 if b.nil?
+      a <=> b
     end
 
     def limit(n)
@@ -677,8 +809,11 @@ module ActiveRecord
       r.nil? ? count == 0 : r.length == 0
     end
 
+    # Like `empty?`: a loaded relation answers from its records, an
+    # unloaded one asks the database for a count.
     def any?
-      count > 0
+      r = @records
+      r.nil? ? count > 0 : r.length > 0
     end
 
     # Rails reaches Enumerable#none? through the relation, and without a

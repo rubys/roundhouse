@@ -1173,7 +1173,24 @@ fn every_runtime_method_body_concretely_typed() {
     // sites bought: every `Rails.logger.error` an app writes inside a
     // `rescue` is now visible on stderr, instead of the operator
     // splicing a reporter into the emitted tree to learn what raised.
-    const CEILING: usize = 345;
+    //
+    // 345 -> 403: `Relation#order` sorts a LOADED relation in memory
+    // (relation.rb `sort_in_place!` and its helpers). FIFTY-EIGHT sites,
+    // MEASURED one declaration at a time (431 with a pair-returning
+    // helper and untyped `terms`; 403 with `terms: Array[String]`, the
+    // helper split into `order_column -> String?` and
+    // `order_descending? -> bool`, and `compare_order_keys -> Integer?`).
+    // What stays `untyped` is what IS untyped: `sorted`, a copy of the
+    // loaded records -- the same representation trade `preloaded` makes
+    // above, and for the same reason (a caller's typed array must not be
+    // coerced to a poly one); each `record` the sort reads a key from;
+    // and the keys themselves, which are whatever the ordered column
+    // holds. The insertion sort touches those on every comparison, which
+    // is where the count comes from. What it bought: campfire's
+    // `message.boosts.ordered` under `includes(boosts: :booster)` no
+    // longer re-queries per message -- 40 round trips -> 0 on the room
+    // page, 14 against Rails' 13.
+    const CEILING: usize = 403;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

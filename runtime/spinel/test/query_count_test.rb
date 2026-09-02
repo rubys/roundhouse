@@ -106,6 +106,29 @@ class QueryCountTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # `order` on a LOADED relation sorts the loaded records in memory
+  # instead of re-querying -- the shape a preloaded association takes
+  # through an order-only scope (campfire's `message.boosts.ordered`, one
+  # query per message before this). A filtering chain still re-queries.
+  def test_ordering_a_loaded_relation_sorts_in_memory
+    loaded = ActiveRecord::Relation.new(Article).order("id").to_a
+    raise "fixture seeded fewer than 2 articles" if loaded.length < 2
+    sql = Db.capture_sql do
+      rel = ActiveRecord::Relation.new(Article).preloaded(loaded, true).order("id DESC")
+      ids = rel.map { |a| a.id }
+      raise "expected descending ids, got #{ids.inspect}" unless ids == loaded.map { |a| a.id }.reverse
+      raise "any? on a loaded relation must not query" unless rel.any?
+    end
+    unless sql.length == 0
+      raise "expected ordering a loaded relation to issue 0 queries, got #{sql.length}:\n#{sql.join("\n")}"
+    end
+    # An unloaded relation (`preloaded` with loaded = false) still queries.
+    sql = Db.capture_sql do
+      ActiveRecord::Relation.new(Article).preloaded([], false).order("id DESC").to_a
+    end
+    raise "expected an unloaded relation to query once, got #{sql.length}" unless sql.length == 1
+  end
+
   # The flip side: chaining after a terminal (`rel.where(...)` mutates
   # and returns the same object) must drop the cache — serving the
   # pre-refinement rows would be a correctness bug, not a perf feature.
@@ -145,4 +168,8 @@ __t4 = QueryCountTest.new
 __t4.setup
 __t4.test_identical_selects_within_a_request_replay_from_the_query_cache
 __t4.teardown
-puts "QueryCountTest: 4 tests passed"
+__t5 = QueryCountTest.new
+__t5.setup
+__t5.test_ordering_a_loaded_relation_sorts_in_memory
+__t5.teardown
+puts "QueryCountTest: 5 tests passed"

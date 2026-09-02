@@ -22,6 +22,16 @@ module ActiveRecord
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
     def order: (*untyped parts) -> Relation
+    # The in-memory sort `order` applies to a LOADED relation (see the
+    # .rb). `sorted` is `untyped` for the same reason `preloaded`'s
+    # `records` is: the body only indexes and assigns into it.
+    def sort_in_place!: (untyped sorted, Array[String] terms) -> bool
+    def order_column: (String term) -> String?
+    def order_descending?: (String term) -> bool
+    # The keys are whatever the ordered column holds, and `<=>` on two
+    # of them is an Integer or nil -- the only honest spellings.
+    def compare_order_keys: (untyped a, untyped b) -> Integer?
+    def order_key_of: (untyped record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
     def order!: (*untyped parts) -> Relation
     def limit: (Integer n) -> Relation

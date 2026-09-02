@@ -155,7 +155,7 @@ fn counted_terminal_on_a_seeded_association_is_renamed() {
         "app/controllers/rooms_controller.rb",
     );
     assert!(
-        show.contains("Message.ordered(ActiveRecord::Relation.new(Message).where(room_id: @room.id)).first_n(3)"),
+        show.contains("Message.ordered(ActiveRecord::Relation.new(Message).where(room_id: @room.id).preloaded(@room.messages_target, @room.messages_loaded?)).first_n(3)"),
         "@room.messages.ordered.first(3) seeds and renames:\n{show}"
     );
 }

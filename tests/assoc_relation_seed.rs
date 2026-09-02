@@ -153,11 +153,11 @@ fn shown() -> String {
 fn ambiguous_assoc_name_resolves_through_the_owner_ivar_name() {
     let show = shown();
     assert!(
-        show.contains("Message.with_creator(ActiveRecord::Relation.new(Message).where(room_id: @room.id))"),
+        show.contains("Message.with_creator(ActiveRecord::Relation.new(Message).where(room_id: @room.id).preloaded(@room.messages_target, @room.messages_loaded?))"),
         "@room.messages seeds room_id:\n{show}"
     );
     assert!(
-        show.contains("Message.with_creator(ActiveRecord::Relation.new(Message).where(creator_id: @user.id))"),
+        show.contains("Message.with_creator(ActiveRecord::Relation.new(Message).where(creator_id: @user.id).preloaded(@user.messages_target, @user.messages_loaded?))"),
         "@user.messages seeds creator_id, not room_id:\n{show}"
     );
 }
@@ -195,7 +195,7 @@ fn row_changing_association_scope_declines() {
 fn preload_only_association_scope_still_seeds() {
     let show = shown();
     assert!(
-        show.contains("Tag.alphabetical(ActiveRecord::Relation.new(Tag).where(recent_room_id: @room.id))"),
+        show.contains("Tag.alphabetical(ActiveRecord::Relation.new(Tag).where(recent_room_id: @room.id).preloaded(@room.recent_tags_target, @room.recent_tags_loaded?))"),
         "includes-only scope does not block the seed:\n{show}"
     );
 }
@@ -216,7 +216,7 @@ fn preload_only_association_scope_still_seeds() {
 fn a_where_on_an_association_read_opens_the_gate() {
     let show = shown();
     assert!(
-        show.contains("ActiveRecord::Relation.new(Message).where(room_id: @room.id).where(body:"),
+        show.contains("ActiveRecord::Relation.new(Message).where(room_id: @room.id).preloaded(@room.messages_target, @room.messages_loaded?).where(body:"),
         "a `where` on an assoc read must seed:\n{show}"
     );
 }
@@ -233,5 +233,21 @@ fn a_bare_count_on_an_association_read_leaves_the_gate_shut() {
     assert!(
         show.contains("@n = ") && !show.contains("Relation.new(Message).where(room_id: @room.id).count"),
         "a bare count must NOT seed:\n{show}"
+    );
+}
+
+/// The seed carries the owner's eager-load cache with it. A scope reached
+/// through a preloaded association (`message.boosts.ordered` under
+/// `includes(boosts: :booster)`) used to re-query per record because the
+/// seed replaced the reader and, with it, the cache the reader would have
+/// answered from. `.preloaded(<owner>.<assoc>_target, <owner>.<assoc>_loaded?)`
+/// hands the relation both: a no-op when nothing was loaded, the loaded
+/// rows otherwise -- which an order-only scope then sorts in memory.
+#[test]
+fn a_seeded_association_relation_carries_the_owners_cache() {
+    let show = shown();
+    assert!(
+        show.contains(".preloaded(@room.messages_target, @room.messages_loaded?)"),
+        "the seed hands the relation the cache:\n{show}"
     );
 }

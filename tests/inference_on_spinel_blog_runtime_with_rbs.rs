@@ -735,7 +735,31 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // lobsters bench lane's AOT row down for three days
     // (`--rbs seed contradicted: User#upvoted_stories is declared to
     // return Relation but this returns int_array`).
-    const CEILING: usize = 778;
+    // 2026-09-02 778 -> 915, +137 for `Relation#order` sorting a LOADED
+    // relation in memory (`sort_in_place!`, `order_column`,
+    // `order_descending?`, `compare_order_keys`, `order_key_of`): a
+    // stable insertion sort over the loaded records, keyed by
+    // `attributes[col]`. The records are `untyped` (the element type this
+    // Relation has never had), the keys are whatever a column holds, and
+    // `order`'s own `*untyped parts` is untyped by declaration -- so every
+    // local the sort derives from them is a TyVar, some sixty in the sort
+    // alone; and this gate resolves none of Relation's self-sends, so
+    // `sort_in_place!`/`compare_order_keys` results count again at each
+    // call site. MEASURED, not derived: 881 with a pair-returning helper,
+    // 921 after splitting it into a `String?` and a `bool` for the
+    // sibling gate in runtime_src_integration.rs (which counts declared
+    // `untyped` and went 431 -> 403 on the same change), 915 once the
+    // loaded copy is built by pushes instead of `dup` (spinel would not
+    // assign a nilable read's `dup` into the typed records field). What
+    // it retires:
+    // the last N+1 on campfire's room page. `message.boosts.ordered`
+    // under `includes(boosts: :booster)` re-queried once per message
+    // because the scope's `order` dropped the memo the association had
+    // just filled; 40 round trips -> 0, and the page sits at 14 against
+    // Rails' 13. Typing Relation's element (the generic-Relation
+    // refinement its header names) would retire most of this along with
+    // the rest of the file's 400-odd.
+    const CEILING: usize = 915;
 
     assert!(
         all_untyped.len() <= CEILING,

@@ -216,6 +216,7 @@ fn find_by_bang_through_a_read_owner_seeds_a_relation() {
     assert!(
         create.contains(
             "ActiveRecord::Relation.new(Membership).where(user_id: Current.user.id)\
+             .preloaded(Current.user.memberships_target, Current.user.memberships_loaded?)\
              .find_by!(room_id:"
         ),
         "Current.user.memberships.find_by! seeds a relation:\n{create}"

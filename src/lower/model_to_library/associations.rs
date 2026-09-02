@@ -104,6 +104,26 @@ pub(super) fn push_association_methods(
                     through.is_some(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
+                // `<name>_loaded?` / `<name>_target`: the eager-load cache
+                // read from outside the record. `scope_chain`'s seed arm
+                // hands a relation seeded from `owner.<name>` these two,
+                // so a scope reached through a preloaded association
+                // (`message.boosts.ordered`) answers from the loaded rows
+                // instead of re-querying per record. Rails' spelling is
+                // `association(:boosts).loaded?` / `.target`; the flat
+                // names here are what every emitter can dispatch.
+                methods.push(synth_cache_reader(
+                    owner,
+                    Symbol::from(format!("{}_loaded?", name.as_str())),
+                    loaded_ivar(name),
+                    Ty::Bool,
+                ));
+                methods.push(synth_cache_reader(
+                    owner,
+                    Symbol::from(format!("{}_target", name.as_str())),
+                    cache_ivar(name),
+                    Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+                ));
                 {
                     // A model that writes its own `<singular>_ids`
                     // wins, same as every other synthesizer here — the
@@ -759,6 +779,24 @@ fn synth_has_one_reader(
                 variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
             },
         )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def <name>; @<ivar>; end` — a plain read of one has_many cache ivar,
+/// typed as the ivar is (see the call site for why these exist).
+fn synth_cache_reader(owner: &ClassId, name: Symbol, ivar: Symbol, ty: Ty) -> MethodDef {
+    MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: Expr::new(Span::synthetic(), ExprNode::Ivar { name: ivar }),
+        signature: Some(super::fn_sig(vec![], ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

@@ -3191,7 +3191,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             );
                             let seed_method =
                                 if assoc_cm.is_some() { "where_scope" } else { "where" };
-                            let seed = syn(
+                            let mut seed = syn(
                                 span,
                                 ExprNode::Send {
                                     recv: Some(relation_new(span, &target)),
@@ -3201,6 +3201,48 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     parenthesized: true,
                                 },
                             );
+                            // The seed REPLACES `<owner>.<assoc>`, and with
+                            // it the reader's eager-load cache: a scope
+                            // reached through a preloaded association
+                            // (`message.boosts.ordered`, with `includes
+                            // (boosts: :booster)` upstream) re-queried per
+                            // record -- the room page's last N+1. So the
+                            // relation is handed the cache too:
+                            // `.preloaded(<owner>.<assoc>_target,
+                            // <owner>.<assoc>_loaded?)` seeds its loaded
+                            // memo when the association was loaded and is a
+                            // no-op when it was not. An order-only scope
+                            // then sorts the memo in memory (Relation#order);
+                            // a filtering chain drops it and queries, as
+                            // before. Not for the create-scope spelling,
+                            // which builds a record rather than reading.
+                            if assoc_cm.is_none() {
+                                let owner_send = |m: String| {
+                                    syn(
+                                        span,
+                                        ExprNode::Send {
+                                            recv: Some(ir.clone()),
+                                            method: Symbol::from(m),
+                                            args: vec![],
+                                            block: None,
+                                            parenthesized: false,
+                                        },
+                                    )
+                                };
+                                seed = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(seed),
+                                        method: Symbol::from("preloaded"),
+                                        args: vec![
+                                            owner_send(format!("{}_target", aname.as_str())),
+                                            owner_send(format!("{}_loaded?", aname.as_str())),
+                                        ],
+                                        block: None,
+                                        parenthesized: true,
+                                    },
+                                );
+                            }
                             if let Some(leading) = assoc_cm {
                                 let new_args = thread_rel(args, seed, Some(leading), span);
                                 *expr = put(
