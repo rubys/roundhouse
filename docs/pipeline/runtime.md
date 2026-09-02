@@ -2403,14 +2403,18 @@ down in 4 of 7 runs on a 16-core Linux box (gdb: `SIGSEGV` in
 `sp_StrArray_scan` under `sp_gc_mark_drain` — a stop-the-world mark
 reaching an `Array[String]` whose element was already freed), and in
 one more run a cable subscribe never confirmed with the server alive.
-`SPINEL_WORKERS=1`: 9 of 9 green. A browser-free burst of
-unauthenticated GETs does not reproduce it. Every launcher we ship
-sets `SPINEL_WORKERS=1` (the archive's README says why); the server's
-header carries the evidence and the open question — our unlocked
-shared state, or a root gap in the multi-worker collector. Lifting the
-pin is Stage C of the green-thread migration, with evidence.
-matz/spinel#4266 asks for a program-level cap so the binary can pin
-itself.
+`SPINEL_WORKERS=1`: 9 of 9 green. Diagnosed the same day with
+`SPINEL_GC_VERIFY=1 SPINEL_GC_STRESS=1` and a TSan build:
+matz/spinel#4272 — the boxed proc channel is per-worker TLS the barrier
+never published, so a stale slot on an idle worker named an object
+another worker's collection had freed — plus the per-class pool's
+plain push under the parallel sweep; both fixed on rubys/spinel
+branches with reductions. Meanwhile the program declares one worker
+for itself on `main.rb`'s first line (the runtime reads
+`SPINEL_WORKERS` at the first `Thread.new`, so the operator's
+environment still wins; matz/spinel#4266). Lifting the declaration is
+Stage C of the green-thread migration, once both fixes are merged and
+the multi-core browser loops are green without it.
 
 ### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
 

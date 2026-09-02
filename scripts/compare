@@ -536,8 +536,7 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         spinel)
-            # SPINEL_WORKERS=1: see runtime/spinel/tep/server_threaded.rb's header.
-            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" SPINEL_WORKERS=1 ./build/blog >"$TARGET_LOG" 2>&1) &
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./build/blog >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
     esac

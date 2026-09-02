@@ -957,7 +957,6 @@ start_target() {
                 BLOG_DB=storage/development.sqlite3 \
                 PORT="$port" \
                 DATABASE_POOL_SIZE="$CONNECTIONS" \
-                SPINEL_WORKERS=1 \
                 ./build/blog \
                 >"$log" 2>&1) &
             TARGET_PID=$!

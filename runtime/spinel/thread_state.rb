@@ -144,6 +144,33 @@ module Broadcasts
 end
 
 module ActiveJob
+  # The performed log, per thread. Every job class's `perform_later`
+  # records its name here BEFORE enqueueing -- on the request thread --
+  # and only the test helpers read it, as a length delta across their
+  # own block, on that same thread. The shared `PERFORMED` Array was the
+  # one global string array the emit pushes onto at request time with no
+  # lock: two workers' pushes tore it, and the next stop-the-world mark
+  # walked the torn buffer (SIGSEGV in sp_StrArray_scan under
+  # sp_gc_mark_drain, 2026-09-02). A per-thread log also stops the
+  # server growing that Array for as long as it lives.
+  def self.__performed
+    l = Thread.current[:jobs_performed]
+    if l.nil?
+      l = []
+      Thread.current[:jobs_performed] = l
+    end
+    l
+  end
+
+  def self.record_performed(job_name)
+    __performed << job_name
+    nil
+  end
+
+  def self.performed
+    __performed.dup
+  end
+
   # Requests enqueue from their own threads and one worker drains: the
   # Array is shared on purpose, so it is written under a lock. `drain`
   # takes one job out under the lock and runs it outside, so a slow job

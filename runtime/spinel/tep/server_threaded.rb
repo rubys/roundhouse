@@ -18,10 +18,18 @@
 # waits go through one `IO.for_fd` wrapper per connection (a dup, closed
 # with the connection), because a raw fd has no `wait_readable`.
 #
-# ONE OS WORKER, FOR NOW -- every launcher sets SPINEL_WORKERS=1 (the
-# campfire archive's README and e2e config, scripts/campfire-compare,
-# campfire-cable-walk, campfire-queries, e2e, compare, bench). This is
-# the evidence, 2026-09-02, spinel 3428632f, 16-core Linux/gcc: with the
+# ONE OS WORKER, FOR NOW -- scaffold/main.rb declares it on its first line
+# (`ENV["SPINEL_WORKERS"] = "1" unless ENV["SPINEL_WORKERS"]`; the runtime
+# reads the variable at the first Thread.new, so the program's own default
+# holds and an operator's environment still wins -- matz/spinel#4266).
+# DIAGNOSED (matz/spinel#4272): the boxed proc channel _sp_proc_poly_ret /
+# _args is per-worker TLS the barrier never published, so a stale slot on
+# an idle worker named an object another worker's collection had freed;
+# fix on rubys/spinel `poly-channel-publish`. Beside it, the per-class pool
+# recycle pushed with plain stores under the PARALLEL sweep (TSan: 1,579
+# reports; fix on `pool-recycle-cas`) -- real, cannot dangle. The
+# evidence that found them, 2026-09-02, spinel 3428632f, 16-core
+# Linux/gcc: with the
 # autodetected worker count the binary died under a browser's parallel
 # load of the room page in 4 of 7 runs -- gdb: SIGSEGV in
 # sp_StrArray_scan inside sp_gc_mark_drain, a stop-the-world mark
@@ -32,11 +40,11 @@
 # reproduce it, so the signed-in page render is part of the shape. Not
 # yet known: whether the freed element is shared state this server
 # still leaves unlocked or a root gap in the runtime's multi-worker
-# collector. Until that is known, one worker is the validated
-# configuration -- the semantics the fiber server had, every I/O parking
-# -- and matz/spinel#4266 asks for a program-level cap so the binary can
-# pin itself instead of every launcher. Lift the pin with evidence, not
-# by deleting it.
+# collector. Until both fixes are merged and the browser loops on a
+# multi-core box are green with the declaration removed, one worker is
+# the validated configuration -- the semantics the fiber server had,
+# every I/O parking. Lift the declaration with that evidence, not by
+# deleting it.
 module Tep
   class Server
     class Threaded

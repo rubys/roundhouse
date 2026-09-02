@@ -132,9 +132,8 @@ RAILS_LOG_LEVEL=debug "$REPO_ROOT/scripts/campfire-oracle" serve --out "$ORACLE"
 ORACLE_PID=$!
 
 step "booting the binary on :$EMIT_PORT (RH_SQL_TRACE=1)"
-# SPINEL_WORKERS=1: see runtime/spinel/tep/server_threaded.rb's header.
 ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" RH_SQL_TRACE=1 \
-    SPINEL_WORKERS=1 exec ./build/blog ) > "$DUMPS/binary.log" 2>&1 &
+    exec ./build/blog ) > "$DUMPS/binary.log" 2>&1 &
 EMIT_PID=$!
 
 wait_up() {

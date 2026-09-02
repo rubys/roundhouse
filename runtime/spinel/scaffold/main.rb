@@ -24,6 +24,17 @@
 # The whole require chain (see boot.rb). Kept in its own file so
 # `test/test_helper.rb` can load the app without loading this one,
 # which starts a server.
+# ONE OS WORKER, DECLARED BY THE PROGRAM. The runtime reads SPINEL_WORKERS at
+# the first Thread.new -- after this line has run -- and ENV[]= is a real
+# setenv(3), so this is the program's own default and an operator's
+# SPINEL_WORKERS=N in the environment still wins (matz, matz/spinel#4266;
+# `||=` is refused there: ENV cannot flow as a value). Why one: the
+# multi-worker collector has two open gaps, matz/spinel#4272 (a per-worker
+# root the barrier does not publish -- the crash) and the parallel-sweep
+# pool race beside it; runtime/spinel/tep/server_threaded.rb's header
+# carries the evidence. Lift this when both are merged and the browser
+# loops on a multi-core box say so, not before.
+ENV["SPINEL_WORKERS"] = "1" unless ENV["SPINEL_WORKERS"]
 require_relative "boot"
 
 module Main
