@@ -90,6 +90,19 @@ pub fn apply_try_guard_lowering(app: &mut App) {
             }
         }
     }
+    // AND THE VIEWS, which `for_each_hook_body` does not walk either. The
+    // ingest desugar this pass replaced was universal — it grounded `try`
+    // in every body it parsed — so the pass has to reach every body the
+    // desugar did, or a site keeps a raw `.try(` that no target's runtime
+    // defines. lobsters' layout is where that showed: `<body
+    // data-username='<%= @user.try(:username) %>'>` reached the Ruby
+    // lane as `user.try(:username)`, and every request raised `undefined
+    // method 'try' for nil` before the page rendered — seven of its view
+    // files, and the AOT lane refused the same site as a non-bool
+    // condition.
+    for view in &mut app.views {
+        rewrite(&mut view.body, &definers, &parents);
+    }
 }
 
 fn rewrite(

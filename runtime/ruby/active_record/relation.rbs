@@ -79,10 +79,18 @@ module ActiveRecord
     def filter: () { (untyped) -> bool } -> Array[untyped]
     def map: () { (untyped) -> untyped } -> untyped
     def collect: () { (untyped) -> untyped } -> untyped
-    def +: (Array[untyped] other) -> Array[untyped]
-    def &: (Array[untyped] other) -> Array[untyped]
-    def |: (Array[untyped] other) -> Array[untyped]
-    def -: (Array[untyped] other) -> Array[untyped]
+    # `other` is `untyped`, NOT `Array[untyped]`, on all four set
+    # operators: each body only hands the argument on to Array's own
+    # operator (`to_a + other`), so it does not care about the array's
+    # REPRESENTATION — and that is all `Array[untyped]` claims. spinel
+    # trusts the seed, and lobsters' `Story#merged_comments` passes
+    # `[self.id]`, an `Array[Integer]`, which contradicted it and held
+    # the AOT lane at the seed check from 2026-08-30. Same over-claim as
+    # `preloaded` above and `map`/`collect` below.
+    def +: (untyped other) -> Array[untyped]
+    def &: (untyped other) -> Array[untyped]
+    def |: (untyped other) -> Array[untyped]
+    def -: (untyped other) -> Array[untyped]
     def include?: (untyped record) -> bool
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]

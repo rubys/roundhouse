@@ -59,6 +59,7 @@ fn emit(files: &[(&str, &str)]) -> String {
     ruby::emit_lowered_models(&app)
         .into_iter()
         .chain(ruby::emit_library(&app))
+        .chain(ruby::emit_lowered_views(&app))
         .map(|f| f.content)
         .collect::<Vec<_>>()
         .join("\n")
@@ -164,5 +165,34 @@ fn the_synthesized_method_list_still_matches_the_synthesizer() {
         "`lower::try_guard::SYNTHESIZED_ON_EVERY_MODEL` names `to_gid_param` because \
          `lower::broadcasts::push_to_gid_param` puts it on every model. That function \
          is gone or renamed — the list is now a claim nothing backs."
+    );
+}
+
+/// A VIEW is a body too. The ingest desugar this pass replaced was
+/// universal; `for_each_hook_body` is not, and views are the bodies it
+/// leaves out. lobsters' layout is where that showed: `<body
+/// data-username='<%= @user.try(:username) %>'>` reached the Ruby lane
+/// as `user.try(:username)`, and every request raised before the page
+/// rendered — no target's runtime defines `try`.
+#[test]
+fn a_try_in_a_view_is_grounded_like_any_other_body() {
+    let src = emit(&[
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  def nickname\n    \"nick\"\n  end\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def show\n    @user = User.first\n  end\nend\n",
+        ),
+        ("app/views/rooms/show.html.erb", "<p><%= @user.try(:nickname) %></p>\n"),
+    ]);
+    assert!(
+        !src.contains(".try("),
+        "a view keeps no raw `try` — nothing at runtime answers it:\n{src}"
+    );
+    assert!(
+        src.contains("is_a?(User)"),
+        "only User answers `nickname`, in a view as in a method:\n{src}"
     );
 }
