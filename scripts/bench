@@ -250,9 +250,14 @@ fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 record_skip() {
     local target="$1" stage="$2" log="$3"
     ruby - "$SKIPPED_JSON" "$target" "$stage" "$log" <<'RUBY'
+# encoding: utf-8
+# The magic comment and the explicit read encoding: a script on stdin
+# takes its source encoding from the locale, and a log's bytes take
+# theirs from it too. cron supplies one here; a bare `env -i` does not,
+# and a build log full of cargo's arrows must not take the record down.
 require "json"
 path, target, stage, log = ARGV
-lines  = File.exist?(log) ? File.readlines(log, chomp: true) : []
+lines  = File.exist?(log) ? File.readlines(log, chomp: true, encoding: "UTF-8").map(&:scrub) : []
 tail   = lines.last(40).map { |l| l.gsub(/\e\[[0-9;]*m/, "") }
 reason = tail.reverse.find { |l| !l.strip.empty? }.to_s.strip
 File.open(path, "a") do |f|
@@ -1224,6 +1229,7 @@ step "aggregating $(wc -l < "$PER_RUN_JSON") runs → $OUT_DIR/summary.md"
 # targets so it's guaranteed available). Median across runs per
 # (target, workers, endpoint) cell. Compute req/sec/GB.
 ruby - "$PER_RUN_JSON" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" <<'RUBY'
+# encoding: utf-8
 require "json"
 
 per_run_path, summary_json_path, summary_md_path = ARGV
