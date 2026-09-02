@@ -46,6 +46,20 @@ module Broadcasts
     LOG.dup
   end
 
+  # THE ONE WRITE PATH onto the log. `record` and both
+  # `ActionCable::Server#broadcast`s (the spinel runtime's and the CRuby
+  # overlay's) append through here, never onto `LOG` directly, because
+  # `runtime/spinel/thread_state.rb` reopens `log_append`, `log` and
+  # `reset_log!` to keep one log per thread -- a writer on the constant
+  # would be invisible to every reader the moment that file loads. It
+  # was: the overlay's raw broadcast went onto `LOG` while the readers
+  # asked the per-thread log, and campfire's two unread-room assertions
+  # answered 0 (CI 256/42 -> 254/41, 2026-09-02).
+  def self.log_append(entry)
+    LOG << entry
+    nil
+  end
+
   # The transport responds to `broadcast(stream, fragment_html)` and
   # owns its own thread-safety. Nil-transport (test environment, spinel
   # tests, CGI one-shots) means `record` only appends to LOG.
@@ -90,7 +104,7 @@ module Broadcasts
     # published, and a fragment rebuilt without its attributes is not
     # what went over the wire.
     entry = { action: action, stream: stream, target: target, html: html, attributes: attributes }
-    LOG << entry
+    log_append(entry)
     # Unconditional dispatch — TRANSPORTS always holds exactly one
     # transport (the no-op SeedTransport until an overlay replaces it),
     # so there is no empty case to guard. Null-object shape: the seed

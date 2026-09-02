@@ -90,7 +90,7 @@ module ActionCable
     # LOG FIRST, then dispatch — the order `Broadcasts.record` uses, so a
     # transport that raises cannot lose the record of the attempt.
     def broadcast(stream, payload)
-      Broadcasts::LOG << { action: :message, stream: stream, payload: payload }
+      Broadcasts.log_append({ action: :message, stream: stream, payload: payload })
       Broadcasts::TRANSPORTS[0].broadcast(stream, payload)
       nil
     end
@@ -147,7 +147,7 @@ module ActionCable
   # `collect { JSON.parse(_1) }` mean something instead of raising.
   class Pubsub
     def broadcasts(stream)
-      Broadcasts::LOG.select { |entry| entry[:stream] == stream }.map do |entry|
+      Broadcasts.log.select { |entry| entry[:stream] == stream }.map do |entry|
         JSON.generate(payload_of(entry))
       end
     end
