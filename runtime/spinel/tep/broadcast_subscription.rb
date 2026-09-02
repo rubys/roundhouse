@@ -1,14 +1,18 @@
 # Tep::BroadcastSubscription -- one entry in the Tep::Broadcast
-# subscriber registry. Pairs a topic name with an output fd. When a
-# publish matches the topic, the fd gets the payload bytes via
-# Sock.sphttp_write_str.
+# subscriber registry. Pairs a topic name with an output: the
+# connection's Tep::WebSocket::Driver for framed delivery, or a bare
+# fd for raw bytes (server-sent events, log fan-out).
 #
-# fd is just an integer file descriptor: typically a WebSocket
-# connection's accepted socket fd, but the registry doesn't care
-# about the protocol on top -- it'll write to any open fd. Apps
-# integrating with WS (via Tep::WebSocket) subscribe their
-# connection fds; non-WS use cases (server-sent events, log
-# fan-out, etc.) work the same way.
+# WHY THE DRIVER AND NOT JUST ITS FD. A publish runs on whichever thread
+# committed the record, and it writes after copying the matching entries
+# out of the registry. Between that copy and the write the subscribing
+# connection can close and the kernel can hand its fd number to the next
+# accept -- so a write addressed to a NUMBER can land in a stranger's
+# socket. The driver's `write_frame` holds the connection's write lock
+# and refuses once the fd's owner has retired it, and that is the only
+# way a framed payload reaches the wire. `fd` stays alongside for the
+# raw-bytes mode and for `unsubscribe_fd`, which the closing connection
+# calls while the number is still uniquely its own.
 #
 # Each subscription lives in a single worker's registry. Cross-
 # worker pub-sub goes through PG LISTEN/NOTIFY (see
@@ -32,11 +36,13 @@ module Tep
     # so payloads land as proper WS frames the peer will accept.
     # Apps register mode-1 subscriptions via subscribe_ws.
     attr_reader :mode
+    attr_reader :ws      # Tep::WebSocket::Driver; the writer for modes 1 and 2
 
-    def initialize(topic, fd, mode)
+    def initialize(topic, fd, mode, ws)
       @topic = topic
       @fd    = fd
       @mode  = mode
+      @ws    = ws
     end
   end
 end

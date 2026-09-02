@@ -13,6 +13,13 @@
 # subscriber with a full buffer parks this thread (sp_net parks on
 # EAGAIN), and it must not park while holding the registry.
 #
+# A WebSocket subscriber is written through its Driver, never by fd
+# number: between the copy and the write the connection can close and
+# its fd number can already belong to the next accept. The driver's
+# write lock refuses once the connection has retired it
+# (Tep::WebSocket::Driver#write_frame), and serialises this publish
+# against the connection's own frames.
+#
 # Roundhouse vendors the local-only fan-out: the cross-worker PG
 # LISTEN/NOTIFY backend from upstream tep is dropped (the blog runs
 # single-worker -- WORKERS=1 -- so in-process delivery reaches every
@@ -25,7 +32,8 @@ module Tep
     # `unsubscribe`, which callers rarely use -- the WS path
     # unsubscribes by fd on close).
     def self.subscribe(topic, fd)
-      sub = Tep::BroadcastSubscription.new(topic, fd, 0)
+      sub = Tep::BroadcastSubscription.new(
+        topic, fd, 0, Tep::WebSocket::Driver.new(fd))
       n = 0
       Tep::APP.broadcast_lock.synchronize do
         subs = Tep::APP.broadcast_subs
@@ -35,10 +43,11 @@ module Tep
       n
     end
 
-    # Subscribe a WebSocket connection: payloads go out as TEXT frames.
-    def self.subscribe_ws(topic, fd)
+    # Subscribe a WebSocket connection: payloads go out as TEXT frames
+    # through its driver.
+    def self.subscribe_ws(topic, ws)
       sub = Tep::BroadcastSubscription.new(
-        topic, fd, Tep::WebSocket::OPCODE_TEXT)
+        topic, ws.fd, Tep::WebSocket::OPCODE_TEXT, ws)
       n = 0
       Tep::APP.broadcast_lock.synchronize do
         subs = Tep::APP.broadcast_subs
@@ -81,7 +90,8 @@ module Tep
 
     # Drop every subscription whose fd matches. Returns the count
     # dropped. Used by WS on-close to clean up everything a closing
-    # connection had subscribed to.
+    # connection had subscribed to -- called BEFORE the fd is closed,
+    # while its number still names only that connection.
     def self.unsubscribe_fd(fd)
       dropped = 0
       Tep::APP.broadcast_lock.synchronize do
@@ -153,8 +163,10 @@ module Tep
     # Branches on each subscription's `mode`:
     #   * mode 0 -> raw bytes via Sock.sphttp_write_bytes (default,
     #     for SSE / log fan-out / non-framed consumers).
-    #   * mode != 0 -> WebSocket frame via Tep::WebSocket::Driver.send_frame,
-    #     using the mode value as the WS opcode (1=TEXT, 2=BINARY).
+    #   * mode != 0 -> WebSocket frame via the subscriber's
+    #     Tep::WebSocket::Driver#write_frame, using the mode value as the
+    #     WS opcode (1=TEXT, 2=BINARY). A retired driver refuses the
+    #     write (-1), which still counts as matched.
     def self.publish_local_only(topic, payload)
       matched = []
       Tep::APP.broadcast_lock.synchronize do
@@ -175,7 +187,7 @@ module Tep
           # payload is not guaranteed NUL-free.
           Sock.sphttp_write_bytes(sub.fd, payload, payload.bytesize)
         else
-          Tep::WebSocket::Driver.send_frame(sub.fd, sub.mode, payload)
+          sub.ws.write_frame(sub.mode, payload)
         end
         i += 1
       end

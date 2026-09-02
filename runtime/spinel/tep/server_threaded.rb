@@ -18,33 +18,37 @@
 # waits go through one `IO.for_fd` wrapper per connection (a dup, closed
 # with the connection), because a raw fd has no `wait_readable`.
 #
-# ONE OS WORKER, FOR NOW -- scaffold/main.rb declares it on its first line
-# (`ENV["SPINEL_WORKERS"] = "1" unless ENV["SPINEL_WORKERS"]`; the runtime
-# reads the variable at the first Thread.new, so the program's own default
-# holds and an operator's environment still wins -- matz/spinel#4266).
-# DIAGNOSED (matz/spinel#4272): the boxed proc channel _sp_proc_poly_ret /
-# _args is per-worker TLS the barrier never published, so a stale slot on
-# an idle worker named an object another worker's collection had freed;
-# fix on rubys/spinel `poly-channel-publish`. Beside it, the per-class pool
-# recycle pushed with plain stores under the PARALLEL sweep (TSan: 1,579
-# reports; fix on `pool-recycle-cas`) -- real, cannot dangle. The
-# evidence that found them, 2026-09-02, spinel 3428632f, 16-core
-# Linux/gcc: with the
-# autodetected worker count the binary died under a browser's parallel
-# load of the room page in 4 of 7 runs -- gdb: SIGSEGV in
-# sp_StrArray_scan inside sp_gc_mark_drain, a stop-the-world mark
-# reaching an Array[String] whose element was already freed; in one run
-# it did not die and a cable subscribe quietly never confirmed instead.
-# With SPINEL_WORKERS=1, 9 of 9 runs green. A browser-free burst (30
-# rounds of 168 unauthenticated GETs, 48-way parallel) does not
-# reproduce it, so the signed-in page render is part of the shape. Not
-# yet known: whether the freed element is shared state this server
-# still leaves unlocked or a root gap in the runtime's multi-worker
-# collector. Until both fixes are merged and the browser loops on a
-# multi-core box are green with the declaration removed, one worker is
-# the validated configuration -- the semantics the fiber server had,
-# every I/O parking. Lift the declaration with that evidence, not by
-# deleting it.
+# OS WORKERS: the runtime's autodetected count, one per core; an operator
+# sets `SPINEL_WORKERS=N`. This server ran on ONE worker first (declared
+# on main.rb's first line, 14e80658 -> 1db97994) while the multi-worker
+# collector had two open gaps -- matz/spinel#4272, the boxed proc channel
+# `_sp_proc_poly_ret/_args` being per-worker TLS the stop-the-world
+# barrier never published, so a stale slot on an idle worker named an
+# object another worker's collection had freed; and the per-class pool
+# recycle's plain push under the PARALLEL sweep -- found with a 16-core
+# browser loop (4 of 7 runs dead in sp_StrArray_scan under the mark),
+# SPINEL_GC_VERIFY + GC_STRESS, and a TSan build. Both merged upstream
+# 2026-09-02 (PRs #4273, #4274). The declaration was lifted on that
+# runtime with the same loop: 10 of 10 runs alive, the process at 9 OS
+# threads under the browser's load (3 idle); the docs ledger
+# (docs/pipeline/runtime.md, "The threaded binary dies on more than one
+# OS worker") carries the evidence.
+#
+# AN fd NUMBER IS NOT A CONNECTION. The one symptom that survived the
+# collector fixes was ours: the ping thread and the broadcast fan-out
+# wrote to `fd` as an Integer, and a closed socket's number goes to the
+# next accept, so a write that "only fails when the fd is closed" landed
+# in a stranger's socket -- a ping frame ahead of an asset's HTTP
+# response, ahead of a new cable's 101, or interleaved with another
+# thread's frame. The traced loop showed it in one run (EOF on fd 40 at
+# trace line 138, `ping fd=40 r=0` at 184, the next welcome on 40 at
+# 185). Every write now goes through the connection's
+# Tep::WebSocket::Driver#write_frame under its lock, and this server
+# RETIRES the driver after the recv loop and BEFORE closing the fd
+# (write_response's upgrade branch). Hold an fd only through the object
+# that owns it. With that fix the loop is 10 of 10 green with no
+# handshake error; the unfixed tree wrote into a reused number 5 times
+# across 4 of its 10 runs (a traced ping after the socket's EOF, r=0).
 module Tep
   class Server
     class Threaded
@@ -240,6 +244,11 @@ module Tep
           res.ws_driver.set_fd(client)
           conn = Tep::WebSocket::Connection.new(res.ws_driver, io)
           conn.run
+          # The recv loop is done with the socket. Retire the driver
+          # BEFORE the caller closes the fd: from here no ping thread or
+          # broadcast can write to a number the kernel is about to hand
+          # to the next accept (Tep::WebSocket::Driver#write_frame).
+          res.ws_driver.retire
           return 0
         end
 

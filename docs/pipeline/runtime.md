@@ -2394,12 +2394,12 @@ concurrent-ruby (campfire's suite also wants `Concurrent::CyclicBarrier`).
 Any raising job wedges the server the same way; a missing constant is
 merely the one this app reaches first.
 
-### The threaded binary dies on more than one OS worker — OPEN, pinned to one
+### The threaded binary dies on more than one OS worker — CLOSED (runtime fixed upstream; the declaration is lifted)
 
-The green-thread server (`runtime/spinel/tep/server_threaded.rb`) is
-validated on ONE OS worker. With spinel's autodetected worker count, a
-browser's parallel load of the signed-in room page took the binary
-down in 4 of 7 runs on a 16-core Linux box (gdb: `SIGSEGV` in
+The green-thread server (`runtime/spinel/tep/server_threaded.rb`) was
+validated on ONE OS worker first. With spinel's autodetected worker
+count, a browser's parallel load of the signed-in room page took the
+binary down in 4 of 7 runs on a 16-core Linux box (gdb: `SIGSEGV` in
 `sp_StrArray_scan` under `sp_gc_mark_drain` — a stop-the-world mark
 reaching an `Array[String]` whose element was already freed), and in
 one more run a cable subscribe never confirmed with the server alive.
@@ -2408,13 +2408,74 @@ one more run a cable subscribe never confirmed with the server alive.
 matz/spinel#4272 — the boxed proc channel is per-worker TLS the barrier
 never published, so a stale slot on an idle worker named an object
 another worker's collection had freed — plus the per-class pool's
-plain push under the parallel sweep; both fixed on rubys/spinel
-branches with reductions. Meanwhile the program declares one worker
-for itself on `main.rb`'s first line (the runtime reads
-`SPINEL_WORKERS` at the first `Thread.new`, so the operator's
-environment still wins; matz/spinel#4266). Lifting the declaration is
-Stage C of the green-thread migration, once both fixes are merged and
-the multi-core browser loops are green without it.
+plain push under the parallel sweep. Both fixes merged upstream on
+2026-09-02 (matz/spinel PRs #4273 and #4274). Meanwhile the program
+declared one worker for itself on `main.rb`'s first line (the runtime
+reads `SPINEL_WORKERS` at the first `Thread.new`, so the operator's
+environment still won; matz/spinel#4266).
+
+**Lifted.** On spinel master with both merges (cdf83a4a), the same
+16-core loop with the autodetected worker count and no declaration:
+10 of 10 runs alive and passing — no fault, no verifier report — and
+the process observed at 9 OS threads under the browser's load (3 at
+idle), so the workers were really there. The one symptom that remained
+on that runtime was not the collector's: a cable subscribe that never
+confirmed, and a browser reporting an invalid HTTP response on an
+asset or on the cable handshake. That was ours — the next entry — and
+with it fixed the loop is 10 of 10 green with no handshake error, and
+10 of 10 again launched plain (no gdb, so address-space randomisation
+on), server alive after each. One plain launch before those, made
+before the exit status was being captured, reset the browser's
+connections right after sign-in — not reproduced in the ten that
+followed, and recorded here rather than explained away.
+`SPINEL_WORKERS=N` in the environment still sets the count; the README
+of each archive says so.
+
+### A WebSocket write addressed to an fd NUMBER reached the number's next owner — CLOSED
+
+Found while lifting the one-worker declaration above, on the runtime
+with both collector fixes: 2 of 5 browser runs stalled on tab A's
+subscribe with the server alive and every OS worker idle, and a
+passing run logged `WebSocket connection to 'ws://…/cable' failed:
+Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE`.
+The traced server (a `warn` at welcome, EOF and every ping) made it
+plain in one run: the socket on fd 40 read EOF at trace line 138, a
+ping thread wrote to fd 40 at line 184 and the write SUCCEEDED, and
+the next welcome on fd 40 came at line 185 — the browser's error that
+run was `ERR_INVALID_HTTP_RESPONSE` on an asset fetch, the HTTP
+connection that held the number in between. Line 426 was the same
+for fd 31, whose socket had closed at 183. Over the ten control runs
+the census is 5 such writes in 4 runs; one of the four reached the
+browser as an error, the rest landed where nothing noticed.
+
+**Mechanism.** `Cable.spawn_ping` gave each connection a green thread
+that slept three seconds and wrote a ping to `ws.fd`, exiting when a
+write FAILED. Closing the socket does not fail the next write: the
+kernel hands a closed fd's number to the next `accept`, so the write
+succeeds into a stranger — a WebSocket frame ahead of an HTTP
+response (the asset error), ahead of a 101 (the handshake error), or
+interleaved with another thread's frame on a live cable socket (a
+frame the client cannot parse; it closes and reconnects, and if the
+stray thread is still alive the reconnect meets it again — the
+stall). `Tep::Broadcast.publish` had the narrower form of the same
+race: it copied `(topic, fd)` pairs out under the registry lock and
+wrote to the numbers outside it. Both are ours; neither is the
+scheduler. One worker hid it only by odds.
+
+**Fix.** The connection's `Tep::WebSocket::Driver` owns a write lock
+and a `closed` flag: every frame goes through `write_frame`, which
+takes the lock and refuses once `retire` has flipped the flag; the
+server retires the driver after the recv loop returns and BEFORE it
+closes the fd. A subscription now holds the driver, not the number,
+and `publish` writes through it. The ping thread exits on the refused
+write, within one interval of the close, never having touched the
+number's next owner; the lock also serialises a broadcast against the
+connection's own frames, so two threads no longer interleave bytes on
+one socket. Every exit of the recv loop (idle timeout and protocol
+error included) now dispatches close, so the registry drops the fd's
+entries while the number is still uniquely the connection's. Rule:
+**a thread may hold an fd NUMBER only through the object that owns
+the fd, and that object decides when writes stop.**
 
 ### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
 

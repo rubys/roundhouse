@@ -196,7 +196,7 @@ module Cable
       Tep::APP.cable_lock.synchronize do
         Tep::APP.cable_identifiers[stream] = identifier
       end
-      Tep::Broadcast.subscribe_ws(stream, ws.fd)
+      Tep::Broadcast.subscribe_ws(stream, ws)
     end
     ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
             ",\"type\":\"confirm_subscription\"}")
@@ -230,9 +230,14 @@ module Cable
   end
 
   # Spawn a per-connection ping thread: a green thread that sleeps
-  # PING_INTERVAL and emits a ping frame, exiting when a write fails
-  # (the fd closed). `sleep` parks the thread; the write parks it on a
-  # full buffer rather than stalling anyone else.
+  # PING_INTERVAL and emits a ping frame, exiting when the write is
+  # refused -- the connection's thread retires the driver before it
+  # closes the fd (Tep::WebSocket::Driver#retire), so this thread is
+  # gone within one interval of the close and never writes to the fd's
+  # NUMBER after it has been handed to another connection. (It used to
+  # exit on a FAILED write, and a write to a reused number succeeds.)
+  # `sleep` parks the thread; the write parks it on a full buffer rather
+  # than stalling anyone else.
   def self.spawn_ping(ws)
     Thread.new do
       Cable.ping_loop(ws)

@@ -43,7 +43,11 @@ module Tep
       # The caller (Tep::Server::Scheduled.write_response) owns the
       # fd lifecycle -- run() never calls sphttp_close. On clean
       # close OR error the server's handle_connection closes the fd
-      # via its usual exit path.
+      # via its usual exit path, after retiring the driver. Every exit
+      # from this loop passes through `dispatch_close`, so the broadcast
+      # registry drops this fd's subscriptions while the number is still
+      # this connection's; a timed-out socket used to skip that and leave
+      # entries behind for the number's next owner.
       def run
         # Synthetic open event before the first recv -- handlers
         # often want to send a welcome message.
@@ -60,6 +64,7 @@ module Tep
           if ready.nil?
             # Timeout: close 1001 going-away.
             @driver.close(Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
+            Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
             return 0
           end
 
@@ -84,6 +89,7 @@ module Tep
             end
             if r.outcome == "close"
               @driver.close(r.close_code, "protocol error")
+              Connection.dispatch_close(@driver, r.close_code, "protocol error")
               return 0
             end
             Connection.dispatch_frame(@driver, r.frame)

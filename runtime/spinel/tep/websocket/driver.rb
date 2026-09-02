@@ -33,6 +33,8 @@ module Tep
 
       def initialize(fd)
         @fd             = fd
+        @closed         = false
+        @wlock          = Mutex.new
         @max_frame_size = Tep::WebSocket::DEFAULT_MAX_FRAME
         @subprotocol    = +""
         @h_open    = Tep::WebSocket::Handler.new
@@ -69,7 +71,7 @@ module Tep
 
       # Send a text frame.
       def text(s)
-        Driver.send_frame(@fd, Tep::WebSocket::OPCODE_TEXT, s)
+        write_frame(Tep::WebSocket::OPCODE_TEXT, s)
       end
 
       # (Upstream tep also defines a Streamer-shape `write(s)` alias for
@@ -80,17 +82,17 @@ module Tep
 
       # Send a binary frame.
       def binary(bytes)
-        Driver.send_frame(@fd, Tep::WebSocket::OPCODE_BINARY, bytes)
+        write_frame(Tep::WebSocket::OPCODE_BINARY, bytes)
       end
 
       # Send a ping with optional payload (<=125 bytes).
       def ping(payload)
-        Driver.send_frame(@fd, Tep::WebSocket::OPCODE_PING, payload)
+        write_frame(Tep::WebSocket::OPCODE_PING, payload)
       end
 
       # Send a pong with the matching ping's payload (per §5.5.3).
       def pong(payload)
-        Driver.send_frame(@fd, Tep::WebSocket::OPCODE_PONG, payload)
+        write_frame(Tep::WebSocket::OPCODE_PONG, payload)
       end
 
       # Send a close frame with code + reason. Reason capped at
@@ -98,11 +100,48 @@ module Tep
       # frame's 125-byte payload limit.
       def close(code, reason)
         body = Driver.encode_close_payload(code, reason)
-        Driver.send_frame(@fd, Tep::WebSocket::OPCODE_CLOSE, body)
+        write_frame(Tep::WebSocket::OPCODE_CLOSE, body)
+      end
+
+      # ONE WRITER AT A TIME, AND NONE AFTER RETIREMENT. Every frame this
+      # driver sends passes through here: the connection's own thread
+      # (welcome, confirm_subscription, close), its ping thread, and any
+      # thread publishing a broadcast. The lock serialises them, so two
+      # frames never interleave their bytes on the wire; and `retire`
+      # flips `@closed` under the same lock, so no write can START once
+      # the fd's owner has decided to close it. That ordering is what
+      # makes an fd NUMBER safe to hold across threads: the kernel hands
+      # a closed fd's number to the next accept, and a writer that only
+      # asked "did my last write fail?" wrote into a stranger's socket.
+      # The ping thread did exactly that -- a ping frame ahead of a new
+      # connection's 101 is ERR_INVALID_HTTP_RESPONSE in the browser, and
+      # a subscribe that never confirms. Returns the write's result, or
+      # -1 once retired.
+      def write_frame(opcode, payload)
+        r = -1
+        @wlock.synchronize do
+          if !@closed
+            r = Driver.send_frame(@fd, opcode, payload)
+          end
+        end
+        r
+      end
+
+      # The fd's owner calls this BEFORE closing the fd (Tep::Server::
+      # Threaded, after the recv loop returns). A write in flight
+      # finishes first -- a parked write completes or fails -- and every
+      # later one is refused, which is also how the ping thread learns
+      # to exit.
+      def retire
+        @wlock.synchronize do
+          @closed = true
+        end
+        0
       end
 
       # Build the frame bytes (unmasked, server-side) and write via
-      # sphttp_write_bytes (binary-safe, explicit length).
+      # sphttp_write_bytes (binary-safe, explicit length). The raw write
+      # behind `write_frame`; nothing else should reach an fd directly.
       def self.send_frame(fd, opcode, payload)
         frame = Tep::WebSocket::Frame.new(true, opcode, payload)
         bytes = frame.encode_unmasked

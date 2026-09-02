@@ -208,11 +208,9 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```sh\n\
              ./build/bin/blog\n\
              ```\n\
-             The program declares one OS worker for itself (`main.rb`'s first line): \
-             the server is a green thread per connection and every wait parks, so one \
-             worker serves many connections, and the runtime's multi-worker collector \
-             has open gaps today (matz/spinel#4272). `SPINEL_WORKERS=N` in the \
-             environment overrides it.\n\n\
+             The server is a green thread per connection, run on the runtime's OS \
+             workers (one per core, autodetected); `SPINEL_WORKERS=N` in the \
+             environment sets the count.\n\n\
              ## Test\n\
              Each `test/*.rb` compiles to its own binary and diffs against \
              its `.expected` snapshot. `spin test` feeds the `.rbs` \

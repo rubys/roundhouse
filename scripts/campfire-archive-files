@@ -65,13 +65,9 @@ spin build
 ./build/bin/campfire
 \`\`\`
 
-The program declares one OS worker for itself (\`main.rb\`'s first line):
-the server is a green thread per connection and every wait parks, so one
-worker serves many connections, and the runtime's multi-worker collector
-has two open gaps today (matz/spinel#4272 and the pool race beside it)
-that took this binary down under a browser's parallel page load. Set
-\`SPINEL_WORKERS=N\` in the environment to override it once those are
-merged. \`runtime/tep/server_threaded.rb\`'s header carries the evidence.
+The server is a green thread per connection, run on the runtime's OS
+workers (one per core, autodetected); set \`SPINEL_WORKERS=N\` in the
+environment to choose the count.
 
 ## End-to-end
 

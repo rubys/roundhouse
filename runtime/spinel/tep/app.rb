@@ -29,7 +29,8 @@ module Tep
     def initialize
       # Type-seed the Broadcast subscriber registry: a first push pins
       # the element type, then it is dropped.
-      @broadcast_subs = [Tep::BroadcastSubscription.new("_", -1, 0)]
+      @broadcast_subs = [Tep::BroadcastSubscription.new(
+        "_", -1, 0, Tep::WebSocket::Driver.new(-1))]
       @broadcast_subs.pop
       @broadcast_lock = Mutex.new
 
