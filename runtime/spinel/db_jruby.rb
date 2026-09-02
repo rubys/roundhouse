@@ -72,14 +72,26 @@ module Db
   # so repeated `step?`s don't re-run the query, and whether the
   # PreparedStatement is cached (kept open) or transient (closed on
   # finalize).
+  #
+  # The query cache (see `query_cache_begin`) rides on the same handle:
+  # `capture` collects a real statement's rows as they are stepped, for
+  # the request's cache; `replay` is the cached result a later identical
+  # SELECT answers from, `row`/`pos` its cursor, and `sql` the key both
+  # need. A replay handle has no PreparedStatement until it is promoted
+  # (see `step?`).
   class Stmt
-    attr_accessor :pstmt, :rs, :executed, :cached
+    attr_accessor :pstmt, :rs, :executed, :cached, :sql, :capture, :replay, :row, :pos
 
     def initialize(pstmt, cached)
       @pstmt = pstmt
       @rs = nil
       @executed = false
       @cached = cached
+      @sql = nil
+      @capture = nil
+      @replay = nil
+      @row = nil
+      @pos = 0
     end
   end
 
@@ -156,6 +168,10 @@ module Db
 
   def self.exec(sql)
     record_query(sql)
+    # Any exec is (per the Db contract) DDL or a write — Rails
+    # invalidates the whole query cache on write; so do we.
+    qcache = Fiber[:rh_qcache]
+    qcache.clear unless qcache.nil?
     st = current_dbh.raw.create_statement
     begin
       st.execute(sql)
@@ -195,6 +211,20 @@ module Db
   # literals key id-bearing queries per-id (fine for the bench;
   # STMT_CACHE_CAP bounds growth).
   def self.prepare(sql)
+    # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
+    # its result depends on binds set after prepare, which are not in
+    # the key, so it never joins the result-replay cache.
+    parameterized = sql.include?("?")
+    qcache = Fiber[:rh_qcache]
+    if !qcache.nil? && !parameterized && (hit = qcache[sql])
+      # A replay is not a round trip, and `capture_sql` does not count
+      # it — Rails' SQLCounter skips CACHE events, and so do the other
+      # two shims.
+      st = Stmt.new(nil, false)
+      st.sql = sql
+      st.replay = hit
+      return st
+    end
     record_query(sql)
     conn   = current_dbh
     cache  = conn.stmt_cache
@@ -208,7 +238,10 @@ module Db
         cached = false
       end
     end
-    Stmt.new(pstmt, cached)
+    st = Stmt.new(pstmt, cached)
+    st.sql = sql
+    st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
   end
 
   # Run the query exactly once, lazily. `sqlite_adapter.rb`'s `select_rows`
@@ -222,27 +255,81 @@ module Db
   end
 
   def self.step?(stmt)
+    if (hit = stmt.replay)
+      if stmt.pos < hit[:rows].length
+        stmt.row = hit[:rows][stmt.pos]
+        stmt.pos += 1
+        return true
+      end
+      return false if hit[:eof]
+      # Cached prefix exhausted without eof (the first consumer stopped
+      # early) — promote to a real transient statement, fast-forwarded
+      # past the rows already replayed.
+      pstmt = current_dbh.raw.prepare_statement(stmt.sql)
+      rs = pstmt.execute_query
+      stmt.pos.times { rs.next }
+      stmt.pstmt = pstmt
+      stmt.rs = rs
+      stmt.executed = true
+      stmt.cached = false
+      stmt.replay = nil
+      return rs.next
+    end
     ensure_executed(stmt)
-    stmt.rs.next
+    ok = stmt.rs.next
+    if (c = stmt.capture)
+      if ok
+        c[:names] = column_names_of(stmt) if c[:names].nil?
+        n = c[:names].length
+        row = Array.new(n)
+        i = 0
+        while i < n
+          row[i] = stmt.rs.get_object(i + 1)
+          i += 1
+        end
+        c[:rows] << row
+      else
+        c[:eof] = true
+      end
+    end
+    ok
+  end
+
+  def self.column_names_of(stmt)
+    md = stmt.rs.get_meta_data
+    n = md.get_column_count
+    (1..n).map { |k| md.get_column_name(k) }
   end
 
   def self.column_int(stmt, i)
+    return stmt.row[i].to_i if stmt.replay
     stmt.rs.get_int(i + 1)
   end
 
   def self.column_float(stmt, i)
+    return stmt.row[i].to_f if stmt.replay
     stmt.rs.get_double(i + 1)
   end
 
-  # Per-request query-cache hooks — the shared overlay dispatch calls
-  # these around every request. The CRuby shim implements Rails' AR
-  # query-cache semantics; this JDBC shim doesn't cache yet, so they
-  # are deliberate no-ops (correct, just not accelerated).
-  def self.query_cache_begin; end
+  # Per-request query cache — Rails' Active Record query cache: an
+  # identical SELECT within one request replays the first result, and
+  # any write (`exec`) empties the cache. The shared overlay dispatch
+  # brackets every request with these two calls. Fiber storage is
+  # thread-local under Puma's thread-per-request, so each worker thread
+  # has its own cache. Same design as db_cruby.rb and db.rb.
+  def self.query_cache_begin
+    Fiber[:rh_qcache] = {}
+  end
 
-  def self.query_cache_end; end
+  def self.query_cache_end
+    Fiber[:rh_qcache] = nil
+  end
 
   def self.column_text(stmt, i)
+    if stmt.replay
+      v = stmt.row[i]
+      return v.nil? ? "" : v.to_s
+    end
     v = stmt.rs.get_string(i + 1)
     v.nil? ? "" : v.to_s
   end
@@ -252,22 +339,22 @@ module Db
   # `getObject` is nil, and `wasNull` after a typed get — so read the
   # object first and only then coerce.
   def self.column_int_opt(stmt, i)
-    v = stmt.rs.get_object(i + 1)
+    v = stmt.replay ? stmt.row[i] : stmt.rs.get_object(i + 1)
     v.nil? ? nil : v.to_i
   end
 
   def self.column_float_opt(stmt, i)
-    v = stmt.rs.get_object(i + 1)
+    v = stmt.replay ? stmt.row[i] : stmt.rs.get_object(i + 1)
     v.nil? ? nil : v.to_f
   end
 
   def self.column_text_opt(stmt, i)
-    v = stmt.rs.get_string(i + 1)
+    v = stmt.replay ? stmt.row[i] : stmt.rs.get_string(i + 1)
     v.nil? ? nil : v.to_s
   end
 
   def self.column_bool_opt(stmt, i)
-    v = stmt.rs.get_object(i + 1)
+    v = stmt.replay ? stmt.row[i] : stmt.rs.get_object(i + 1)
     v.nil? ? nil : v.to_i != 0
   end
 
@@ -277,6 +364,7 @@ module Db
   # numerics via to_i/to_f pass-through is unnecessary — JRuby coerces
   # them to Ruby Integer/Float on comparison and arithmetic.
   def self.column_value(stmt, i)
+    return stmt.row[i] if stmt.replay
     stmt.rs.get_object(i + 1)
   end
 
@@ -286,21 +374,37 @@ module Db
   # pre-execution behaviour varies. `ensure_executed` makes a
   # `column_count`-before-`step?` call order work.
   def self.column_count(stmt)
+    return stmt.replay[:names].length if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_count
   end
 
   def self.column_name(stmt, i)
+    return stmt.replay[:names][i] if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_name(i + 1)
   end
 
-  # Release the per-call handle. Close the ResultSet (if a query ran); a
-  # cached PreparedStatement stays open for reuse, a transient one is
-  # closed.
+  # Release the per-call handle. A pure replay held no statement. A
+  # capture is published to the request's query cache on release — even
+  # a partial one (eof false): the next identical SELECT replays the
+  # consumed prefix and promotes past it only if it wants more. Then
+  # close the ResultSet (if a query ran); a cached PreparedStatement
+  # stays open for reuse, a transient one is closed.
   def self.finalize(stmt)
+    return nil if stmt.replay
+    if (c = stmt.capture)
+      # A capture that never stepped has no column names yet; the next
+      # consumer would find an empty, eof-less prefix and promote, which
+      # is correct but pointless — leave it out.
+      qcache = Fiber[:rh_qcache]
+      if !c[:names].nil? && !qcache.nil? && !qcache.key?(stmt.sql)
+        qcache[stmt.sql] = c
+      end
+    end
     stmt.rs.close if stmt.rs
-    stmt.pstmt.close unless stmt.cached
+    stmt.pstmt.close if stmt.pstmt && !stmt.cached
+    nil
   end
 
   def self.last_insert_rowid
