@@ -104,6 +104,13 @@ require_relative "runtime/typed_store"
 # string escaper it uses.
 require_relative "runtime/schematized_json"
 require_relative "runtime/broadcasts"
+# The job queue and its drain flag. `thread_state` below REOPENS
+# ActiveJob and reads `PENDING`, and main.rb calls `ActiveJob.
+# register_drain` unconditionally, so the module has to exist first.
+# It reaches the boot chain by an ActiveJob::Base subclass otherwise,
+# which a job-less app (no `app/jobs`) does not have -- there the call
+# went unresolved and `PENDING` undefined. The file is always shipped.
+require_relative "runtime/active_job"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
