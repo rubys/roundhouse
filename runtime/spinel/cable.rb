@@ -193,7 +193,9 @@ module Cable
       return Cable.reject(ws, identifier)
     end
     channel.streams.each do |stream|
-      Tep::APP.cable_identifiers[stream] = identifier
+      Tep::APP.cable_lock.synchronize do
+        Tep::APP.cable_identifiers[stream] = identifier
+      end
       Tep::Broadcast.subscribe_ws(stream, ws.fd)
     end
     ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
@@ -227,17 +229,20 @@ module Cable
     Cable.subscribe(ws, connection, identifier)
   end
 
-  # Spawn a per-connection ping fiber on the cooperative scheduler.
-  # Loops every PING_INTERVAL seconds emitting a ping frame; exits when
-  # a write fails (the fd closed). One fiber per connection.
+  # Spawn a per-connection ping thread: a green thread that sleeps
+  # PING_INTERVAL and emits a ping frame, exiting when a write fails
+  # (the fd closed). `sleep` parks the thread; the write parks it on a
+  # full buffer rather than stalling anyone else.
   def self.spawn_ping(ws)
-    Tep::Scheduler.spawn_fiber(Fiber.new { Cable.ping_loop(ws) })
+    Thread.new do
+      Cable.ping_loop(ws)
+    end
     0
   end
 
   def self.ping_loop(ws)
     while true
-      Tep::Scheduler.pause(PING_INTERVAL)
+      sleep(PING_INTERVAL)
       r = ws.text("{\"type\":\"ping\",\"message\":" + Time.now.to_i.to_s + "}")
       if r < 0
         return 0
@@ -288,8 +293,18 @@ module Cable
         ActionController::CookieJar.new(Tep.str_hash))
     end
 
+    # UNDER A LEASE. The socket's recv loop runs after the upgrade
+    # response, outside the request's `Db.with_connection`, and a
+    # subscribe reads the database (`RoomStreamsAreAuthorized` asks who
+    # belongs to the room). Without a lease the read fell back to the
+    # pool's first connection -- which another thread may hold, and a
+    # sqlite connection and its statement cache are one thread's at a
+    # time. The first two sockets to subscribe at once took the binary
+    # down inside sqlite's parser.
     def handle_event(evt)
-      Cable.handle_message(@ws, @connection, evt.data)
+      Db.with_connection do
+        Cable.handle_message(@ws, @connection, evt.data)
+      end
       0
     end
   end
@@ -366,8 +381,19 @@ module Cable
   #
   # Returns without publishing when no subscriber has named the stream,
   # same as `Transport#broadcast`.
+  # The identifier JSON a subscriber sent for `stream`, or "" when none
+  # has. Read under the map's lock: subscribes on other connections
+  # write it concurrently.
+  def self.identifier_for(stream)
+    id = ""
+    Tep::APP.cable_lock.synchronize do
+      id = Tep::APP.cable_identifiers[stream]
+    end
+    id
+  end
+
   def self.publish_raw(stream, message_json)
-    id = Tep::APP.cable_identifiers[stream]
+    id = Cable.identifier_for(stream)
     if id.length == 0
       return nil
     end
@@ -383,7 +409,7 @@ module Cable
   # and publish to every WS fd subscribed to the stream.
   class Transport
     def broadcast(stream, fragment)
-      id = Tep::APP.cable_identifiers[stream]
+      id = Cable.identifier_for(stream)
       if id.length == 0
         return nil   # no subscriber has named this stream yet
       end

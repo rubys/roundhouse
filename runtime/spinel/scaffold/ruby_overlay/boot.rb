@@ -140,6 +140,9 @@ require_relative "runtime/action_mailer"
 # server boot unless some model happened to pull the anchor in.
 require_relative "runtime/gem_facades"
 require_relative "runtime/broadcasts"
+# Per-request state per THREAD -- reopens Current, the view slots, the
+# broadcast log, the job queue and the store memo (see the file).
+require_relative "runtime/thread_state"
 # `Turbo::StreamsChannel` — the channel a `<turbo-cable-stream-source>`
 # names, AND the `broadcast_*_to` class methods a model's after_commit
 # reaches (and an app's own tests mock). One constant, both halves, the

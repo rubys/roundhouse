@@ -130,7 +130,8 @@ fn a_read_through_the_forwarder_answers_the_model() {
 fn reset_replaces_the_instance_rather_than_nilling_it() {
     let src = emitted("app/models/current.rb");
     assert!(
-        src.contains("@__instance = Current.new") && !src.contains("@__instance = nil"),
+        src.contains("Thread.current[:__current_attrs_Current] = Current.new")
+            && !src.contains("Thread.current[:__current_attrs_Current] = nil"),
         "resetting a CurrentAttributes means a fresh instance:\n{src}"
     );
 }

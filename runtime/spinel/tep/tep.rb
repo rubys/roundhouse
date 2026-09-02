@@ -24,8 +24,7 @@ require_relative "broadcast"
 # App owns the cooperative-scheduler + broadcast-subscriber state on
 # the Tep::APP singleton; scheduler + server_scheduled read it.
 require_relative "app"
-require_relative "scheduler"
-require_relative "server_scheduled"
+require_relative "server_threaded"
 
 module Tep
   # Type-seeding: pin parameter types for transport methods that

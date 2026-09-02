@@ -197,20 +197,29 @@ fn synthesized_source(
     };
 
     let mut body = String::new();
+    // ONE INSTANCE PER THREAD, which is what `CurrentAttributes` means:
+    // Rails keeps the instance in `IsolatedExecutionState`, so two
+    // requests served at once each see their own `Current.user`. A
+    // class-level `@__instance` was one instance for the whole process
+    // -- correct under the single-fiber server the binary used to run,
+    // and a cross-request identity leak the moment two green threads (or
+    // two Puma threads on the CRuby lane) dispatch at once. The slot is
+    // `Thread.current[...]`, keyed per class so two CurrentAttributes
+    // classes in one app do not share it; spinel types thread-local
+    // storage by key from its assignments, the way it types ivars, so
+    // the reader below narrows to the class and every forwarder stays
+    // typed.
+    //
     // `reset` REPLACES the instance rather than nilling it. Rails'
     // `CurrentAttributes.reset` sets every attribute back to its
-    // default, which a fresh instance is; nilling the slot means the
-    // same thing at runtime and something else in the type system.
-    // `@__instance`'s type is the union of what the class assigns to
-    // it, so a single `= nil` made it `Current | Nil` — and then
-    // `self.instance` answered a nilable, `Current.instance.user`
-    // failed to dispatch on the union, and EVERY class-level forwarder
-    // (which is the whole surface app code calls) registered `Untyped`.
-    // One `nil` in a synthesized reset, and campfire's per-request
-    // state was shapeless.
+    // default, which a fresh instance is -- and a reader that ever
+    // answered a nilable made `Current.instance.user` fail to dispatch
+    // and EVERY class-level forwarder register `Untyped`. The reader
+    // narrows its slot read behind `nil?` for the same reason.
+    let key = format!("__current_attrs_{}", class.replace("::", "_"));
     body.push_str(&format!(
-        "  def self.instance\n    @__instance = {class}.new if @__instance.nil?\n    @__instance\n  end\n\n\
-         \x20 def self.reset\n    @__instance = {class}.new\n    nil\n  end\n\n"
+        "  def self.instance\n    c = Thread.current[:{key}]\n    return c if !c.nil?\n    c = {class}.new\n    Thread.current[:{key}] = c\n    c\n  end\n\n\
+         \x20 def self.reset\n    Thread.current[:{key}] = {class}.new\n    nil\n  end\n\n"
     ));
 
     for a in attrs {

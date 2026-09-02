@@ -39,7 +39,7 @@
 # matz/spinel#686 doc fix).
 #
 # Module-level state is a single `@pool` (ActiveRecord ConnectionPool of N
-# opaque dbh ptrs). `Db.current_dbh` reads Fiber.storage[:db_handle] when
+# opaque dbh ptrs). `Db.current_conn` reads Thread.current[:db_conn] when
 # set (request-scoped checkout) and falls back to the pool's first free
 # handle otherwise (single-fiber test/dev mode). Existing call sites don't
 # care which path they're on; they just call Db.X.
@@ -649,6 +649,8 @@ class DbPool
   def initialize(path, n)
     @conns = []
     @free  = []
+    @lock  = Mutex.new
+    @cv    = ConditionVariable.new
     i = 0
     while i < n
       rc = SQL.sqlite3_open_v2(path, SQL.db_out, SQL::OPEN_URI_RWC, nil)
@@ -672,16 +674,33 @@ class DbPool
   end
 
   def available
-    @free.length
+    n = 0
+    @lock.synchronize do
+      n = @free.length
+    end
+    n
   end
 
-  # Pop a free connection index (LIFO).
+  # Pop a free connection index (LIFO), parking this green thread while
+  # the pool is empty: `release` signals. (The lease used to spin on a
+  # scheduler pause; a condition variable is the shape for threads.)
   def lease
-    @free.delete_at(@free.length - 1)
+    idx = 0
+    @lock.synchronize do
+      while @free.length == 0
+        @cv.wait(@lock)
+      end
+      idx = @free.delete_at(@free.length - 1)
+    end
+    idx
   end
 
   def release(idx)
-    @free.push(idx)
+    @lock.synchronize do
+      @free.push(idx)
+      @cv.signal
+    end
+    nil
   end
 
   def conn(idx)
@@ -807,29 +826,24 @@ module Db
   # real DbConn object (tag OBJ), so the `.dbh`/`.prepare_cached` calls on
   # the result resolve — unlike the int-boxed ConnectionPool path.
   def self.current_conn
-    c = Fiber[:db_conn]
+    c = Thread.current[:db_conn]
     return c if !c.nil?
     @pool.first
   end
 
-  # Request-scoped connection lease for the fiber-per-connection server.
-  # Leases a connection index, binds its DbConn to this fiber's storage,
-  # runs the block, then releases the index. No mutex: spinel fibers are
-  # cooperative (no preemption), so the lease/release are atomic between
-  # yields. On exhaustion the fiber parks via Tep::Scheduler until a
-  # release frees one; with pool_size >= max concurrent fibers the wait
-  # loop never trips.
+  # Request-scoped connection lease for the thread-per-connection
+  # server. Leases a connection index (parking on the pool's condition
+  # variable while none is free), binds its DbConn to this thread's
+  # storage, runs the block, then releases the index. With pool_size >=
+  # the workers' concurrency the wait never trips.
   #
   # NOTE: no begin/ensure (not used elsewhere in spinel-compiled code), so
   # a raise inside the block leaks the lease — acceptable on the happy
   # path; revisit if the dispatch path starts raising under load.
   def self.with_connection
-    while @pool.available == 0
-      Tep::Scheduler.pause(0.001)
-    end
     idx = @pool.lease
     conn = @pool.conn(idx)
-    Fiber[:db_conn] = conn
+    Thread.current[:db_conn] = conn
     # Rails wraps every request in the query cache; so does this lease.
     conn.qc_begin
     result = yield
@@ -839,7 +853,7 @@ module Db
     # cache is bounded — `prepare_cached` deliberately caps nothing, since
     # a stmt it refused to cache is a stmt nothing can ever finalize.
     conn.trim!
-    Fiber[:db_conn] = nil
+    Thread.current[:db_conn] = nil
     @pool.release(idx)
     result
   end

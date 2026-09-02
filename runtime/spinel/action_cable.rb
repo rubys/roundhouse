@@ -67,7 +67,7 @@ module ActionCable
     # transport that raises cannot lose the record of the attempt.
     def broadcast(stream, payload)
       json = ActionCable.payload_json(payload)
-      Broadcasts::LOG << { action: :message, stream: stream, payload: json }
+      Broadcasts.log_append({ action: :message, stream: stream, payload: json })
       Cable.publish_raw(stream, json)
       nil
     end
@@ -112,7 +112,7 @@ module ActionCable
   class Pubsub
     def broadcasts(stream)
       out = []
-      Broadcasts::LOG.each do |entry|
+      Broadcasts.log.each do |entry|
         next if entry[:stream] != stream
         if entry[:action] == :message
           out << entry[:payload].to_s

@@ -104,6 +104,9 @@ require_relative "runtime/typed_store"
 # string escaper it uses.
 require_relative "runtime/schematized_json"
 require_relative "runtime/broadcasts"
+# Per-request state per THREAD -- reopens Current, the view slots, the
+# broadcast log, the job queue and the store memo (see the file).
+require_relative "runtime/thread_state"
 require_relative "runtime/tep/tep"
 # Spinel-only CGI shim (escape/unescape_html/parse) — CRuby/JRuby use stdlib
 # `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes

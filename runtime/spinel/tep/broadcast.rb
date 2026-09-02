@@ -1,139 +1,108 @@
-# Tep::Broadcast -- in-process pub-sub topic broker.
+# Tep::Broadcast -- in-process fan-out.
 #
-# Foundation of the Broadcast battery (Battery 2 in
-# docs/BATTERIES-DESIGN.md). Apps + later batteries (Presence,
-# LiveView) layer on top: WebSocket connections subscribe to
-# topics; publish(topic, payload) writes payload to every
-# subscribed fd.
+# A registry of (topic, fd, mode) subscriptions on the Tep::APP
+# singleton, and `publish`, which writes a payload to every fd
+# subscribed to a topic. WebSocket subscribers (mode = the WS opcode)
+# get a framed message; mode 0 gets raw bytes, for SSE / log fan-out.
 #
-# Public API:
+# THREADS. Connections are green threads now (Tep::Server::Threaded), so
+# a subscribe on one connection races an unsubscribe or a publish on
+# another. Every registry read and write happens under
+# `Tep::APP.broadcast_lock`, and `publish` copies the matching
+# subscriptions out under the lock and writes OUTSIDE it: a write to a
+# subscriber with a full buffer parks this thread (sp_net parks on
+# EAGAIN), and it must not park while holding the registry.
 #
-#   sub_id = Tep::Broadcast.subscribe(topic, fd)
-#   Tep::Broadcast.publish(topic, payload)
-#   Tep::Broadcast.unsubscribe(sub_id)
-#   Tep::Broadcast.unsubscribe_fd(fd)    # drop ALL subs for an fd
-#
-# Subscription model is fd-based rather than block/callback-based
-# (spinel can't reliably round-trip blocks-as-values across module
-# boundaries, see memory [[spinel_widening_dispatch]]). The
-# concrete v1 use case is "deliver to a WS connection" -- the WS
-# layer keeps its accepted-socket fd, calls subscribe, and
-# Tep::Broadcast.publish writes the payload bytes to that fd.
-# Apps that need a different delivery surface (HTTP SSE, log
-# fan-out) use the same subscribe-fd shape with a different fd.
-#
-# Storage scope is per-process: subscriptions live on Tep::APP,
-# which under prefork is per-worker. Cross-worker pub-sub goes
-# through PG LISTEN/NOTIFY (Tep::Broadcast.enable_pg_backend) --
-# subscribers always register fd-local; publish() additionally
-# NOTIFY's the configured channel so peer workers' local
-# subscribers see the message too.
-#
-# `subscribe` returns an opaque subscription id (the registry
-# index at insertion time). Callers can pass it back to
-# `unsubscribe` for a single-sub drop. For WS connections that
-# subscribe to multiple topics, `unsubscribe_fd(fd)` drops every
-# subscription tied to that fd in one call -- the right shape for
-# the WS on-close hook.
+# Roundhouse vendors the local-only fan-out: the cross-worker PG
+# LISTEN/NOTIFY backend from upstream tep is dropped (the blog runs
+# single-worker -- WORKERS=1 -- so in-process delivery reaches every
+# subscriber). `publish` is therefore a straight alias for
+# `publish_local_only`.
 module Tep
   module Broadcast
-    # Register a subscription for `fd` on `topic`. Returns an
-    # opaque sub_id for later unsubscribe. The fd receives raw
-    # bytes on publish -- suits SSE / log fan-out / anything that
-    # doesn't need WebSocket framing. For WS connections, prefer
-    # subscribe_ws.
+    # Subscribe `fd` to `topic` for raw-bytes delivery. Returns the
+    # subscription's index at the time of the push (an id for
+    # `unsubscribe`, which callers rarely use -- the WS path
+    # unsubscribes by fd on close).
     def self.subscribe(topic, fd)
-      subs = Tep::APP.broadcast_subs
       sub = Tep::BroadcastSubscription.new(topic, fd, 0)
-      subs.push(sub)
-      subs.length - 1
+      n = 0
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        subs.push(sub)
+        n = subs.length - 1
+      end
+      n
     end
 
-    # WebSocket-bridged variant of subscribe. The fd is expected
-    # to be an established WS connection (typically a
-    # Tep::WebSocket::Connection's #fd). On publish, payload is
-    # wrapped in a WS TEXT frame via Tep::WebSocket::Driver
-    # before delivery -- the peer sees a well-formed WS message,
-    # not raw bytes that would close the connection.
-    #
-    # Cleanup is automatic: when the WS connection closes,
-    # Tep::WebSocket::Connection.dispatch_close runs the user's
-    # on_close handler and then calls unsubscribe_fd(driver.fd),
-    # dropping every subscription tied to the closed connection.
-    # Apps don't need to add their own unsubscribe; if they do,
-    # the second call just finds 0 matches (harmless).
+    # Subscribe a WebSocket connection: payloads go out as TEXT frames.
     def self.subscribe_ws(topic, fd)
-      subs = Tep::APP.broadcast_subs
       sub = Tep::BroadcastSubscription.new(
         topic, fd, Tep::WebSocket::OPCODE_TEXT)
-      subs.push(sub)
-      subs.length - 1
+      n = 0
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        subs.push(sub)
+        n = subs.length - 1
+      end
+      n
     end
 
-    # Drop the subscription at `sub_id`. Note that ids are
-    # registry indexes; subsequent drops shift everything past it
-    # downward. For multi-sub drop, prefer `unsubscribe_fd`.
+    # Drop one subscription by index. Out-of-range is a no-op.
     def self.unsubscribe(sub_id)
-      subs = Tep::APP.broadcast_subs
-      if sub_id < 0 || sub_id >= subs.length
-        return 0
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        if sub_id >= 0 && sub_id < subs.length
+          subs.delete_at(sub_id)
+        end
       end
-      subs.delete_at(sub_id)
       0
     end
 
-    # Drop the subscriptions matching BOTH topic and fd. Returns the
-    # count dropped. The multiplexed-connection shape (one WS fd,
-    # several topics — e.g. Mastodon streaming's subscribe/unsubscribe
-    # frames) needs this: an unsubscribe frame drops one topic while
-    # the fd stays connected, so neither unsubscribe(sub_id) (ids
-    # shift) nor unsubscribe_fd (drops everything) fits.
+    # Drop every subscription of `fd` to `topic`. Returns the count
+    # dropped. Back-to-front so delete_at indices stay valid mid-loop.
     def self.unsubscribe_topic_fd(topic, fd)
-      subs = Tep::APP.broadcast_subs
       dropped = 0
-      i = subs.length - 1
-      while i >= 0
-        if subs[i].fd == fd
-          if subs[i].topic == topic
-            subs.delete_at(i)
-            dropped += 1
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        i = subs.length - 1
+        while i >= 0
+          if subs[i].fd == fd
+            if subs[i].topic == topic
+              subs.delete_at(i)
+              dropped += 1
+            end
           end
+          i -= 1
         end
-        i -= 1
       end
       dropped
     end
 
     # Drop every subscription whose fd matches. Returns the count
     # dropped. Used by WS on-close to clean up everything a closing
-    # connection had subscribed to. Back-to-front so delete_at
-    # indices stay valid mid-loop.
+    # connection had subscribed to.
     def self.unsubscribe_fd(fd)
-      subs = Tep::APP.broadcast_subs
       dropped = 0
-      i = subs.length - 1
-      while i >= 0
-        if subs[i].fd == fd
-          subs.delete_at(i)
-          dropped += 1
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        i = subs.length - 1
+        while i >= 0
+          if subs[i].fd == fd
+            subs.delete_at(i)
+            dropped += 1
+          end
+          i -= 1
         end
-        i -= 1
       end
       dropped
     end
 
-    # Write `payload` to every subscribed fd for `topic`. Returns
-    # the number of subscriptions matched (NOT the number of
-    # successful writes -- a closed / bad fd still counts as
-    # matched; the underlying sphttp_write_str returns -1 silently
-    # on that fd). Apps that need delivery confirmation should
-    # track their own ack channel.
-    #
-    # Roundhouse vendors the local-only fan-out: the cross-worker PG
-    # LISTEN/NOTIFY backend from upstream tep is dropped (the blog
-    # runs single-worker — WORKERS=1 — so in-process delivery reaches
-    # every subscriber). publish is therefore a straight alias for
-    # publish_local_only.
+    # Write `payload` to every subscribed fd for `topic`. Returns the
+    # number of subscriptions matched (NOT the number of successful
+    # writes -- a closed / bad fd still counts as matched; the underlying
+    # write returns -1 silently on that fd). Apps that need delivery
+    # confirmation should track their own ack channel.
     def self.publish(topic, payload)
       Tep::Broadcast.publish_local_only(topic, payload)
     end
@@ -141,20 +110,26 @@ module Tep
     # Total subscription count across all topics. Useful for
     # diagnostics and the v1 test surface.
     def self.subscriber_count
-      Tep::APP.broadcast_subs.length
+      n = 0
+      Tep::APP.broadcast_lock.synchronize do
+        n = Tep::APP.broadcast_subs.length
+      end
+      n
     end
 
     # Count of subscribers for one topic. O(n) over the registry;
     # acceptable for v1 (n is typically small per worker).
     def self.subscribers_for(topic)
-      subs = Tep::APP.broadcast_subs
       n = 0
-      i = 0
-      while i < subs.length
-        if subs[i].topic == topic
-          n += 1
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        i = 0
+        while i < subs.length
+          if subs[i].topic == topic
+            n += 1
+          end
+          i += 1
         end
-        i += 1
       end
       n
     end
@@ -163,40 +138,48 @@ module Tep
     # available to apps that need to fully reset (e.g. during
     # graceful shutdown). Returns the count dropped.
     def self.clear
-      subs = Tep::APP.broadcast_subs
-      n = subs.length
-      subs.clear
+      n = 0
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        n = subs.length
+        subs.clear
+      end
       n
     end
 
-    # Local fan-out. (Upstream tep names this publish_local_only to
-    # distinguish it from the PG-NOTIFY-augmented publish; roundhouse
-    # dropped the PG backend, so publish is a straight alias for this.)
+    # Local fan-out. The matching subscriptions are copied out under the
+    # lock; the writes happen outside it (see the module comment).
     #
     # Branches on each subscription's `mode`:
-    #   * mode 0 -> raw bytes via Sock.sphttp_write_str (default,
+    #   * mode 0 -> raw bytes via Sock.sphttp_write_bytes (default,
     #     for SSE / log fan-out / non-framed consumers).
     #   * mode != 0 -> WebSocket frame via Tep::WebSocket::Driver.send_frame,
     #     using the mode value as the WS opcode (1=TEXT, 2=BINARY).
     def self.publish_local_only(topic, payload)
-      subs = Tep::APP.broadcast_subs
-      matched = 0
-      i = 0
-      while i < subs.length
-        if subs[i].topic == topic
-          if subs[i].mode == 0
-            # write_bytes: write_str is strlen-terminated, and a raw
-            # payload is not guaranteed NUL-free.
-            Sock.sphttp_write_bytes(subs[i].fd, payload, payload.bytesize)
-          else
-            Tep::WebSocket::Driver.send_frame(
-              subs[i].fd, subs[i].mode, payload)
+      matched = []
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        i = 0
+        while i < subs.length
+          if subs[i].topic == topic
+            matched.push(subs[i])
           end
-          matched += 1
+          i += 1
+        end
+      end
+      i = 0
+      while i < matched.length
+        sub = matched[i]
+        if sub.mode == 0
+          # write_bytes: write_str is strlen-terminated, and a raw
+          # payload is not guaranteed NUL-free.
+          Sock.sphttp_write_bytes(sub.fd, payload, payload.bytesize)
+        else
+          Tep::WebSocket::Driver.send_frame(sub.fd, sub.mode, payload)
         end
         i += 1
       end
-      matched
+      matched.length
     end
   end
 end

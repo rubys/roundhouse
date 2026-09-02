@@ -135,21 +135,20 @@ module Tep
       0
     end
 
-    # Scheduler-friendly body drain, used by Tep::Server::Scheduled
-    # (whose client fd is non-blocking — a blocking recv would starve
-    # the whole worker). Loops on Sock.sphttp_recv_some +
-    # Tep::Scheduler.io_wait so other fibers keep running while we wait
-    # for body bytes; a 5s per-recv timeout drops a client that opened
-    # the request but never sent the body. Form parse mirrors
-    # consume_body (urlencoded only; multipart isn't vendored).
-    def consume_body_via_scheduler(client_fd)
+    # Body drain for Tep::Server::Threaded, whose client fd is
+    # non-blocking: `io` is the connection's `IO.for_fd` wrapper, and its
+    # timed `wait_readable` parks this green thread until body bytes
+    # arrive; a 5s per-recv timeout drops a client that opened the
+    # request but never sent the body. Form parse mirrors consume_body
+    # (urlencoded only; multipart isn't vendored).
+    def consume_body_via_io(io, client_fd)
       cl = content_length
       # bytesize throughout — same reasoning as consume_body above; on
-      # this path the char/byte gap also cost a 5s io_wait timeout per
-      # multibyte body, waiting for bytes that had already arrived.
+      # this path the char/byte gap also cost a 5s wait per multibyte
+      # body, waiting for bytes that had already arrived.
       while @raw_body.bytesize < cl
-        ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
-        if ready == 0
+        ready = io.wait_readable(5)
+        if ready.nil?
           break   # timeout -- client never finished sending
         end
         chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize)

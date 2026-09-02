@@ -229,7 +229,7 @@ module Main
   # belonging to a request.
   def self.job_loop
     while true
-      Tep::Scheduler.pause(JOB_POLL_INTERVAL)
+      sleep(JOB_POLL_INTERVAL)
       if ActiveJob.pending_count > 0
         Db.with_connection { ActiveJob.drain }
       end
@@ -598,10 +598,13 @@ Broadcasts.set_transport(Cable::Transport.new)
 # reaches this line keeps the inline behaviour rather than dropping work
 # into an Array nobody reads.
 ActiveJob.register_drain
-Tep::Scheduler.spawn_fiber(Fiber.new { Main.job_loop })
-# Tep::Server::Scheduled is the fiber-per-connection server (Falcon-
-# shape). Required for WebSockets: the /cable recv loop parks on
-# Tep::Scheduler.io_wait so a held-open connection doesn't pin the
-# worker. It serves plain HTTP too — a superset of the blocking
-# Tep::Server the binary used before cable landed.
-Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false)
+Thread.new do
+  Main.job_loop
+end
+# Tep::Server::Threaded is the thread-per-connection server: a green
+# thread per connection, every wait a park (recv, write, sleep, and the
+# timed idle waits), so a held-open WebSocket costs a small stack and
+# the OS workers run other connections' Ruby meanwhile. It replaced the
+# fiber-per-connection server, whose poll loop sat above a blocking
+# write in C that no Ruby scheduler could see.
+Tep::Server::Threaded.new(MainApp.new).run(port, workers, false)

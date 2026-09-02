@@ -20,9 +20,14 @@ module Tep
     class Connection
       attr_accessor :driver, :fd, :idle_timeout_seconds
 
-      def initialize(driver)
+      # `io` is the connection's `IO.for_fd` wrapper over the same fd
+      # (Tep::Server::Threaded owns and closes it): a raw fd has no
+      # `wait_readable`, and the wrapper is what parks this green
+      # thread until a frame arrives or the idle timeout passes.
+      def initialize(driver, io)
         @driver = driver
         @fd     = driver.fd
+        @io     = io
         @idle_timeout_seconds = 300
       end
 
@@ -51,8 +56,8 @@ module Tep
         # + per-byte C accessor (sphttp.c is retired — matz/spinel#1466).
         inbuf = +""
         while true
-          ready = Tep::Scheduler.io_wait(@fd, Tep::Scheduler::READ, @idle_timeout_seconds)
-          if ready == 0
+          ready = @io.wait_readable(@idle_timeout_seconds)
+          if ready.nil?
             # Timeout: close 1001 going-away.
             @driver.close(Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
             return 0
