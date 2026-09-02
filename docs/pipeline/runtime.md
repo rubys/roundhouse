@@ -2394,6 +2394,24 @@ concurrent-ruby (campfire's suite also wants `Concurrent::CyclicBarrier`).
 Any raising job wedges the server the same way; a missing constant is
 merely the one this app reaches first.
 
+### The threaded binary dies on more than one OS worker — OPEN, pinned to one
+
+The green-thread server (`runtime/spinel/tep/server_threaded.rb`) is
+validated on ONE OS worker. With spinel's autodetected worker count, a
+browser's parallel load of the signed-in room page took the binary
+down in 4 of 7 runs on a 16-core Linux box (gdb: `SIGSEGV` in
+`sp_StrArray_scan` under `sp_gc_mark_drain` — a stop-the-world mark
+reaching an `Array[String]` whose element was already freed), and in
+one more run a cable subscribe never confirmed with the server alive.
+`SPINEL_WORKERS=1`: 9 of 9 green. A browser-free burst of
+unauthenticated GETs does not reproduce it. Every launcher we ship
+sets `SPINEL_WORKERS=1` (the archive's README says why); the server's
+header carries the evidence and the open question — our unlocked
+shared state, or a root gap in the multi-worker collector. Lifting the
+pin is Stage C of the green-thread migration, with evidence.
+matz/spinel#4266 asks for a program-level cap so the binary can pin
+itself.
+
 ### Tab B does not DISPLAY a message body that is present in its HTML — OPEN
 
 Narrowed, not solved. Two browser tabs, one room; tab A posts. Tab B's

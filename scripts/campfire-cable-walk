@@ -170,7 +170,8 @@ if [[ "$LANE" == spinel ]]; then
     step "starting the binary on :$PORT"
     (
       cd "$OUT"
-      BLOG_DB="$OUT/storage/walk.sqlite3" PORT="$PORT" exec ./build/blog
+      # SPINEL_WORKERS=1: see runtime/spinel/tep/server_threaded.rb's header.
+      BLOG_DB="$OUT/storage/walk.sqlite3" PORT="$PORT" SPINEL_WORKERS=1 exec ./build/blog
     ) >"$LOG" 2>&1 &
     SERVER_PID=$!
 else

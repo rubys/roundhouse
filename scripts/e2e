@@ -304,7 +304,8 @@ case "$TARGET" in
         TARGET_PID=$!
         ;;
     spinel)
-        (cd "$APP_DIR" && BLOG_DB="$DB_REL" PORT="$PORT" \
+        # SPINEL_WORKERS=1: see runtime/spinel/tep/server_threaded.rb's header.
+        (cd "$APP_DIR" && BLOG_DB="$DB_REL" PORT="$PORT" SPINEL_WORKERS=1 \
             ./build/blog >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;

@@ -206,8 +206,13 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             ./build/bin/blog\n\
-             ```\n\n\
+             SPINEL_WORKERS=1 ./build/bin/blog\n\
+             ```\n\
+             `SPINEL_WORKERS=1` pins the runtime to one OS worker: the server is a \
+             green thread per connection and every wait parks, so one worker serves \
+             many connections, and more than one can crash today's binary under a \
+             browser's parallel page load (see `runtime/tep/server_threaded.rb`'s \
+             header for the evidence; matz/spinel#4266 asks for a program-level cap).\n\n\
              ## Test\n\
              Each `test/*.rb` compiles to its own binary and diffs against \
              its `.expected` snapshot. `spin test` feeds the `.rbs` \
@@ -766,7 +771,11 @@ fn ensure_e2e(
         // storage/development.sqlite3 when BLOG_DB is unset, and reads PORT
         // (default 3000, which the playwright config expects). Serves
         // /assets/* from the prebuilt static/assets/.
-        BuildTarget::Spinel => ("./build/bin/blog", "storage/development.sqlite3"),
+        // SPINEL_WORKERS=1: one OS worker until the threaded server's
+        // shared-state audit lands — runtime/spinel/tep/server_threaded.rb's
+        // header has the evidence. Playwright runs the command through a
+        // shell, so the env prefix is honoured.
+        BuildTarget::Spinel => ("SPINEL_WORKERS=1 ./build/bin/blog", "storage/development.sqlite3"),
         _ => unreachable!("ships_e2e gates the match"),
     };
 

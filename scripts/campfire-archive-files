@@ -62,8 +62,18 @@ spin build
 ## Run
 
 \`\`\`sh
-./build/bin/campfire
+SPINEL_WORKERS=1 ./build/bin/campfire
 \`\`\`
+
+\`SPINEL_WORKERS=1\` pins the runtime to one OS worker. The server is a
+green thread per connection and every wait parks, so one worker serves
+many connections; on more than one, today's binary can die under a
+browser's parallel page load (about one run in two on a 16-core Linux
+box; never on one worker). Whether that is shared state the server
+still leaves unlocked or a gap in the runtime's multi-worker collector
+is being worked out, and matz/spinel#4266 asks for a program-level cap
+so a binary can pin itself. The header of
+\`runtime/tep/server_threaded.rb\` carries the evidence.
 
 ## End-to-end
 
@@ -167,7 +177,8 @@ export default defineConfig({
     viewport: { width: 1400, height: 1400 },
   },
   webServer: {
-    command: './build/bin/campfire',
+    // SPINEL_WORKERS=1: see the README's Run section.
+    command: 'SPINEL_WORKERS=1 ./build/bin/campfire',
     cwd: '..',
     url: 'http://localhost:3000/',
     reuseExistingServer: !process.env.CI,

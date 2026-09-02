@@ -17,6 +17,26 @@
 # blocking fd would pin the OS worker in the syscall instead. Timed
 # waits go through one `IO.for_fd` wrapper per connection (a dup, closed
 # with the connection), because a raw fd has no `wait_readable`.
+#
+# ONE OS WORKER, FOR NOW -- every launcher sets SPINEL_WORKERS=1 (the
+# campfire archive's README and e2e config, scripts/campfire-compare,
+# campfire-cable-walk, campfire-queries, e2e, compare, bench). This is
+# the evidence, 2026-09-02, spinel 3428632f, 16-core Linux/gcc: with the
+# autodetected worker count the binary died under a browser's parallel
+# load of the room page in 4 of 7 runs -- gdb: SIGSEGV in
+# sp_StrArray_scan inside sp_gc_mark_drain, a stop-the-world mark
+# reaching an Array[String] whose element was already freed; in one run
+# it did not die and a cable subscribe quietly never confirmed instead.
+# With SPINEL_WORKERS=1, 9 of 9 runs green. A browser-free burst (30
+# rounds of 168 unauthenticated GETs, 48-way parallel) does not
+# reproduce it, so the signed-in page render is part of the shape. Not
+# yet known: whether the freed element is shared state this server
+# still leaves unlocked or a root gap in the runtime's multi-worker
+# collector. Until that is known, one worker is the validated
+# configuration -- the semantics the fiber server had, every I/O parking
+# -- and matz/spinel#4266 asks for a program-level cap so the binary can
+# pin itself instead of every launcher. Lift the pin with evidence, not
+# by deleting it.
 module Tep
   class Server
     class Threaded

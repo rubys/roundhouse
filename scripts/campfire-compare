@@ -192,8 +192,10 @@ if [[ "$LANE" == spinel ]]; then
     # about the caller's environment (scripts/lobsters-spinel-driver.rb
     # learned this when the upstream default flipped under it).
     step "booting the emit on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC)"
+    # SPINEL_WORKERS=1: one OS worker until the threaded server's
+    # shared-state audit lands (runtime/spinel/tep/server_threaded.rb header).
     ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" \
-        SPINEL_GC_MINOR="$MINOR_GC" exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
+        SPINEL_GC_MINOR="$MINOR_GC" SPINEL_WORKERS=1 exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
 else
     step "booting the emit on :$EMIT_PORT"
