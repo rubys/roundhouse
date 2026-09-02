@@ -43,6 +43,23 @@ per_run = begin
   end
 end
 
+# skipped.json is JSONL too, one record per lane the harness asked for
+# and could not measure — {target, stage, reason, log_tail} — written by
+# scripts/bench since 2026-09-02. Its ABSENCE means a harness that
+# predates it; an empty file means nothing was skipped. Optional like the
+# others.
+skipped = begin
+  path = File.join(run_path, 'skipped.json')
+  if File.exist?(path)
+    File.readlines(path).filter_map do |line|
+      line = line.strip
+      JSON.parse(line) unless line.empty?
+    rescue JSON::ParserError
+      nil
+    end
+  end
+end
+
 # ── ordering / metadata ──────────────────────────────────────────────
 
 TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
@@ -133,6 +150,7 @@ end
 measured_targets = targets.select { |t| endpoints.any? { |ep| measured?(by[ep][t]) } }
 dead_targets     = targets - measured_targets
 
+
 # Per-target timed-run accounting, for the no-data banner. per-run.json is
 # the only artifact that distinguishes "never recorded a run" from
 # "recorded some runs and then stopped" — the second shape is a server
@@ -162,6 +180,18 @@ def env_map(env, key)
   value = env_dig(env, key)
   value.is_a?(Hash) ? value : {}
 end
+
+# What the run ASKED for, from env.json's harness snapshot. A lane that
+# fails to build never writes a cell, so it is in none of the lists above
+# — `targets` is what reached summary.json, and a page built only from
+# that reads eight lanes as the whole plan. On 2026-09-02 seventeen were
+# requested, eight measured, and the only trace of the other nine was one
+# appendix row. Everything that says how many lanes there are should say
+# how many were requested.
+requested_targets = Array(env_map(env, 'harness')['targets'])
+never_ran = requested_targets - targets - (per_run || []).map { |r| r['target'] }.uniq
+skipped_by = Hash.new { |h, k| h[k] = [] }
+(skipped || []).each { |s| skipped_by[s['target']] << s if s['target'] }
 
 concurrency = env_map(env, 'harness')['concurrency']
 benchmark   = env.is_a?(Hash) ? env['benchmark'] : nil
@@ -407,11 +437,12 @@ if env
   provenance << " · captured #{env['captured_at']}" if env['captured_at']
   provenance << %( · <code>#{sha}</code>) unless sha.empty?
 end
-html << %(<div class="meta">Run <code>#{run_dir}</code>#{provenance} · #{total} cells × #{runs} runs · #{endpoints.size} endpoints × #{targets.size} targets</div>\n)
+lane_count = requested_targets.size > targets.size ? "#{targets.size} of #{requested_targets.size} requested" : targets.size.to_s
+html << %(<div class="meta">Run <code>#{run_dir}</code>#{provenance} · #{total} cells × #{runs} runs · #{endpoints.size} endpoints × #{lane_count} targets</div>\n)
 
 # Sibling artifacts published alongside this page (relative links, so
 # they work both served and opened from the run directory directly).
-artifacts = %w[env.json per-run.json summary.json summary.md parity.txt]
+artifacts = %w[env.json per-run.json skipped.json summary.json summary.md parity.txt]
   .select { |f| File.exist?(File.join(run_path, f)) }
 unless artifacts.empty?
   html << %(<div class="meta">Artifacts: #{artifacts.map { |f| %(<a href="#{f}"><code>#{f}</code></a>) }.join(' · ')}</div>\n)
@@ -452,7 +483,15 @@ end
 # blog bench always does; campfire runs five Ruby lanes and would have
 # published a paragraph about the JVM and .NET anyway.
 managed   = %w[jruby kotlin csharp csharp-aot rails-jruby] & measured_targets
-heap_note = managed.empty? ? '' : " The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: the JVM cells (<code>jruby</code>, <code>kotlin</code>) via <code>-Xmx512m=-Xms512m</code>, and the .NET cells (<code>csharp</code>, <code>csharp-aot</code>) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB)."
+# Name only the budgeted cells that are ON the page: a run without kotlin
+# or csharp must not describe their heap caps as if they were measured.
+jvm_cells = %w[jruby kotlin] & measured_targets
+net_cells = %w[csharp csharp-aot] & measured_targets
+code_list = ->(ts) { ts.map { |t| "<code>#{t}</code>" }.join(', ') }
+budget_clauses = []
+budget_clauses << "the JVM #{jvm_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(jvm_cells)}) via <code>-Xmx512m=-Xms512m</code>" unless jvm_cells.empty?
+budget_clauses << "the .NET #{net_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(net_cells)}) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB)" unless net_cells.empty?
+heap_note = budget_clauses.empty? ? '' : " The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: #{budget_clauses.join(', and ')}."
 
 # #16 is about the BLOG fixture specifically. Pointing campfire's readers
 # at it would be citing the wrong app's caveats at them.
@@ -497,22 +536,54 @@ partial = measured_targets.select do |t|
   tally[:total] > 0 && tally[:measured] < tally[:total]
 end
 
-unless dead_targets.empty? && partial.empty?
-  items = (dead_targets + partial).map do |t|
+# Three shapes, in the order a reader wants them: lanes that never reached
+# the run at all (failed to build, stage a DB, or start — skipped.json says
+# which stage and why), lanes that reached summary.json with no numbers,
+# and lanes that stopped partway. The first shape is the one this banner
+# could not see until 2026-09-02: it keyed off summary.json, and a lane
+# that fails to BUILD never writes a cell there.
+esc = ->(s) { s.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') }
+unless never_ran.empty? && dead_targets.empty? && partial.empty?
+  stage_word = { 'build' => 'failed to build', 'db' => 'failed to stage its database', 'start' => 'built but never came up' }
+  items = never_ran.map do |t|
+    recs = skipped_by[t]
+    if recs.empty?
+      why = skipped.nil? ? ' — this run predates <code>skipped.json</code>, so the reason is only in the harness\'s own log' :
+                           ' — the harness recorded no reason'
+      "<li><code>#{t}</code> was requested and never measured#{why}</li>"
+    else
+      recs.map do |r|
+        what = stage_word.fetch(r['stage'], "was lost at the #{esc.(r['stage'])} stage")
+        reason = r['reason'].to_s.strip
+        tail = Array(r['log_tail']).join("\n").strip
+        line = "<li><code>#{t}</code> #{what}"
+        line << ": <code>#{esc.(reason)}</code>" unless reason.empty?
+        line << %(<details><summary>last #{Array(r['log_tail']).size} lines of the #{esc.(r['stage'])} log</summary><pre style="white-space:pre-wrap;font-size:0.85em">#{esc.(tail)}</pre></details>) unless tail.empty?
+        line << '</li>'
+      end.join("\n")
+    end
+  end
+  items += (dead_targets + partial).map do |t|
     tally = run_tally[t]
     counted = tally[:total] > 0 ? " (#{tally[:measured]} of #{tally[:total]} timed runs recorded)" : ''
     verb = dead_targets.include?(t) ? 'recorded no measurements' :
            'stopped answering partway through its cells'
     "<li><code>#{t}</code> #{verb}#{counted}</li>"
-  end.join("\n")
+  end
+  missing = never_ran.size + dead_targets.size
+  headline = if requested_targets.empty?
+    'Not every target produced numbers:'
+  else
+    "#{measured_targets.size} of #{requested_targets.size} requested targets produced numbers#{missing > 0 ? "; #{missing} did not" : ''}:"
+  end
 
   html << <<~BANNER
     <div class="methodology" style="border-left-color:#c0392b;background:#fdf3f2">
-      <strong>Incomplete run.</strong> Not every requested target produced numbers:
+      <strong>Incomplete run.</strong> #{headline}
       <ul>
-      #{items}
+      #{items.join("\n")}
       </ul>
-      <p class="caveat">Their cells are shown as <em>no data</em>, not as zero — an unmeasured cell means <code>wrk</code> found nothing serving, which is a different claim from a runtime that was measured and is slow. They are left out of the derived charts (multipliers, RSS ranking) for the same reason.</p>
+      <p class="caveat">Every chart and table below is drawn from the targets that were measured; a target that failed to build is absent, not slow. Where a lane reached the run and then produced no numbers its cells are shown as <em>no data</em>, not as zero — an unmeasured cell means <code>wrk</code> found nothing serving, which is a different claim from a runtime that was measured and is slow. Such lanes are left out of the derived charts (multipliers, RSS ranking) for the same reason.</p>
     </div>
   BANNER
 end

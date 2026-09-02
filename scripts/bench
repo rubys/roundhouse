@@ -55,6 +55,9 @@
 #   bench/results/<timestamp>/per-run.json        # raw per-run data
 #   bench/results/<timestamp>/summary.json        # median + computed metrics
 #   bench/results/<timestamp>/summary.md          # rendered table
+#   bench/results/<timestamp>/skipped.json        # lanes that produced no
+#                                                 # measurements, with the
+#                                                 # stage and log tail
 #
 # Environment:
 #   On Linux: assumes `cpupower frequency-set -g performance` was run
@@ -216,11 +219,47 @@ mkdir -p "$OUT_DIR"
 
 LOG_DIR="$(mktemp -d -t rh-bench-logs.XXXXXX)"
 
+# Every lane the run asked for and could not measure, one JSON line each:
+# {"target","stage","reason","log_tail"}. Written empty up front so a run
+# with nothing to report says so by an empty file rather than a missing
+# one — a missing file means a harness that predates the record. The
+# report reads it for its "Incomplete run" banner. Until this existed the
+# nine lanes lost on 2026-09-02 left one line each in the nightly's log
+# ("rust failed to build; skipping target") and nothing in the run
+# directory, so the page could say WHICH lanes were missing and not WHY.
+SKIPPED_JSON="$OUT_DIR/skipped.json"
+: > "$SKIPPED_JSON"
+
 # ── helpers ──────────────────────────────────────────────────────────
 
-step() { printf '\033[36m→\033[0m %s\n' "$*"; }
-ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+# fd 3 is the console. build_target's every tool now writes to a per-lane
+# build log (so a failure carries its own reason), and these three write
+# to the console THROUGH that capture, so the progress lines still read
+# as they always did while the tool output lands in the log.
+exec 3>&1
+step() { printf '\033[36m→\033[0m %s\n' "$*" >&3; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*" >&3; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+# Record a lane that produced no measurements: which stage lost it
+# (build, db, start) and the tail of the log that stage wrote. The
+# `reason` is the log's last non-blank line — for a compiler abort that
+# is "fatal runtime error: stack overflow, aborting", for a missing
+# module the ModuleNotFoundError — the one line a reader of the page
+# needs before deciding whether to open the tail.
+record_skip() {
+    local target="$1" stage="$2" log="$3"
+    ruby - "$SKIPPED_JSON" "$target" "$stage" "$log" <<'RUBY'
+require "json"
+path, target, stage, log = ARGV
+lines  = File.exist?(log) ? File.readlines(log, chomp: true) : []
+tail   = lines.last(40).map { |l| l.gsub(/\e\[[0-9;]*m/, "") }
+reason = tail.reverse.find { |l| !l.strip.empty? }.to_s.strip
+File.open(path, "a") do |f|
+  f.puts JSON.generate(target: target, stage: stage, reason: reason, log_tail: tail)
+end
+RUBY
+}
 
 wait_for_port() {
     local url="$1"
@@ -350,7 +389,7 @@ build_target() {
             TARGET_GEMFILE=""  # uses fixture's own Gemfile
             if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
                 step "regenerating fixtures/real-blog"
-                (cd "$REPO_ROOT" && bin/rh fixture >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh fixture) || return 1
             fi
             # Gems install into the active Ruby's gem dir, which is
             # per-version: a Ruby bump (or pruning the old version) leaves
@@ -369,7 +408,7 @@ build_target() {
             # generates + migrates + seeds under CRuby.
             if [[ ! -f "$FIXTURE80/storage/development.sqlite3" ]]; then
                 step "generating rails 8.0 fixture (bin/rh fixture --rails)"
-                (cd "$REPO_ROOT" && bin/rh fixture --rails '~> 8.0.0' "$FIXTURE80" >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh fixture --rails '~> 8.0.0' "$FIXTURE80") || return 1
             fi
             # Swap the SQLite stack for JRuby: the sqlite3 C-ext gem has no
             # JRuby build → JDBC adapter; kamal/thruster pull C-ext deps
@@ -387,7 +426,7 @@ build_target() {
                 (cd "$FIXTURE80" && \
                     BUNDLE_PATH="$FIXTURE80/.bundle-jruby" \
                     BUNDLE_WITHOUT="development:test" \
-                    jruby -S bundle install >/dev/null) || return 1
+                    jruby -S bundle install) || return 1
             fi
             ;;
         ruby|ruby-int)
@@ -395,19 +434,19 @@ build_target() {
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
             if (( SKIP_EMIT == 0 )) || [[ ! -d "$RUBY_OUT" ]]; then
                 step "regenerating ruby target (bin/rh transpile ruby)"
-                (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh transpile ruby) || return 1
             fi
             # Same per-version gem-dir hazard as the rails cells: make sure
             # the scaffold bundle is satisfied for the active Ruby before the
             # asset build and the puma boot rely on it.
             step "bundling ruby target"
             (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle check >/dev/null 2>&1 \
-                || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install >/dev/null) || return 1
+                || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install) || return 1
             # Assets — Tailwind compile + JS deps. Needed for full
             # response bytes; without it the index page is naked.
             if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
                 step "building ruby assets"
-                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null) || return 1
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets) || return 1
             fi
             ;;
         jruby)
@@ -418,7 +457,7 @@ build_target() {
             TARGET_GEMFILE="$JRUBY_OUT/Gemfile"
             if (( SKIP_EMIT == 0 )) || [[ ! -d "$JRUBY_OUT" ]]; then
                 step "regenerating jruby target (bin/rh transpile jruby)"
-                (cd "$REPO_ROOT" && bin/rh transpile jruby >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh transpile jruby) || return 1
             fi
             # JRuby resolves the jdbc-sqlite3 driver (and JRuby builds of
             # puma/rack/etc.) into this tree. The transpile drops the MRI
@@ -433,7 +472,7 @@ build_target() {
                ! (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle check >/dev/null 2>&1); then
                 step "installing jruby bundle"
                 rm -f "$JRUBY_OUT/Gemfile.lock"
-                (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle install >/dev/null) || return 1
+                (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle install) || return 1
             fi
             # Assets — Tailwind + JS deps. The output is byte-identical to
             # the ruby tree, so reuse those when present (avoids a second
@@ -445,7 +484,7 @@ build_target() {
                     cp -R "$RUBY_OUT/static/assets" "$JRUBY_OUT/static/assets"
                 else
                     step "building jruby assets"
-                    (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle exec rake assets >/dev/null) || return 1
+                    (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle exec rake assets) || return 1
                 fi
             fi
             ;;
@@ -454,7 +493,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$TS_OUT/main.ts" ]]; then
                 step "regenerating typescript target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target typescript "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target typescript "$FIXTURE") || return 1
             fi
             if [[ ! -d "$TS_OUT/node_modules" ]]; then
                 step "installing npm deps"
@@ -466,7 +505,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$CR_OUT/src/main.cr" ]]; then
                 step "regenerating crystal target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target crystal "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target crystal "$FIXTURE") || return 1
             fi
             if [[ ! -x "$CR_OUT/.bin/server" ]]; then
                 step "building crystal target (release)"
@@ -482,7 +521,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$KT_OUT/src/main/kotlin/Main.kt" ]]; then
                 step "regenerating kotlin target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target kotlin "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target kotlin "$FIXTURE") || return 1
             fi
             if (( SKIP_EMIT == 0 )) || [[ ! -x "$KT_OUT/build/install/roundhouse-app/bin/roundhouse-app" ]]; then
                 step "building kotlin target (gradle installDist)"
@@ -496,11 +535,11 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$SW_OUT/Sources/App/main.swift" ]]; then
                 step "regenerating swift target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target swift "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target swift "$FIXTURE") || return 1
             fi
             if (( SKIP_EMIT == 0 )) || [[ ! -x "$SW_OUT/.build/release/App" ]]; then
                 step "building swift target (swift build -c release)"
-                (cd "$SW_OUT" && swift build -c release >/dev/null) || return 1
+                (cd "$SW_OUT" && swift build -c release) || return 1
             fi
             ;;
         csharp)
@@ -510,7 +549,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/Program.cs" ]]; then
                 step "regenerating csharp target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE") || return 1
             fi
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/bin/Release/net10.0/roundhouse-app.dll" ]]; then
                 step "building csharp target (dotnet build -c Release)"
@@ -524,7 +563,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/Program.cs" ]]; then
                 step "regenerating csharp target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE") || return 1
             fi
             if (( SKIP_EMIT == 0 )) || [[ ! -x "$CS_OUT/publish-aot/roundhouse-app" ]]; then
                 local rid
@@ -551,7 +590,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$RS_OUT/Cargo.toml" ]]; then
                 step "regenerating rust target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target rust "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target rust "$FIXTURE") || return 1
             fi
             if [[ ! -x "$RS_OUT/target/release/app" ]]; then
                 step "building rust target (release)"
@@ -568,7 +607,7 @@ build_target() {
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$SP_OUT/main.rb" ]]; then
                 step "regenerating spinel target (bin/rh transpile spinel)"
-                (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh transpile spinel) || return 1
             fi
             if [[ ! -f "$SP_OUT/static/assets/tailwind.css" ]]; then
                 step "building spinel assets (tailwind + turbo.min.js)"
@@ -578,8 +617,8 @@ build_target() {
                 # returns nothing → the Makefile cp collapses to /app/... and
                 # aborts. Self-heal first; bundle check is a fast no-op when set.
                 (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle check >/dev/null 2>&1 \
-                    || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install >/dev/null) || return 1
-                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null) || return 1
+                    || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install) || return 1
+                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets) || return 1
             fi
             # Recompile whenever we re-emitted (SKIP_EMIT==0) — the spinel
             # COMPILER may have changed under us (git pull && make), and
@@ -588,7 +627,7 @@ build_target() {
             # old binary across compiler updates.
             if (( SKIP_EMIT == 0 )) || [[ ! -x "$SP_OUT/build/blog" ]]; then
                 step "AOT-compiling main.rb → build/blog (spinel)"
-                (cd "$SP_OUT" && rm -f build/blog && make build >/dev/null) || return 1
+                (cd "$SP_OUT" && rm -f build/blog && make build) || return 1
             fi
             ;;
         go)
@@ -600,7 +639,7 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$GO_OUT/go.mod" ]]; then
                 step "regenerating go target (bin/rh transpile go)"
-                (cd "$REPO_ROOT" && bin/rh transpile go >/dev/null) || return 1
+                (cd "$REPO_ROOT" && bin/rh transpile go) || return 1
             fi
             if [[ ! -x "$GO_OUT/.bin/server" ]]; then
                 step "building go target (cmd/v2/, release shape)"
@@ -615,10 +654,10 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$EX_OUT/mix.exs" ]]; then
                 step "regenerating elixir target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target elixir "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target elixir "$FIXTURE") || return 1
             fi
             step "building elixir target (mix compile)"
-            (cd "$EX_OUT" && mix deps.get >/dev/null 2>&1 && MIX_ENV=prod mix compile >/dev/null) || return 1
+            (cd "$EX_OUT" && mix deps.get && MIX_ENV=prod mix compile) || return 1
             ;;
         python)
             # `emit_preview --target python` writes the lowered-IR Python
@@ -626,15 +665,19 @@ build_target() {
             # the emitted pyproject.toml. Wipe pycache so emitter changes
             # aren't masked by stale bytecode, sync the venv, and validate
             # imports so a startup failure surfaces here, not as HTTP diffs.
-            # Mirrors scripts/compare's python branch.
+            # Mirrors scripts/compare's python branch — INCLUDING the module
+            # it names: this check said `app.routes` for two weeks after the
+            # overlay moved routing under app/v2 (c80bb3c3), and every
+            # nightly from 2026-08-20 dropped python for a module that no
+            # longer existed. `app.v2.dispatch` is the live dispatch path.
             TARGET_BUILD_DIR="$PY_OUT"
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$PY_OUT/pyproject.toml" ]]; then
                 step "regenerating python target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target python "$FIXTURE" >/dev/null 2>&1) || return 1
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target python "$FIXTURE") || return 1
             fi
             step "syncing python venv (uv) + validating imports"
-            (cd "$PY_OUT" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes") || return 1
+            (cd "$PY_OUT" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.v2.dispatch") || return 1
             ;;
     esac
 }
@@ -1099,12 +1142,23 @@ for target in "${TARGETS[@]}"; do
     # languages still get measured. The `if !` context suppresses set -e
     # inside build_target — that's why each build step there ends in
     # `|| return 1`, so the first failure propagates here.
-    if ! build_target "$target"; then
+    # Everything the build's tools print goes to the lane's build log —
+    # stdout too, because dotnet and gradle put their errors there — and
+    # a failure hands the reader the tail of it, on stderr for the nightly
+    # log and in skipped.json for the page. Progress lines (`step`) reach
+    # the console through fd 3, above.
+    build_log="$LOG_DIR/build-${target}.log"
+    if ! build_target "$target" >"$build_log" 2>&1; then
         fail "$target failed to build; skipping target"
+        echo "--- $target build log (last 40 lines: $build_log) ---" >&2
+        tail -40 "$build_log" >&2
+        record_skip "$target" build "$build_log"
         continue
     fi
-    if ! stage_db "$target"; then
+    if ! stage_db "$target" >>"$build_log" 2>&1; then
         fail "$target DB staging failed; skipping target"
+        tail -20 "$build_log" >&2
+        record_skip "$target" db "$build_log"
         continue
     fi
 
@@ -1127,6 +1181,7 @@ for target in "${TARGETS[@]}"; do
         step "start $target (workers=$effective_workers, port=$port)"
         start_target "$target" "$port" "$effective_workers" || {
             fail "$target failed to start; skipping cell"
+            record_skip "$target" start "$LOG_DIR/${target}-${effective_workers}w.log"
             port=$(( port + 1 ))
             continue
         }
