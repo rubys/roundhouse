@@ -55,13 +55,20 @@ module Tep
     # (path, expires, max-age, domain, samesite, httponly, secure).
     # Empty `opts` is fine: just writes "name=value".
     def set_cookie(name, value, opts)
+      # Build the line by concatenation, never `<<`: an in-place-mutated
+      # string is a heap String object, and `set_cookies` is a poly array
+      # (its seed is an immediate literal), so a heap element boxes as an
+      # object rather than an immediate string. A consumer that splits an
+      # element then misses spinel's immediate-string dispatch arm and
+      # raises. `+` keeps every line an immediate string, which every
+      # reader (the servers concatenate, the bench driver splits) handles.
       line = name + "=" + Url.escape(value)
       if opts.length > 0
         opts.each do |k, v|
           if v.length == 0
-            line << "; " + k          # bare flag (HttpOnly, Secure)
+            line = line + "; " + k    # bare flag (HttpOnly, Secure)
           else
-            line << "; " + k + "=" + v
+            line = line + "; " + k + "=" + v
           end
         end
       end
