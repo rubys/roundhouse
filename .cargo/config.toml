@@ -3,7 +3,9 @@
 # The recursive walkers in analyze (`analyze_expr`, `visit_effects`,
 # `diagnose_expr`) bottom out near that on deeper fixtures
 # (`fixtures/real-blog`). Bump to 32 MB so test runs aren't sensitive
-# to fixture depth. Production code uses the main thread's larger
-# default; if depth ever bites at runtime, switch the load-bearing
-# walkers to `stacker::maybe_grow` instead.
+# to fixture depth. The CLI binaries don't read this: each runs the
+# pipeline on a thread sized by `roundhouse::stack::run` (256 MB), after
+# the OS main-thread default (8 MB) proved too small for a debug-profile
+# walk of a 45-term `||` chain (bf2e160f) and cost the bench page nine
+# lanes.
 RUST_MIN_STACK = "33554432"

@@ -78,6 +78,10 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    roundhouse::stack::run(cli)
+}
+
+fn cli() -> ExitCode {
     match parse_args() {
         Ok(args) => match run(&args) {
             Ok(()) => ExitCode::SUCCESS,

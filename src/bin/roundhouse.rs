@@ -69,6 +69,10 @@ Examples:
 }
 
 fn main() -> ExitCode {
+    roundhouse::stack::run(cli)
+}
+
+fn cli() -> ExitCode {
     match parse_args(std::env::args().skip(1).collect()) {
         Ok(Action::Help) => {
             print!("{}", usage());

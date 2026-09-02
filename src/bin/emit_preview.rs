@@ -19,6 +19,10 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::profile::DeploymentProfile;
 
 fn main() {
+    roundhouse::stack::run(emit)
+}
+
+fn emit() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let target = take_flag(&mut args, "--target").unwrap_or_else(|| "typescript".into());
     let profile = take_flag(&mut args, "--profile");

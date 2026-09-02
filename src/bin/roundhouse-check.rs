@@ -32,6 +32,10 @@ use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::{ingest_app, survey, IngestError};
 
 fn main() -> ExitCode {
+    roundhouse::stack::run(check)
+}
+
+fn check() -> ExitCode {
     let mut continue_on_error = std::env::var("ROUNDHOUSE_INGEST_SURVEY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);

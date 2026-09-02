@@ -12,6 +12,10 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    roundhouse::stack::run(serve)
+}
+
+fn serve() -> ExitCode {
     match roundhouse::mcp::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

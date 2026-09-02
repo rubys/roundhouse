@@ -78,6 +78,10 @@ use roundhouse::lower::{
 use roundhouse::ty::Ty;
 
 fn main() {
+    roundhouse::stack::run(dump)
+}
+
+fn dump() {
     let opts = match parse_args() {
         Ok(o) => o,
         Err(e) => {

@@ -225,6 +225,19 @@ jobs:
         run: gem install rails-html-sanitizer --no-document
       - name: cargo test
         run: cargo test --all-targets
+      # scripts/bench emits nine of its lanes with `cargo run --bin
+      # emit_preview` — the DEBUG profile — and nothing else in CI did:
+      # the site job and bin/rh run `--release`, whose frames are a
+      # fraction of the size. A debug-only stack overflow (bf2e160f's
+      # 45-term `||` chain) therefore passed CI green and took nine lanes
+      # off the published bench page. This is the harness's own shape,
+      # run here so the next one fails a PR instead of a nightly.
+      - name: Emit every bench lane in the debug profile (scripts/bench's shape)
+        run: |
+          set -euo pipefail
+          for target in typescript crystal rust python elixir go kotlin swift csharp; do
+            cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
+          done
 
   # -------------------------------------------------------------------
   # One job per target language. Each generates a project from the

@@ -34,6 +34,10 @@ pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
+/// The thread budget every CLI runs the pipeline on. Host-only: wasm has
+/// no threads and its stack is fixed at link time.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stack;
 pub mod rbs;
 pub mod runtime_loader;
 pub mod runtime_src;
