@@ -325,4 +325,4 @@ at your option.
 `runtime/spinel/tep/` carries code that began as
 [tep](https://github.com/OriPekelman/tep) 0.8.1 by Ori Pekelman,
 MIT-licensed; see `runtime/spinel/tep/NOTICE`. That directory ships
-into every emitted spinel tree as `runtime/tep/`.
+into every emitted spinel tree, under runtime/tep there.
