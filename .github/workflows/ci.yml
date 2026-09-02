@@ -711,11 +711,10 @@ jobs:
   # compare can carry. Known divergences are forgiven BY NAME against
   # docs/pipeline/runtime.md; anything new fails.
   #
-  # CRuby lane only, deliberately: `--spinel` is expected red on
-  # frame_html.html until matz/spinel#4240 closes (SanitizeTags is
-  # inert on the binary — a builtin-named method lost through an
-  # untyped slot), and a job born red is a job nobody reads. Grow the
-  # spinel lane here when that issue closes.
+  # This is the REQUIRED lane (CRuby emit). The binary legs below —
+  # campfire-compare-spinel (default) and (minor-gc) — take the same
+  # walk against the compiled binary and stay advisory, because spinel
+  # is tracked unpinned.
   campfire-compare:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -778,13 +777,36 @@ jobs:
   # `continue-on-error` for the same reason framework-tests-spinel is:
   # spinel is tracked unpinned, and upstream churn must not gate
   # unrelated work — with the known cost that a break here is invisible
-  # in the run conclusion, so check this job BY NAME when campfire
+  # in the run conclusion, so check these legs BY NAME when campfire
   # moves.
+  #
+  # Two legs, one definition. `default` serves the binary with spinel's
+  # whole-heap mark; `minor-gc` serves it under SPINEL_GC_MINOR=1, the
+  # generational collector that is opt-in until it goes default-on.
+  # matz asked for this leg by name (matz/spinel#4260): the default-on
+  # decision needs a workload with a large, stable retained heap, and a
+  # long-lived process holding connection registries and a rendered
+  # room page is that shape — lobsters is request-shaped, LangArena the
+  # opposite. Both legs consume the SAME build-spinel artifact of the
+  # SAME run, so a red `minor-gc` beside a green `default` is the
+  # collector alone. That is the report he wants most: reduce it, file
+  # it upstream, and say minor-GC-only in the title. Only the served
+  # binary sees the variable — scripts/campfire-compare exports it
+  # explicitly, 0 or 1, on the launch line and nowhere else.
   campfire-compare-spinel:
+    name: campfire-compare-spinel (${{ matrix.gc }})
     needs: build-spinel
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gc: default
+            flag: ''
+          - gc: minor-gc
+            flag: --minor-gc
     services:
       redis:
         image: redis
@@ -823,8 +845,8 @@ jobs:
         run: scripts/campfire-oracle prepare --app /tmp/campfire
       - name: Walk gems
         run: gem install websocket-driver --no-document
-      - name: scripts/campfire-compare --spinel
-        run: scripts/campfire-compare --spinel /tmp/campfire
+      - name: scripts/campfire-compare --spinel ${{ matrix.flag }}
+        run: scripts/campfire-compare --spinel ${{ matrix.flag }} /tmp/campfire
 
   campfire-conformance:
     runs-on: ubuntu-latest

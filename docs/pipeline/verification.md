@@ -294,12 +294,21 @@ diffs between two IRs drop out from plain `diff` across the outputs.
 - **Everything else is red-as-signal:** compare, smoke,
   framework-tests, and toolchain jobs turn the run red without
   blocking deploy; the red is the shared worklist.
-- **Exactly five jobs are `continue-on-error`**, all for one
-  structural reason — they track matz/spinel master unpinned, so
-  upstream churn must not gate unrelated work: `build-spinel`,
+- **Seven jobs are `continue-on-error`**, all for one structural
+  reason — they track matz/spinel master unpinned, so upstream churn
+  must not gate unrelated work: `build-spinel`,
   `framework-tests-spinel`, `toolchain-spinel`, `compare-spinel`,
-  `smoke-spinel`. The cost: an advisory failure is invisible in the
-  run's conclusion. Read the jobs, not the conclusion.
+  `smoke-spinel`, `smoke-campfire`, and `campfire-compare-spinel`,
+  which runs as two legs. The cost: an advisory failure is invisible
+  in the run's conclusion. Read the jobs, not the conclusion.
+- **`campfire-compare-spinel (default)` and `(minor-gc)`** serve the
+  same binary, from the same `build-spinel` artifact, through the same
+  Rails-oracle walk; the second under `SPINEL_GC_MINOR=1`, spinel's
+  generational collector, which is opt-in until it goes default-on.
+  matz asked for that leg (matz/spinel#4260): campfire is the
+  retained-heap shape the default-on decision lacks. A red `minor-gc`
+  beside a green `default` is the collector alone — reduce it, file it
+  upstream, and say minor-GC-only in the title.
 - **`campfire-conformance` is blocking** — pinned input, so no churn
   to excuse noise.
 

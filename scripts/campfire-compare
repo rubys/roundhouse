@@ -39,6 +39,17 @@
 #                 c178fc15, the day it was filed): both frames
 #                 equivalent to Rails on the compiled binary. Needs
 #                 `spinel` >= that commit on PATH.
+#   --minor-gc    With --spinel: serve the binary under SPINEL_GC_MINOR=1,
+#                 spinel's generational collector (opt-in until it goes
+#                 default-on — matz/spinel#4260 asked for exactly this
+#                 leg, on every push, on our CI). Only the SERVED binary
+#                 sees the variable; the compiler builds without it, so
+#                 a compile-time fault cannot pass for a runtime one.
+#                 Either way the value is exported explicitly (0 or 1),
+#                 so an ambient setting cannot flip a lane. A divergence
+#                 that appears ONLY under this flag is the report matz
+#                 wants most: file it upstream with a reduction and say
+#                 minor-GC-only in the title.
 #
 # Requires: the Rails oracle prepared at build/campfire-oracle
 # (scripts/campfire-oracle prepare), redis-server running (Action Cable's
@@ -52,6 +63,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
+MINOR_GC=0
 OUT=""
 KEEP=0
 REUSE=""
@@ -61,7 +73,8 @@ while [[ $# -gt 0 ]]; do
         --reuse)  REUSE="$2"; shift 2 ;;
         --keep)   KEEP=1; shift ;;
         --spinel) LANE=spinel; shift ;;
-        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+        --minor-gc) MINOR_GC=1; shift ;;
+        -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
         *) APP="$1"; shift ;;
     esac
 done
@@ -70,6 +83,10 @@ step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 ok()   { printf '\033[1;32mok\033[0m  %s\n' "$1"; }
 fail() { printf '\033[1;31m%s\033[0m\n' "$1"; }
 die()  { fail "$1"; exit 1; }
+
+if [[ $MINOR_GC -eq 1 && "$LANE" != spinel ]]; then
+    die "--minor-gc needs --spinel: SPINEL_GC_MINOR is read by the compiled binary, nothing on the ruby lane"
+fi
 
 ORACLE_PID=""
 EMIT_PID=""
@@ -169,12 +186,17 @@ step "booting the Rails oracle on :$ORACLE_PORT"
     > "$DUMPS/oracle-server.log" 2>&1 &
 ORACLE_PID=$!
 
-step "booting the emit on :$EMIT_PORT"
 if [[ "$LANE" == spinel ]]; then
+    # SPINEL_GC_MINOR is exported explicitly on BOTH settings: the default
+    # lane's whole-heap mark is then an attestation, not an assumption
+    # about the caller's environment (scripts/lobsters-spinel-driver.rb
+    # learned this when the upstream default flipped under it).
+    step "booting the emit on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC)"
     ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" \
-        exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
+        SPINEL_GC_MINOR="$MINOR_GC" exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
 else
+    step "booting the emit on :$EMIT_PORT"
     ( cd "$OUT" && RAILS_ENV=development SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
         exec ruby -S puma -p "$EMIT_PORT" config.ru ) > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
