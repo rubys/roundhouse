@@ -51,6 +51,10 @@
 # The instance side therefore RAISES rather than returning quietly: a
 # channel that accepts a subscription it will never deliver on is the
 # failure that looks like success.
+# The bundled `json` (spinel: the native binding to sp_json.c, activated
+# by this require; CRuby: the stdlib) parses subscribe frames and quotes
+# envelope fields. The flat-key decoder this glue used to carry is gone.
+require "json"
 require_relative "broadcasts"
 require_relative "cable"
 
@@ -117,7 +121,7 @@ module ActionCable
         if entry[:action] == :message
           out << entry[:payload].to_s
         else
-          out << Tep::Json.quote(Broadcasts.render_fragment(
+          out << JSON.generate(Broadcasts.render_fragment(
             action: entry[:action],
             target: entry[:target],
             html: entry[:html],
@@ -170,7 +174,7 @@ module ActionCable
         out = out + ","
       end
       first = false
-      out = out + Tep::Json.quote(key.to_s) + ":" + value.to_s
+      out = out + JSON.generate(key.to_s) + ":" + value.to_s
     end
     out + "}"
   end
@@ -365,14 +369,14 @@ module ActionCable
     # A channel's `params` — the subscribe frame's identifier, read one
     # key at a time.
     #
-    # OVER THE JSON TEXT, NOT A PARSED HASH. An identifier is
+    # PARSED PER READ, COERCED AT THE BOUNDARY. An identifier is
     # `{"channel":"RoomChannel","room_id":5}`: heterogeneous values
     # under keys only the app knows, which is the untyped bag this
-    # pipeline has nowhere to put. `Tep::Json` already walks that text
-    # a key at a time without building one, and a channel only ever
-    # asks for the keys it names — campfire's seven ask for
-    # `signed_stream_name` and `room_id` — so nothing needs the whole
-    # object at once.
+    # pipeline has nowhere to put. `JSON.parse` hands it back as one
+    # boxed value and every read coerces what it takes out (`to_s`), so
+    # nothing downstream widens; a channel only ever asks for the keys
+    # it names — campfire's seven ask for `signed_stream_name` and
+    # `room_id` — so nothing keeps the object around.
     #
     # A STRING EVERY TIME, INCLUDING FOR A NUMBER. `RoomChannel` does
     # `Room.find_by(id: params[:room_id])` and the client writes
@@ -392,29 +396,39 @@ module ActionCable
         @identifier = identifier
       end
 
-      # THE VALUE'S OWN SYNTAX DECIDES HOW IT IS READ, not a fallback
-      # chain: `get_str` answers "" for a number AND for an empty
-      # string, so trying it first and falling back on "" would turn
-      # `{"k":""}` into `"0"`. One look at the first character of the
-      # value settles it.
+      # The text as an object, or nil when it is not one: a frame that
+      # does not parse, or parses to an array or a scalar, reads as
+      # having no keys rather than raising mid-subscribe. Both runtimes
+      # raise JSON::ParserError on bad input; only CRuby would also
+      # raise on `[1]["k"]`, so the Hash check does the same job on both.
+      def self.object(text)
+        begin
+          h = JSON.parse(text)
+        rescue StandardError
+          return nil
+        end
+        h.is_a?(Hash) ? h : nil
+      end
+
+      # One key of `text` as a String: "" when the key is absent or
+      # `text` is not an object; a number reads as its digits. The
+      # cable glue reads subscribe frames through this too.
+      def self.read(text, name)
+        h = Parameters.object(text)
+        if h.nil?
+          return ""
+        end
+        v = h[name]
+        v.nil? ? "" : v.to_s
+      end
+
       def [](key)
-        name = key.to_s
-        pos = Tep::Json.find_value_start(@identifier, name)
-        if pos < 0
-          return ""
-        end
-        pos = Tep::Json.skip_ws(@identifier, pos)
-        if pos >= @identifier.length
-          return ""
-        end
-        if @identifier[pos] == "\""
-          return Tep::Json.parse_str_value(@identifier, pos)
-        end
-        Tep::Json.get_int(@identifier, name).to_s
+        Parameters.read(@identifier, key.to_s)
       end
 
       def key?(key)
-        Tep::Json.has_key?(@identifier, key.to_s)
+        h = Parameters.object(@identifier)
+        h.nil? ? false : h.key?(key.to_s)
       end
     end
 

@@ -167,7 +167,7 @@ module Cable
   # its subscription table on the identifier and retries a subscription
   # it never heard back about, so a dropped frame is a reconnect loop.
   def self.subscribe(ws, connection, identifier)
-    name = Tep::Json.get_str(identifier, "channel")
+    name = ActionCable::Channel::Parameters.read(identifier, "channel")
     if name.length == 0
       return Cable.reject(ws, identifier)
     end
@@ -199,13 +199,13 @@ module Cable
       end
       Tep::Broadcast.subscribe_ws(stream, ws)
     end
-    ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
+    ws.text("{\"identifier\":" + JSON.generate(identifier) +
             ",\"type\":\"confirm_subscription\"}")
     0
   end
 
   def self.reject(ws, identifier)
-    ws.text("{\"identifier\":" + Tep::Json.quote(identifier) +
+    ws.text("{\"identifier\":" + JSON.generate(identifier) +
             ",\"type\":\"reject_subscription\"}")
     0
   end
@@ -219,11 +219,14 @@ module Cable
   # app's `subscribed` can read `current_user`. That is the hop item 4
   # adds: identity existed and nothing consulted it.
   def self.handle_message(ws, connection, data)
-    cmd = Tep::Json.get_str(data, "command")
-    if cmd != "subscribe"
+    frame = ActionCable::Channel::Parameters.object(data)
+    if frame.nil?
       return 0
     end
-    identifier = Tep::Json.get_str(data, "identifier")
+    if frame["command"].to_s != "subscribe"
+      return 0
+    end
+    identifier = frame["identifier"].to_s
     if identifier.length == 0
       return 0
     end
@@ -403,7 +406,7 @@ module Cable
     if id.length == 0
       return nil
     end
-    envelope = "{\"identifier\":" + Tep::Json.quote(id) +
+    envelope = "{\"identifier\":" + JSON.generate(id) +
                ",\"message\":" + message_json + "}"
     Tep::Broadcast.publish(stream, envelope)
     nil
@@ -419,8 +422,8 @@ module Cable
       if id.length == 0
         return nil   # no subscriber has named this stream yet
       end
-      envelope = "{\"identifier\":" + Tep::Json.quote(id) +
-                 ",\"message\":" + Tep::Json.quote(fragment) + "}"
+      envelope = "{\"identifier\":" + JSON.generate(id) +
+                 ",\"message\":" + JSON.generate(fragment) + "}"
       Tep::Broadcast.publish(stream, envelope)
       nil
     end

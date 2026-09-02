@@ -1,11 +1,6 @@
 require_relative "tep_core"
 require_relative "url"
 require_relative "net"
-# Tep::Json — flat-key JSON decode (get_str) + encode (quote/escape),
-# used by the Action Cable glue to parse subscribe frames and build
-# the welcome/confirm/message envelopes. Namespaced (Tep::Json), so no
-# collision with roundhouse's own `JSON` shim (runtime/json.rb).
-require_relative "json"
 require_relative "streamer"
 # BroadcastSubscription is needed by app.rb (which type-seeds the
 # subscriber registry) and broadcast.rb.
@@ -40,13 +35,10 @@ module Tep
   _tep_seed_res.streamer.pump(_tep_seed_stream)
   _tep_seed_stream.write("")
 
-  # Pin String param types on vendored methods roundhouse's cable glue
-  # doesn't itself call. Without a String-typed call site, spinel
-  # defaults their params to int and the C-compile fails when the body
-  # uses them as strings. Both calls are side-effect-free (pure reads /
-  # parse), so running them at load is harmless.
-  #   - Tep::Json.get_int exercises the get_int -> parse_int_value path.
-  #   - Tep::Broadcast.subscribers_for reads the (empty) registry.
-  Tep::Json.get_int("", "")
+  # Pin the String param type on a vendored method roundhouse's cable
+  # glue doesn't itself call. Without a String-typed call site, spinel
+  # defaults the param to int and the C-compile fails when the body
+  # uses it as a string. The call is a side-effect-free read of the
+  # (empty) registry, so running it at load is harmless.
   Tep::Broadcast.subscribers_for("")
 end

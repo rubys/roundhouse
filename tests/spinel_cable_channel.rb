@@ -29,14 +29,7 @@
 root = ARGV[0] or abort "usage: spinel_cable_channel.rb <repo-root>"
 root = File.expand_path(root)
 
-# `Tep::Json` is referenced by `payload_json` further up the file, which
-# nothing here calls. Stubbed rather than loaded so the driver stays
-# free of the Tep runtime.
 module Tep
-  module Json
-    def self.quote(s) = s.inspect
-  end
-
   module WebSocket
     class Handler; end
   end
