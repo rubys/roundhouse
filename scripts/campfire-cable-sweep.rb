@@ -264,7 +264,15 @@ writer = Thread.new do
     sleep(1.0 / opts[:rate])
   end
 end
-pump(clients, opts[:messages] / opts[:rate] + opts[:drain]) { break if !writer.alive? && now - t1 > opts[:messages] / opts[:rate] + opts[:drain] }
+# Read until the writer has posted everything AND --drain seconds have passed
+# since its last POST. The window is not an estimate: a POST into a big room
+# takes as long as its fan-out, and a fixed budget stopped reading before the
+# last messages of the 5,000-socket cell were even posted.
+last_post = now
+pump(clients, opts[:messages] / opts[:rate] + opts[:drain] + 600) do
+  last_post = posts.values.map { |p| p[:done] }.max || last_post
+  break if !writer.alive? && now - last_post > opts[:drain]
+end
 writer.join
 chat_s = now - t1
 chat_cpu = c1 && cpu_ticks(opts[:pid]) ? (cpu_ticks(opts[:pid]) - c1) / TICK : nil
