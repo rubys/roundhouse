@@ -2464,6 +2464,60 @@ inside it, since `synchronize` carries no ensure on this lane. A
 per-thread or per-connection out-buffer would remove the lock; the FFI
 declares buffers once per module today, and a prepare is short.
 
+### N cable sockets on one binary: the connect storm, the idle cost, and fan-out per subscriber — MEASURED (2026-09-03)
+
+`scripts/campfire-cable-sweep` drives the campfire binary with N held-open
+Action Cable sockets (`scripts/campfire-cable-sweep.rb`: a stdlib RFC 6455
+client on one `IO.select` loop, each socket signed in as a seeded user and
+subscribed to the stream its room page names), pinned to a CPU set so a
+tier of once.com/campfire's table runs on its own core count. Four cores,
+four workers, the 1,000-user seed, roundhouse 74222ab8 on spinel 7182e9b6:
+
+| sockets | rooms | connect storm | idle CPU | idle RSS | frames delivered | fan-out p50 / p99 | last frame p99 |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 10 | 1 | 6 ms | 0.003 cores | 30 MB | 300 / 300 | 45 / 58 ms | 59 ms |
+| 30 | 1 | 14 ms | 0.005 cores | 33 MB | 900 / 900 | 46 / 69 ms | 70 ms |
+| 100 | 2 | 40 ms | 0.010 cores | 43 MB | 1500 / 1500 | 39 / 70 ms | 72 ms |
+| 300 | 6 | 0.13 s | 0.028 cores | 89 MB | 1500 / 1500 | 32 / 55 ms | 61 ms |
+| 300 | 1 | 0.13 s | 0.029 cores | 77 MB | 9000 / 9000 | 46 / 69 ms | 77 ms |
+| 1000 | 20 | 0.53 s | 0.129 cores | 184 MB | 1500 / 1500 | 34 / 65 ms | 67 ms |
+| 1000 | 1 | 0.57 s | 0.134 cores | 143 MB | 30000 / 30000 | 121 / 178 ms | 199 ms |
+| 3000 | 20 | 4.3 s | 0.58 cores | 296 MB | 4500 / 4500 | 94 / 158 ms | 180 ms |
+| 5000 | 20 | 11.6 s | 0.57 cores | 433 MB | 7500 / 7500 | 171 / 315 ms | 423 ms |
+
+The table's 1,000-user row is 4 CPUs and 8 GB; at that size the binary
+idles at 3% of a core and 184 MB and delivers every frame. Rooms hold 50
+subscribers from 100 sockets up (150 and 250 at 3,000 and 5,000), so the
+fan-out per message is the same size through 1,000; a message to a room
+of 1,000 costs 225 µs per delivered frame and the last subscriber gets it
+50 ms after the first, which is our serial fan-out from the posting thread.
+
+**The walls, in the order the sweep met them.** At 300 on four workers the
+connect storm crashed the server: matz/spinel#4312, the shared prepare
+out-buffer above, ours. At 1,000 every connection past about 450 was lost
+silently: matz/spinel#4314, `IO#wait_readable` refusing a descriptor at
+or past 1024 in front of a park that polls; fixed upstream the same night
+(7182e9b6), which is what makes the 1,000 row and beyond measurable. From
+1,000 to 5,000 the cost per connect quintuples (0.53 to 2.1 ms) and the
+fan-out latency triples at a constant room size: matz/spinel#4317, every
+wake in the monitor costs O(parked threads) — a standalone puts it at
+8.5 µs per wake with nothing parked and 86 µs with 5,000 parked, linear.
+Readings that did not survive and are withdrawn: the single-writer SQLite
+theory (this storm subscribes only the message stream and writes
+nothing), the listen backlog (1024, overflow counters unmoved), and "the
+monitor pinned at a full core" (it was, under 568 dead threads; with the
+descriptor fix the busiest thread in a 1,000-connect storm is 15–20% of a
+core).
+
+**What the numbers do not yet cover.** Idle sockets and thirty messages are
+one shape; room-page load under concurrency is the other, and the
+thread server is weakest there (the interleaving cost on
+matz/spinel#4306). The real client also subscribes to the presence
+channel, which writes on connect; the driver does not yet. Payloads are
+lighter than production's (the attachment gaps are a ledgered bias). And
+the comparison that answers the table is Rails as ONCE configures it,
+driven by the same script on the same cores, which is the next lane.
+
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 
 `Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection
