@@ -374,11 +374,27 @@ class DbConn
       return e.ptr if e.sql == sql
       i += 1
     end
-    rc = SQL.sqlite3_prepare_v2(@dbh, sql, -1, SQL.stmt_out, nil)
+    # `SQL.stmt_out` is ONE 8-byte out-buffer for the whole process (an
+    # `ffi_buffer`, static C storage). Under parallel OS workers two
+    # connections preparing at the same moment wrote their statement
+    # pointers into it in turn, and one of them read the other's: a
+    # statement then belonged to two connections, and the second use of
+    # it — a `sqlite3_clear_bindings` on a handle another thread was
+    # stepping, or a finalize of a statement already finalized — took the
+    # process down within a second of parallel load on the room page
+    # (matz/spinel#4312: needed many requests on distinct connections,
+    # not the collector; the lease and the pool were clean). The prepare
+    # and the read of its out-buffer are one critical section now. No
+    # raise inside the lock: `synchronize` has no ensure on this lane.
+    rc = 0
+    st = 0
+    Db.prepare_lock.synchronize do
+      rc = SQL.sqlite3_prepare_v2(@dbh, sql, -1, SQL.stmt_out, nil)
+      st = rc == SQL::OK ? SQL.read_ptr(SQL.stmt_out) : 0
+    end
     if rc != SQL::OK
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
     end
-    st = SQL.read_ptr(SQL.stmt_out)
     @entries.push(Stmt.new(sql, st))
     st
   end
@@ -825,6 +841,14 @@ module Db
   # spinel's per-fiber storage indexer (#577/#578). The stored value is a
   # real DbConn object (tag OBJ), so the `.dbh`/`.prepare_cached` calls on
   # the result resolve — unlike the int-boxed ConnectionPool path.
+  # Serialises `sqlite3_prepare_v2` and the read of its shared out-buffer
+  # across OS workers (DbConn#prepare_cached). Created at load: the first
+  # prepare can come from any thread.
+  @prepare_lock = Mutex.new
+  def self.prepare_lock
+    @prepare_lock
+  end
+
   def self.current_conn
     c = Thread.current[:db_conn]
     return c if !c.nil?

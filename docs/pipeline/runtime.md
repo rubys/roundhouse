@@ -2432,6 +2432,38 @@ followed, and recorded here rather than explained away.
 `SPINEL_WORKERS=N` in the environment still sets the count; the README
 of each archive says so.
 
+### A prepared statement crossed connections through one shared out-buffer — CLOSED (ours)
+
+The campfire binary on 12 OS workers died inside SQLite within a second
+of sixteen parallel room-page requests, about one run in two:
+`sqlite3_clear_bindings` from `Db.finalize`, with six other workers
+inside the library on their own connections at that moment (filed as
+matz/spinel#4312 with what the bisection ruled out — a 4 GB collection
+budget still crashed, so not the collector; a pool of one or two
+connections was clean, so it needed parallel connections; the lease, the
+pool's `Mutex`/`ConditionVariable` and `Thread.current` held up in a
+64-thread standalone on 12 workers; the empty room page was clean). The
+cable sweep then hit the same wall on FOUR workers at 300 sockets: the
+connect storm's presence writes.
+
+**Mechanism.** `DbConn#prepare_cached` prepared through `SQL.stmt_out`,
+an `ffi_buffer` — ONE 8-byte block of static C storage for the whole
+process — and read the statement pointer back out of it. Two workers
+preparing at the same moment wrote in turn and one read the other's
+pointer: a statement then belonged to two connections, one connection's
+cache held a handle it never prepared, and the next reset, clear or
+finalize on it from either side was undefined behaviour inside SQLite.
+Every row of the bisection follows: the seeded room page prepares
+constantly (with the bind gate off every value is a new SQL string), the
+empty page barely prepares at all, one connection serialises the
+prepares behind the lease, and no collector is involved.
+
+**Fix.** The prepare and the read of its out-buffer are one critical
+section under `Db.prepare_lock` (a module-level `Mutex`); no raise
+inside it, since `synchronize` carries no ensure on this lane. A
+per-thread or per-connection out-buffer would remove the lock; the FFI
+declares buffers once per module today, and a prepare is short.
+
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 
 `Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection

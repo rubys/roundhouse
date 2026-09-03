@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# scripts/campfire-cable-sweep — the campfire binary under N held-open cable
+# sockets, for a list of N: connect storm, idle cost, and fan-out cost per
+# subscriber (scripts/campfire-cable-sweep.rb does the measuring). The
+# server is pinned to a CPU set so a tier of once.com/campfire's table can
+# be run on its own core count; RSS and CPU are read off the process.
+#
+# Usage: scripts/campfire-cable-sweep --bin PATH --db PATH [--cpus 0-3]
+#        [--workers 4] [--sizes "10 30 100 300 1000"] [--per-room 50]
+#        [--idle 20] [--messages 30] [--rate 2] [--out DIR] [--port 19800]
+set -uo pipefail
+BIN=""; DB=""; CPUS="0-3"; WORKERS=4; SIZES="10 30 100 300 1000"; PER_ROOM=50
+IDLE=20; MESSAGES=30; RATE=2; OUT=""; PORT=19800; BIG_ROOM=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bin) BIN="$2"; shift 2 ;; --db) DB="$2"; shift 2 ;; --cpus) CPUS="$2"; shift 2 ;;
+    --workers) WORKERS="$2"; shift 2 ;; --sizes) SIZES="$2"; shift 2 ;; --per-room) PER_ROOM="$2"; shift 2 ;;
+    --idle) IDLE="$2"; shift 2 ;; --messages) MESSAGES="$2"; shift 2 ;; --rate) RATE="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;; --big-room) BIG_ROOM="$2"; shift 2 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[[ -x "$BIN" && -f "$DB" ]] || { echo "need --bin (executable) and --db (seeded sqlite)" >&2; exit 2; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT="${OUT:-/tmp/cable-sweep-$(date -u +%Y%m%d-%H%M%S)}"; mkdir -p "$OUT"
+BINDIR="$(cd "$(dirname "$BIN")/../.." && pwd)"   # spin layout: build/bin/campfire under the tree
+ulimit -n 65536 || true
+echo "sweep: $BIN on cpus $CPUS, $WORKERS workers, sizes: $SIZES (~$PER_ROOM per room) -> $OUT"
+
+run_one() {   # $1 = N, $2 = rooms list, $3 = label
+  local n="$1" rooms="$2" label="$3"
+  cp "$DB" "$BINDIR/storage/development.sqlite3"; rm -f "$BINDIR/storage/development.sqlite3-wal" "$BINDIR/storage/development.sqlite3-shm"
+  ( cd "$BINDIR" && SPINEL_WORKERS="$WORKERS" DATABASE_POOL_SIZE=64 BLOG_DB=storage/development.sqlite3 PORT="$PORT" \
+      taskset -c "$CPUS" ./build/bin/campfire > "$OUT/server-$label.log" 2>&1 ) &
+  local wrapper=$!
+  for i in $(seq 1 200); do curl -s -o /dev/null "http://127.0.0.1:$PORT/session/new" && break; sleep 0.1; done
+  local pid; pid="$(pgrep -x campfire | tail -1)"
+  echo "== N=$n rooms=$rooms (server pid $pid, $(sed -n 2p "$OUT/server-$label.log" | sed 's/^ *//'))"
+  ruby "$HERE/campfire-cable-sweep.rb" --base "http://127.0.0.1:$PORT" --sockets "$n" --rooms "$rooms" --users 1000 \
+       --idle "$IDLE" --messages "$MESSAGES" --rate "$RATE" --pid "$pid" --json "$OUT/$label.json" 2>&1 | sed 's/^/   /'
+  local st="alive"
+  if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid"; for i in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid"; st="killed"; }
+  else st="CRASHED"; fi
+  wait "$wrapper" 2>/dev/null
+  echo "   server: $st"
+  [[ -f "$OUT/$label.json" ]] && python3 -c "import json,sys; d=json.load(open('$OUT/$label.json')); d['label']='$label'; d['server']='$st'; print(json.dumps(d))" >> "$OUT/results.jsonl"
+}
+
+for n in $SIZES; do
+  r=$(( (n + PER_ROOM - 1) / PER_ROOM )); [[ $r -lt 1 ]] && r=1; [[ $r -gt 20 ]] && r=20
+  rooms="$(seq -s, 1 $r)"
+  run_one "$n" "$rooms" "n$n"
+done
+[[ -n "$BIG_ROOM" ]] && run_one "$BIG_ROOM" "1" "big$BIG_ROOM"
+
+echo; echo "== summary ($OUT/results.jsonl)"
+python3 - "$OUT/results.jsonl" <<'PY'
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1])]
+print("| N | subs/room | storm s | failed | idle cpu cores | idle RSS MB | pings | delivered/expected | frame p50 / p99 ms | last p99 ms | chat cpu cores | us/frame | server |")
+print("|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--|")
+for d in rows:
+    i,c,s=d['idle'],d['chat'],d['storm']
+    print(f"| {d['sockets']} | {d['subscribers_per_room']} | {s['seconds']} | {s['failed']} | {i['cpu_cores']} | {i['rss_mb']} | {i['pings']} | {c['delivered']}/{c['expected']} | {c['frame_p50_ms']} / {c['frame_p99_ms']} | {c['last_p99_ms']} | {c['cpu_cores']} | {c['us_per_frame']} | {d['server']} |")
+PY
