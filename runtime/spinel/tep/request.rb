@@ -135,6 +135,34 @@ module Tep
       0
     end
 
+    # Scheduler-friendly body drain, used by Tep::Server::Scheduled (the
+    # TEP_SERVER=fiber measurement lane, whose client fd is non-blocking
+    # -- a blocking recv would starve the whole loop). Loops on
+    # Sock.sphttp_recv_some + Tep::Scheduler.io_wait so other fibers keep
+    # running while we wait for body bytes; a 5s per-recv timeout drops a
+    # client that opened the request but never sent the body. Form parse
+    # mirrors consume_body (urlencoded only; multipart isn't vendored).
+    def consume_body_via_scheduler(client_fd)
+      cl = content_length
+      while @raw_body.bytesize < cl
+        ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
+        if ready == 0
+          break   # timeout -- client never finished sending
+        end
+        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize)
+        if chunk.bytesize == 0
+          break   # peer closed mid-body
+        end
+        @raw_body = @raw_body + chunk
+      end
+      if form?
+        Url.parse_query(@raw_body).each do |k, v|
+          @req_params[k] = v
+        end
+      end
+      0
+    end
+
     # Body drain for Tep::Server::Threaded, whose client fd is
     # non-blocking: `io` is the connection's `IO.for_fd` wrapper, and its
     # timed `wait_readable` parks this green thread until body bytes

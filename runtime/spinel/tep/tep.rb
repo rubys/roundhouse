@@ -11,6 +11,7 @@ require_relative "websocket"
 require_relative "request"
 require_relative "response"
 require_relative "parser"
+require_relative "scheduler"
 require_relative "server"
 # Presence is a no-op stub here; WebSocket::Connection's close path
 # calls Tep::Presence.untrack_by_fd.
@@ -21,6 +22,7 @@ require_relative "broadcast"
 # server read it.
 require_relative "app"
 require_relative "server_threaded"
+require_relative "server_scheduled"
 
 module Tep
   # Type-seeding: pin parameter types for transport methods that

@@ -62,7 +62,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-fiber elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # A lane the palette has never seen still needs a bar. Prefer its
@@ -90,6 +90,7 @@ COLOR = {
   'swift'      => '#f05138',
   'csharp'     => '#8a6fe0',
   'spinel'     => '#7d4cdb',
+  'spinel-fiber' => '#b59ae8',
   'elixir'     => '#4b275f',
   'typescript' => '#3178c6',
   'python'     => '#3776ab',
@@ -519,7 +520,8 @@ html << <<~METHOD
     <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>#{harness_name}</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout.#{heap_note}#{appendix_ref}
     #{fixture_caveat}#{harness_notes}
     #{(measured_targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
-    #{(measured_targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but on the <a href="https://github.com/matz/spinel">Spinel</a> VM behind the Tep fiber server rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
+    #{(measured_targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but compiled by <a href="https://github.com/matz/spinel">Spinel</a> behind its thread-per-connection server (a green thread per connection on the runtime's autodetected OS worker count) rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
+    #{(measured_targets.include?('spinel-fiber') ? %(<p class="caveat"><code>spinel-fiber</code> is the <em>same spinel binary</em> started with <code>TEP_SERVER=fiber</code>: its previous fiber-per-connection server, one poll loop on one thread. Nothing else differs — same compiler, same emitted tree, same database and pool — so the <code>spinel</code> / <code>spinel-fiber</code> pair measures the scheduler design alone (<a href="https://github.com/matz/spinel/issues/4306">matz/spinel#4306</a>).</p>) : '')}
   </div>
 METHOD
 

@@ -26,6 +26,17 @@ module Tep
     # rationale that puts broadcast_subs here rather than on a module.
     attr_accessor :cable_identifiers, :cable_lock
 
+    # Cooperative-scheduler state (Tep::Scheduler; only the
+    # TEP_SERVER=fiber measurement lane runs it). One entry per fiber
+    # across these parallel arrays:
+    #   sched_fibers   PtrArray<FiberSlot>  the Fiber
+    #   sched_wake_at  IntArray             unix-seconds; -1 = ready now
+    #   sched_io_fd    IntArray             fd parked on; -1 = none
+    #   sched_io_mode  IntArray             requested mode bits (1=R,2=W)
+    #   sched_io_ready IntArray             observed-ready bits (0=not yet)
+    attr_accessor :sched_fibers, :sched_wake_at, :sched_current
+    attr_accessor :sched_io_fd, :sched_io_mode, :sched_io_ready
+
     # The app's own name, for the startup banner and the log prefix
     # (Tep.display_name). Set by scaffold/main.rb; empty until then.
     attr_accessor :name
@@ -42,6 +53,20 @@ module Tep
       # Cable stream -> identifier-JSON map.
       @cable_identifiers = Tep.str_hash
       @cable_lock = Mutex.new
+
+      # Scheduler arrays (fiber lane). FiberSlot array -- seed with a
+      # noop-bodied slot to pin the element type, then drop it.
+      @sched_fibers   = [Tep::FiberSlot.new(Fiber.new { Tep.seed_fiber_noop })]
+      @sched_fibers.pop
+      @sched_wake_at  = [0]
+      @sched_wake_at.pop
+      @sched_current  = -1               # currently-running fiber idx
+      @sched_io_fd    = [0]
+      @sched_io_fd.pop
+      @sched_io_mode  = [0]
+      @sched_io_mode.pop
+      @sched_io_ready = [0]
+      @sched_io_ready.pop
     end
 
     # Tep::Server::Threaded calls Tep::APP.dispatch(req, res) per

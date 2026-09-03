@@ -2432,6 +2432,44 @@ followed, and recorded here rather than explained away.
 `SPINEL_WORKERS=N` in the environment still sets the count; the README
 of each archive says so.
 
+### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
+
+`Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection
+server on one poll loop, retired on 2026-09-01) were restored on
+2026-09-03, unchanged apart from a refused WebSocket upgrade, and every
+binary now carries BOTH servers: `TEP_SERVER=fiber` selects the fiber
+one in `scaffold/main.rb`, anything else the threaded one. The point is
+a comparison with nothing else varying — same compiler, same emitted
+tree, same database and pool, same process — because the blog bench had
+shown the cost of the threaded design and the compiler was moving under
+it at the same time: on 2026-09-03 the nightly's spinel lane read 7.9k
+req/s where the night before it read 22.1k on `/articles/1.json`, and
+separating the runtime's per-park cost (matz/spinel#4306), its
+broadcast wake (#4305, fixed the same day) and a same-day compiler
+regression (#4304, fixed) took a hand-rebuilt archive each time. The
+bench harness carries the pair as `spinel` (threads, autodetected OS
+workers) and `spinel-fiber` (the same binary, `TEP_SERVER=fiber
+SPINEL_WORKERS=1`), and the report says what the pair measures.
+
+**What the fiber lane is not.** An HTTP GET lane. A WebSocket upgrade
+answers 501: the driver's recv loop wants a parked green thread, and on
+this server it would run on the main thread and hold every other
+connection. Spinel's `Thread#[]` is per green thread, not per fiber, so
+the per-request state `thread_state.rb` keeps in `Thread.current` is
+shared by every fiber on the main thread — correct while a request runs
+from start to finish without yielding, which a GET does, and the reason
+the campfire compare and cable gates stay on the threaded server. With
+one worker the scaffold's job-loop thread never runs while the poll
+loop holds the main thread. None of that is fixable without the fiber
+scheduler learning what the runtime now does for threads, which is the
+question #4306 asks the other way round.
+
+**First observation, same binary, spinel 790db4cb, 16-core macOS,
+`wrk -t2 -c64 -d3s /articles/1.json`:** fiber 32.6k req/s (p99 2.4 ms);
+threads on the autodetected 16 workers 28.8k (p50 0.15 ms, p99 205 ms).
+Before that day's runtime fixes the same pair on the same machine read
+28.7k against 7.0k. The bench box's numbers are the bench page's.
+
 ### A WebSocket write addressed to an fd NUMBER reached the number's next owner — CLOSED
 
 Found while lifting the one-worker declaration above, on the runtime

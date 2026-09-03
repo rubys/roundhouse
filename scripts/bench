@@ -124,7 +124,7 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python|kotlin|swift|csharp|csharp-aot) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|spinel-fiber|go|elixir|python|kotlin|swift|csharp|csharp-aot) NORMALIZED+=("$t") ;;
         jr) NORMALIZED+=(jruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
@@ -137,7 +137,7 @@ for t in "${TARGETS[@]}"; do
         cs) NORMALIZED+=(csharp) ;;
         cs-aot) NORMALIZED+=(csharp-aot) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python kotlin swift csharp csharp-aot" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel spinel-fiber go elixir python kotlin swift csharp csharp-aot" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -602,7 +602,16 @@ build_target() {
                 (cd "$RS_OUT" && cargo build --release --quiet) || return 1
             fi
             ;;
-        spinel)
+        spinel|spinel-fiber)
+            # `spinel-fiber` is the SAME binary started with TEP_SERVER=fiber
+            # (runtime/spinel/tep/server_scheduled.rb): one emit, one build,
+            # two server designs. A second lane in the same invocation
+            # reuses what the first built.
+            if [[ -n "${SP_BUILT:-}" ]]; then
+                TARGET_BUILD_DIR="$SP_OUT"
+                TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
+                return 0
+            fi
             # `bin/rh transpile spinel` writes to $SP_OUT and additionally
             # vendors Tep transport (sphttp.c) + per-target Makefile;
             # `make assets` builds Tailwind + turbo.min.js; `make build`
@@ -634,6 +643,7 @@ build_target() {
                 step "AOT-compiling main.rb → build/blog (spinel)"
                 (cd "$SP_OUT" && rm -f build/blog && make build) || return 1
             fi
+            SP_BUILT=1
             ;;
         go)
             # `bin/rh transpile go` writes to $GO_OUT; build the v2
@@ -758,7 +768,7 @@ stage_db() {
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
-        spinel)
+        spinel|spinel-fiber)
             local db="$SP_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
@@ -993,10 +1003,32 @@ start_target() {
             TARGET_PID=$!
             disown 2>/dev/null || true
             ;;
+        spinel-fiber)
+            # The spinel binary's OTHER server: Tep::Server::Scheduled, a
+            # fiber per connection on one thread (TEP_SERVER=fiber), the
+            # design Tep::Server::Threaded replaced. Same binary, same DB,
+            # same pool; only the environment differs, so the `spinel` /
+            # `spinel-fiber` pair measures the scheduler design alone
+            # (matz/spinel#4306). SPINEL_WORKERS=1 is declared because the
+            # server runs on the main thread and the other workers would
+            # only idle; `workers` is ignored and the row records 1.
+            (cd "$SP_OUT" && \
+                TEP_SERVER=fiber \
+                SPINEL_WORKERS=1 \
+                BLOG_DB=storage/development.sqlite3 \
+                PORT="$port" \
+                DATABASE_POOL_SIZE="$CONNECTIONS" \
+                ./build/blog \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
         spinel)
             # AOT-compiled native binary (Spinel codegen) — single-process,
-            # Tep::Server FFI HTTP/1.1, no workers concept. `workers` is
-            # ignored and the per-cell row records workers=1.
+            # Tep::Server::Threaded, a green thread per connection on the
+            # runtime's autodetected OS worker count (SPINEL_WORKERS caps
+            # it). `workers` is ignored and the per-cell row records
+            # workers=1.
             # Size the connection pool to the wrk concurrency: the
             # fiber-per-connection server serves up to `c` requests at
             # once, so a smaller pool would make fibers park on a handle.

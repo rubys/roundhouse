@@ -33,6 +33,25 @@ module Tep
     Hash.new("")
   end
 
+  # Holder for a Fiber so the cooperative scheduler (Tep::Scheduler, the
+  # TEP_SERVER=fiber measurement lane) can keep them in a typed array.
+  # Spinel's `[Fiber.new { ... }]` array literal infers IntArray (Fiber is
+  # a built-in pointer type, not a user class spinel tracks via
+  # PtrArray), so a one-attribute wrapper class is the cheapest way to
+  # put them in a homogeneous container. Vendored from tep's lib/tep.rb.
+  class FiberSlot
+    attr_accessor :f
+    def initialize(f)
+      @f = f
+    end
+  end
+
+  # A canonical no-op fiber body, used to type-seed Fiber-bearing
+  # collections without running anything user-visible.
+  def self.seed_fiber_noop
+    0
+  end
+
   # Shutdown hook. Tep::Server::Threaded calls Tep.on_shutdown after
   # the accept loop breaks on SIGTERM/SIGINT. Upstream tep fans this
   # out to run_end / Events hooks; roundhouse has none, so it's a

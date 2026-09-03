@@ -571,6 +571,8 @@ while i < ARGV.length
     puts "  -h, --help       show this help and exit"
     puts ""
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
+    puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
+    puts "    (HTTP only, one thread; the measurement lane, matz/spinel#4306)"
     puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
     exit(0)
   elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
@@ -612,4 +614,13 @@ Tep::APP.name = Rails.application.global_id_app
 # the OS workers run other connections' Ruby meanwhile. It replaced the
 # fiber-per-connection server, whose poll loop sat above a blocking
 # write in C that no Ruby scheduler could see.
-Tep::Server::Threaded.new(MainApp.new).run(port, workers, false)
+#
+# TEP_SERVER=fiber runs the server it replaced, Tep::Server::Scheduled,
+# from the same binary: the two designs measured back to back with only
+# the environment differing (matz/spinel#4306). HTTP only; see the note
+# at the top of tep/server_scheduled.rb.
+if (ENV["TEP_SERVER"] || "thread") == "fiber"
+  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false)
+else
+  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false)
+end
