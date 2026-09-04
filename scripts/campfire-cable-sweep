@@ -83,7 +83,19 @@ OUT="$(cd "$OUT" && pwd)"
 # ask for. Globals and a trap, because an EXIT trap fires after the
 # function that would have held these as `local` has returned, and under
 # `set -u` that is how the restore dies instead of running.
+# Armed HERE, in the parent shell, and not inside `start_server`: that
+# one is called as `$(start_server ...)`, a command substitution, so
+# anything it assigns is set in a subshell and the EXIT trap below — which
+# runs in the parent — would see an empty string and restore nothing.
+# The oracle kept the socket tier's 1,000-user database twice before this
+# moved out here.
 ORACLE_DB_BAK=""
+if [[ "$LANE" == rails && -f "$ORACLE/storage/db/production.sqlite3" ]] \
+   && [[ ! "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]]; then
+    ORACLE_DB_BAK="$ORACLE/tmp/sweep-oracle-prod.sqlite3"
+    mkdir -p "$ORACLE/tmp"
+    cp "$ORACLE/storage/db/production.sqlite3" "$ORACLE_DB_BAK"
+fi
 restore_oracle_db() {
     [[ -n "$ORACLE_DB_BAK" && -f "$ORACLE_DB_BAK" ]] || return 0
     cp "$ORACLE_DB_BAK" "$ORACLE/storage/db/production.sqlite3"
@@ -137,14 +149,7 @@ start_server() {   # $1 = label
     # campfire-compare) silently measures the wrong rows afterwards. That
     # happened the first time the socket tier was given its own 1,000-user
     # seed: the sweep left it in place and the oracle answered 1000/20.
-    if [[ ! "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]]; then
-        if [[ -z "$ORACLE_DB_BAK" && -f "$ORACLE/storage/db/production.sqlite3" ]]; then
-            ORACLE_DB_BAK="$ORACLE/tmp/sweep-oracle-prod.sqlite3"
-            mkdir -p "$ORACLE/tmp"
-            cp "$ORACLE/storage/db/production.sqlite3" "$ORACLE_DB_BAK"
-        fi
-        cp "$DB" "$ORACLE/storage/db/production.sqlite3"
-    fi
+    [[ "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]] || cp "$DB" "$ORACLE/storage/db/production.sqlite3"
     rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
     # jemalloc, because their Dockerfile preloads it and the headline
     # column on this phase is memory. Absent, the lane runs on stock
