@@ -2738,6 +2738,116 @@ serialize harder behind one SQLite writer. Teardown is a tie (1.46 vs
 1.57 CPU-s), which is the first time the disconnect half has been
 measured on either lane.
 
+### The idle axis, both halves of it — MEASURED (2026-09-04)
+
+The 1,000-user tier above loses idle CPU to Rails by 19x. Two changes
+land on that axis the same day, one upstream and one here, and each was
+measured with the other held still.
+
+**Theirs.** matz/spinel#4317 asked for persistent readiness registration
+in the scheduler's monitor: a wake handed the whole parked population to
+`poll(2)`, and a server's parked threads are its idle connections. It was
+answered in a day — `692e50b2` puts the readiness set in an epoll set,
+`1c34d424` carries the same contract to kqueue, `1c269a3c` moves the set
+into each worker so a wake needs no hand-off (the half #4306 left open).
+
+**Ours.** A green thread per connection sleeping three seconds is the
+best case only while the connections' beat phases coincide. Real
+connections arrive over minutes, the phases spread, and the monitor turns
+once per beat. `Cable` now keeps a registry of open drivers on `Tep::APP`
+and one thread beats all of them — Action Cable's shape, and the CRuby
+overlay's `Reactor#beat` already.
+
+#### The runtime change, one binary against itself
+
+`SPINEL_SCHED_POLL=1` keeps the old path, so these columns are the same
+binary on the same cores in the same hour with a ping thread per
+connection in both. Four cores pinned, four workers, the 1,000-user /
+20-room seed, two subscriptions per socket. `scripts/campfire-cable-sweep
+--env` is what holds the binary still.
+
+| N | storm CPU | | idle cores | | fan-out p99 | |
+|--:|--:|--:|--:|--:|--:|--:|
+| | poll | epoll | poll | epoll | poll | epoll |
+| 300 | 0.77 s | 0.74 s | 0.046 | **0.016** | 63 ms | 60 ms |
+| 1000 | 3.88 s | **2.64 s** | 0.251 | **0.052** | 95 ms | 75 ms |
+| 3000 | 15.22 s | **8.99 s** | 0.470 | **0.154** | 169 ms | 173 ms |
+| 5000 | 32.90 s | **18.28 s** | 0.465 | **0.211** | 377 ms | 334 ms |
+
+Every cell delivers every frame on both backends. Storm WALL time barely
+moves — the storm is not CPU-bound, it is N presence INSERTs through one
+SQLite writer — but the CPU spent getting there nearly halves at the top,
+and idle falls by 2.2x to 4.9x with nothing else changed.
+
+#### The heartbeat, and the burst it made
+
+One shared beat took 1,000 sockets from 0.052 to 0.009 idle cores — and
+put every connection's frame in the same instant. That burst is
+measurable, and the sweep's driver is the first thing it hits: one Ruby
+thread reading every socket has to drain N pings before it can stamp the
+next message. The driver now reports what it cost itself, which is what
+separates the two.
+
+| N=5000 | ping per connection | one beat | ten slices |
+|--|--:|--:|--:|
+| idle cores | 0.203 | **0.047** | **0.046** |
+| fan-out p50 / p99 | 199 / 367 ms | 228 / 1402 ms | 208 / 543 ms |
+| driver's longest reading pass | 101 ms | 791 ms | 146 ms |
+| server CPU through the chat window | 0.404 cores | **0.281** | **0.312** |
+
+About two thirds of the p99 the unsliced beat added is the driver's own
+backlog. `beat_cycle` therefore walks the registry in `BEAT_SLICES`
+pieces spread across the interval: every connection is still pinged once
+per `PING_INTERVAL`, ten slices divide the burst by ten, and the monitor
+pays ten wakes an interval instead of the 333 a second a thread per
+connection costs at 1,000 sockets. At 3,000 the sliced beat is at or
+better than the per-connection thread on every column (p99 166 vs 176 ms,
+idle 0.027 vs 0.144); at 5,000 its p99 is still the worse of the two (543
+vs 367) and 44 ms of that gap is the driver again. 5,000 is a tier past
+the one campfire's table asks for and the idle number there is 4.4x
+better, so this is recorded rather than chased.
+
+#### Where the 1,000-user tier stands now
+
+The honest cell is the PACED one — connects 6 ms apart, so the beat
+phases are spread the way a deployment spreads them, which is what
+`--pace` exists for. Same seed, same cores, two subscriptions per socket.
+
+| 1,000 sockets, paced | idle cores | fan-out p50 / p99 | chat CPU |
+|--|--:|--:|--:|
+| poll + thread per connection (2026-09-03) | 0.396 | — | — |
+| epoll + thread per connection | 0.046 | 35 / 76 ms | 0.120 cores |
+| epoll + one beat | 0.010 | 34 / 129 ms | 0.084 cores |
+| **epoll + sliced beat** | **0.011** | **33 / 66 ms** | **0.085 cores** |
+| Rails as ONCE deploys it (2026-09-04) | 0.013 | 33 / 201 ms | 0.170 cores |
+
+The axis that was 19x against us is now level: 0.011 cores against
+Rails' 0.013 to hold a thousand silent sockets, with the fan-out tail
+three times better and the delivery CPU half. Memory was already 5x ours
+and is unchanged. **Nothing here is published**; the plan still defers
+that, but the reason it deferred — one axis we lost badly — is gone.
+
+#### macOS runs the kqueue path, and it was untested under load
+
+`1c34d424` went to CI without a Mac under load, and the shape to suspect
+was a park that only ever ends on its timeout. 300 sockets in one room on
+a 16-core Mac, 30 s idle then 20 posts: 300/300 subscribed in 0.16 s,
+pings exactly on cadence, 6,000/6,000 frames at p50 19 ms / p99 32 ms,
+clean teardown. No stall in any run; the beat count is where a
+timeout-only park would have shown first.
+
+#### Traps
+
+* Editing a running bash script is editing what it is about to execute:
+  the sweep died on `line 136: syntax error near unexpected token 'done'`
+  in a cell whose file had been correct at launch. Copy it, or wait.
+* A ping count read by the client cannot see a registry leak — a closed
+  connection's driver refuses the write, so the leak is invisible at
+  every socket and shows up only as work. `tests/spinel_cable_heartbeat.rb`
+  reads the registry instead.
+* The box's clock is CEST; a run that looks stalled against an EDT
+  timestamp usually is not.
+
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 
 `Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection
