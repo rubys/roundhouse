@@ -74,6 +74,23 @@ OUT="${OUT:-/tmp/cable-sweep-$(date -u +%Y%m%d-%H%M%S)}"; mkdir -p "$OUT"
 # directory instead. A relative --out is what silenced both socket lanes
 # on the first published campfire run.
 OUT="$(cd "$OUT" && pwd)"
+
+# THE ORACLE'S DATABASE IS BORROWED, NOT TAKEN. The rails lane serves out
+# of the oracle tree, so a `--db` from anywhere else gets copied over
+# `storage/db/production.sqlite3` — and has to be put back, or every
+# other harness reading that tree afterwards (bench-campfire's HTTP
+# lanes, campfire-queries, campfire-compare) measures rows it did not
+# ask for. Globals and a trap, because an EXIT trap fires after the
+# function that would have held these as `local` has returned, and under
+# `set -u` that is how the restore dies instead of running.
+ORACLE_DB_BAK=""
+restore_oracle_db() {
+    [[ -n "$ORACLE_DB_BAK" && -f "$ORACLE_DB_BAK" ]] || return 0
+    cp "$ORACLE_DB_BAK" "$ORACLE/storage/db/production.sqlite3"
+    rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
+    return 0
+}
+trap 'restore_oracle_db' EXIT INT TERM
 ulimit -n 65536 || true
 # Their Dockerfile's allocator, if this box has one.
 JEMALLOC=""
@@ -112,7 +129,22 @@ start_server() {   # $1 = label
     # left alone — flushing the fragment cache between cells would measure
     # a cold Rails nobody runs.
     mkdir -p "$ORACLE/storage/db"
-    [[ "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]] || cp "$DB" "$ORACLE/storage/db/production.sqlite3"
+    # SERVING A DATABASE THAT IS NOT THE ORACLE'S MEANS BORROWING ITS
+    # TREE. The rails lane runs out of the oracle, which reads
+    # `storage/db/production.sqlite3`, so a `--db` from anywhere else has
+    # to be copied over it — and put back, or every other harness that
+    # reads that tree (bench-campfire's HTTP lanes, campfire-queries,
+    # campfire-compare) silently measures the wrong rows afterwards. That
+    # happened the first time the socket tier was given its own 1,000-user
+    # seed: the sweep left it in place and the oracle answered 1000/20.
+    if [[ ! "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]]; then
+        if [[ -z "$ORACLE_DB_BAK" && -f "$ORACLE/storage/db/production.sqlite3" ]]; then
+            ORACLE_DB_BAK="$ORACLE/tmp/sweep-oracle-prod.sqlite3"
+            mkdir -p "$ORACLE/tmp"
+            cp "$ORACLE/storage/db/production.sqlite3" "$ORACLE_DB_BAK"
+        fi
+        cp "$DB" "$ORACLE/storage/db/production.sqlite3"
+    fi
     rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
     # jemalloc, because their Dockerfile preloads it and the headline
     # column on this phase is memory. Absent, the lane runs on stock
