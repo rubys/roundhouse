@@ -2654,6 +2654,68 @@ and a new `Cable::WsClose` walks them under a database lease when the
 socket closes. Verified against Rails on the same seed: eight rows during
 the idle phase on both lanes, zero after teardown on both.
 
+### The 1,000-user tier, both lanes, same cores — MEASURED (2026-09-04)
+
+once.com/campfire's table puts 1,000 concurrent users on 4 CPUs and
+8 GB. Both lanes on `taskset -c 0-3`, the same 1,000-user / 20-room seed,
+the same pre-minted cookie file, and the same driver: the binary on four
+OS workers, campfire on `WEB_CONCURRENCY=3` (its own
+`(processor_count * 0.666).ceil` at four cores) x 5 threads, production,
+Redis for the cable adapter and the fragment cache. Every socket holds
+the two subscriptions a real tab holds, so every connect is a
+`memberships` UPDATE and every close another. roundhouse 883db7a5 on
+spinel 7182e9b6, Rails 8.2.0.alpha @ 1a02651a, campfire @ 94a48aac.
+
+| N | lane | connect storm | storm CPU | idle CPU | idle RSS / PSS | frames | fan-out p50 / p99 | last frame p99 | chat CPU | teardown CPU |
+|--:|--|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 100 | binary | 0.87 s | 0.24 s | 0.013 cores | 56 / 44 MB | 500 / 500 | 51 / 79 ms | 80 ms | 0.036 cores | 0.14 s |
+| 100 | rails | 0.62 s | 1.52 s | 0.009 cores | 741 / 514 MB | 500 / 500 | 38 / 204 ms | 207 ms | 0.105 cores | 0.39 s |
+| 300 | binary | 2.48 s | 0.80 s | 0.040 cores | 73 / 62 MB | 1500 / 1500 | 40 / 74 ms | 76 ms | 0.083 cores | 0.37 s |
+| 300 | rails | 1.10 s | 2.86 s | 0.005 cores | 794 / 586 MB | 1500 / 1500 | 32 / 299 ms | 303 ms | 0.182 cores | 0.63 s |
+| 1000 | binary | 6.70 s | 3.99 s | 0.243 cores | 143 / 133 MB | 1500 / 1500 | 38 / 76 ms | 81 ms | 0.285 cores | 1.46 s |
+| 1000 | rails | 2.35 s | 5.86 s | 0.013 cores | 902 / 697 MB | 1500 / 1500 | 33 / 201 ms | 207 ms | 0.170 cores | 1.57 s |
+
+Both lanes deliver every frame at every size. Nothing here is published;
+the plan defers that until the binary is competitive, and on one axis it
+is not.
+
+**Memory: the binary, by 5x.** 133 MB of PSS against 697 MB at 1,000
+sockets — 2% of the tier's 8 GB against 9%. RSS reads higher for Rails
+still (902 MB) because three forked workers each carry their own copy of
+a page; PSS is the fair number and the binary wins on either.
+
+**Idle CPU: Rails, by 19x, and this is the thing to fix.** 0.013 cores
+against 0.243 to hold a thousand silent sockets. Action Cable runs ONE
+shared heartbeat off its reactor's select timeout; this lane runs a ping
+thread per connection and every wake of the monitor costs O(parked
+threads) — matz/spinel#4317, already filed with a standalone that puts
+it at 15 ns per parked thread per wake.
+
+**And the second subscription is most of it, which #4317 does not
+explain.** The same 1,000 sockets holding ONE subscription idle at 0.136
+cores (and storm in 0.57 s for 1.15 CPU-s, teardown 0.22 s) — the same
+number of connections, the same number of ping threads, the same parked
+count. Holding 2,000 subscriptions instead of 1,000 costs ~1.5x the idle
+CPU on a workload where neither subscription receives anything. Not a
+drain: over a 90-second idle it settles at 0.207 cores rather than
+falling back. Something in the per-connection write path is O(registered
+streams) and it is the next probe.
+
+**Fan-out: the binary's tail, Rails' median.** 38 vs 33 ms at the 50th
+percentile, 76 vs 201 ms at the 99th. Net of the idle tax the binary also
+does the work more cheaply: subtracting each lane's own idle draw from
+its chat window leaves ~0.041 cores against ~0.157 for the same 1,500
+delivered frames. The binary is ~3.8x cheaper at delivering, and pays a
+quarter of a core to hold the sockets it delivers to.
+
+**Connect storm: Rails, on wall time; the binary, on CPU.** 2.35 s
+against 6.70 s to subscribe 1,000 sockets and write 1,000 presence rows,
+for 5.86 CPU-seconds against 3.99. Three processes x five threads have
+more hands than four workers do, and the binary's presence writes
+serialize harder behind one SQLite writer. Teardown is a tie (1.46 vs
+1.57 CPU-s), which is the first time the disconnect half has been
+measured on either lane.
+
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 
 `Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection
