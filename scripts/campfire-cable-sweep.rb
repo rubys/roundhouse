@@ -80,6 +80,7 @@ OptionParser.new do |o|
   o.on("--messages N", Integer) { |v| opts[:messages] = v }
   o.on("--rate R", Float)  { |v| opts[:rate] = v }
   o.on("--drain S", Float) { |v| opts[:drain] = v }
+  o.on("--pace S", Float)  { |v| opts[:pace] = v }
   o.on("--settle S", Float) { |v| opts[:settle] = v }
   o.on("--[no-]presence")  { |v| opts[:presence] = v }
   o.on("--cookies FILE")   { |v| opts[:cookies] = v }
@@ -384,10 +385,24 @@ def pump(clients, seconds)
 end
 
 # ── 1. connect storm ─────────────────────────────────────────────────
-log "==> connect #{N} sockets (#{subs_per_socket} subscription#{subs_per_socket == 1 ? "" : "s"} each#{opts[:presence] ? ", presence writes on" : ""})"
+log "==> connect #{N} sockets (#{subs_per_socket} subscription#{subs_per_socket == 1 ? "" : "s"} each#{opts[:presence] ? ", presence writes on" : ""}#{opts[:pace] ? ", paced #{opts[:pace]}s apart" : ""})"
 storm_c0 = cpu_ticks(opts[:pid])
 t_storm = now
-clients.each(&:open!)
+# HOW FAST THE CONNECTIONS ARRIVE IS A MEASUREMENT AXIS, not an artifact.
+# A storm that opens everything at once leaves the per-connection ping
+# phases clustered, one scheduler wake serves the whole beat, and the
+# idle cost that comes back is the best case; connections in a
+# deployment arrive over minutes and spread the phases fully. `--pace`
+# puts the arrivals at a chosen interval, and pumps between them so the
+# already-open sockets are read while the rest are still arriving.
+if opts[:pace] && opts[:pace] > 0
+  clients.each do |c|
+    c.open!
+    pump(clients, opts[:pace])
+  end
+else
+  clients.each(&:open!)
+end
 pump(clients, 60) { break if clients.all? { |c| c.state == :subscribed || c.closed? } }
 storm_s = now - t_storm
 storm_cpu = storm_c0 && cpu_ticks(opts[:pid]) ? (cpu_ticks(opts[:pid]) - storm_c0) / TICK : nil

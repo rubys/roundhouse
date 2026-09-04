@@ -26,10 +26,11 @@
 #        [--workers 4] [--sizes "10 30 100 300 1000"] [--per-room 50]
 #        [--idle 20] [--messages 30] [--rate 2] [--out DIR] [--port 19800]
 #        [--cookies FILE] [--secret KEY] [--no-presence] [--env K=V ...]
+#        [--pace SECONDS]
 set -uo pipefail
 BIN=""; DB=""; CPUS="0-3"; WORKERS=4; SIZES="10 30 100 300 1000"; PER_ROOM=50
 IDLE=20; MESSAGES=30; RATE=2; OUT=""; PORT=19800; BIG_ROOM=""
-LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1; EXTRA_ENV=()
+LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1; EXTRA_ENV=(); PACE=""
 SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     # Repeatable; binary lane only (the rails lane's env is what ONCE
     # deploys, and adding to it would make it something else).
     --env) EXTRA_ENV+=("$2"); shift 2 ;;
+    --pace) PACE="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -113,8 +115,9 @@ run_one() {   # $1 = N, $2 = rooms list, $3 = label
   for i in $(seq 1 600); do curl -s -o /dev/null "http://127.0.0.1:$PORT/session/new" && break; sleep 0.2; done
   echo "== N=$n rooms=$rooms (lane $LANE, server pid $pid)"
   local presence_flag=""; [[ "$PRESENCE" == 0 ]] && presence_flag="--no-presence"
+  local pace_flag=""; [[ -n "$PACE" ]] && pace_flag="--pace $PACE"
   ruby "$HERE/campfire-cable-sweep.rb" --base "http://127.0.0.1:$PORT" --sockets "$n" --rooms "$rooms" --users 10000 \
-       --cookies "$COOKIES" $presence_flag \
+       --cookies "$COOKIES" $presence_flag $pace_flag \
        --idle "$IDLE" --messages "$MESSAGES" --rate "$RATE" --pid "$pid" --json "$OUT/$label.json" 2>&1 | sed 's/^/   /'
   local st="alive"
   if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid"; for i in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
