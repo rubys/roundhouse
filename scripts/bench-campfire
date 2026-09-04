@@ -238,6 +238,37 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Sum PSS across a PID and its descendants (KB), or nothing where the
+# kernel does not offer it (macOS, older Linux).
+#
+# WHY THIS EXISTS BESIDE THE RSS SUM. Adding up RSS over a process tree
+# counts every shared page once per process. A clustered Puma with eight
+# workers therefore reads ~3.2 GB where its real footprint is far lower,
+# while a single-process binary has nothing to double-count — so the
+# error runs entirely in OUR favour, on the biggest memory number the
+# page prints. PSS divides each shared page by the number of processes
+# sharing it, which is the number a deployer's budget actually sees, and
+# it is what the WebSocket phase and the runtime ledger have always used.
+sum_pss_kb() {
+    local pids="$1" stack="$1"
+    [[ -r "/proc/$1/smaps_rollup" ]] || { echo ""; return 0; }
+    while [[ -n "$stack" ]]; do
+        local next=""
+        for p in $stack; do
+            for k in $(pgrep -P "$p" 2>/dev/null || true); do
+                pids="$pids $k"; next="$next $k"
+            done
+        done
+        stack="$next"
+    done
+    local total=0 v
+    for p in $pids; do
+        v="$(awk '/^Pss:/ {s += $2} END {print s+0}' "/proc/$p/smaps_rollup" 2>/dev/null || echo 0)"
+        total=$(( total + ${v:-0} ))
+    done
+    echo "$total"
+}
+
 # Sum RSS across a PID and its descendants (KB). Puma's master carries
 # almost nothing; the workers are the measurement.
 sum_rss_kb() {
@@ -658,17 +689,21 @@ for lane in "${LANES[@]}"; do
             wrk_out="$LOG_DIR/wrk-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
             rss_out="$LOG_DIR/rss-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
             : > "$rss_out"
+            # Two columns per sample: RSS sum, then PSS sum (empty
+            # where the kernel has no smaps_rollup).
             ( while kill -0 "$SERVER_PID" 2>/dev/null; do
-                  sum_rss_kb "$SERVER_PID" >> "$rss_out"; sleep 1
+                  echo "$(sum_rss_kb "$SERVER_PID") $(sum_pss_kb "$SERVER_PID")" >> "$rss_out"
+                  sleep 1
               done ) &
             rss_pid=$!
             wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
                 -H "Cookie: $cookie" "$url" > "$wrk_out" 2>&1 || true
             kill "$rss_pid" 2>/dev/null || true
             wait "$rss_pid" 2>/dev/null || true
-            rss="$(sort -n < "$rss_out" | awk '{a[NR]=$1} END {print NR ? a[int((NR+1)/2)] : 0}')"
-            printf '{"target":"%s","workers":%d,"endpoint":"%s","run":%d,"rss_kb":%s,%s}\n' \
-                "$lane" "$WORKERS" "$ep" "$run" "${rss:-0}" \
+            rss="$(awk '{print $1}' "$rss_out" | sort -n | awk '{a[NR]=$1} END {print NR ? a[int((NR+1)/2)] : 0}')"
+            pss="$(awk 'NF>1 {print $2}' "$rss_out" | sort -n | awk '{a[NR]=$1} END {print NR ? a[int((NR+1)/2)] : ""}')"
+            printf '{"target":"%s","workers":%d,"endpoint":"%s","run":%d,"rss_kb":%s,"pss_kb":%s,%s}\n' \
+                "$lane" "$WORKERS" "$ep" "$run" "${rss:-0}" "${pss:-null}" \
                 "$(parse_wrk "$wrk_out" | sed 's/^{//;s/}$//')" >> "$PER_RUN"
         done
     done
@@ -902,12 +937,18 @@ end
 
 cells = records.group_by { |r| [r["target"], r["workers"], r["endpoint"]] }.map do |(t, w, e), runs|
   rss_kb = median(runs.map { |r| r["rss_kb"] }.reject { |v| v.to_i.zero? })
+  pss_kb = median(runs.map { |r| r["pss_kb"] }.compact.reject { |v| v.to_i.zero? })
   req = median(runs.map { |r| r["req_sec"] })
   { target: t, workers: w, endpoint: e, runs: runs.size,
     req_sec: req, p50_ms: median(runs.map { |r| r["p50_ms"] }),
     p99_ms: median(runs.map { |r| r["p99_ms"] }),
     rss_kb: rss_kb, rss_mb: rss_kb && rss_kb / 1024.0,
-    rps_per_gb: (req && rss_kb && rss_kb > 0) ? req / (rss_kb / 1024.0 / 1024.0) : nil }
+    pss_kb: pss_kb, pss_mb: pss_kb && pss_kb / 1024.0,
+    # Per-GB against the FAIR number: an over-counted denominator makes
+    # a multi-process lane look more efficient than it is... and a
+    # single-process one look worse.
+    rps_per_gb: (req && (pss_kb || rss_kb) && (pss_kb || rss_kb) > 0) ?
+                 req / ((pss_kb || rss_kb) / 1024.0 / 1024.0) : nil }
 end
 File.write(sj, JSON.pretty_generate(cells))
 

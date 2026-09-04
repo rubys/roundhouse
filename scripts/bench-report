@@ -169,6 +169,20 @@ targets   = order_first(cells.map { |c| c['target'] }.uniq, TARGET_ORDER)
 # reads metrics through `cell_metric`, which keeps the nil.
 def measured?(cell) ; cell && !cell['req_sec'].nil? ; end
 
+# THE FAIR MEMORY NUMBER. Summing RSS over a process tree counts every
+# shared page once per process, so a clustered lane reads high and a
+# single-process one does not — an error that runs one way. PSS divides
+# shared pages by their sharers; prefer it wherever the harness captured
+# it, and fall back to RSS for runs and platforms that have none.
+def mem_mb(cell)
+  return nil unless cell
+  cell['pss_mb'] || cell['rss_mb']
+end
+
+def mem_is_pss?(cells)
+  cells.any? { |c| c && c['pss_mb'] }
+end
+
 # Metric read that propagates "unmeasured". The req_sec nil is the
 # authority for the whole cell: an unmeasured cell's RSS is 0 only
 # because the sampler found no process to sample, and its rps_per_gb is
@@ -773,13 +787,17 @@ end
 html << h2.('Memory footprint (RSS)')
 rss_note = managed.empty? ? '' :
   ' The field spans more than two orders of magnitude. The managed-heap cells (the JVM and .NET targets) run under a fixed heap budget rather than an organically-grown working set — see the note below the chart.'
-html << "<p>Max RSS observed across all endpoints, per target, sorted low to high.#{rss_note}</p>\n"
+fair_mem = mem_is_pss?(cells)
+html << "<p>Max #{fair_mem ? 'PSS' : 'RSS'} observed across all endpoints, per target, sorted low to high.#{rss_note}</p>\n"
+if fair_mem
+  html << %(<p class="legend">PSS, not a sum of RSS: adding RSS across a process tree counts every shared page once per process, which reads high for a clustered lane and changes nothing for a single-process one. PSS divides each shared page among its sharers.</p>\n)
+end
 
 # Only lanes that measured: an unmeasured cell's RSS reads 0 because the
 # sampler had no process to sample, and a 0 MB bar would put a dead lane
 # at the top of a chart whose whole point is "lower is better".
 mem_rows = measured_targets.map do |tgt|
-  max_rss = endpoints.filter_map { |ep| cell_metric(by[ep][tgt], 'rss_mb')&.to_f }.max
+  max_rss = endpoints.filter_map { |ep| mem_mb(by[ep][tgt])&.to_f }.max
   { 'target' => tgt, 'rss_mb' => max_rss || 0.0 }
 end
 mem_rows.sort_by! { |r| r['rss_mb'] }
@@ -1008,7 +1026,7 @@ end
 # ── Section: raw data table ──────────────────────────────────────────
 
 html << "<details>\n<summary>Raw cell data (#{cells.size} rows)</summary>\n"
-html << "<table>\n<thead><tr><th>target</th><th>endpoint</th><th>req/sec</th><th>p50 (ms)</th><th>p99 (ms)</th><th>RSS (MB)</th><th>req/sec/GB</th></tr></thead>\n<tbody>\n"
+html << "<table>\n<thead><tr><th>target</th><th>endpoint</th><th>req/sec</th><th>p50 (ms)</th><th>p99 (ms)</th><th>#{mem_is_pss?(cells) ? 'PSS' : 'RSS'} (MB)</th><th>req/sec/GB</th></tr></thead>\n<tbody>\n"
 cells.sort_by { |c| [TARGET_ORDER.index(c['target']) || 99, ENDPOINT_ORDER.index(c['endpoint']) || 99] }.each do |c|
   html << "<tr>"
   html << "<td>#{c['target']}</td>"
@@ -1019,10 +1037,10 @@ cells.sort_by { |c| [TARGET_ORDER.index(c['target']) || 99, ENDPOINT_ORDER.index
     v = cell_metric(c, k)
     html << %(<td class="num">#{v ? fmt_dec(v, 2) : '—'}</td>)
   end
-  %w[rss_mb rps_per_gb].each do |k|
-    v = cell_metric(c, k)
-    html << %(<td class="num">#{v ? fmt_int(v) : '—'}</td>)
-  end
+  mem = mem_mb(c)
+  html << %(<td class="num">#{mem ? fmt_int(mem) : '—'}</td>)
+  v = cell_metric(c, 'rps_per_gb')
+  html << %(<td class="num">#{v ? fmt_int(v) : '—'}</td>)
   html << "</tr>\n"
 end
 html << "</tbody></table>\n</details>\n"
