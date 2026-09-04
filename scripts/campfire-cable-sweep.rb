@@ -368,18 +368,44 @@ clients = (0...N).map do |i|
 end
 subs_per_socket = clients[0].nil? ? 0 : 1 + (opts[:presence] ? 1 : 0)
 
+# THE DRIVER IS ONE THREAD, and above a few thousand sockets that is a
+# measurement instrument with a capacity of its own. A server that beats
+# every connection from one heartbeat delivers N ping frames in a burst,
+# and this loop has to read and parse all of them before it can stamp
+# the next message frame — which would show up as the SERVER's tail
+# latency and is not. `$drain_s` / `$drain_max` price that: total time
+# spent reading frames, and the longest single pass. Reset per phase and
+# reported with the chat window.
+$drain_s = 0.0
+$drain_max = 0.0
+
+# A paced storm calls this between opens, so some clients have not been
+# opened yet and have no socket; `IO.select` on a nil is a TypeError.
+def readable_clients(clients)
+  clients.reject { |c| c.closed? || c.sock.nil? }
+end
+
 def pump(clients, seconds)
   deadline = now + seconds
-  live = clients.reject(&:closed?)
+  live = readable_clients(clients)
   while (left = deadline - now) > 0
     socks = live.map(&:sock)
+    if socks.empty?
+      sleep([left, 0.05].min)
+      yield if block_given?
+      next
+    end
     ready, = IO.select(socks, nil, nil, [left, 0.05].min)
     next unless ready
+    t_pass = now
     ready.each do |s|
       c = live.find { |x| x.sock.equal?(s) }
       c.readable!
     end
-    live = clients.reject(&:closed?) if ready.any? { |s| live.find { |x| x.sock.equal?(s) }.closed? }
+    pass = now - t_pass
+    $drain_s += pass
+    $drain_max = pass if pass > $drain_max
+    live = readable_clients(clients) if ready.any? { |s| live.find { |x| x.sock.equal?(s) }.closed? }
     yield if block_given?
   end
 end
@@ -430,6 +456,7 @@ posts = {}
 subs_in = Hash.new(0)
 clients.each { |c| subs_in[c.room] += 1 if c.state == :subscribed }
 c1 = cpu_ticks(opts[:pid]); t1 = now
+$drain_s = 0.0; $drain_max = 0.0
 writer = Thread.new do
   (1..opts[:messages]).each do |k|
     room = ROOMS[k % ROOMS.size]
@@ -475,6 +502,12 @@ codes = posts.values.map { |p| p[:code] }.tally
 log "   post codes: #{codes.inspect}#{bad_posts > 0 ? " — first failure: " + posts.values.find { |p| p[:code] != "200" }[:note].to_s.inspect : ""}" if bad_posts > 0
 us_per_frame = chat_cpu && delivered > 0 ? (chat_cpu * 1e6 / delivered).round(1) : nil
 log "   delivered #{delivered}/#{expected} frames from #{posts.size} posts (#{bad_posts} non-200); frame p50 #{pct.(lat, 0.5)} ms p99 #{pct.(lat, 0.99)} ms; last-frame p50 #{pct.(last, 0.5)} p99 #{pct.(last, 0.99)} ms; server cpu #{chat_cpu ? (chat_cpu / chat_s).round(3) : "n/a"} cores, #{us_per_frame || "n/a"} us/frame, rss #{chat_rss || "n/a"} MB"
+# WHAT THE DRIVER ITSELF COST during that window. A latency here is a
+# server number only to the extent this thread was free to stamp it:
+# `drain max` is the longest single reading pass, and if it is the size
+# of the p99 above then the p99 is the driver's backlog, not the
+# server's fan-out.
+log "   driver: #{(100 * $drain_s / chat_s).round(1)}% of the window spent reading frames, longest pass #{($drain_max * 1000).round(1)} ms"
 
 # ── 4. teardown ───────────────────────────────────────────────────────
 #
@@ -501,7 +534,9 @@ out = {
   idle: { seconds: idle_s.round(1), cpu_cores: idle_cpu&.round(4), rss_mb: idle_rss, pss_mb: idle_pss, pings: idle_pings },
   chat: { messages: posts.size, rate: opts[:rate], non_200: bad_posts, codes: codes, delivered: delivered, expected: expected,
           frame_p50_ms: pct.(lat, 0.5), frame_p99_ms: pct.(lat, 0.99), last_p50_ms: pct.(last, 0.5), last_p99_ms: pct.(last, 0.99),
-          cpu_cores: chat_cpu ? (chat_cpu / chat_s).round(4) : nil, us_per_frame: us_per_frame, rss_mb: chat_rss },
+          cpu_cores: chat_cpu ? (chat_cpu / chat_s).round(4) : nil, us_per_frame: us_per_frame, rss_mb: chat_rss,
+          driver_read_share: chat_s > 0 ? (100 * $drain_s / chat_s).round(1) : nil,
+          driver_max_pass_ms: ($drain_max * 1000).round(1) },
   teardown: { seconds: down_s.round(1), cpu_seconds: down_cpu&.round(3), rss_mb: down_rss },
   server_threads: threads_of(opts[:pid]), server_processes: procs_of(opts[:pid])
 }
