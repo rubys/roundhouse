@@ -507,6 +507,15 @@ kill_jobs() {
 #
 # Cached by existence. Seeding a thousand users is minutes of work and
 # the result does not change; `--force` rebuilds it.
+SS_PROD=""; SS_DEV=""; SS_BAK=""
+restore_oracle() {
+    [[ -n "$SS_BAK" ]] || return 0
+    [[ -f "$SS_BAK/production.sqlite3" ]] && cp "$SS_BAK/production.sqlite3" "$SS_PROD"
+    [[ -f "$SS_BAK/development.sqlite3" ]] && cp "$SS_BAK/development.sqlite3" "$SS_DEV"
+    rm -f "$SS_PROD-wal" "$SS_PROD-shm" "$SS_DEV-wal" "$SS_DEV-shm"
+    return 0
+}
+
 SOCKET_USERS_DEFAULT=1000
 SOCKET_ROOMS_DEFAULT=20
 SOCKET_MESSAGES_DEFAULT=20
@@ -529,22 +538,23 @@ cmd_socket_seed() {
     [[ "$sr" == 5   ]] && sr="$SOCKET_ROOMS_DEFAULT"
     [[ "$sm" == 100 ]] && sm="$SOCKET_MESSAGES_DEFAULT"
 
-    local prod="$OUT/storage/db/production.sqlite3"
-    local dev="$OUT/storage/db/development.sqlite3"
-    local bak="$OUT/tmp/oracle-restore"
-    mkdir -p "$bak"
-    [[ -f "$prod" ]] && cp "$prod" "$bak/production.sqlite3"
-    [[ -f "$dev" ]] && cp "$dev" "$bak/development.sqlite3"
-    restore_oracle() {
-        [[ -f "$bak/production.sqlite3" ]] && cp "$bak/production.sqlite3" "$prod"
-        [[ -f "$bak/development.sqlite3" ]] && cp "$bak/development.sqlite3" "$dev"
-        rm -f "$prod-wal" "$prod-shm" "$dev-wal" "$dev-shm"
-        return 0
-    }
+    # GLOBALS, not locals, and that is the whole point of this comment.
+    # `restore_oracle` runs from an EXIT trap, which fires AFTER this
+    # function has returned — at which point a `local` is out of scope
+    # and `set -u` turns the restore into `bak: unbound variable`. The
+    # first run of this command did exactly that and left the oracle
+    # holding the 1,000-user database: the trap failed at the one job it
+    # exists for.
+    SS_PROD="$OUT/storage/db/production.sqlite3"
+    SS_DEV="$OUT/storage/db/development.sqlite3"
+    SS_BAK="$OUT/tmp/oracle-restore"
+    mkdir -p "$SS_BAK"
+    [[ -f "$SS_PROD" ]] && cp "$SS_PROD" "$SS_BAK/production.sqlite3"
+    [[ -f "$SS_DEV" ]] && cp "$SS_DEV" "$SS_BAK/development.sqlite3"
     trap 'restore_oracle' EXIT INT TERM
 
     step "socket seed: $su users, $sr rooms, $sm messages/room (the oracle is restored afterwards)"
-    rm -f "$dev" "$dev-wal" "$dev-shm"
+    rm -f "$SS_DEV" "$SS_DEV-wal" "$SS_DEV-shm"
     (cd "$OUT" && RAILS_ENV=development bin/rails db:prepare >/dev/null) \
         || die "socket seed: db:prepare failed"
     (cd "$OUT" && CF_USERS="$su" CF_ROOMS="$sr" CF_MESSAGES="$sm" \
@@ -555,9 +565,9 @@ cmd_socket_seed() {
     # line i of the file is user i of THIS dataset, and a cookie minted
     # against the 50-user seed names a user the sweep's database does not
     # have.
-    cp "$dev" "$prod"; rm -f "$prod-wal" "$prod-shm"
+    cp "$SS_DEV" "$SS_PROD"; rm -f "$SS_PROD-wal" "$SS_PROD-shm"
     COUNT="$su" COOKIE_FILE="$seed_cookies" cmd_cookies || die "socket seed: minting failed"
-    cp "$dev" "$seed_db"
+    cp "$SS_DEV" "$seed_db"
     step "socket seed ready: $seed_db ($(wc -l < "$seed_cookies") cookies)"
     echo "$seed_db"
 }
