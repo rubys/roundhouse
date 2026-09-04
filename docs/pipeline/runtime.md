@@ -2612,8 +2612,10 @@ APP's output or it is not an oracle. `scripts/campfire-compare` could not
 have caught it either: it masks "signed blobs (avatar sgids, stream
 signatures)" as volatile, which is exactly the bytes that were wrong.
 The unit harness also loaded CRuby's stdlib `Base64` where an emitted
-ruby tree ships `runtime/base64.rb`; it now loads the one that ships,
-which is what made the missing `urlsafe_encode64_nopad` visible.
+ruby tree ships the one in `runtime/spinel/base64.rb`, emitted to
+runtime/base64.rb in the tree — which is why `write_bundled_requires`
+skips the stdlib require for it. The harness loads the one that ships
+now, and that is what made the missing `urlsafe_encode64_nopad` visible.
 
 ### A channel's `on_subscribe` / `on_unsubscribe` callbacks run — CLOSED (ours)
 

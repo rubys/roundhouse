@@ -30,14 +30,6 @@ require "minitest/autorun"
 # without inline requires (which spinel-target would warn on).
 require "base64"
 require "json"
-# AND THEN THE ONE THAT SHIPS, on top. An emitted ruby tree carries
-# `runtime/base64.rb` — `write_bundled_requires` skips the stdlib
-# require precisely because "the program defines it itself" — so the
-# stdlib module here is NOT what the emitted app calls. It lacks
-# `urlsafe_encode64_nopad`, which `Rails::GlobalID#to_param` and the
-# signed-id verifier both use, and a test suite that never loaded the
-# real one could not have caught either.
-require_relative "../../spinel/base64"
 
 FRAMEWORK_RUBY = File.expand_path("..", __dir__)
 $LOAD_PATH.unshift(FRAMEWORK_RUBY)
@@ -45,6 +37,27 @@ $LOAD_PATH.unshift(FRAMEWORK_RUBY)
 # resolve below. Required by base_test.rb's `:memory:` sqlite setup;
 # harmless for tests that don't touch persistence.
 $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
+
+# THE BASE64 THAT SHIPS, loaded on top of the stdlib one required above.
+# An emitted ruby tree carries `runtime/base64.rb` and
+# `write_bundled_requires` skips the stdlib require for it precisely
+# because "the program defines it itself" — so CRuby's module is NOT
+# what the emitted app calls. It has no `urlsafe_encode64_nopad`, which
+# `Rails::GlobalID#to_param` and the signed-id verifier both use, and a
+# suite that never loaded the shipped one could not have caught either.
+#
+# TWO CANDIDATES because two harnesses run this file and their layouts
+# differ: the source-side gate reads it out of `runtime/spinel/`, and
+# `tests/framework_tests_ruby.rs` stages a scratch tree in the EMITTED
+# shape, where it sits beside the other framework files (the same swap
+# that file already performs for `message_digest`). Whichever exists is
+# the one that ships in that layout.
+[File.join(FRAMEWORK_RUBY, "base64.rb"),
+ File.expand_path("../spinel/base64.rb", FRAMEWORK_RUBY)].each do |candidate|
+  next unless File.exist?(candidate)
+  load candidate
+  break
+end
 
 require "active_record"
 require "action_view/slots"

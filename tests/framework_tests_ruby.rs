@@ -96,6 +96,20 @@ fn build_and_run(test_file: &Path, tag: &str) {
         scratch_runtime.join("message_digest.rb"),
     )
     .expect("copy message_digest_cruby.rb");
+    // `runtime/base64.rb` is the same shape of hole. The emit writes one
+    // (from `runtime/spinel/base64.rb`) and `write_bundled_requires`
+    // then SKIPS the stdlib `require "base64"` for that tree, on the
+    // rule that a program defining a constant itself does not require
+    // the bundled library for it. So an emitted app calls ours, not
+    // CRuby's — and ours carries `urlsafe_encode64_nopad`, which
+    // `Rails::GlobalID#to_param` and `ActiveRecord::SignedId` both need.
+    // A scratch tree without it runs the test suite against a Base64
+    // that no emitted tree has.
+    std::fs::copy(
+        Path::new("runtime/spinel/base64.rb"),
+        scratch_runtime.join("base64.rb"),
+    )
+    .expect("copy base64.rb");
 
     // Test helper: same framework-Ruby version the source-side
     // `framework_ruby_tests_pass` gate uses, but with FRAMEWORK_RUBY
