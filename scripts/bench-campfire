@@ -11,8 +11,9 @@
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
 #   LANE ∈ { rails | rails-nocache | ruby | spinel |
-#            rails-1p | ruby-1p | spinel-1p }
-#          (default: rails rails-nocache ruby spinel rails-1p ruby-1p spinel-1p)
+#            rails-1p | rails-nocache-1p | ruby-1p | spinel-1p }
+#          (default: rails rails-nocache ruby spinel
+#                     rails-1p rails-nocache-1p ruby-1p spinel-1p)
 #
 #   THE DEPLOYED LANES — what each project would actually run on this box:
 #
@@ -30,6 +31,10 @@
 #   THE ONE-PROCESS LANES — the diagnostic that explains the above:
 #
 #     rails-1p       Rails, one Puma worker x 5 threads, no proxy, no jobs
+#     rails-nocache-1p  the same, rendering rather than reading Redis —
+#                    the operand that makes the one-process set a
+#                    RENDERER comparison, which is the only thing it can
+#                    honestly be
 #     ruby-1p        the CRuby emit, same
 #     spinel-1p      the binary, SPINEL_WORKERS=1
 #
@@ -170,12 +175,12 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,107p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|rails-1p|ruby-1p|spinel-1p) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|spinel|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby spinel rails-1p ruby-1p spinel-1p)
+(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby spinel rails-1p rails-nocache-1p ruby-1p spinel-1p)
 (( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
@@ -408,10 +413,11 @@ start_lane() {
                 $nocache > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        rails-1p)
+        rails-1p|rails-nocache-1p)
+            local nc1=""; [[ "$lane" == "rails-nocache-1p" ]] && nc1="--no-fragment-cache"
             scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
                 --workers 1 --threads "$THREADS" --shape-report "$shape" \
-                > "$log" 2>&1 &
+                $nc1 > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
         ruby|ruby-1p)
@@ -476,7 +482,7 @@ login_cookie() {
     local jar="$LOG_DIR/jar-$lane.txt"
     rm -f "$jar"
     case "$lane" in
-        rails|rails-nocache|rails-1p)
+        rails|rails-nocache|rails-1p|rails-nocache-1p)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
@@ -593,6 +599,7 @@ for lane in "${LANES[@]}"; do
     # workers and a binary autodetecting twelve both announced
     # "1 worker(s)".
     case "$lane" in
+        rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
@@ -1004,6 +1011,13 @@ pack_spinel_tree() {
         build_status="front end: not checked (spinel not on PATH)"
     fi
 
+    # UNQUOTED heredoc — it interpolates $rh, $sp and $(date), which is
+    # the point. That also makes every BACKTICK a command substitution:
+    # prose written as `spinel` RUNS spinel, splices its stdout into the
+    # shipped file and leaks its stderr to the operator's console. Three
+    # of them shipped in the 2026-09-04 archive, which is how `wrk`'s
+    # usage text ended up in the middle of a sentence. Escape every
+    # backtick in this block: \` .
     cat > "$SP_EMIT/REPRODUCE.md" <<REPRO
 # campfire — spinel tree, as emitted
 
@@ -1017,10 +1031,10 @@ Emitted by roundhouse \`$rh\` from once-campfire. Strict emit, no
 
 ## What this is
 
-The tree the `spinel` lanes on the benchmark page were built from. It
+The tree the \`spinel\` lanes on the benchmark page were built from. It
 compiles, links and serves: the same binary answers campfire's room
-pages under `wrk` and holds thousands of WebSocket connections under
-`scripts/campfire-cable-sweep`. Until 2026-09-04 this archive carried a
+pages under \`wrk\` and holds thousands of WebSocket connections under
+\`scripts/campfire-cable-sweep\`. Until 2026-09-04 this archive carried a
 paragraph saying it did not compile — accurate when it was written, and
 long outlived by the tree beside it.
 

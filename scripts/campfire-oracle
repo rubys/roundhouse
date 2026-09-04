@@ -343,6 +343,11 @@ cmd_serve() {
     # deployed lane's sibling died with
     # `LD_PRELOAD=/usr/lib/...libjemalloc.so.2: No such file or
     # directory` — bash trying to execute the allocator.
+    # The one-process lanes record their shape too, or the page's
+    # appendix says only "jemalloc=..." for them and a reader cannot tell
+    # a one-worker Rails from an eight-worker one.
+    report_shape "workers=$WORKERS"
+    report_shape "fragment-cache=$FRAGMENT_CACHE"
     local pre=(
         WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS"
         RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
