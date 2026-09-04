@@ -323,12 +323,20 @@ cmd_serve() {
     else
         report_shape "jemalloc=off"
     fi
-    WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS" \
-    RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 \
-    DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))" \
-    RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
-    ${jem:+LD_PRELOAD="$jem"} \
-        exec bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
+    # THROUGH `env`, not as a command prefix. A prefix assignment is only
+    # an assignment if the parser saw `NAME=value` BEFORE expansion; a
+    # word that comes out of `${jem:+...}` is the COMMAND, so the
+    # deployed lane's sibling died with
+    # `LD_PRELOAD=/usr/lib/...libjemalloc.so.2: No such file or
+    # directory` — bash trying to execute the allocator.
+    local pre=(
+        WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS"
+        RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
+        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
+        RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
+    )
+    [[ -n "$jem" ]] && pre+=( LD_PRELOAD="$jem" )
+    exec env "${pre[@]}" bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
 }
 
 # ── the deployed shape ───────────────────────────────────────────────

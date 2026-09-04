@@ -189,6 +189,20 @@ SPINEL_SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deploym
 LOG_DIR="$OUT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# A lane the harness asked for and could not measure. bench-report draws
+# a banner from this file, which is the difference between a page that is
+# missing a lane and a page that SAYS it is missing a lane and why — the
+# whole point of publishing status rather than results.
+SKIPPED="$OUT_DIR/skipped.json"
+: > "$SKIPPED"
+skip_lane() {   # $1 = lane, $2 = stage, $3 = reason, $4 = log to tail
+    local tail_txt=""
+    [[ -n "${4:-}" && -f "${4:-}" ]] && tail_txt="$(tail -3 "$4" | tr -d '\r' | tr '\n' ' ' | sed 's/"/\\"/g' | cut -c1-300)"
+    printf '{"target":"%s","stage":"%s","reason":"%s","log_tail":"%s"}\n' \
+        "$1" "$2" "$3" "$tail_txt" >> "$SKIPPED"
+}
+
+
 step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
@@ -337,7 +351,14 @@ for _l in "${LANES[@]}"; do [[ "$_l" == spinel* ]] && WANT_SPINEL=1; done
 if (( WANT_SPINEL )); then
     if ! build_spinel_binary; then
         fail "dropping the spinel lanes"
-        NEW_LANES=(); for _l in "${LANES[@]}"; do [[ "$_l" == spinel* ]] || NEW_LANES+=("$_l"); done
+        NEW_LANES=()
+        for _l in "${LANES[@]}"; do
+            if [[ "$_l" == spinel* ]]; then
+                skip_lane "$_l" "build" "the spinel binary could not be built" "$LOG_DIR/build-spinel.log"
+            else
+                NEW_LANES+=("$_l")
+            fi
+        done
         LANES=("${NEW_LANES[@]}")
     fi
 fi
@@ -560,12 +581,15 @@ for lane in "${LANES[@]}"; do
     step "start $lane on :$port ($WORKERS worker(s) x $THREADS thread(s))"
     if ! start_lane "$lane" "$port"; then
         fail "$lane failed to start; skipping lane"
-        port=$(( port + 1 )); SERVER_PID=""; continue
+        skip_lane "$lane" "boot" "did not answer on :$port within 60s" "$LOG_DIR/$lane.log"
+        stop_lane
+        port=$(( port + 1 )); continue
     fi
     cookie="$(login_cookie "$lane" "$port")" || {
         fail "$lane sign-in failed; skipping lane"
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        port=$(( port + 1 )); SERVER_PID=""; continue
+        skip_lane "$lane" "sign-in" "the lane booted but would not sign a user in" "$LOG_DIR/$lane.log"
+        stop_lane
+        port=$(( port + 1 )); continue
     }
     ok "$lane up and signed in"
 
