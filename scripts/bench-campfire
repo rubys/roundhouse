@@ -271,7 +271,12 @@ wait_for_port() {
         # not finished booting — accepting it declared the deployed lane
         # ready four seconds early and would have handed the cold-start
         # measurement the proxy's startup instead of Rails'.
-        code="$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+        # `|| echo 000`, and it is not decoration. Under `set -e` a
+        # failed command substitution exits the harness, and curl exits 7
+        # for "connection refused" — which is the NORMAL answer while a
+        # server is still booting, i.e. every single time this loop is
+        # doing its job.
+        code="$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
         [[ "$code" != "000" && "$code" != "502" && "$code" != "503" ]] && return 0
         sleep 0.3
     done
@@ -506,7 +511,11 @@ cold_start() {
     local rep t0 t_accept t_page code
     for rep in $(seq 1 "$reps"); do
         t0="$(date +%s.%N)"
-        start_lane_quiet "$lane" "$port" || { fail "$lane cold-start boot $rep failed"; return 0; }
+        if ! start_lane_quiet "$lane" "$port"; then
+            fail "$lane cold-start boot $rep failed"
+            stop_lane
+            return 0
+        fi
         t_accept="$(date +%s.%N)"
         # The room page, authenticated, until it is really a 200: a lane
         # still booting answers 502, and a jar that has gone stale
@@ -515,7 +524,7 @@ cold_start() {
         local deadline=$(( $(date +%s) + 120 ))
         while (( $(date +%s) < deadline )); do
             code="$(curl -s -b "$jar" -o /dev/null -w '%{http_code}' \
-                    "http://127.0.0.1:$port/rooms/1" 2>/dev/null)"
+                    "http://127.0.0.1:$port/rooms/1" 2>/dev/null || echo 000)"
             [[ "$code" == "200" ]] && break
             sleep 0.05
         done
