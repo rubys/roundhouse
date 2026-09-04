@@ -271,12 +271,16 @@ wait_for_port() {
         # not finished booting — accepting it declared the deployed lane
         # ready four seconds early and would have handed the cold-start
         # measurement the proxy's startup instead of Rails'.
-        # `|| echo 000`, and it is not decoration. Under `set -e` a
-        # failed command substitution exits the harness, and curl exits 7
-        # for "connection refused" — which is the NORMAL answer while a
-        # server is still booting, i.e. every single time this loop is
-        # doing its job.
-        code="$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+        # `|| true`, and it is not decoration. Under `set -e` a failed
+        # command substitution exits the harness, and curl exits 7 for
+        # "connection refused" — the NORMAL answer while a server is
+        # still booting, i.e. every time this loop is doing its job.
+        #
+        # NOT `|| echo 000`: `-w '%{http_code}'` already prints 000 on a
+        # failed connection, so the fallback appended a SECOND one and
+        # the guard below compared "000\n000" against "000", found them
+        # different, and declared every lane up before it had started.
+        code="$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
         [[ "$code" != "000" && "$code" != "502" && "$code" != "503" ]] && return 0
         sleep 0.3
     done
@@ -524,7 +528,7 @@ cold_start() {
         local deadline=$(( $(date +%s) + 120 ))
         while (( $(date +%s) < deadline )); do
             code="$(curl -s -b "$jar" -o /dev/null -w '%{http_code}' \
-                    "http://127.0.0.1:$port/rooms/1" 2>/dev/null || echo 000)"
+                    "http://127.0.0.1:$port/rooms/1" 2>/dev/null || true)"
             [[ "$code" == "200" ]] && break
             sleep 0.05
         done
