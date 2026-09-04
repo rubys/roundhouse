@@ -2658,6 +2658,26 @@ the idle phase on both lanes, zero after teardown on both.
 
 ### The 1,000-user tier, both lanes, same cores — MEASURED (2026-09-04)
 
+**Correction, 2026-09-04 (later the same day).** The idle-CPU doubling this
+entry attributes to the second registered stream per socket is not the
+streams. The idle cost is the monitor's turn rate times a `poll` over
+every parked socket, and the turn rate is set by how spread the
+per-connection ping phases are: a second subscription only made the
+connect storm ten times longer (a presence write per connect through
+SQLite's sleeping busy handler), which spread the phases. Same binary,
+1,000 sockets, 4 workers on 4 cores: one subscription after a 0.55 s
+storm idles at 0.132 cores (monitor blocking 65 turns/s); two
+subscriptions after a 6.2 s storm at 0.234 (182/s); ONE subscription with
+the connects paced 6 ms apart, a 6.6 s storm, at 0.396 (337/s). Real
+connections arrive over minutes, so the paced row is the honest idle
+number for a per-connection heartbeat: one monitor turn per beat, ~1.1 ms
+of `poll` over 1,000 TCP sockets per turn. Reproduced in matz's standalone
+by staggering its heartbeat starts (0.021 cores started together, 0.375
+staggered, 0.010 with one shared heartbeat; matz/spinel#4317). The idle
+axis is therefore mostly ours: a shared heartbeat, Action Cable's shape,
+is the next change; the population term, a `poll` over everyone parked
+on every event, stays the runtime's and is what #4317 asks for.
+
 once.com/campfire's table puts 1,000 concurrent users on 4 CPUs and
 8 GB. Both lanes on `taskset -c 0-3`, the same 1,000-user / 20-room seed,
 the same pre-minted cookie file, and the same driver: the binary on four
