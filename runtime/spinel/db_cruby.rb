@@ -40,6 +40,11 @@ require "sqlite3"
 
 module Db
   @pool    = nil
+  # WHAT PROCESS THIS POOL BELONGS TO, and what it would take to build
+  # another one. Both exist for `fork`: see `adopt_after_fork`.
+  @owner_pid = nil
+  @path      = nil
+  @pool_size = 0
   @rows    = {}
   @next_id = 0
   @mutex   = nil
@@ -65,12 +70,57 @@ module Db
   # every concurrently-serving thread can hold its own handle without
   # contending. Override explicitly for tests.
   def self.configure(path, pool_size: ENV.fetch("RAILS_MAX_THREADS", "3").to_i)
-    @mutex = Mutex.new
-    @cv    = ConditionVariable.new
-    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(pool_size) do
+    @path      = path
+    @pool_size = pool_size
+    @mutex     = Mutex.new
+    @cv        = ConditionVariable.new
+    @pool      = open_pool
+    @owner_pid = Process.pid
+  end
+
+  # The pool construction, in one place because two callers need it: the
+  # boot-time `configure` above and `adopt_after_fork` below.
+  def self.open_pool
+    path = @path
+    ActiveRecord::ConnectionAdapters::ConnectionPool.new(@pool_size) do
       db = SQLite3::Database.new(path)
       db.results_as_hash = false
       db
+    end
+  end
+
+  # A FORKED CHILD DOES NOT INHERIT A USABLE POOL, and the failure is
+  # silent in the worst way.
+  #
+  # A clustered Puma boots the app in the master and then forks a worker
+  # per `WEB_CONCURRENCY`, so every handle this pool opened belongs to
+  # the parent. The sqlite3 gem notices — "Writable sqlite database
+  # connection(s) were inherited from a forked process ... being closed
+  # to prevent possible data corruption" — and discards them. It does
+  # not tell the pool, which goes on handing the discarded handles out,
+  # and a discarded handle does not raise: it answers every query
+  # against an EMPTY SCHEMA. campfire's sign-in came back
+  # `SQLite3::SQLException: no such table: bans` from a database whose
+  # `bans` table is right there on disk.
+  #
+  # One Puma worker never forks, which is the only reason this survived
+  # every benchmark run this tree has ever been in.
+  #
+  # The check is a pid comparison once per REQUEST (`with_connection`),
+  # not once per query — `current_dbh` is the hot path and pays nothing
+  # while a lease is held.
+  def self.adopt_after_fork
+    return if @pool.nil? || @owner_pid == Process.pid
+    @mutex.synchronize do
+      # Re-checked under the lock: every worker thread in a fresh child
+      # reaches this together on the first request.
+      if @owner_pid != Process.pid
+        # The parent's handles are simply dropped. They are already
+        # discarded by the gem's fork safety, and closing a descriptor
+        # this process shares with its parent is not ours to do.
+        @pool      = open_pool
+        @owner_pid = Process.pid
+      end
     end
   end
 
@@ -82,6 +132,10 @@ module Db
   def self.current_dbh
     h = Fiber[:db_handle]
     return h if !h.nil?
+    # Only the UNLEASED path pays the fork check — boot, tests, and
+    # single-threaded dev. Under a lease the line above has already
+    # returned, so the per-query cost of all this is zero.
+    adopt_after_fork
     @pool.free[0]
   end
 
@@ -96,6 +150,7 @@ module Db
   # With pool_size == thread count, the wait loop never trips.
   def self.with_connection
     h = nil
+    adopt_after_fork
     @mutex.synchronize do
       while @pool.available_count == 0
         @cv.wait(@mutex)
@@ -127,6 +182,7 @@ module Db
       i += 1
     end
     @pool = nil
+    @owner_pid = nil
   end
 
   def self.exec(sql)

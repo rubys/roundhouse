@@ -26,8 +26,22 @@ preload_app! if ENV.fetch("WEB_CONCURRENCY", "0").to_i > 0
 # SQLite cannot reuse safely post-fork. Re-running Db.configure here
 # gives each worker its own handle to the same file. Puma 8 renamed
 # `on_worker_boot` to `before_worker_boot`.
+#
+# THE PATH COMES FROM THE APP, not from a second copy of its default.
+# This line used to read `ENV.fetch("BLOG_DB", ":memory:")`, and the
+# app's own default is `storage/development.sqlite3`. With one worker
+# the app loads inside the worker and fixes it up; with two or more,
+# `preload_app!` loads the app in the MASTER, so this hook was the last
+# word and every worker served from a fresh EMPTY in-memory database.
+# Every query answered `no such table: <anything>` — not an error the
+# pool could raise, just an empty schema — and campfire's sign-in 500'd
+# on `bans` while the file on disk had the table all along.
 before_worker_boot do
-  Db.configure(ENV.fetch("BLOG_DB", ":memory:")) if defined?(Db)
+  if defined?(Main) && Main.respond_to?(:default_db_path)
+    Db.configure(Main.default_db_path) if defined?(Db)
+  elsif defined?(Db)
+    Db.configure(ENV.fetch("BLOG_DB", "storage/development.sqlite3"))
+  end
 end
 
 # `touch tmp/restart.txt` to restart workers without dropping

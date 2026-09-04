@@ -116,10 +116,20 @@ module Main
   # Tests configure `:memory:` explicitly through their own setup, so
   # this server default never reaches them (the `adapter.nil?` guard
   # also short-circuits when a test already configured the adapter).
+  # WHERE THE DATABASE IS, decided in ONE place. `config/puma.rb` has to
+  # answer the same question after every fork, and when it carried its
+  # own copy of this default the two disagreed: it fell back to
+  # `:memory:`, so a clustered, preloaded Puma gave every worker a fresh
+  # EMPTY database and campfire's sign-in came back `no such table:
+  # bans` from a file whose `bans` table is right there on disk.
+  def self.default_db_path
+    db_path = ENV["BLOG_DB"]
+    (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
+  end
+
   def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
-    db_path = ENV["BLOG_DB"]
-    path = (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
+    path = Main.default_db_path
     # SqliteAdapter.configure delegates to Db.configure (single shared
     # connection); both the legacy AR-adapter dispatch path and the
     # Level-3 lowerer-emitted `_adapter_*` path read through one handle.
