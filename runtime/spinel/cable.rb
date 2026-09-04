@@ -39,6 +39,11 @@ module Cable
 
   PING_INTERVAL = 3   # seconds — matches Action Cable's default
 
+  # How many pieces one interval's beats are sent in. See `beat_cycle`:
+  # every connection is still pinged once per interval, but N frames do
+  # not leave together.
+  BEAT_SLICES = 10
+
   # THE APP'S OWN `ApplicationCable::Connection`, built against the
   # handshake's cookie jar — or an anonymous one when the app declares
   # no connection class.
@@ -319,21 +324,73 @@ module Cable
   # for nothing.
   def self.heartbeat_loop
     while true
-      sleep(PING_INTERVAL)
-      Cable.beat
+      Cable.beat_cycle
     end
     0
   end
 
-  # One beat: the registry copied out under the lock, the frames written
+  # ONE INTERVAL'S BEATS, SPREAD ACROSS IT. Every connection is still
+  # pinged exactly once per PING_INTERVAL; what changes is that the
+  # frames leave in BEAT_SLICES pieces instead of all at once.
+  #
+  # WHY, measured. A single burst of N pings costs the server one long
+  # run of writes every interval, and it costs anything reading many of
+  # those sockets a backlog: on the 5,000-socket sweep cell the driver's
+  # longest single reading pass went from 101 ms with a thread per
+  # connection to 791 ms with one unsliced beat, and about two thirds of
+  # the fan-out p99 that grew alongside it (367 -> 1401 ms) is that
+  # backlog rather than the server. Ten slices divide the burst by ten
+  # and cost ten monitor wakes per interval instead of one — against the
+  # 333 a second a thread per connection costs at 1,000 sockets, which is
+  # the whole reason the beat was shared.
+  #
+  # A connection that arrives mid-cycle is picked up by the next one, at
+  # most one interval later, which is well inside the client's timeout.
+  def self.beat_cycle
+    live = Cable.registry_snapshot
+    n = live.length
+    if n == 0
+      Cable.beat_pause(PING_INTERVAL.to_f)
+      return 0
+    end
+    per = (n + BEAT_SLICES - 1) / BEAT_SLICES
+    pause = PING_INTERVAL.to_f / BEAT_SLICES.to_f
+    i = 0
+    slice = 0
+    while slice < BEAT_SLICES
+      Cable.beat_pause(pause)
+      stop = i + per
+      if stop > n
+        stop = n
+      end
+      # A timestamp per slice, not per cycle: the frame says when it was
+      # sent, and the slices are up to an interval apart.
+      payload = Cable.ping_payload
+      while i < stop
+        live[i].text(payload)
+        i += 1
+      end
+      slice += 1
+    end
+    n
+  end
+
+  # The sleep between slices, as its own method so a test can run a whole
+  # cycle without waiting an interval for it. Nothing else should call it.
+  def self.beat_pause(seconds)
+    sleep(seconds)
+    0
+  end
+
+  def self.ping_payload
+    "{\"type\":\"ping\",\"message\":" + Time.now.to_i.to_s + "}"
+  end
+
+  # The registry, copied out under its lock. The writes then happen
   # outside it -- `Tep::Broadcast.publish_local_only`'s rule, and for the
-  # same reason. A slow client can park this thread inside its write,
-  # which is the cost of sharing the beat; Action Cable's timer shares
-  # the same exposure, and a client that cannot absorb 40 bytes in three
-  # seconds is gone anyway. The timestamp is read once per beat rather
-  # than once per connection.
-  def self.beat
-    payload = "{\"type\":\"ping\",\"message\":" + Time.now.to_i.to_s + "}"
+  # same reason: a write can park, and nothing else may wait on the
+  # registry while it does.
+  def self.registry_snapshot
     live = [Tep::WebSocket::Driver.new(-1)]
     live.pop
     Tep::APP.cable_conns_lock.synchronize do
@@ -344,6 +401,22 @@ module Cable
         i += 1
       end
     end
+    live
+  end
+
+  # One unsliced pass over the registry: every open connection gets a
+  # frame now. `beat_cycle` is what the heartbeat thread runs; this is
+  # the whole-registry write it is built out of, kept whole because a
+  # test can read it and because a slice of one is this.
+  #
+  # A slow client can park this thread inside its write, which is the
+  # cost of sharing the beat; Action Cable's timer shares the same
+  # exposure, and a client that cannot absorb 40 bytes in three seconds
+  # is gone anyway. The timestamp is read once per pass rather than once
+  # per connection.
+  def self.beat
+    payload = Cable.ping_payload
+    live = Cable.registry_snapshot
     i = 0
     while i < live.length
       live[i].text(payload)

@@ -167,9 +167,43 @@ check("unregistering by a STALE number would take the new owner: run it before t
       Cable.unregister(b), 1)
 check("  which is what it did", conns.map(&:fd), [11, 13])
 
-# --- empty ------------------------------------------------------------
+# --- the cycle, sliced ------------------------------------------------
+# `beat_cycle` is what the heartbeat thread actually runs: one interval's
+# worth of beats sent in BEAT_SLICES pieces, so N frames never leave
+# together. Every connection must still get exactly one per cycle, and
+# the pieces must cover the registry exactly — an off-by-one in the slice
+# arithmetic would silently stop pinging the tail of it, which a client
+# sees as a dropped connection three seconds later. The pause is stubbed
+# so the probe does not wait a whole interval.
+paused = []
+Cable.define_singleton_method(:beat_pause) { |secs| paused << secs; 0 }
+
 Cable.unregister(a)
 Cable.unregister(c)
+check("the earlier connections all closed", conns.length, 0)
+roster = (1..25).map { |k| Tep::WebSocket::Driver.new(100 + k) }
+roster.each { |r| Cable.register(r) }
+check("a roster of 25", conns.length, 25)
+
+check("a cycle answers the registry size", Cable.beat_cycle, 25)
+check("every connection got exactly one ping in the cycle",
+      roster.map { |r| r.writes.length }.uniq, [1])
+check("the cycle is BEAT_SLICES pieces", paused.length, Cable::BEAT_SLICES)
+check("  spread over one interval",
+      (paused.sum - Cable::PING_INTERVAL).abs < 0.001, true)
+
+paused.clear
+roster.each { |r| r.writes.clear }
+Cable.beat_cycle
+check("a second cycle pings everyone again", roster.map { |r| r.writes.length }.uniq, [1])
+
+# An empty registry still waits an interval rather than spinning.
+roster.each { |r| Cable.unregister(r) }
+paused.clear
+check("a cycle over an empty registry", Cable.beat_cycle, 0)
+check("  waits one interval and does not spin", paused, [Cable::PING_INTERVAL.to_f])
+
+# --- empty ------------------------------------------------------------
 check("the last close empties the registry", conns.length, 0)
 check("a beat over nobody is not an error", Cable.beat, 0)
 check("and the heartbeat is still marked running", Tep::APP.cable_heartbeat, 1)
