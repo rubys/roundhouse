@@ -678,9 +678,17 @@ end
 
 # ── Section: YJIT contribution ───────────────────────────────────────
 
-# Restrict to the JIT/interp variants that were actually measured; skip
-# the section if none of them ran.
-yjit_series = %w[ruby ruby-int rails rails-int] & measured_targets
+# Restrict to the JIT/interp PAIRS that were actually measured, and skip
+# the section unless at least one pair is complete. Half a pair is worse
+# than no section: campfire dropped its `-int` lanes on 2026-09-04 (they
+# measured within a percent of their YJIT siblings and cost a seventh of
+# the run), which left `ruby` and `rails` here on their own — a chart
+# captioned "how far YJIT moves each" with nothing for it to have moved
+# them from.
+yjit_series = %w[ruby rails].flat_map { |base|
+  pair = [base, "#{base}-int"]
+  (pair - measured_targets).empty? ? pair : []
+}
 unless yjit_series.empty?
   html << h2.('YJIT contribution')
   html << <<~P
