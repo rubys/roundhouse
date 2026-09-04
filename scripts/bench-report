@@ -784,10 +784,10 @@ end
 
 # ── Section: memory footprint ────────────────────────────────────────
 
-html << h2.('Memory footprint (RSS)')
+fair_mem = mem_is_pss?(cells)
+html << h2.("Memory footprint (#{fair_mem ? 'PSS' : 'RSS'})")
 rss_note = managed.empty? ? '' :
   ' The field spans more than two orders of magnitude. The managed-heap cells (the JVM and .NET targets) run under a fixed heap budget rather than an organically-grown working set — see the note below the chart.'
-fair_mem = mem_is_pss?(cells)
 html << "<p>Max #{fair_mem ? 'PSS' : 'RSS'} observed across all endpoints, per target, sorted low to high.#{rss_note}</p>\n"
 if fair_mem
   html << %(<p class="legend">PSS, not a sum of RSS: adding RSS across a process tree counts every shared page once per process, which reads high for a clustered lane and changes nothing for a single-process one. PSS divides each shared page among its sharers.</p>\n)
@@ -903,7 +903,7 @@ if sockets && !sockets.empty?
   html << h2.('WebSocket connections')
   tiers = sockets.map { |r| r['sockets'] }.compact.uniq.sort
   html << "<p>Sockets held open, subscribed to a room, then idled and driven: each lane pinned to the same cores, one client, exact delivered/expected frame counts. The idle column is the cost of holding connections that are doing nothing, which is what a chat deployment does most of the time. <strong>Read the fan-out latency against the per-room column</strong> — one message costs one write per subscriber in its room, so a room of 200 and a room of 50 are different workloads at the same socket count.</p>\n"
-  html << "<table>\n<thead><tr><th>target</th><th>sockets</th><th>per room</th><th>connect storm</th><th>idle (cores)</th><th>RSS (MB)</th><th>fan-out p50 / p99</th><th>delivering (cores)</th><th>frames</th></tr></thead>\n<tbody>\n"
+  html << "<table>\n<thead><tr><th>target</th><th>sockets</th><th>per room</th><th>connect storm</th><th>idle (cores)</th><th>#{sockets.any? { |r| r['pss_mb'] } ? 'PSS' : 'RSS'} (MB)</th><th>fan-out p50 / p99</th><th>delivering (cores)</th><th>frames</th></tr></thead>\n<tbody>\n"
   tiers.each do |n|
     order_first(sockets.select { |r| r['sockets'] == n }.map { |r| r['target'] }, TARGET_ORDER).each do |tgt|
       r = sockets.find { |x| x['sockets'] == n && x['target'] == tgt } or next

@@ -328,6 +328,26 @@ deployed_worker_count() {
     ruby -e 'print (ARGV[0].to_i * 0.666).ceil' "$n"
 }
 
+# A LANE IS NOT STOPPED UNTIL ITS PORT IS FREE. `stop_lane` waits for the
+# process it started, but for the deployed lanes that process is a
+# supervisor: `campfire-oracle serve` sends TERM to thruster and
+# resque-pool from an EXIT trap and returns immediately, so the listener
+# can outlive it by seconds. The next boot then loses the bind and dies —
+# and `wait_for_port` cheerfully measures the OLD server, which is how
+# three rails-nocache cold starts came back at 27-65 ms against the same
+# shape's 4,098 ms elsewhere on the same page.
+wait_port_free() {
+    local port="$1" budget="${2:-60}" code
+    local deadline=$(( $(date +%s) + budget ))
+    while (( $(date +%s) < deadline )); do
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:$port/" 2>/dev/null || true)"
+        [[ "$code" == "000" ]] && return 0
+        sleep 0.2
+    done
+    fail "port $port still answers after ${budget}s — refusing to measure a server we did not start"
+    return 1
+}
+
 wait_for_port() {
     local url="$1" budget="${2:-60}"
     local deadline=$(( $(date +%s) + budget ))
@@ -440,7 +460,11 @@ rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3
 start_lane() {
     local lane="$1" port="$2"
     local log="$LOG_DIR/$lane.log"
-    local shape="$LOG_DIR/shape-$lane.txt"
+    # The shape record belongs to the MEASURED boot. `cold_start` boots
+    # each lane three more times and would otherwise leave the file
+    # holding whatever its last boot managed to write — which is how
+    # rails-nocache's row on the page shrank to one line.
+    local shape="${SHAPE_OVERRIDE:-$LOG_DIR/shape-$lane.txt}"
     case "$lane" in
         rails|rails-nocache)
             # AS THEIR DOCKERFILE RUNS IT. `--deployed` is the whole
@@ -564,6 +588,9 @@ parse_wrk() {
 
 PER_RUN="$OUT_DIR/per-run.json"
 COLD="$OUT_DIR/coldstart.json"
+# Set only while cold_start is booting, so those boots write their shape
+# somewhere other than the measured run's record.
+SHAPE_OVERRIDE=""
 : > "$PER_RUN"
 : > "$OUT_DIR/parity.txt"
 : > "$COLD"
@@ -589,11 +616,13 @@ COLD="$OUT_DIR/coldstart.json"
 cold_start() {
     local lane="$1" port="$2" jar="$3" reps="${4:-3}"
     local rep t0 t_accept t_page code
+    SHAPE_OVERRIDE="$LOG_DIR/shape-coldstart-$lane.txt"
     for rep in $(seq 1 "$reps"); do
         t0="$(date +%s.%N)"
         if ! start_lane_quiet "$lane" "$port"; then
             fail "$lane cold-start boot $rep failed"
-            stop_lane
+            stop_lane "$port"
+            SHAPE_OVERRIDE=""
             return 0
         fi
         t_accept="$(date +%s.%N)"
@@ -609,26 +638,30 @@ cold_start() {
             sleep 0.05
         done
         t_page="$(date +%s.%N)"
-        stop_lane
+        stop_lane "$port"
         printf '{"target":"%s","rep":%d,"accept_ms":%s,"page_ms":%s,"page_code":"%s"}\n' \
             "$lane" "$rep" \
             "$(awk -v a="$t0" -v b="$t_accept" 'BEGIN{printf "%.1f", (b-a)*1000}')" \
             "$(awk -v a="$t0" -v b="$t_page" 'BEGIN{printf "%.1f", (b-a)*1000}')" \
             "$code" >> "$COLD"
     done
+    SHAPE_OVERRIDE=""
 }
 
 # start_lane without the banner, for the cold-start reps.
 start_lane_quiet() { start_lane "$@" >/dev/null 2>&1; }
 
-stop_lane() {
-    [[ -z "$SERVER_PID" ]] && return 0
-    kill -TERM "$SERVER_PID" 2>/dev/null || true
-    local i
-    for i in $(seq 1 100); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.1; done
-    kill -KILL "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-    SERVER_PID=""
+stop_lane() {   # $1 = the port it was serving (optional, but pass it)
+    if [[ -n "$SERVER_PID" ]]; then
+        kill -TERM "$SERVER_PID" 2>/dev/null || true
+        local i
+        for i in $(seq 1 100); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.1; done
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+    [[ -n "${1:-}" ]] && wait_port_free "$1"
+    return 0
 }
 
 port="$BASE_PORT"
@@ -649,13 +682,13 @@ for lane in "${LANES[@]}"; do
     if ! start_lane "$lane" "$port"; then
         fail "$lane failed to start; skipping lane"
         skip_lane "$lane" "boot" "did not answer on :$port within 60s" "$LOG_DIR/$lane.log"
-        stop_lane
+        stop_lane "$port"
         port=$(( port + 1 )); continue
     fi
     cookie="$(login_cookie "$lane" "$port")" || {
         fail "$lane sign-in failed; skipping lane"
         skip_lane "$lane" "sign-in" "the lane booted but would not sign a user in" "$LOG_DIR/$lane.log"
-        stop_lane
+        stop_lane "$port"
         port=$(( port + 1 )); continue
     }
     ok "$lane up and signed in"
@@ -716,7 +749,7 @@ for lane in "${LANES[@]}"; do
         done
     done
 
-    stop_lane
+    stop_lane "$port"
 
     # Cold start, after the load and with this lane's jar in hand. Redis
     # is NOT flushed between reps, deliberately: restarting a campfire
