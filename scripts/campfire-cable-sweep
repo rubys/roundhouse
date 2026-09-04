@@ -68,6 +68,12 @@ fi
 COOKIES="${COOKIES:-$ORACLE/tmp/session-cookies.txt}"
 [[ -f "$COOKIES" ]] || { echo "no cookie file at $COOKIES — scripts/campfire-oracle cookies --count N" >&2; exit 2; }
 OUT="${OUT:-/tmp/cable-sweep-$(date -u +%Y%m%d-%H%M%S)}"; mkdir -p "$OUT"
+# ABSOLUTE: `start_server` runs the server from ITS OWN tree (`cd
+# "$BINDIR"` / `cd "$ORACLE"`), so a relative --out would put the
+# server's log — and the readiness the harness waits on — under the app's
+# directory instead. A relative --out is what silenced both socket lanes
+# on the first published campfire run.
+OUT="$(cd "$OUT" && pwd)"
 ulimit -n 65536 || true
 # Their Dockerfile's allocator, if this box has one.
 JEMALLOC=""

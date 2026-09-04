@@ -884,8 +884,8 @@ end
 if sockets && !sockets.empty?
   html << h2.('WebSocket connections')
   tiers = sockets.map { |r| r['sockets'] }.compact.uniq.sort
-  html << "<p>Sockets held open, subscribed to a room, then idled and driven: each lane pinned to the same cores, one client, exact delivered/expected frame counts. The idle column is the cost of holding connections that are doing nothing, which is what a chat deployment does most of the time.</p>\n"
-  html << "<table>\n<thead><tr><th>target</th><th>sockets</th><th>connect storm</th><th>idle (cores)</th><th>RSS (MB)</th><th>fan-out p50 / p99</th><th>delivering (cores)</th><th>frames</th></tr></thead>\n<tbody>\n"
+  html << "<p>Sockets held open, subscribed to a room, then idled and driven: each lane pinned to the same cores, one client, exact delivered/expected frame counts. The idle column is the cost of holding connections that are doing nothing, which is what a chat deployment does most of the time. <strong>Read the fan-out latency against the per-room column</strong> — one message costs one write per subscriber in its room, so a room of 200 and a room of 50 are different workloads at the same socket count.</p>\n"
+  html << "<table>\n<thead><tr><th>target</th><th>sockets</th><th>per room</th><th>connect storm</th><th>idle (cores)</th><th>RSS (MB)</th><th>fan-out p50 / p99</th><th>delivering (cores)</th><th>frames</th></tr></thead>\n<tbody>\n"
   tiers.each do |n|
     order_first(sockets.select { |r| r['sockets'] == n }.map { |r| r['target'] }, TARGET_ORDER).each do |tgt|
       r = sockets.find { |x| x['sockets'] == n && x['target'] == tgt } or next
@@ -894,6 +894,7 @@ if sockets && !sockets.empty?
                  %(#{fmt_int(r['delivered'])}/#{fmt_int(r['expected'])}#{ok ? '' : ' <span class="caveat">short</span>'})
                else '—' end
       html << %(<tr><td><strong>#{tgt}</strong></td><td class="num">#{fmt_int(n)}</td>) +
+              %(<td class="num">#{r['subscribers_per_room'] || '—'}</td>) +
               %(<td class="num">#{r['storm_s'] ? "#{fmt_dec(r['storm_s'], 1)} s" : '—'}</td>) +
               %(<td class="num">#{r['idle_cores'] ? fmt_dec(r['idle_cores'], 3) : '—'}</td>) +
               %(<td class="num">#{r['pss_mb'] || r['rss_mb'] || '—'}</td>) +

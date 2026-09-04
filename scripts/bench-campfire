@@ -186,6 +186,16 @@ SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
 # value works — but it has to be the SAME one the cable sweep uses, or a
 # pre-minted cookie file cannot be shared between the two harnesses.
 SPINEL_SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
+# ABSOLUTE, IMMEDIATELY. Every path derived from here is handed to a
+# script that `cd`s — the oracle into its own tree, the cable sweep into
+# the server's — and a relative one then resolves against THAT directory.
+# The first published run passed `--out bench/results/campfire/<stamp>`
+# and lost both deployed Rails lanes and the entire WebSocket phase to
+# it, each failing as "No such file or directory" on a log it was trying
+# to write. Every validation run before it had used an absolute /tmp
+# path, so nothing caught it.
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 LOG_DIR="$OUT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -578,7 +588,18 @@ stop_lane() {
 
 port="$BASE_PORT"
 for lane in "${LANES[@]}"; do
-    step "start $lane on :$port ($WORKERS worker(s) x $THREADS thread(s))"
+    # Say what THIS lane will actually run. The old banner printed
+    # `$WORKERS` for every lane, so a deployed Rails booting eight
+    # workers and a binary autodetecting twelve both announced
+    # "1 worker(s)".
+    case "$lane" in
+        rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
+        ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
+        spinel)              shape_note="one process, workers autodetected" ;;
+        spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
+        *)                   shape_note="1 worker x $THREADS threads" ;;
+    esac
+    step "start $lane on :$port ($shape_note)"
     if ! start_lane "$lane" "$port"; then
         fail "$lane failed to start; skipping lane"
         skip_lane "$lane" "boot" "did not answer on :$port within 60s" "$LOG_DIR/$lane.log"

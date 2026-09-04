@@ -158,7 +158,14 @@ while [[ $# -gt 0 ]]; do
         --rooms)    ROOMS="$2"; shift 2 ;;
         --messages) MESSAGES="$2"; shift 2 ;;
         --deployed) DEPLOYED=1; shift ;;
-        --shape-report) SHAPE_REPORT="$2"; : > "$SHAPE_REPORT"; shift 2 ;;
+        # Absolutised here because `serve` writes to it AFTER `cd
+        # "$OUT"`, so a relative path would land in the app's tree — or,
+        # as on the first published run, nowhere, taking the lane with it
+        # (`set -e` plus a failed append).
+        --shape-report)
+            SHAPE_REPORT="$2"; : > "$SHAPE_REPORT" || true
+            SHAPE_REPORT="$(cd "$(dirname "$SHAPE_REPORT")" && pwd)/$(basename "$SHAPE_REPORT")"
+            shift 2 ;;
         --no-jemalloc) JEMALLOC=0; shift ;;
         --no-yjit)  YJIT=0; shift ;;
         --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
@@ -293,7 +300,14 @@ find_jemalloc() {
 # beside the run so the page can state which of the four landed rather
 # than implying all of them did: a benchmark that claims Thruster and
 # silently ran without it is worse than one that never claimed it.
-report_shape() { [[ -n "$SHAPE_REPORT" ]] && printf '%s\n' "$1" >> "$SHAPE_REPORT"; return 0; }
+# NEVER FATAL. This records what the lane achieved; a lane that dies
+# because its own diagnostic could not be written is the worst possible
+# trade, and is exactly what happened on the first published run.
+report_shape() {
+    [[ -n "$SHAPE_REPORT" ]] || return 0
+    printf '%s\n' "$1" >> "$SHAPE_REPORT" 2>/dev/null || true
+    return 0
+}
 
 cmd_serve() {
     [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
