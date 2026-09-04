@@ -389,9 +389,18 @@ cmd_serve_deployed() {
     # resque-pool, exactly as the Procfile runs it. It competes for the
     # same cores in the deployment, which is part of what the deployment
     # costs, so it runs here too — backgrounded, and killed with us.
-    RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 FORK_PER_JOB=false INTERVAL=0.1 \
-    ${jem:+LD_PRELOAD="$jem"} \
-        bundle exec resque-pool > "$OUT/tmp/resque-pool.log" 2>&1 &
+    # Through `env` for the reason the web half is: a `${jem:+...}`
+    # expansion in command-PREFIX position is the command, not an
+    # assignment, so this started `LD_PRELOAD=...libjemalloc.so.2` as a
+    # program and the deployed lane silently ran without its job runner.
+    # The shape report is what caught it — `resque-pool=FAILED` — which
+    # is the entire reason it records what was ACHIEVED.
+    local jobs_env=(
+        RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
+        FORK_PER_JOB=false INTERVAL=0.1
+    )
+    [[ -n "$jem" ]] && jobs_env+=( LD_PRELOAD="$jem" )
+    env "${jobs_env[@]}" bundle exec resque-pool > "$OUT/tmp/resque-pool.log" 2>&1 &
     JOBS_PID=$!
     sleep 0.5
     if kill -0 "$JOBS_PID" 2>/dev/null; then
