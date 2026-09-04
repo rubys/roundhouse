@@ -2270,9 +2270,20 @@ jobs:
         run: |
           mkdir -p _site/bench/campfire
           if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/campfire/summary.json; then
-            for f in env.json per-run.json summary.md parity.txt; do
+            # EVERY sidecar the renderer knows how to use. bench-report
+            # draws a section per file and silently omits the ones it
+            # cannot find, so a file missing from this list is a section
+            # missing from the published page with nothing to say it —
+            # which is how nine lanes went missing from the blog page on
+            # 2026-09-02. coldstart.json and sockets.json carry two of
+            # the measures campfire's own discussion asks for.
+            for f in env.json per-run.json summary.md parity.txt coldstart.json sockets.json skipped.json; do
               curl -fsSL --max-time 30 "$BENCH_URL/$f" -o "_site/bench/campfire/$f" || true
             done
+            # A 404 leaves curl's -o file behind empty on some versions;
+            # an empty sidecar parses as nothing and renders as nothing,
+            # but a zero-byte JSON file is noise in the published dir.
+            find _site/bench/campfire -type f -empty -delete
             echo "campfire_bench=present" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::campfire bench data unavailable at $BENCH_URL; skipping page render"

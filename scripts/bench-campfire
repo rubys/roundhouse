@@ -102,7 +102,16 @@
 #   <out>/summary.json    median per (lane, endpoint)
 #   <out>/summary.md      rendered table
 #   <out>/parity.txt      tag-tally diff per endpoint, both lanes
-#   <out>/env.json        provenance: campfire SHA, Rails revision, rubies
+#   <out>/coldstart.json  one record per boot: to an answer, to a page
+#   <out>/sockets.json    the WebSocket tier, both lanes, folded from
+#                         scripts/campfire-cable-sweep
+#   <out>/env.json        provenance: campfire SHA, Rails revision, rubies,
+#                         and what each lane ACTUALLY ran
+#
+# Every one of those is a section on the published page, and
+# `.github/workflows/ci.yml` fetches them BY NAME from the bench box — a
+# new sidecar that is not added to that list is a section that silently
+# does not appear.
 #
 # Requires: wrk, ruby, bundler, sqlite3, curl, cargo.
 
@@ -160,7 +169,7 @@ while [[ $# -gt 0 ]]; do
         --socket-cookies) SOCKET_COOKIES="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
-        -h|--help)     sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)     sed -n '2,107p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         rails|rails-nocache|ruby|spinel|rails-1p|ruby-1p|spinel-1p) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
