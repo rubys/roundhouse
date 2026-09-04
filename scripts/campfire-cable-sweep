@@ -25,11 +25,11 @@
 #        [--lane binary|rails] [--oracle DIR] [--threads 5]
 #        [--workers 4] [--sizes "10 30 100 300 1000"] [--per-room 50]
 #        [--idle 20] [--messages 30] [--rate 2] [--out DIR] [--port 19800]
-#        [--cookies FILE] [--secret KEY] [--no-presence]
+#        [--cookies FILE] [--secret KEY] [--no-presence] [--env K=V ...]
 set -uo pipefail
 BIN=""; DB=""; CPUS="0-3"; WORKERS=4; SIZES="10 30 100 300 1000"; PER_ROOM=50
 IDLE=20; MESSAGES=30; RATE=2; OUT=""; PORT=19800; BIG_ROOM=""
-LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1
+LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1; EXTRA_ENV=()
 SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +40,13 @@ while [[ $# -gt 0 ]]; do
     --lane) LANE="$2"; shift 2 ;; --oracle) ORACLE="$2"; shift 2 ;; --threads) THREADS="$2"; shift 2 ;;
     --cookies) COOKIES="$2"; shift 2 ;; --secret) SECRET="$2"; shift 2 ;;
     --no-presence) PRESENCE=0; shift ;;
+    # A/B ONE BINARY AGAINST ITSELF. The runtime knob that decides a
+    # measurement is often an environment variable -- SPINEL_SCHED_POLL=1
+    # is the pre-epoll scheduler backend -- and a before/after built from
+    # two different binaries on two different days is not a comparison.
+    # Repeatable; binary lane only (the rails lane's env is what ONCE
+    # deploys, and adding to it would make it something else).
+    --env) EXTRA_ENV+=("$2"); shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -67,6 +74,7 @@ ulimit -n 65536 || true
 PIN=(taskset -c "$CPUS")
 command -v taskset >/dev/null || { PIN=(); echo "warning: no taskset — the server is NOT pinned to $CPUS; this run is a smoke test, not a tier" >&2; }
 echo "sweep: lane=$LANE on cpus $CPUS, $WORKERS workers, sizes: $SIZES (~$PER_ROOM per room) -> $OUT"
+[[ -n "${EXTRA_ENV[*]:-}" ]] && echo "sweep: server env: ${EXTRA_ENV[*]}"
 
 # Boot the lane's server on $PORT with a fresh copy of the seed, and
 # echo the pid to stdout. `exec` in the subshell so `$!` IS the server
@@ -79,6 +87,7 @@ start_server() {   # $1 = label
     rm -f "$BINDIR/storage/development.sqlite3-wal" "$BINDIR/storage/development.sqlite3-shm"
     ( cd "$BINDIR" && exec env SPINEL_WORKERS="$WORKERS" DATABASE_POOL_SIZE=64 \
         BLOG_DB=storage/development.sqlite3 PORT="$PORT" SECRET_KEY_BASE="$SECRET" \
+        ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
         "${PIN[@]}" "./build/bin/$SERVER_NAME" > "$OUT/server-$label.log" 2>&1 ) &
   else
     # AS ONCE DEPLOYS IT. WEB_CONCURRENCY is what campfire's config/puma.rb
