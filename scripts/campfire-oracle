@@ -62,6 +62,7 @@
 #   scripts/campfire-oracle prepare [options]   export, bundle, migrate, seed
 #   scripts/campfire-oracle serve   [options]   boot Puma (blocks)
 #   scripts/campfire-oracle login   [options]   write a logged-in cookie jar
+#   scripts/campfire-oracle cookies [options]   mint one signed session cookie per seeded user
 #   scripts/campfire-oracle check-lock          diff the lockfile vs the pin
 #
 # Options:
@@ -85,6 +86,8 @@
 #                   deployment does — and which makes the message list a
 #                   Redis read rather than a render. See the header.
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
+#   --count N       users to mint cookies for (`cookies`, default --users)
+#   --cookie-file P where `cookies` writes them (default <out>/tmp/session-cookies.txt)
 #
 # Requires: ruby, bundler, sqlite3, curl. Everything else comes from
 # campfire's own Gemfile.
@@ -118,6 +121,8 @@ RAILS_ENV_NAME="production"
 # measurements and both are real.
 FRAGMENT_CACHE=1
 JAR=""
+COUNT=""
+COOKIE_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -133,12 +138,16 @@ while [[ $# -gt 0 ]]; do
         --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
         --env)      RAILS_ENV_NAME="$2"; shift 2 ;;
         --jar)      JAR="$2"; shift 2 ;;
+        --count)    COUNT="$2"; shift 2 ;;
+        --cookie-file) COOKIE_FILE="$2"; shift 2 ;;
         -h|--help)  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "campfire-oracle: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
 JAR="${JAR:-$OUT/tmp/bench-jar.txt}"
+COUNT="${COUNT:-$USERS}"
+COOKIE_FILE="${COOKIE_FILE:-$OUT/tmp/session-cookies.txt}"
 
 # The secret is fixed, not random: a cookie minted against one boot has to
 # survive the next one, and a signed id in a dumped page has to be
@@ -273,6 +282,62 @@ cmd_login() {
     step "signed in — jar at $JAR"
 }
 
+cmd_cookies() {
+    [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
+    mkdir -p "$(dirname "$COOKIE_FILE")"
+
+    # WHY MINTING AND NOT SIGNING IN. campfire rate-limits
+    # `SessionsController#create` to 10 per 3 minutes per IP and each one
+    # is a bcrypt; a thousand-socket sweep cannot log its users in. ONCE's
+    # own load harness has the same problem and answers it the same way —
+    # `test/performance/create_dummy_cookies.rb` ships 10,000 pre-forged
+    # cookies. Sign-in is not the workload the requirements table is about.
+    #
+    # THROUGH RAILS' OWN JAR, not a hand-built MessageVerifier. That was
+    # tried for `login` and the app read the cookie back as a Hash: the
+    # envelope in Rails main is not the one an assembled verifier
+    # produces. `CookieJar.build` against the app's real `env_config`
+    # signs it the way the app will read it, and reconstructing that is
+    # precisely the inference this oracle exists to avoid.
+    #
+    # THE TOKENS ARE THE SEED'S. scripts/campfire-oracle-seed.rb writes
+    # `Session` rows with campfire's own performance.rb token shape —
+    # 19 filler characters and a zero-padded user id — so line i of this
+    # file is user i, on either lane.
+    #
+    # BOTH LANES READ IT. The binary's `cookies.signed[:session_token]`
+    # verifies the same `_rails` envelope under the same "signed cookie"
+    # salt and 2**16 PBKDF2 iterations, so the sweep hands one file to
+    # Rails and to the binary and neither one signs anybody in. Boot the
+    # binary with this SECRET_KEY_BASE or it will reject every cookie.
+    step "minting $COUNT session cookies -> $COOKIE_FILE"
+    (cd "$OUT" && SECRET_KEY_BASE="$SECRET_KEY_BASE" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 \
+        bin/rails runner "
+          req = ActionDispatch::Request.new(Rails.application.env_config.merge(
+            'HTTP_HOST' => '127.0.0.1', 'rack.input' => StringIO.new))
+          jar = ActionDispatch::Cookies::CookieJar.build(req, {})
+          # ONE COOKIE PER USER, IN USER ORDER, and derived from the id
+          # rather than read off whatever Session rows exist. Every form
+          # sign-in against this oracle mints another row, so
+          # \`Session.order(:user_id).limit(n)\` returns the same low user
+          # several times over — measured: eight sockets spread across two
+          # users, and a presence table that looked like a bug in the app.
+          missing = []
+          File.open('$COOKIE_FILE', 'w') do |f|
+            User.order(:id).limit($COUNT).pluck(:id).each do |id|
+              token = 'a' * 19 + id.to_s.rjust(5, '0')
+              missing << id unless Session.exists?(token: token)
+              jar.signed[:session_token] = { value: token, httponly: true, same_site: :lax }
+              f.puts jar[:session_token]
+            end
+          end
+          abort \"no seeded session for user(s) #{missing.first(5).join(', ')} — reseed\" if missing.any?
+        ") || die "minting failed"
+    local n; n="$(wc -l < "$COOKIE_FILE" | tr -d " ")"
+    [[ "$n" -gt 0 ]] || die "no sessions in the seed — run 'prepare'"
+    step "$n cookies (SECRET_KEY_BASE=$SECRET_KEY_BASE)"
+}
+
 cmd_check_lock() {
     [[ -f "$OUT/Gemfile.lock" ]] || die "no oracle at $OUT — run 'prepare' first"
     if diff "$APP/Gemfile.lock" "$OUT/Gemfile.lock"; then
@@ -287,7 +352,8 @@ case "$CMD" in
     prepare)    cmd_prepare ;;
     serve)      cmd_serve ;;
     login)      cmd_login ;;
+    cookies)    cmd_cookies ;;
     check-lock) cmd_check_lock ;;
     ""|-h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)          die "unknown command '$CMD' (prepare|serve|login|check-lock)" ;;
+    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|check-lock)" ;;
 esac

@@ -5,11 +5,17 @@
 #
 # The driver is a plain RFC 6455 client over TCPSocket (stdlib only, so it
 # runs on the bench box's system Ruby), pumped by one IO.select loop, the
-# same shape the CRuby cable reactor has. Every socket signs in as a seeded
-# user, loads its room page to read the <turbo-cable-stream-source> the app
-# rendered (the stream name is the app's, never assumed — the August k6
-# harness subscribed to names our emit does not use and counted zero
-# deliveries as success), subscribes, and then:
+# same shape the CRuby cable reactor has. It knows nothing about which
+# runtime answers the port — that is what lets the SAME script drive the
+# campfire binary and Rails as ONCE configures it, and what makes the two
+# results comparable.
+#
+# Every socket signs in as a seeded user, loads its room page to read the
+# <turbo-cable-stream-source> the app rendered (the stream name is the
+# app's, never assumed — the August k6 harness subscribed to names our
+# emit does not use and counted zero deliveries as success), opens ONE
+# WebSocket carrying the subscriptions a real campfire tab carries, and
+# then:
 #
 #   1. connect storm  — time until all N are subscribed, and how many failed
 #   2. idle           — hold for --idle seconds; server CPU and RSS, pings seen
@@ -18,6 +24,40 @@
 #                       carries the message's marker is timestamped on
 #                       receipt, so fan-out latency is POST-sent -> frame-read
 #                       on one clock, and delivered/expected is exact.
+#   4. teardown       — close all N at once and hold --settle seconds; the
+#                       disconnect storm's server cost.
+#
+# TWO SUBSCRIPTIONS PER SOCKET, because that is what the browser opens.
+# campfire's room page mounts a `<turbo-cable-stream-source
+# channel="RoomMessagesChannel">` AND `presence_controller.js` subscribes
+# to `{"channel":"PresenceChannel","room_id":<id>}` on the same consumer.
+# Only the second one WRITES: `PresenceChannel`'s `on_subscribe :present`
+# runs `membership.present`, an UPDATE per subscribe, and its
+# `on_unsubscribe :absent` another on close. A sweep that opened the
+# message stream alone measured a connect storm with no database in it —
+# which is the one thing once.com/campfire's requirements table is most
+# likely to be sized by. `--no-presence` restores the older shape, and
+# every result records which one it was.
+#
+# SIGN-IN GOES THROUGH THE FORM, WITH THE TOKEN. Rails campfire's
+# `Authentication` concern is `protect_from_forgery with: :exception`, so
+# a POST needs both the session cookie and the `authenticity_token` the
+# page carried; the binary does not check, but a driver that skipped the
+# token would only ever have run against the lane that forgives it. Every
+# response's Set-Cookie is absorbed into a per-user jar, and the POSTs in
+# the chat phase carry THAT user's `csrf-token` meta, not user 1's.
+#
+# AND IT DOES NOT SCALE, WHICH IS WHY --cookies EXISTS. campfire rate-limits
+# `SessionsController#create` to 10 per 3 minutes per IP (MEASURED against
+# the oracle: sign-in 8 answers 429), and each one is a bcrypt at ~100 ms.
+# Signing in a thousand users is not a slow setup, it is an impossible
+# one. `--cookies FILE` takes one signed `session_token` per line — user
+# i on line i — and skips sign-in entirely, which is exactly what ONCE's
+# own load harness does (`test/performance/create_dummy_cookies.rb` ships
+# 10,000 pre-forged cookies for the same reason). Mint the file with
+# `scripts/campfire-oracle cookies`; the same file works on BOTH lanes,
+# because both verify a Rails `_rails`-envelope signed cookie under the
+# same SECRET_KEY_BASE.
 #
 # Prints one human line and, with --json, one JSON object.
 require "socket"
@@ -29,7 +69,8 @@ require "securerandom"
 require "optparse"
 
 opts = { base: "http://127.0.0.1:3000", sockets: 10, rooms: "1,2,3,4,5", users: 50,
-         idle: 20, messages: 30, rate: 2.0, drain: 5, pid: nil, json: nil, quiet: false }
+         idle: 20, messages: 30, rate: 2.0, drain: 5, settle: 5, presence: true,
+         cookies: nil, pid: nil, json: nil, quiet: false }
 OptionParser.new do |o|
   o.on("--base URL")       { |v| opts[:base] = v }
   o.on("--sockets N", Integer) { |v| opts[:sockets] = v }
@@ -39,6 +80,9 @@ OptionParser.new do |o|
   o.on("--messages N", Integer) { |v| opts[:messages] = v }
   o.on("--rate R", Float)  { |v| opts[:rate] = v }
   o.on("--drain S", Float) { |v| opts[:drain] = v }
+  o.on("--settle S", Float) { |v| opts[:settle] = v }
+  o.on("--[no-]presence")  { |v| opts[:presence] = v }
+  o.on("--cookies FILE")   { |v| opts[:cookies] = v }
   o.on("--pid PID", Integer) { |v| opts[:pid] = v }
   o.on("--json FILE")      { |v| opts[:json] = v }
   o.on("--quiet")          { opts[:quiet] = true }
@@ -49,7 +93,6 @@ HOST = BASE.host
 PORT = BASE.port
 ROOMS = opts[:rooms].split(",").map(&:to_i)
 N = opts[:sockets]
-U = [opts[:users], N].min
 RUN = SecureRandom.hex(3)
 
 def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -57,62 +100,158 @@ def log(msg) = ($stderr.puts(msg) unless $quiet)
 $quiet = opts[:quiet]
 
 # ── server sampling (Linux /proc; nil elsewhere) ─────────────────────
+#
+# THE WHOLE PROCESS TREE, not the pid handed in. The binary is one
+# process with N OS worker threads inside it, so a single /proc read was
+# the whole server; clustered Puma is a master and N forked workers, and
+# reading the master alone would have charged Rails almost nothing for
+# almost everything it did. The tree is rediscovered on every sample —
+# Puma replaces a worker it reaps, and a sample that cached the pid list
+# would silently stop counting it.
+def tree_pids(pid)
+  return [] unless pid
+  return [pid] unless File.directory?("/proc")
+  children = Hash.new { |h, k| h[k] = [] }
+  Dir.glob("/proc/[0-9]*/stat").each do |path|
+    stat = (File.read(path) rescue next).split(") ").last.split
+    children[stat[1].to_i] << File.basename(File.dirname(path)).to_i
+  end
+  out = [pid]
+  queue = [pid]
+  until queue.empty?
+    kids = children[queue.shift]
+    out.concat(kids); queue.concat(kids)
+  end
+  out.uniq
+end
+
 def cpu_ticks(pid)
   return nil unless pid && File.exist?("/proc/#{pid}/stat")
-  f = File.read("/proc/#{pid}/stat").split(") ").last.split
-  f[11].to_i + f[12].to_i     # utime + stime, clock ticks (100/s)
+  tree_pids(pid).sum do |p|
+    f = (File.read("/proc/#{p}/stat") rescue next 0).split(") ").last.split
+    f[11].to_i + f[12].to_i   # utime + stime, clock ticks (100/s)
+  end
 end
+
+# RSS summed over the tree, and PSS beside it. They are the same number
+# for a one-process server and they are NOT for a forked one: every
+# worker's copy of a shared page is counted once per worker in RSS and
+# split between them in PSS. Publishing RSS alone would hand the
+# clustered lane a penalty it does not really pay; publishing PSS alone
+# would break comparison with the single-process table already measured.
+# Both, and the report says which is which.
 def rss_mb(pid)
   return nil unless pid
-  if File.exist?("/proc/#{pid}/status")
-    File.read("/proc/#{pid}/status")[/VmRSS:\s+(\d+)/, 1].to_i / 1024
+  if File.directory?("/proc")
+    kb = tree_pids(pid).sum { |p| (File.read("/proc/#{p}/status")[/VmRSS:\s+(\d+)/, 1].to_i rescue 0) }
+    kb.zero? ? nil : kb / 1024
   else
     (`ps -o rss= -p #{pid}`.to_i / 1024 rescue nil)
   end
 end
+
+def pss_mb(pid)
+  return nil unless pid && File.exist?("/proc/#{pid}/smaps_rollup")
+  kb = tree_pids(pid).sum { |p| (File.read("/proc/#{p}/smaps_rollup")[/^Pss:\s+(\d+)/, 1].to_i rescue 0) }
+  kb.zero? ? nil : kb / 1024
+end
+
 def threads_of(pid)
   return nil unless pid && File.exist?("/proc/#{pid}/status")
-  File.read("/proc/#{pid}/status")[/Threads:\s+(\d+)/, 1].to_i
+  tree_pids(pid).sum { |p| (File.read("/proc/#{p}/status")[/Threads:\s+(\d+)/, 1].to_i rescue 0) }
 end
+
+def procs_of(pid) = pid ? tree_pids(pid).size : nil
 TICK = 100.0
 
-# ── the HTTP half: sessions and the page that names the stream ───────
-def http(verb, path, form: nil, cookie: nil, csrf: nil, accept: "text/html")
+# ── the HTTP half: a cookie jar per user, and the pages it reads ─────
+#
+# A JAR, not the one `session_token=` line the older driver kept. Rails
+# hands out TWO cookies — `session_token` (who you are) and
+# `_campfire_session` (which the CSRF token is bound to) — and it rotates
+# the second one; posting with the first alone is a 422 on that lane and
+# a silent pass on ours.
+class Jar
+  def initialize(pairs = {}) = @c = pairs
+  def absorb(res)
+    Array(res.get_fields("set-cookie")).each do |line|
+      name, value = line.split(";", 2)[0].split("=", 2)
+      @c[name.strip] = value if name && value
+    end
+    self
+  end
+  def [](name) = @c[name]
+  def to_s = @c.map { |k, v| "#{k}=#{v}" }.join("; ")
+  def empty? = @c.empty?
+end
+
+def http(verb, path, form: nil, jar: nil, csrf: nil, accept: "text/html")
   req = verb == :get ? Net::HTTP::Get.new(path) : Net::HTTP::Post.new(path)
   req["Accept"] = accept
-  req["Cookie"] = cookie if cookie
+  req["Cookie"] = jar.to_s if jar && !jar.empty?
   req["X-CSRF-Token"] = csrf if csrf
   req.set_form_data(form) if form
-  Net::HTTP.start(HOST, PORT, read_timeout: 30) { |h| h.request(req) }
+  res = Net::HTTP.start(HOST, PORT, read_timeout: 30) { |h| h.request(req) }
+  jar&.absorb(res)
+  res
 end
 
-log "==> sign in #{U} users"
-cookies = []
-(1..U).each do |i|
-  res = http(:post, "/session", form: { "email_address" => "user#{i}@example.com", "password" => "secret123456" })
-  abort "sign-in for user#{i} answered #{res.code}" unless res.code == "302"
-  tok = Array(res.get_fields("set-cookie")).map { |c| c.split(";", 2)[0] }.find { |c| c.start_with?("session_token=") }
-  abort "no session_token for user#{i}" unless tok
-  cookies << tok
+# The token a Rails form carries. Absent on the binary, which does not
+# check — hence `to_s` at every call site rather than an abort.
+def form_token(body) = body.to_s[/name="authenticity_token"[^>]*value="([^"]*)"/, 1]
+def meta_token(body) = body.to_s[/<meta name="csrf-token" content="([^"]+)"/, 1]
+
+if opts[:cookies]
+  lines = File.readlines(opts[:cookies], chomp: true).reject(&:empty?)
+  U = [opts[:users], N, lines.size].min
+  log "==> #{U} pre-minted cookies from #{opts[:cookies]} (no sign-in; see the header)"
+  JARS = (0...U).map { |i| Jar.new({ "session_token" => lines[i].sub(/\Asession_token=/, "") }) }
+else
+  U = [opts[:users], N].min
+  log "==> sign in #{U} users through the form"
+  JARS = (1..U).map do |i|
+    jar = Jar.new
+    page = http(:get, "/session/new", jar: jar)
+    abort "GET /session/new answered #{page.code}" unless page.code == "200"
+    res = http(:post, "/session", jar: jar,
+               form: { "email_address" => "user#{i}@example.com", "password" => "secret123456",
+                       "authenticity_token" => form_token(page.body).to_s })
+    abort "sign-in for user#{i} answered #{res.code}#{res.code == "429" ? " — rate limited; use --cookies (see the header)" : ""}" unless res.code == "302"
+    abort "no session_token for user#{i}" unless jar["session_token"]
+    jar
+  end
 end
 
+# ── the pages: the stream each room names, and each writer's token ───
+#
+# One page per ROOM for the signed stream name (it is signed per room,
+# not per user), and one page per WRITER for that user's CSRF token —
+# not per socket. A thousand room-page renders before the storm would
+# be setup cost larger than the measurement.
 log "==> read the #{ROOMS.size} room pages"
-streams = {}   # room => [channel, signed, csrf]
+streams = {}                      # room => [channel, signed-stream-name]
 ROOMS.each do |r|
-  res = http(:get, "/rooms/#{r}", cookie: cookies[0])
+  res = http(:get, "/rooms/#{r}", jar: JARS[0])
   abort "GET /rooms/#{r} answered #{res.code}" unless res.code == "200"
   tag = res.body.to_s[/<turbo-cable-stream-source[^>]*>/]
   abort "no <turbo-cable-stream-source> on /rooms/#{r}" unless tag
-  streams[r] = [tag[/channel="([^"]+)"/, 1], tag[/signed-stream-name="([^"]+)"/, 1],
-                res.body.to_s[/<meta name="csrf-token" content="([^"]+)"/, 1]]
+  streams[r] = [tag[/channel="([^"]+)"/, 1], tag[/signed-stream-name="([^"]+)"/, 1]]
 end
+
+writers = (1..opts[:messages]).map { |k| k % U }.uniq
+csrf = { 0 => meta_token(http(:get, "/rooms/#{ROOMS[0]}", jar: JARS[0]).body) }
+(writers - [0]).each do |u|
+  csrf[u] = meta_token(http(:get, "/rooms/#{ROOMS[u % ROOMS.size]}", jar: JARS[u]).body)
+end
+log "   #{writers.size} writer token(s)#{csrf[writers[0]] ? "" : " — none carried a csrf-token meta (the binary does not check)"}"
 
 # ── the socket half: a hand-rolled Action Cable client ───────────────
 class Cable
-  attr_reader :id, :room, :state, :sock, :pings, :hits, :opened_at, :subscribed_at
-  def initialize(id, room, cookie, identifier)
-    @id, @room, @cookie, @identifier = id, room, cookie, identifier
+  attr_reader :id, :room, :state, :sock, :pings, :hits, :opened_at, :subscribed_at, :confirmed, :rejected
+  def initialize(id, room, jar, identifiers)
+    @id, @room, @jar, @identifiers = id, room, jar, identifiers
     @state = :new; @buf = +""; @pings = 0; @hits = []   # hits: [t, marker]
+    @confirmed = 0; @rejected = 0
   end
   def open!
     @opened_at = now
@@ -121,7 +260,7 @@ class Cable
     key = [SecureRandom.random_bytes(16)].pack("m0")
     @sock.write("GET /cable HTTP/1.1\r\nHost: #{HOST}:#{PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" \
                 "Sec-WebSocket-Key: #{key}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\n" \
-                "Origin: http://#{HOST}:#{PORT}\r\nCookie: #{@cookie}\r\n\r\n")
+                "Origin: http://#{HOST}:#{PORT}\r\nCookie: #{@jar}\r\n\r\n")
     @state = :handshake
   end
   def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -169,20 +308,39 @@ class Cable
     end
   end
 
+  # ONE `welcome` and then a subscribe frame per identifier, on the one
+  # socket — an Action Cable consumer multiplexes its subscriptions, and
+  # opening a second socket for presence would double the descriptor
+  # count the sweep is measuring.
   def text(payload)
     t = now
     msg = JSON.parse(payload) rescue return
     case msg["type"]
     when "welcome"
       @state = :welcomed
-      send_frame(1, JSON.generate({ "command" => "subscribe", "identifier" => @identifier }))
+      @identifiers.each { |ident| send_frame(1, JSON.generate({ "command" => "subscribe", "identifier" => ident })) }
     when "confirm_subscription"
-      @state = :subscribed; @subscribed_at = t
-    when "reject_subscription" then fail!("rejected")
+      @confirmed += 1
+      settled!(t)
+    when "reject_subscription"
+      @rejected += 1
+      settled!(t)
     when "ping" then @pings += 1
     when nil
       m = msg["message"].to_s[/sweep-#{RUN}-(\d+)/, 1]
       @hits << [t, m.to_i] if m
+    end
+  end
+
+  # Subscribed once every subscription has been answered and at least one
+  # was confirmed. A rejected presence subscription must not take the
+  # message stream down with it — and it must not be counted as success.
+  def settled!(t)
+    return unless @confirmed + @rejected >= @identifiers.size
+    if @confirmed > 0
+      @state = :subscribed; @subscribed_at = t
+    else
+      fail!("all #{@identifiers.size} subscriptions rejected")
     end
   end
 
@@ -200,9 +358,14 @@ end
 
 clients = (0...N).map do |i|
   room = ROOMS[i % ROOMS.size]
-  channel, signed, = streams[room]
-  Cable.new(i, room, cookies[i % U], JSON.generate({ "channel" => channel, "signed_stream_name" => signed }))
+  channel, signed = streams[room]
+  idents = [JSON.generate({ "channel" => channel, "signed_stream_name" => signed })]
+  # room_id as a NUMBER, the way `cable.subscribeTo({channel:
+  # "PresenceChannel", room_id: Current.room.id})` serializes it.
+  idents << JSON.generate({ "channel" => "PresenceChannel", "room_id" => room }) if opts[:presence]
+  Cable.new(i, room, JARS[i % U], idents)
 end
+subs_per_socket = clients[0].nil? ? 0 : 1 + (opts[:presence] ? 1 : 0)
 
 def pump(clients, seconds)
   deadline = now + seconds
@@ -221,14 +384,18 @@ def pump(clients, seconds)
 end
 
 # ── 1. connect storm ─────────────────────────────────────────────────
-log "==> connect #{N} sockets"
+log "==> connect #{N} sockets (#{subs_per_socket} subscription#{subs_per_socket == 1 ? "" : "s"} each#{opts[:presence] ? ", presence writes on" : ""})"
+storm_c0 = cpu_ticks(opts[:pid])
 t_storm = now
 clients.each(&:open!)
-pump(clients, 30) { break if clients.all? { |c| c.state == :subscribed || c.closed? } }
+pump(clients, 60) { break if clients.all? { |c| c.state == :subscribed || c.closed? } }
 storm_s = now - t_storm
+storm_cpu = storm_c0 && cpu_ticks(opts[:pid]) ? (cpu_ticks(opts[:pid]) - storm_c0) / TICK : nil
 subscribed = clients.count { |c| c.state == :subscribed }
 failed = clients.count(&:closed?)
-log "   subscribed #{subscribed}/#{N} in #{storm_s.round(2)}s (#{failed} failed#{failed > 0 ? ": " + clients.select(&:closed?).map(&:why).tally.inspect : ""})"
+confirmations = clients.sum(&:confirmed)
+rejections = clients.sum(&:rejected)
+log "   subscribed #{subscribed}/#{N} in #{storm_s.round(2)}s (#{confirmations} confirmations, #{rejections} rejections, #{failed} failed#{failed > 0 ? ": " + clients.select(&:closed?).map(&:why).tally.inspect : ""}); server cpu #{storm_cpu ? storm_cpu.round(2).to_s + "s" : "n/a"}"
 
 # ── 2. idle ───────────────────────────────────────────────────────────
 log "==> idle #{opts[:idle]}s"
@@ -238,8 +405,9 @@ pump(clients, opts[:idle])
 idle_s = now - t0
 idle_cpu = c0 && cpu_ticks(opts[:pid]) ? (cpu_ticks(opts[:pid]) - c0) / TICK / idle_s : nil
 idle_rss = rss_mb(opts[:pid])
+idle_pss = pss_mb(opts[:pid])
 idle_pings = clients.sum(&:pings) - pings0
-log "   server cpu #{idle_cpu ? (idle_cpu.round(3).to_s + " cores") : "n/a"}, rss #{idle_rss || "n/a"} MB, #{idle_pings} pings in #{idle_s.round(1)}s"
+log "   server cpu #{idle_cpu ? (idle_cpu.round(3).to_s + " cores") : "n/a"}, rss #{idle_rss || "n/a"} MB#{idle_pss ? " (pss #{idle_pss} MB over #{procs_of(opts[:pid])} processes)" : ""}, #{idle_pings} pings in #{idle_s.round(1)}s"
 
 # ── 3. chat ───────────────────────────────────────────────────────────
 log "==> chat: #{opts[:messages]} messages at #{opts[:rate]}/s"
@@ -250,12 +418,12 @@ c1 = cpu_ticks(opts[:pid]); t1 = now
 writer = Thread.new do
   (1..opts[:messages]).each do |k|
     room = ROOMS[k % ROOMS.size]
-    ck = cookies[k % U]
+    u = k % U
     sent = now
     res = begin
       http(:post, "/rooms/#{room}/messages",
            form: { "message[body]" => "sweep-#{RUN}-#{k} at #{Time.now.utc.iso8601(3)}", "message[client_message_id]" => "sweep-#{RUN}-#{k}" },
-           cookie: ck, csrf: streams[room][2], accept: "text/vnd.turbo-stream.html, text/html")
+           jar: JARS[u], csrf: csrf[u], accept: "text/vnd.turbo-stream.html, text/html")
     rescue => e
       e
     end
@@ -293,15 +461,34 @@ log "   post codes: #{codes.inspect}#{bad_posts > 0 ? " — first failure: " + p
 us_per_frame = chat_cpu && delivered > 0 ? (chat_cpu * 1e6 / delivered).round(1) : nil
 log "   delivered #{delivered}/#{expected} frames from #{posts.size} posts (#{bad_posts} non-200); frame p50 #{pct.(lat, 0.5)} ms p99 #{pct.(lat, 0.99)} ms; last-frame p50 #{pct.(last, 0.5)} p99 #{pct.(last, 0.99)} ms; server cpu #{chat_cpu ? (chat_cpu / chat_s).round(3) : "n/a"} cores, #{us_per_frame || "n/a"} us/frame, rss #{chat_rss || "n/a"} MB"
 
+# ── 4. teardown ───────────────────────────────────────────────────────
+#
+# The disconnect storm, and with presence on it is the other half of the
+# write path: every socket's `on_unsubscribe :absent` is a row. Nothing
+# client-side observes when the server has finished, so the window is
+# fixed and the reading is the server's CPU inside it — a floor, not a
+# duration.
+log "==> teardown: close #{clients.count { |c| !c.closed? }} sockets, settle #{opts[:settle]}s"
+d0 = cpu_ticks(opts[:pid]); t_down = now
 clients.each(&:close!)
+sleep(opts[:settle])
+down_s = now - t_down
+down_cpu = d0 && cpu_ticks(opts[:pid]) ? (cpu_ticks(opts[:pid]) - d0) / TICK : nil
+down_rss = rss_mb(opts[:pid])
+log "   server cpu #{down_cpu ? down_cpu.round(2).to_s + "s over " + down_s.round(1).to_s + "s" : "n/a"}, rss #{down_rss || "n/a"} MB"
+
 out = {
   sockets: N, rooms: ROOMS.size, users: U, subscribers_per_room: subs_in.values.max,
-  storm: { seconds: storm_s.round(3), subscribed: subscribed, failed: failed },
-  idle: { seconds: idle_s.round(1), cpu_cores: idle_cpu&.round(4), rss_mb: idle_rss, pings: idle_pings },
+  presence: opts[:presence], subscriptions_per_socket: subs_per_socket,
+  sign_in: opts[:cookies] ? "pre-minted cookies" : "form + csrf token",
+  storm: { seconds: storm_s.round(3), subscribed: subscribed, failed: failed,
+           confirmations: confirmations, rejections: rejections, cpu_seconds: storm_cpu&.round(3) },
+  idle: { seconds: idle_s.round(1), cpu_cores: idle_cpu&.round(4), rss_mb: idle_rss, pss_mb: idle_pss, pings: idle_pings },
   chat: { messages: posts.size, rate: opts[:rate], non_200: bad_posts, codes: codes, delivered: delivered, expected: expected,
           frame_p50_ms: pct.(lat, 0.5), frame_p99_ms: pct.(lat, 0.99), last_p50_ms: pct.(last, 0.5), last_p99_ms: pct.(last, 0.99),
           cpu_cores: chat_cpu ? (chat_cpu / chat_s).round(4) : nil, us_per_frame: us_per_frame, rss_mb: chat_rss },
-  server_threads: threads_of(opts[:pid])
+  teardown: { seconds: down_s.round(1), cpu_seconds: down_cpu&.round(3), rss_mb: down_rss },
+  server_threads: threads_of(opts[:pid]), server_processes: procs_of(opts[:pid])
 }
 File.write(opts[:json], JSON.generate(out) + "\n") if opts[:json]
 puts JSON.generate(out) if opts[:quiet]

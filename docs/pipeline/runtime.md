@@ -1243,8 +1243,14 @@ the runtime already stores, so the type stays.
 suffix. Rails HMAC-signs the value with `Turbo.signed_stream_verifier`
 and refuses a name that does not verify.
 
-
-
+**Why.** Signing is not the hard part; agreeing on the key is. That
+reason has EXPIRED as of 2026-09-04: `MessageVerifier::ITERATIONS` is
+1_000 now and a Rails-minted cookie verifies here (see "Signed cookies
+interoperate with Rails" below), so the key question is settled and only
+the three-ended change is left. It is still all three ends or none —
+`turbo_stream_from`, `decode_stream_name` and `Turbo::Streams::StreamName`
+in one commit — because two of them agreeing and the third not is the
+failure that looks like it works.
 
 **What it costs.** A stream name is tamperable: a client can subscribe
 to any stream whose name it can spell. Signing would close that, and
@@ -2504,14 +2510,56 @@ monitor pinned at a full core" (it was, under 568 dead threads; with the
 descriptor fix the busiest thread in a 1,000-connect storm is 15–20% of a
 core).
 
-**What the numbers do not yet cover.** Idle sockets and thirty messages are
-one shape; room-page load under concurrency is the other, and the
-thread server is weakest there (the interleaving cost on
-matz/spinel#4306). The real client also subscribes to the presence
-channel, which writes on connect; the driver does not yet. Payloads are
-lighter than production's (the attachment gaps are a ledgered bias). And
-the comparison that answers the table is Rails as ONCE configures it,
-driven by the same script on the same cores, which is the next lane.
+**What that table is, and is not.** Every row above was taken with ONE
+subscription per socket and no presence, which is the shape the driver
+had; it is a floor, and the rows are kept as measured rather than
+restated. The driver has since grown the second subscription a real
+campfire tab opens — `{"channel":"PresenceChannel","room_id":N}` on the
+same consumer — so a connect storm now costs a `memberships` UPDATE per
+socket and a disconnect storm another. Re-measuring the tier with
+presence on is a re-run of the same script, and the two shapes are
+distinguished in every result (`"presence": true|false`).
+
+Still not covered: room-page load under concurrency, which is the other
+half of the workload and where the thread server is weakest (the
+interleaving cost on matz/spinel#4306); and payloads lighter than
+production's (the attachment gaps are a ledgered bias).
+
+### The same script drives Rails, on the same cores — the two-lane sweep
+
+`scripts/campfire-cable-sweep --lane rails` boots campfire itself out of
+the `scripts/campfire-oracle` tree — clustered Puma at `WEB_CONCURRENCY`,
+Redis for both the cable adapter and the fragment cache, production env,
+pinned to the same CPU set — and runs the SAME driver against it. A
+number from either lane produced by a different script is not a
+comparison, so there is one script.
+
+**Three things had to be true first, and each was found by trying.**
+
+1. *Sign-in does not scale, on either lane.* campfire rate-limits
+   `SessionsController#create` to 10 per 3 minutes per IP (measured: the
+   8th sign-in answers 429) and each one is a bcrypt. The driver signs in
+   through the real form with the `authenticity_token` now — Rails
+   refuses a POST without it, and a driver that skipped the token would
+   only ever have run against the lane that forgives it — but above a few
+   dozen sockets it takes `--cookies`, one pre-minted signed
+   `session_token` per line. `scripts/campfire-oracle cookies` mints them
+   through Rails' own cookie jar against the seed's deterministic token
+   shape. ONCE answers the same problem the same way: their harness ships
+   10,000 pre-forged cookies.
+
+2. *One cookie file has to work on both lanes*, which is the PBKDF2
+   iteration fix below.
+
+3. *CPU and RSS have to be read off the process TREE.* The binary is one
+   process; clustered Puma is a master and N forked workers, and sampling
+   the master alone would have charged Rails almost nothing for almost
+   everything it did. The driver rediscovers the tree on every sample
+   (Puma replaces a reaped worker) and reports PSS beside RSS, because a
+   forked worker's copy of a shared page is counted once per worker in
+   the first and split between them in the second — RSS alone would
+   invent a penalty the clustered lane does not pay, PSS alone would
+   break comparison with the single-process rows already measured.
 
 ### Signed cookies interoperate with Rails — CLOSED (ours)
 
