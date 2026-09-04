@@ -328,6 +328,11 @@ module Cable
         connection, identifier_json, ActionCable::Channel::Parameters.new(identifier)
       )
       channel.subscribed
+      # After `subscribed` and before the rejection is read, which is
+      # Rails' order — the callback's own `unless: :subscription_rejected?`
+      # guard is what skips it for a refused subscription. campfire's
+      # `PresenceChannel` writes its `memberships` row here.
+      channel.after_subscribe
       if channel.subscription_rejected?
         Outcome.new(nil, [], nil)
       else
@@ -347,6 +352,7 @@ module Cable
     # teardown, and there is nobody left to tell.
     def self.unsubscribe(channel)
       channel.unsubscribed
+      channel.after_unsubscribe
       nil
     rescue StandardError => e
       warn "[cable] #{channel.class}#unsubscribed raised: #{e.class}: #{e.message}"

@@ -928,6 +928,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
     super::delegate::lower_delegates(&mut app);
+    // Channels, before the concern splices for the same reason `Current`
+    // is: this turns a class-body macro into real methods, and every
+    // later pass reads methods.
+    super::channel_callbacks::lower_channel_callbacks(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
     // After the splice, so a class method a concern contributed gets

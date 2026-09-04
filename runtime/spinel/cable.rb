@@ -166,7 +166,7 @@ module Cable
   # A REJECTION IS A FRAME, not a silence. Action Cable's client keys
   # its subscription table on the identifier and retries a subscription
   # it never heard back about, so a dropped frame is a reconnect loop.
-  def self.subscribe(ws, connection, identifier)
+  def self.subscribe(ws, connection, identifier, holder)
     name = ActionCable::Channel::Parameters.read(identifier, "channel")
     if name.length == 0
       return Cable.reject(ws, identifier)
@@ -186,6 +186,13 @@ module Cable
     # `Cable::Dispatch.subscribe` reports the same event the same way.
     begin
       channel.subscribed
+      # AFTER `subscribed` AND BEFORE the rejection check, which is
+      # Rails' order: the callback's own `unless: :subscription_rejected?`
+      # guard is what skips it for a refused subscription, and a channel
+      # that declared `on_subscribe` WITHOUT that guard means it to run
+      # either way. campfire's `PresenceChannel` writes its `memberships`
+      # row here — the whole reason a connect storm costs a database.
+      channel.after_subscribe
     rescue StandardError => e
       warn "[cable] " + name + "#subscribed raised: " + e.message
       return Cable.reject(ws, identifier)
@@ -199,6 +206,13 @@ module Cable
       end
       Tep::Broadcast.subscribe_ws(stream, ws)
     end
+    # REMEMBERED, and only once the subscription is confirmed. The
+    # unsubscribe callbacks are the other half of a connect storm —
+    # campfire's `on_unsubscribe :absent` is the `memberships` UPDATE
+    # that takes a user back out of the room — and they need a channel
+    # object that outlives the frame that built it. A rejected or
+    # crashed subscribe returns above and is never held.
+    holder.remember(channel)
     ws.text("{\"identifier\":" + JSON.generate(identifier) +
             ",\"type\":\"confirm_subscription\"}")
     0
@@ -218,7 +232,7 @@ module Cable
   # with — #71 item 3 — and it is passed through to the channel so the
   # app's `subscribed` can read `current_user`. That is the hop item 4
   # adds: identity existed and nothing consulted it.
-  def self.handle_message(ws, connection, data)
+  def self.handle_message(ws, connection, data, holder)
     frame = ActionCable::Channel::Parameters.object(data)
     if frame.nil?
       return 0
@@ -230,7 +244,7 @@ module Cable
     if identifier.length == 0
       return 0
     end
-    Cable.subscribe(ws, connection, identifier)
+    Cable.subscribe(ws, connection, identifier, holder)
   end
 
   # Spawn a per-connection ping thread: a green thread that sleeps
@@ -300,6 +314,7 @@ module Cable
       # class per tree — see that method's note.
       @connection = Cable.build_connection(
         ActionController::CookieJar.new(Tep.str_hash))
+      @channels = []
     end
 
     # UNDER A LEASE. The socket's recv loop runs after the upgrade
@@ -312,7 +327,72 @@ module Cable
     # down inside sqlite's parser.
     def handle_event(evt)
       Db.with_connection do
-        Cable.handle_message(@ws, @connection, evt.data)
+        Cable.handle_message(@ws, @connection, evt.data, self)
+      end
+      0
+    end
+
+    # THE SUBSCRIPTIONS THIS SOCKET HOLDS, so the unsubscribe callbacks
+    # have somewhere to run. `Cable.subscribe` pushes a channel here only
+    # after it has confirmed it; `WsClose` walks the list once, on the
+    # connection's own thread, inside a lease.
+    #
+    # ONE ARRAY ON THE HANDLER rather than a module-level fd map: the
+    # handler already IS the per-connection object (`Cable.upgrade`
+    # builds a fresh one per upgrade and the driver holds it), so the
+    # list dies with the connection and no lock is needed — nothing else
+    # can reach it.
+    def remember(channel)
+      @channels << channel
+      0
+    end
+
+    def channels
+      @channels
+    end
+
+    # Rails runs `unsubscribed` and the `after_unsubscribe` chain when a
+    # subscription goes away, including when the socket simply closes.
+    #
+    # BEST EFFORT, one channel at a time: a teardown callback that raises
+    # must not stop the rest of the teardown, and there is nobody left to
+    # tell. Same posture as the overlay's `Cable::Dispatch.unsubscribe`.
+    def unsubscribe_all
+      @channels.each do |channel|
+        begin
+          channel.unsubscribed
+          channel.after_unsubscribe
+        rescue StandardError => e
+          warn "[cable] unsubscribe raised: " + e.message
+        end
+      end
+      @channels = []
+      0
+    end
+  end
+
+  # on_close handler: run the app's unsubscribe callbacks.
+  #
+  # A THIRD HANDLER rather than a branch in `WsMessage`, because tep
+  # dispatches close to `driver.h_close` and the message handler is not
+  # it. It holds the message handler — the object that owns the channel
+  # list — which is also what makes the pair one lifetime: `upgrade`
+  # builds both and hands the same `WsMessage` to this one.
+  #
+  # UNDER A LEASE, for the reason `WsMessage#handle_event` is: the
+  # callbacks write (`membership.disconnected` is an UPDATE), and this
+  # runs on the connection's recv thread outside any request.
+  class WsClose < Tep::WebSocket::Handler
+    attr_accessor :msg
+
+    def initialize
+      super
+      @msg = Cable::WsMessage.new
+    end
+
+    def handle_event(evt)
+      Db.with_connection do
+        @msg.unsubscribe_all
       end
       0
     end
@@ -372,6 +452,10 @@ module Cable
     cb_msg.req = req
     cb_msg.connection = conn
     drv.set_on_message(cb_msg)
+
+    cb_close = Cable::WsClose.new
+    cb_close.msg = cb_msg
+    drv.set_on_close(cb_close)
 
     res.start_websocket(hs.accept_key, drv)
     true

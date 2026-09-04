@@ -2567,6 +2567,45 @@ The unit harness also loaded CRuby's stdlib `Base64` where an emitted
 ruby tree ships `runtime/base64.rb`; it now loads the one that ships,
 which is what made the missing `urlsafe_encode64_nopad` visible.
 
+### A channel's `on_subscribe` / `on_unsubscribe` callbacks run — CLOSED (ours)
+
+`on_subscribe :present, unless: :subscription_rejected?` landed in
+`unknown_calls` and was dropped with a `lower_residue` warning, because
+it is an `ActiveSupport::Callbacks` chain and there is no such thing in
+an emitted tree. campfire's `PresenceChannel` does ALL of its work in
+those two hooks: `present` is the `memberships` UPDATE that records
+somebody as being in a room, `absent` the one that takes them out. So the
+binary subscribed correctly, delivered every frame, and wrote nothing —
+invisible to the cable walk (which asserts frames) and invisible to the
+suite (Rails' `Channel::TestCase` builds the channel itself). The cable
+sweep found it by running the two lanes side by side: eight sockets, and
+Rails had eight `connected_at` rows where the binary had none.
+
+`ingest::channel_callbacks` consumes the declarations and inlines the
+chain — guards and all, ancestors first — into one generated method per
+hook:
+
+```ruby
+def after_subscribe
+  present if !(subscription_rejected?)
+  nil
+end
+```
+
+A method rather than a table, for the reason every lowering here prefers
+one: a chain walked at run time is a list of Symbols a static target
+cannot dispatch. Inlined rather than `super`, because the parent chain is
+a compile-time fact and a virtual call is not free on the strict targets.
+A block form (`on_subscribe { … }`) or a lambda guard is left in
+`unknown_calls` with its warning rather than half-modelled.
+
+Both lanes call both hooks. The overlay's `Cable::Dispatch` already kept
+the channel object for the life of the subscription; the spinel lane now
+keeps confirmed channels on the per-connection `Cable::WsMessage` handler
+and a new `Cable::WsClose` walks them under a database lease when the
+socket closes. Verified against Rails on the same seed: eight rows during
+the idle phase on both lanes, zero after teardown on both.
+
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 
 `Tep::Server::Scheduled` and `Tep::Scheduler` (the fiber-per-connection

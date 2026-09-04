@@ -21,6 +21,7 @@ pub mod expr;
 pub mod fixture;
 pub mod jbuilder;
 pub mod library_class;
+pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
 pub mod model;

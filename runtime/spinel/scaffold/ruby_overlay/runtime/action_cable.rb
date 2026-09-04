@@ -334,6 +334,26 @@ module ActionCable
       def unsubscribed
         nil
       end
+
+      # The callback hooks Rails spells as an `ActiveSupport::Callbacks`
+      # chain (`on_subscribe :present, unless: :subscription_rejected?`).
+      # `ingest::channel_callbacks` inlines the chain into one generated
+      # method per hook on each channel that declares any; these are the
+      # no-ops that let `Cable::Dispatch` call both unconditionally, the
+      # same shape `subscribed`/`unsubscribed` above already have.
+      #
+      # BOTH RUN ON THIS LANE. `Dispatch` keeps the channel object for
+      # the life of the subscription, so the unsubscribe half has
+      # somewhere to run; the spinel lane throws the channel away with
+      # the subscribe frame and calls only the first (a divergence in
+      # docs/pipeline/runtime.md).
+      def after_subscribe
+        nil
+      end
+
+      def after_unsubscribe
+        nil
+      end
     end
 
     # The subscribe frame's identifier, read the way a channel body
