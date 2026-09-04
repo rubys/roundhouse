@@ -624,7 +624,12 @@ LANE_JOBS_PID=""
 cold_start() {
     local lane="$1" port="$2" jar="$3" reps="${4:-3}"
     local rep t0 t_accept t_page code
-    SHAPE_OVERRIDE="$LOG_DIR/shape-coldstart-$lane.txt"
+    # In a SUBDIRECTORY, not `shape-coldstart-<lane>.txt`: the env.json
+    # builder globs `logs/shape-*.txt` and would list each of these as a
+    # lane of its own, which put eight phantom `coldstart-*` rows in the
+    # published appendix.
+    mkdir -p "$LOG_DIR/coldstart"
+    SHAPE_OVERRIDE="$LOG_DIR/coldstart/shape-$lane.txt"
     for rep in $(seq 1 "$reps"); do
         t0="$(date +%s.%N)"
         if ! start_lane_quiet "$lane" "$port"; then
