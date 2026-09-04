@@ -148,7 +148,15 @@ run_one() {   # $1 = N, $2 = rooms list, $3 = label
 }
 
 for n in $SIZES; do
-  r=$(( (n + PER_ROOM - 1) / PER_ROOM )); [[ $r -lt 1 ]] && r=1; [[ $r -gt 20 ]] && r=20
+  r=$(( (n + PER_ROOM - 1) / PER_ROOM )); [[ $r -lt 1 ]] && r=1
+  # The cap is the seed's room count, and hitting it changes the
+  # WORKLOAD rather than the size: the sockets pile into fewer rooms and
+  # each message costs one write per subscriber there. Say so, because
+  # the resulting fan-out latency is not comparable to an uncapped cell.
+  if [[ $r -gt 20 ]]; then
+    echo "warning: $n sockets at $PER_ROOM per room wants $r rooms; the seed has 20, so this cell runs $(( (n + 19) / 20 )) per room" >&2
+    r=20
+  fi
   rooms="$(seq -s, 1 $r)"
   run_one "$n" "$rooms" "n$n"
 done

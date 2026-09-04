@@ -80,10 +80,16 @@
 #   --socket-sizes S  socket counts for that phase (default "1000")
 #   --socket-cpus C   cores to pin each socket-phase server to (default 0-3,
 #                     once.com/campfire's 1,000-user tier)
-#   --socket-db PATH  seeded database for the socket phase (default: the
-#                     oracle's). A 1,000-user seed makes every socket a
-#                     different user; the default 50-user one reuses them.
+#   --socket-db PATH  seeded database for the socket phase. Default: the
+#                     tier's OWN dataset (1,000 users / 20 rooms), built
+#                     once by `campfire-oracle socket-seed` and cached
+#                     under build/ — NOT the 50-user HTTP seed, against
+#                     which 1,000 sockets become 5 rooms of 200 sharing
+#                     50 cookies.
 #   --socket-cookies PATH   pre-minted cookie file for it
+#   --socket-per-room N     subscribers per room (default 50, which is
+#                     the shape the runtime ledger's tiers were measured
+#                     at; the sweep derives the room count from it)
 #   --skip-prepare    reuse the oracle tree and emit already on disk
 #   --keep            leave servers running on exit
 #
@@ -148,6 +154,7 @@ SOCKET_SIZES="1000"
 SOCKET_CPUS="0-3"
 SOCKET_DB=""
 SOCKET_COOKIES=""
+SOCKET_PER_ROOM=50
 APP="$HOME/git/once-campfire"
 
 while [[ $# -gt 0 ]]; do
@@ -172,6 +179,7 @@ while [[ $# -gt 0 ]]; do
         --socket-cpus)  SOCKET_CPUS="$2"; shift 2 ;;
         --socket-db)    SOCKET_DB="$2"; shift 2 ;;
         --socket-cookies) SOCKET_COOKIES="$2"; shift 2 ;;
+        --socket-per-room) SOCKET_PER_ROOM="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,107p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -740,21 +748,28 @@ run_socket_phase() {
     local sweep="$REPO_ROOT/scripts/campfire-cable-sweep"
     [[ -x "$sweep" ]] || { fail "no campfire-cable-sweep — skipping the socket phase"; return 0; }
 
-    local db="${SOCKET_DB:-$ORACLE/storage/db/production.sqlite3}"
-    local cookies="${SOCKET_COOKIES:-$ORACLE/tmp/session-cookies.txt}"
-    if [[ ! -f "$cookies" ]]; then
-        step "minting $USERS session cookies for the socket phase"
-        scripts/campfire-oracle cookies --out "$ORACLE" --count "$USERS" >/dev/null 2>&1 \
-            || { fail "could not mint cookies — skipping the socket phase"; return 0; }
+    # THE TIER GETS ITS OWN DATASET. The HTTP seed is 50 users in 5
+    # rooms, deliberately — those pages have to render in a comparable
+    # time. Pointing a 1,000-socket sweep at it produces 5 rooms of 200
+    # subscribers sharing 50 cookies twenty ways, and since one message
+    # costs one write per subscriber in its room, that measures a room
+    # size nobody deploys. `socket-seed` builds 1,000 users over 20 rooms
+    # once, caches it under build/, and restores the oracle afterwards.
+    local db cookies
+    if [[ -n "$SOCKET_DB" ]]; then
+        db="$SOCKET_DB"
+        cookies="${SOCKET_COOKIES:-$ORACLE/tmp/session-cookies.txt}"
+    else
+        db="$REPO_ROOT/build/campfire-socket-seed.sqlite3"
+        cookies="${SOCKET_COOKIES:-$REPO_ROOT/build/campfire-socket-cookies.txt}"
+        scripts/campfire-oracle socket-seed --out "$ORACLE" --app "$APP" \
+            --seed-db "$db" --seed-cookies "$cookies" \
+            || { fail "could not build the socket seed — skipping the socket phase"; return 0; }
     fi
-    [[ -f "$cookies" ]] || { fail "no cookie file at $cookies — skipping the socket phase"; return 0; }
+    [[ -f "$db" ]] || { fail "no socket database at $db — skipping the socket phase"; return 0; }
+    [[ -s "$cookies" ]] || { fail "no cookie file at $cookies — skipping the socket phase"; return 0; }
 
-    # Rooms come from the seed, not from a default: the sweep spreads N
-    # sockets over ceil(N / per-room) rooms and a room the seed does not
-    # have answers 302, which reads as a silent zero delivery.
-    local biggest=0 n
-    for n in $SOCKET_SIZES; do (( n > biggest )) && biggest=$n; done
-    local per_room=$(( (biggest + ROOMS - 1) / ROOMS ))
+    local per_room="$SOCKET_PER_ROOM"
     (( per_room < 1 )) && per_room=1
 
     # campfire's own formula at the tier's core count, which is what its

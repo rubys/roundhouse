@@ -63,6 +63,11 @@
 #   scripts/campfire-oracle serve   [options]   boot Puma (blocks)
 #   scripts/campfire-oracle login   [options]   write a logged-in cookie jar
 #   scripts/campfire-oracle cookies [options]   mint one signed session cookie per seeded user
+#   scripts/campfire-oracle socket-seed [options]
+#                                              build the WebSocket tier's OWN
+#                                              dataset (1,000 users / 20 rooms
+#                                              by default) + its cookie file,
+#                                              leaving the oracle untouched
 #   scripts/campfire-oracle check-lock          diff the lockfile vs the pin
 #
 # Options:
@@ -105,6 +110,11 @@
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
 #   --count N       users to mint cookies for (`cookies`, default --users)
 #   --cookie-file P where `cookies` writes them (default <out>/tmp/session-cookies.txt)
+#   --seed-db PATH  where `socket-seed` writes its database
+#                   (default build/campfire-socket-seed.sqlite3)
+#   --seed-cookies PATH  and its cookie file
+#                   (default build/campfire-socket-cookies.txt)
+#   --force         rebuild the socket seed even if both files exist
 #
 # Requires: ruby, bundler, sqlite3, curl. Everything else comes from
 # campfire's own Gemfile.
@@ -146,6 +156,9 @@ SHAPE_REPORT=""
 JAR=""
 COUNT=""
 COOKIE_FILE=""
+SEED_DB=""
+SEED_COOKIES=""
+FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -173,6 +186,9 @@ while [[ $# -gt 0 ]]; do
         --jar)      JAR="$2"; shift 2 ;;
         --count)    COUNT="$2"; shift 2 ;;
         --cookie-file) COOKIE_FILE="$2"; shift 2 ;;
+        --seed-db)      SEED_DB="$2"; shift 2 ;;
+        --seed-cookies) SEED_COOKIES="$2"; shift 2 ;;
+        --force)        FORCE=1; shift ;;
         -h|--help)  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "campfire-oracle: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -473,6 +489,79 @@ kill_jobs() {
     return 0
 }
 
+# ── the WebSocket tier's own dataset ─────────────────────────────────
+#
+# The HTTP benchmark wants pages that render in a comparable time, so the
+# oracle is seeded small: 50 users, 5 rooms. The socket sweep wants the
+# opposite — a thousand DISTINCT users spread over enough rooms that a
+# room holds a realistic number of subscribers. Run against the HTTP
+# seed, 1,000 sockets become 5 rooms of 200 with 50 cookies reused twenty
+# times each, and fan-out latency is dominated by a room size nobody
+# deploys. once.com/campfire's own table is about users, not rooms.
+#
+# So this builds a SECOND dataset, in its own two files, and puts the
+# oracle back exactly as it found it. The restore is a trap, not a line
+# at the end: an interrupted run that left a 1,000-user database in
+# `production.sqlite3` would silently re-point every other harness —
+# bench-campfire, campfire-queries, campfire-compare — at the wrong rows.
+#
+# Cached by existence. Seeding a thousand users is minutes of work and
+# the result does not change; `--force` rebuilds it.
+SOCKET_USERS_DEFAULT=1000
+SOCKET_ROOMS_DEFAULT=20
+SOCKET_MESSAGES_DEFAULT=20
+
+cmd_socket_seed() {
+    [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
+    local seed_db="${SEED_DB:-$REPO_ROOT/build/campfire-socket-seed.sqlite3}"
+    local seed_cookies="${SEED_COOKIES:-$REPO_ROOT/build/campfire-socket-cookies.txt}"
+    mkdir -p "$(dirname "$seed_db")" "$(dirname "$seed_cookies")"
+
+    if [[ -f "$seed_db" && -s "$seed_cookies" ]] && (( FORCE == 0 )); then
+        step "socket seed already built ($(wc -l < "$seed_cookies") cookies) — $seed_db"
+        echo "$seed_db"; return 0
+    fi
+
+    # Sizes: --users/--rooms/--messages if the caller set them, else the
+    # tier's own defaults rather than the HTTP seed's.
+    local su="$USERS" sr="$ROOMS" sm="$MESSAGES"
+    [[ "$su" == 50  ]] && su="$SOCKET_USERS_DEFAULT"
+    [[ "$sr" == 5   ]] && sr="$SOCKET_ROOMS_DEFAULT"
+    [[ "$sm" == 100 ]] && sm="$SOCKET_MESSAGES_DEFAULT"
+
+    local prod="$OUT/storage/db/production.sqlite3"
+    local dev="$OUT/storage/db/development.sqlite3"
+    local bak="$OUT/tmp/oracle-restore"
+    mkdir -p "$bak"
+    [[ -f "$prod" ]] && cp "$prod" "$bak/production.sqlite3"
+    [[ -f "$dev" ]] && cp "$dev" "$bak/development.sqlite3"
+    restore_oracle() {
+        [[ -f "$bak/production.sqlite3" ]] && cp "$bak/production.sqlite3" "$prod"
+        [[ -f "$bak/development.sqlite3" ]] && cp "$bak/development.sqlite3" "$dev"
+        rm -f "$prod-wal" "$prod-shm" "$dev-wal" "$dev-shm"
+        return 0
+    }
+    trap 'restore_oracle' EXIT INT TERM
+
+    step "socket seed: $su users, $sr rooms, $sm messages/room (the oracle is restored afterwards)"
+    rm -f "$dev" "$dev-wal" "$dev-shm"
+    (cd "$OUT" && RAILS_ENV=development bin/rails db:prepare >/dev/null) \
+        || die "socket seed: db:prepare failed"
+    (cd "$OUT" && CF_USERS="$su" CF_ROOMS="$sr" CF_MESSAGES="$sm" \
+        bin/rails runner "$(cat "$REPO_ROOT/scripts/campfire-oracle-seed.rb")") \
+        || die "socket seed: seeding failed"
+
+    # Mint the cookies while the BIG database is the one the oracle reads:
+    # line i of the file is user i of THIS dataset, and a cookie minted
+    # against the 50-user seed names a user the sweep's database does not
+    # have.
+    cp "$dev" "$prod"; rm -f "$prod-wal" "$prod-shm"
+    COUNT="$su" COOKIE_FILE="$seed_cookies" cmd_cookies || die "socket seed: minting failed"
+    cp "$dev" "$seed_db"
+    step "socket seed ready: $seed_db ($(wc -l < "$seed_cookies") cookies)"
+    echo "$seed_db"
+}
+
 cmd_login() {
     mkdir -p "$(dirname "$JAR")"; rm -f "$JAR"
     local token
@@ -558,10 +647,11 @@ cmd_check_lock() {
 
 case "$CMD" in
     prepare)    cmd_prepare ;;
+    socket-seed) cmd_socket_seed ;;
     serve)      cmd_serve ;;
     login)      cmd_login ;;
     cookies)    cmd_cookies ;;
     check-lock) cmd_check_lock ;;
     ""|-h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|check-lock)" ;;
+    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|socket-seed|check-lock)" ;;
 esac
