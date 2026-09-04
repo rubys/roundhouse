@@ -15,7 +15,9 @@
 # Protocol implemented (Action Cable v1 JSON):
 #   - Server -> client {"type":"welcome"} on open
 #   - Server -> client {"type":"ping","message":<unix-ts>} every 3s
-#     (a per-connection ping thread; Turbo reconnects without it)
+#     (ONE heartbeat thread for the process, walking a registry of open
+#     connections -- Action Cable's shape, and see `Cable.register` for
+#     why it is not a thread per connection; Turbo reconnects without it)
 #   - Client -> server {"command":"subscribe","identifier":"<json>"}
 #     where the identifier JSON carries
 #     {"channel":"Turbo::StreamsChannel","signed_stream_name":"<sig>"}
@@ -247,34 +249,110 @@ module Cable
     Cable.subscribe(ws, connection, identifier, holder)
   end
 
-  # Spawn a per-connection ping thread: a green thread that sleeps
-  # PING_INTERVAL and emits a ping frame, exiting when the write is
-  # refused -- the connection's thread retires the driver before it
-  # closes the fd (Tep::WebSocket::Driver#retire), so this thread is
-  # gone within one interval of the close and never writes to the fd's
-  # NUMBER after it has been handed to another connection. (It used to
-  # exit on a FAILED write, and a write to a reused number succeeds.)
-  # `sleep` parks the thread; the write parks it on a full buffer rather
-  # than stalling anyone else.
-  def self.spawn_ping(ws)
-    Thread.new do
-      Cable.ping_loop(ws)
-    end
-    0
-  end
-
-  def self.ping_loop(ws)
-    while true
-      sleep(PING_INTERVAL)
-      r = ws.text("{\"type\":\"ping\",\"message\":" + Time.now.to_i.to_s + "}")
-      if r < 0
-        return 0
+  # ONE HEARTBEAT THREAD FOR THE PROCESS, not one per connection, and
+  # the difference is most of our idle cost. A per-connection ping
+  # thread sleeps PING_INTERVAL and wakes on its own phase; connections
+  # arrive over minutes in a real deployment, so the phases spread out
+  # and the scheduler's monitor turns once per beat -- 333 turns a
+  # second at 1,000 sockets, each one a poll over every parked thread.
+  # A shared beat is one turn per interval no matter how many sockets
+  # are held. Measured on the standalone matz and I traded on
+  # matz/spinel#4317: 0.375 cores staggered per-connection against
+  # 0.010 shared, at 1,000 connections. It is also Action Cable's own
+  # shape, which is what the comparison lane runs.
+  #
+  # THE REGISTRY IS DRIVERS, NOT FDS, for the reason Broadcast's is: an
+  # fd number belongs to the next accept the moment its owner closes
+  # it, and a heartbeat that wrote to the number would put a ping frame
+  # in front of a stranger's 101. `Driver#write_frame` refuses once the
+  # connection has retired it, and retirement happens before the close.
+  def self.register(ws)
+    start = false
+    Tep::APP.cable_conns_lock.synchronize do
+      Tep::APP.cable_conns.push(ws)
+      if Tep::APP.cable_heartbeat == 0
+        Tep::APP.cable_heartbeat = 1
+        start = true
       end
     end
+    # Outside the lock: nothing else should wait on the registry while a
+    # thread is being born. The flag is already set, so a second opener
+    # racing here cannot start a second beat.
+    if start
+      Cable.spawn_heartbeat
+    end
     0
   end
 
-  # on_open handler: greet + start the ping thread.
+  # Drop a connection from the heartbeat's registry. Called from the
+  # on-close handler, BEFORE the fd is closed, while its number still
+  # names only this connection -- the same contract, and the same
+  # back-to-front delete, as `Tep::Broadcast.unsubscribe_fd`.
+  def self.unregister(ws)
+    fd = ws.fd
+    dropped = 0
+    Tep::APP.cable_conns_lock.synchronize do
+      conns = Tep::APP.cable_conns
+      i = conns.length - 1
+      while i >= 0
+        if conns[i].fd == fd
+          conns.delete_at(i)
+          dropped += 1
+        end
+        i -= 1
+      end
+    end
+    dropped
+  end
+
+  def self.spawn_heartbeat
+    Thread.new do
+      Cable.heartbeat_loop
+    end
+    0
+  end
+
+  # Beat forever. The thread outlives the last connection and beats over
+  # an empty registry rather than exiting: a beat costs one wake every
+  # three seconds, and a heartbeat that stops has to be restarted by
+  # whoever opens the next socket, under the same lock, which is a race
+  # for nothing.
+  def self.heartbeat_loop
+    while true
+      sleep(PING_INTERVAL)
+      Cable.beat
+    end
+    0
+  end
+
+  # One beat: the registry copied out under the lock, the frames written
+  # outside it -- `Tep::Broadcast.publish_local_only`'s rule, and for the
+  # same reason. A slow client can park this thread inside its write,
+  # which is the cost of sharing the beat; Action Cable's timer shares
+  # the same exposure, and a client that cannot absorb 40 bytes in three
+  # seconds is gone anyway. The timestamp is read once per beat rather
+  # than once per connection.
+  def self.beat
+    payload = "{\"type\":\"ping\",\"message\":" + Time.now.to_i.to_s + "}"
+    live = [Tep::WebSocket::Driver.new(-1)]
+    live.pop
+    Tep::APP.cable_conns_lock.synchronize do
+      conns = Tep::APP.cable_conns
+      i = 0
+      while i < conns.length
+        live.push(conns[i])
+        i += 1
+      end
+    end
+    i = 0
+    while i < live.length
+      live[i].text(payload)
+      i += 1
+    end
+    live.length
+  end
+
+  # on_open handler: greet + join the heartbeat's registry.
   class WsOpen < Tep::WebSocket::Handler
     attr_accessor :ws
 
@@ -285,7 +363,7 @@ module Cable
 
     def handle_event(evt)
       @ws.text("{\"type\":\"welcome\"}")
-      Cable.spawn_ping(@ws)
+      Cable.register(@ws)
       0
     end
   end
@@ -391,6 +469,7 @@ module Cable
     end
 
     def handle_event(evt)
+      Cable.unregister(@msg.ws)
       Db.with_connection do
         @msg.unsubscribe_all
       end

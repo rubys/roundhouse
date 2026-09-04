@@ -26,6 +26,15 @@ module Tep
     # rationale that puts broadcast_subs here rather than on a module.
     attr_accessor :cable_identifiers, :cable_lock
 
+    # Live cable connections, one Driver per open WebSocket, and the
+    # flag that says the process's ONE heartbeat thread is already
+    # running. Cable registers on open and unregisters on close, the
+    # same lifecycle as a broadcast subscription, and the heartbeat
+    # walks the list every Cable::PING_INTERVAL. Here rather than in
+    # Cable for the reason `cable_identifiers` is: a module-level
+    # constant seeded the same way types as int.
+    attr_accessor :cable_conns, :cable_conns_lock, :cable_heartbeat
+
     # Cooperative-scheduler state (Tep::Scheduler; only the
     # TEP_SERVER=fiber measurement lane runs it). One entry per fiber
     # across these parallel arrays:
@@ -53,6 +62,13 @@ module Tep
       # Cable stream -> identifier-JSON map.
       @cable_identifiers = Tep.str_hash
       @cable_lock = Mutex.new
+
+      # Live cable connections. Seed-and-drop pins the element type, the
+      # same way broadcast_subs above does.
+      @cable_conns = [Tep::WebSocket::Driver.new(-1)]
+      @cable_conns.pop
+      @cable_conns_lock = Mutex.new
+      @cable_heartbeat = 0
 
       # Scheduler arrays (fiber lane). FiberSlot array -- seed with a
       # noop-bodied slot to pin the element type, then drop it.
