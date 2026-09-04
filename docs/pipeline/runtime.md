@@ -1243,13 +1243,8 @@ the runtime already stores, so the type stays.
 suffix. Rails HMAC-signs the value with `Turbo.signed_stream_verifier`
 and refuses a name that does not verify.
 
-**Why.** Signing is not the hard part; agreeing on the key is. Our
-`MessageVerifier` derives with 65_536 PBKDF2 iterations where Rails'
-class default is 1_000, so a signature minted here would not verify
-against a Rails-issued cookie or vice versa — and that question is
-already open (see `message_digest.rbs` and spinel#3769). Shipping a
-signature that is real but incompatible would be worse than one that is
-absent and labelled.
+
+
 
 **What it costs.** A stream name is tamperable: a client can subscribe
 to any stream whose name it can spell. Signing would close that, and
@@ -2517,6 +2512,60 @@ channel, which writes on connect; the driver does not yet. Payloads are
 lighter than production's (the attachment gaps are a ledgered bias). And
 the comparison that answers the table is Rails as ONCE configures it,
 driven by the same script on the same cores, which is the next lane.
+
+### Signed cookies interoperate with Rails — CLOSED (ours)
+
+`ActionController::MessageVerifier` derived its key with 65_536 PBKDF2
+iterations, and every test we run derived it the same way on both sides,
+so nothing noticed that no Rails app uses that number.
+`ActiveSupport::KeyGenerator.new(secret)` defaults to 2**16;
+`Rails::Application#key_generator` — which is what every signed cookie
+and every signed id in a Rails app actually goes through — passes
+`iterations: 1000`.
+
+**Measured, not read.** A `session_token` cookie minted by campfire under
+Rails 8.2 through the app's own `ActionDispatch::Cookies::CookieJar`
+reproduces bit for bit at PBKDF2-HMAC-SHA256(secret, `"signed cookie"`,
+1_000, 64) then HMAC-SHA1, and at no other point in the
+{1_000, 65_536} x {SHA1, SHA256}^2 grid. Before the change the emitted
+binary answered 302 to a cookie Rails had just issued for a session row
+its own database held; after it, 200. ONCE's own load harness had the
+number all along — `test/performance/create_dummy_cookies.rb` forges its
+10,000 cookies with `KeyGenerator.new("dummy", iterations: 1000)`, which
+had been read here as a bug in their script.
+
+This is what lets the cable sweep hand ONE cookie file to both lanes, and
+it is the precondition the unsigned-stream-name entry above was waiting
+on.
+
+**A signed id's envelope was wrong too, and is fixed with it.** Rails 8.2
+mints `record.signed_id(purpose: :avatar)` as
+`{"_rails":{"data":1,"pur":"user/avatar"}}`, URL-safe base64 with no
+padding — the id embedded as JSON, and NO `exp` key at all when there is
+no expiry — where this file built the cookie jar's
+`{"_rails":{"message":"<base64>","exp":null,"pur":…}}` in strict base64.
+Both are `ActiveSupport::Messages::Metadata`; which one it writes depends
+on whether the verifier's serializer can carry the metadata itself, and
+the cookie jar's cannot (it signs an already-serialized String) while the
+signed-id verifier's can. Same secret, same salt, same digest — three
+different bytes. `MessageVerifier.data_envelope` /
+`verified_data_json` are the second face, and `ActiveRecord::SignedId`
+reads them.
+
+**Why nothing caught either.** The unit vectors were real ActiveSupport
+output from a HAND-ASSEMBLED verifier — `KeyGenerator.new(SECRET,
+hash_digest_class: SHA256)` and `MessageVerifier.new(key, serializer:
+JSON)` — which is a configuration no Rails application has: the app's
+generator passes 1_000 iterations and the app's verifier picks the other
+envelope. Two wrong answers, both correctly signed, pinned as ground
+truth. They come from campfire itself now, minted through `signed_id` and
+`CookieJar.build` (the runner is in the test's header) — a vector is the
+APP's output or it is not an oracle. `scripts/campfire-compare` could not
+have caught it either: it masks "signed blobs (avatar sgids, stream
+signatures)" as volatile, which is exactly the bytes that were wrong.
+The unit harness also loaded CRuby's stdlib `Base64` where an emitted
+ruby tree ships `runtime/base64.rb`; it now loads the one that ships,
+which is what made the missing `urlsafe_encode64_nopad` visible.
 
 ### The fiber server is back beside the threaded one, as a measurement lane — OPEN (matz/spinel#4306)
 

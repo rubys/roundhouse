@@ -9,10 +9,31 @@
 # The format, measured against ActiveSupport 8.2 rather than inferred:
 #
 #   cookie  = strict_base64(envelope) + "--" + hex_digest
-#   envelope = {"_rails":{"message":<strict_base64(json)>,"exp":null,
-#                         "pur":"cookie.<name>"}}
 #   digest  = HMAC(derived_key, strict_base64(envelope))
-#   key     = PBKDF2-HMAC-SHA256(secret_key_base, salt, 2**16, 64)
+#   key     = PBKDF2-HMAC-SHA256(secret_key_base, salt, 1_000, 64)
+#
+# TWO ENVELOPES, and which one a caller gets depends on its verifier's
+# serializer rather than on anything the caller says:
+#
+#   signed cookie  {"_rails":{"message":<strict_base64(json)>,"exp":null,
+#                             "pur":"cookie.<name>"}}
+#   signed id      {"_rails":{"data":<json>,"pur":"<model>/<purpose>"}}
+#                  {"_rails":{"data":<json>,"exp":"<iso8601_ms>",
+#                             "pur":"<model>/<purpose>"}}
+#
+# and they are base64'd differently too: a cookie is strict base64, a
+# signed id is URL-safe and unpadded (the verifier is `url_safe` because
+# the token goes in a path segment).
+#
+# The cookie jar hands its verifier an already-serialized String, so
+# `Messages::Metadata` cannot nest the metadata inside the payload and
+# base64s it into a `message` field with an always-present `exp`. The
+# signed-id verifier's serializer CAN, so the id goes in verbatim as
+# `data` and `exp` is OMITTED ENTIRELY when there is none. Both measured
+# against campfire under Rails 8.2, minting through the app's own
+# `signed_id` and `CookieJar.build` — not through a hand-assembled
+# `MessageVerifier`, which produces a third shape no app ever emits and
+# which this file was pinned to for a while.
 #
 # The `_rails` envelope is `use_message_serializer_for_metadata`, a 7.1
 # default, and it is INSIDE the signed payload — the digest covers the
@@ -34,7 +55,27 @@
 # need those lifted at ingest; none of the corpus does.
 module ActionController
   module MessageVerifier
-    ITERATIONS = 65_536
+    # 1_000, WHICH IS THE APPLICATION'S NUMBER AND NOT THE CLASS'S.
+    # `ActiveSupport::KeyGenerator.new(secret)` defaults to 2**16, and
+    # this file said 65_536 for that reason — but no Rails app ever
+    # constructs one that way. `Rails::Application#key_generator` passes
+    # `iterations: 1000` explicitly, and every signed cookie and signed
+    # id in a Rails app derives through it.
+    #
+    # MEASURED, not read: a `session_token` cookie minted by campfire
+    # under Rails 8.2 (`ActionDispatch::Cookies::CookieJar.build` against
+    # the app's own env_config) reproduces bit for bit at
+    # PBKDF2-HMAC-SHA256(secret, "signed cookie", 1_000, 64) + HMAC-SHA1,
+    # and at no other point in the {1_000, 65_536} x {SHA1, SHA256}^2
+    # grid. At 65_536 the emitted app and Rails rejected each other's
+    # cookies in both directions — the exact opposite of what the top of
+    # this file promises, and it went unnoticed because both lanes of
+    # every test we run derive the key HERE.
+    #
+    # ONCE's own load harness had the answer all along:
+    # `test/performance/create_dummy_cookies.rb` forges its 10,000
+    # cookies with `KeyGenerator.new("dummy", iterations: 1000)`.
+    ITERATIONS = 1_000
     KEY_SIZE = 64
     SIGNED_COOKIE_SALT = "signed cookie"
 
@@ -129,6 +170,56 @@ module ActionController
       message = extract(env, "\"message\":\"")
       return "" if message == ""
       Base64.strict_decode64(message)
+    end
+
+    # The SIGNED-ID form: the value goes in as JSON, not base64, and an
+    # absent expiry is an absent KEY rather than `"exp":null`. Separate
+    # from `envelope` above rather than a flag on it, because the two
+    # shapes have different fields in a different order and a caller that
+    # picked the wrong one would mint a token that verifies here and
+    # nowhere else — which is exactly the bug this pair replaces.
+    def self.data_envelope(secret, salt, data_json, purpose, exp, sha1)
+      env = "{\"_rails\":{\"data\":" + data_json
+      env = env + ",\"exp\":" + exp if exp != ""
+      env = env + ",\"pur\":\"" + purpose + "\"}}"
+      # URL-SAFE AND UNPADDED, which is the other thing a signed id does
+      # differently: `ActiveRecord::SignedId`'s verifier is `url_safe`,
+      # because the token goes in a path segment (campfire's
+      # `route_for :user_avatar, user.avatar_token`). The cookie jar's is
+      # not. Measured: Rails' avatar token ends `…YXIifX0` where strict
+      # base64 of the same envelope ends `…YXIifX0=`.
+      payload = Base64.urlsafe_encode64_nopad(env)
+      payload + "--" + digest_for(secret, salt, payload, sha1)
+    end
+
+    # The `data` a signed id carries, as JSON text, or "" for every
+    # rejection — the mirror of `verified_json` for the other envelope.
+    def self.verified_data_json(secret, salt, signed, purpose, sha1)
+      sep = signed.index("--")
+      return "" if sep.nil?
+      payload = signed[0, sep]
+      supplied = signed[sep + 2, signed.length - sep - 2]
+      return "" if supplied != digest_for(secret, salt, payload, sha1)
+      env = Base64.urlsafe_decode64(payload)
+      return "" if extract(env, "\"pur\":\"") != purpose
+      exp = extract(env, "\"exp\":\"")
+      return "" if exp != "" && exp <= iso8601_ms(Time.now)
+      extract_raw(env, "\"data\":")
+    end
+
+    # `extract` reads a QUOTED field; `data` is a bare JSON value, so it
+    # ends at the next `,` or `}` instead of at the next quote. An id is
+    # an Integer or a String id; either way it stops at the same place,
+    # because a String id's own quotes are inside the run.
+    def self.extract_raw(envelope, prefix)
+      at = envelope.index(prefix)
+      return "" if at.nil?
+      rest = at + prefix.length
+      comma = envelope.index(",", rest)
+      brace = envelope.index("}", rest)
+      close = comma.nil? ? brace : (brace.nil? ? comma : (comma < brace ? comma : brace))
+      return "" if close.nil?
+      envelope[rest, close - rest]
     end
 
     def self.digest_for(secret, salt, payload, sha1)

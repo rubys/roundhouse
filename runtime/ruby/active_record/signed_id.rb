@@ -5,12 +5,22 @@
 # (`route_for :user_avatar, user.avatar_token`), so this is on the path
 # of any page showing a person, not a corner of the model API.
 #
-# The wire format is ActiveSupport's, shared with signed cookies and
-# implemented once next door in action_controller/message_verifier.rb.
-# Two things differ from a cookie and both are Rails' choices, not ours:
+# The wire format is ActiveSupport's, implemented next door in
+# action_controller/message_verifier.rb. Three things differ from a
+# signed cookie and all three are Rails' choices, not ours:
 #
-#   digest   HMAC-SHA256, not the cookie jar's SHA1
-#   message  the id as a bare JSON Integer (`123`), not a quoted String
+#   digest    HMAC-SHA256, not the cookie jar's SHA1
+#   envelope  `{"_rails":{"data":123,"pur":…}}` — the id verbatim as
+#             JSON, not base64 in a `message` field
+#   exp       OMITTED when there is none, where a cookie always carries
+#             `"exp":null`
+#
+# All three measured against campfire under Rails 8.2 by minting
+# `user.signed_id(purpose: :avatar)` and reading the bytes. The file used
+# to build the cookie envelope for a signed id: same secret, same salt,
+# same digest, different shape — so an `avatar_token` minted here was
+# rejected by Rails and vice versa, and no test saw it because both sides
+# of every test were this file.
 #
 # A REOPEN-STYLE file, outside the strict-target runtime_loader tables
 # for the same reason connection.rb is: PBKDF2 + HMAC live in
@@ -31,13 +41,15 @@ module ActiveRecord
     # `expires_in` is SECONDS, with 0 meaning "never" — Rails' default
     # for `signed_id` and what every unexpiring caller passes.
     def self.generate(id, purpose, expires_in)
-      exp = "null"
+      # "" means "no exp key at all", which is what Rails writes for an
+      # unexpiring signed id — not `"exp":null`, the cookie jar's shape.
+      exp = ""
       if expires_in > 0
         exp = "\"" +
               ActionController::MessageVerifier.iso8601_ms(Time.now + expires_in) +
               "\""
       end
-      ActionController::MessageVerifier.envelope(
+      ActionController::MessageVerifier.data_envelope(
         Rails.application.secret_key_base, SALT, id.to_s, purpose, exp, false
       )
     end
@@ -54,7 +66,7 @@ module ActiveRecord
     # signature error BY NAME (campfire's Users::AvatarsController does)
     # would not catch this one.
     def self.verified_id(token, purpose)
-      json = ActionController::MessageVerifier.verified_json(
+      json = ActionController::MessageVerifier.verified_data_json(
         Rails.application.secret_key_base, SALT, token, purpose, false
       )
       return 0 if json == ""

@@ -30,6 +30,14 @@ require "minitest/autorun"
 # without inline requires (which spinel-target would warn on).
 require "base64"
 require "json"
+# AND THEN THE ONE THAT SHIPS, on top. An emitted ruby tree carries
+# `runtime/base64.rb` — `write_bundled_requires` skips the stdlib
+# require precisely because "the program defines it itself" — so the
+# stdlib module here is NOT what the emitted app calls. It lacks
+# `urlsafe_encode64_nopad`, which `Rails::GlobalID#to_param` and the
+# signed-id verifier both use, and a test suite that never loaded the
+# real one could not have caught either.
+require_relative "../../spinel/base64"
 
 FRAMEWORK_RUBY = File.expand_path("..", __dir__)
 $LOAD_PATH.unshift(FRAMEWORK_RUBY)
