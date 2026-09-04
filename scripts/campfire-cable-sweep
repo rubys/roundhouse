@@ -69,6 +69,14 @@ COOKIES="${COOKIES:-$ORACLE/tmp/session-cookies.txt}"
 [[ -f "$COOKIES" ]] || { echo "no cookie file at $COOKIES — scripts/campfire-oracle cookies --count N" >&2; exit 2; }
 OUT="${OUT:-/tmp/cable-sweep-$(date -u +%Y%m%d-%H%M%S)}"; mkdir -p "$OUT"
 ulimit -n 65536 || true
+# Their Dockerfile's allocator, if this box has one.
+JEMALLOC=""
+for c in /usr/local/lib/libjemalloc.so /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+         /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 /usr/lib64/libjemalloc.so.2 \
+         /opt/homebrew/lib/libjemalloc.dylib; do
+    [[ -e "$c" ]] && { JEMALLOC="$c"; break; }
+done
+[[ "$LANE" == rails ]] && echo "sweep: rails lane allocator: ${JEMALLOC:-stock malloc (no jemalloc found)}"
 # The pin is the whole point of a tier — but a Mac has no taskset, and a
 # harness that only runs where it publishes cannot be smoke-tested before
 # it gets there. Absent, the run says so rather than silently measuring
@@ -100,7 +108,12 @@ start_server() {   # $1 = label
     mkdir -p "$ORACLE/storage/db"
     [[ "$DB" -ef "$ORACLE/storage/db/production.sqlite3" ]] || cp "$DB" "$ORACLE/storage/db/production.sqlite3"
     rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
+    # jemalloc, because their Dockerfile preloads it and the headline
+    # column on this phase is memory. Absent, the lane runs on stock
+    # malloc and the summary says so rather than quietly comparing
+    # allocators.
     ( cd "$ORACLE" && exec env WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS" \
+        ${JEMALLOC:+LD_PRELOAD="$JEMALLOC"} \
         RAILS_ENV=production DISABLE_SSL=1 SECRET_KEY_BASE="$SECRET" \
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" RUBY_YJIT_ENABLE=1 \
         "${PIN[@]}" bundle exec puma -p "$PORT" -e production config.ru \

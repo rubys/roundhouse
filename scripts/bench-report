@@ -43,6 +43,34 @@ per_run = begin
   end
 end
 
+# coldstart.json is JSONL, one record per boot — {target, rep, accept_ms,
+# page_ms, page_code} — written by scripts/bench-campfire. Optional like
+# every other sidecar: a run that measured no cold start renders without
+# the section rather than with an empty one.
+coldstart = begin
+  path = File.join(run_path, 'coldstart.json')
+  if File.exist?(path)
+    File.readlines(path).filter_map do |line|
+      line = line.strip
+      JSON.parse(line) unless line.empty?
+    rescue JSON::ParserError
+      nil
+    end
+  end
+end
+
+# sockets.json is a JSON ARRAY, one row per (lane, socket count), folded
+# together by bench-campfire from the two campfire-cable-sweep runs. The
+# WebSocket phase is a different workload on different cores from
+# everything else on the page, which is why it is a section of its own
+# and never a row in the HTTP tables.
+sockets = begin
+  path = File.join(run_path, 'sockets.json')
+  File.exist?(path) ? JSON.parse(File.read(path)) : nil
+rescue JSON::ParserError
+  nil
+end
+
 # skipped.json is JSONL too, one record per lane the harness asked for
 # and could not measure — {target, stage, reason, log_tail} — written by
 # scripts/bench since 2026-09-02. Its ABSENCE means a harness that
@@ -62,7 +90,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-fiber elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python ruby ruby-1p ruby-int jruby rails rails-nocache rails-1p rails-int rails-jruby]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # A lane the palette has never seen still needs a bar. Prefer its
@@ -90,14 +118,17 @@ COLOR = {
   'swift'      => '#f05138',
   'csharp'     => '#8a6fe0',
   'spinel'     => '#7d4cdb',
+  'spinel-1p'  => '#a98ae4',
   'spinel-fiber' => '#b59ae8',
   'elixir'     => '#4b275f',
   'typescript' => '#3178c6',
   'python'     => '#3776ab',
   'ruby'       => '#cc342d',
+  'ruby-1p'    => '#e08079',
   'ruby-int'   => '#e89c93',
   'jruby'      => '#5382a1',
   'rails'      => '#666666',
+  'rails-1p'   => '#9a9a9a',
   'rails-int'  => '#aaaaaa',
   'rails-jruby' => '#46707f',
 }
@@ -803,6 +834,77 @@ end
 html << "</tbody></table>\n"
 html << %(<p class="legend">All values in milliseconds. Lower is better.</p>\n)
 
+# ── Section: cold start ──────────────────────────────────────────────
+#
+# First on campfire's own list of measures and, until 2026-09-04, on no
+# page here. Two numbers because for a chat app they are two questions:
+# when does the port answer, and when does a signed-in room page come
+# back. The second is the honest one — it contains the first render.
+if coldstart && !coldstart.empty?
+  def cs_median(xs)
+    xs = xs.compact.sort
+    return nil if xs.empty?
+    xs.size.odd? ? xs[xs.size / 2] : (xs[xs.size / 2 - 1] + xs[xs.size / 2]) / 2.0
+  end
+
+  cs_by = coldstart.group_by { |r| r['target'] }
+  cs_targets = order_first(cs_by.keys, TARGET_ORDER)
+  reps = cs_by.values.map(&:size).max
+
+  html << h2.('Cold start')
+  html << "<p>Time from <code>exec</code> to a server that answers, and to a signed-in <code>/rooms/1</code> that comes back 200. Median of #{reps} boots per lane, all on the shape named in the row. The room page is the number that matters: it contains the first render, and on a fragment-cached lane a restart keeps the Redis its own Procfile runs in a separate process, so this is a warm-cache restart rather than a cold deployment.</p>\n"
+  html << "<table>\n<thead><tr><th>target</th><th>answers (ms)</th><th>room page (ms)</th></tr></thead>\n<tbody>\n"
+  cs_targets.sort_by { |t| cs_median(cs_by[t].map { |r| r['page_ms'] }) || Float::INFINITY }.each do |tgt|
+    rows = cs_by[tgt]
+    acc = cs_median(rows.map { |r| r['accept_ms'] })
+    pg  = cs_median(rows.map { |r| r['page_ms'] })
+    bad = rows.count { |r| r['page_code'].to_s != '200' }
+    note = bad.zero? ? '' : %( <span class="caveat">(#{bad} boot#{bad == 1 ? '' : 's'} never rendered)</span>)
+    html << %(<tr><td><strong>#{tgt}</strong></td><td class="num">#{acc ? fmt_dec(acc, 0) : '—'}</td><td class="num">#{pg ? fmt_dec(pg, 0) : '—'}#{note}</td></tr>\n)
+  end
+  html << "</tbody></table>\n"
+  html << %(<p class="legend">Milliseconds. Lower is better. A deployed Rails lane boots a proxy, a Puma master and one worker per <code>(processor_count &times; 0.666).ceil</code>; the binary boots one process.</p>\n)
+end
+
+# ── Section: WebSocket connections ───────────────────────────────────
+#
+# "How many concurrent WebSocket connections a given box will hold" is
+# the measure campfire's own discussion calls the one that matters most.
+# It is a different workload on different cores from the HTTP rows above
+# — a pinned tier, one client driving both lanes — so it is a section of
+# its own and never a row in those tables.
+if sockets && !sockets.empty?
+  html << h2.('WebSocket connections')
+  tiers = sockets.map { |r| r['sockets'] }.compact.uniq.sort
+  html << "<p>Sockets held open, subscribed to a room, then idled and driven: each lane pinned to the same cores, one client, exact delivered/expected frame counts. The idle column is the cost of holding connections that are doing nothing, which is what a chat deployment does most of the time.</p>\n"
+  html << "<table>\n<thead><tr><th>target</th><th>sockets</th><th>connect storm</th><th>idle (cores)</th><th>RSS (MB)</th><th>fan-out p50 / p99</th><th>delivering (cores)</th><th>frames</th></tr></thead>\n<tbody>\n"
+  tiers.each do |n|
+    order_first(sockets.select { |r| r['sockets'] == n }.map { |r| r['target'] }, TARGET_ORDER).each do |tgt|
+      r = sockets.find { |x| x['sockets'] == n && x['target'] == tgt } or next
+      frames = if r['delivered'] && r['expected']
+                 ok = r['delivered'] == r['expected']
+                 %(#{fmt_int(r['delivered'])}/#{fmt_int(r['expected'])}#{ok ? '' : ' <span class="caveat">short</span>'})
+               else '—' end
+      html << %(<tr><td><strong>#{tgt}</strong></td><td class="num">#{fmt_int(n)}</td>) +
+              %(<td class="num">#{r['storm_s'] ? "#{fmt_dec(r['storm_s'], 1)} s" : '—'}</td>) +
+              %(<td class="num">#{r['idle_cores'] ? fmt_dec(r['idle_cores'], 3) : '—'}</td>) +
+              %(<td class="num">#{r['pss_mb'] || r['rss_mb'] || '—'}</td>) +
+              %(<td class="num">#{r['frame_p50_ms'] ? "#{fmt_dec(r['frame_p50_ms'], 0)} / #{fmt_dec(r['frame_p99_ms'], 0)} ms" : '—'}</td>) +
+              %(<td class="num">#{r['chat_cores'] ? fmt_dec(r['chat_cores'], 3) : '—'}</td>) +
+              %(<td class="num">#{frames}</td></tr>\n)
+    end
+  end
+  html << "</tbody></table>\n"
+  # The client is single-threaded, and above a few thousand sockets a
+  # shared heartbeat hands it every ping at once. Saying so beside the
+  # tail is the difference between a measurement and a claim.
+  worst = sockets.map { |r| r['driver_max_pass_ms'] }.compact.max
+  if worst && worst > 20
+    html << %(<p class="caveat">The driver is one thread reading every socket; its longest single reading pass in this run was #{fmt_dec(worst, 0)}&nbsp;ms. A fan-out p99 near that number is the client's backlog rather than the server's fan-out.</p>\n)
+  end
+  html << %(<p class="legend">Memory is PSS where the lane is multi-process, RSS otherwise. Lower is better in every column except frames, which must be exact.</p>\n)
+end
+
 # ── Section: what each lane rendered (parity.txt) ────────────────────
 
 # A throughput number for a page that is not the same page is not a
@@ -959,6 +1061,16 @@ if env
                                        "#{seed['messages_per_room']} messages/room"],
       *servers.map { |label, version| ["app server (#{label})", version] },
     ])
+  end
+
+  # What each lane ACTUALLY ran, as the harness recorded it at boot —
+  # not what it was asked to run. Outside the toolchain block on purpose:
+  # a run with no toolchain capture still has lanes.
+  shapes = env['lane_shapes']
+  if shapes.is_a?(Hash) && !shapes.empty?
+    html << "<h3>What each lane actually ran</h3>\n"
+    html << "<p class=\"legend\">Recorded at boot, not copied from intent: a lane that asked for jemalloc and did not get one says so here.</p>\n"
+    html << kv_table(shapes.sort.map { |lane, parts| [lane, "<code>#{parts.join('</code>, <code>')}</code>"] })
   end
 
   toolchains = env_map(env, 'toolchains')

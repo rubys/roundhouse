@@ -77,6 +77,23 @@
 #   --users N       seeded users (default 50)
 #   --rooms N       seeded rooms (default 5)
 #   --messages N    seeded messages per room (default 100)
+#   --deployed      Serve the shape once-campfire's own Dockerfile serves:
+#                   campfire's `config/puma.rb` worker formula rather than
+#                   a pinned count, jemalloc preloaded, Thruster in front,
+#                   and resque-pool alongside. `--workers` is ignored.
+#                   This is the lane a claim about beating "the current
+#                   deployment" has to be made against; every other shape
+#                   here is a diagnostic that explains it.
+#   --shape-report P
+#                   Write one `key=value` line per part of the shape
+#                   `serve` actually achieved (jemalloc, thruster,
+#                   resque-pool, workers), so a page can state what ran
+#                   instead of what was asked for.
+#   --no-jemalloc   Do not preload jemalloc. It IS preloaded by default
+#                   (their Dockerfile sets LD_PRELOAD), because a memory
+#                   column that compares runtimes must not be comparing
+#                   malloc implementations. Ignored where no jemalloc is
+#                   installed — `serve` says so rather than pretending.
 #   --no-yjit       boot without YJIT (the baseline lane)
 #   --env NAME      RAILS_ENV for `serve` (default production). Development
 #                   is 12x slower on this app and is not a benchmark.
@@ -120,6 +137,12 @@ RAILS_ENV_NAME="production"
 # actually rendering. See the header — these are two different
 # measurements and both are real.
 FRAGMENT_CACHE=1
+# The deployed shape (their Dockerfile + Procfile), off by default so the
+# single-worker diagnostic lanes stay exactly what they were.
+DEPLOYED=0
+JEMALLOC=1
+# Where `serve` records which parts of the deployed shape it achieved.
+SHAPE_REPORT=""
 JAR=""
 COUNT=""
 COOKIE_FILE=""
@@ -134,6 +157,9 @@ while [[ $# -gt 0 ]]; do
         --users)    USERS="$2"; shift 2 ;;
         --rooms)    ROOMS="$2"; shift 2 ;;
         --messages) MESSAGES="$2"; shift 2 ;;
+        --deployed) DEPLOYED=1; shift ;;
+        --shape-report) SHAPE_REPORT="$2"; : > "$SHAPE_REPORT"; shift 2 ;;
+        --no-jemalloc) JEMALLOC=0; shift ;;
         --no-yjit)  YJIT=0; shift ;;
         --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
         --env)      RAILS_ENV_NAME="$2"; shift 2 ;;
@@ -241,11 +267,40 @@ JSON
     step "ready — $(tr -d '\n ' < "$OUT/oracle.json")"
 }
 
+# WHERE THE ALLOCATOR IS, if it is anywhere. campfire's Dockerfile
+# symlinks `libjemalloc.so.2` to `/usr/local/lib/libjemalloc.so` and
+# preloads it; a bench box that installed the distro package has it under
+# a triplet directory instead, and a Mac usually has it nowhere. Echoes
+# the path, or nothing — the caller reports the absence rather than
+# quietly serving a different shape than it says it is serving.
+find_jemalloc() {
+    local c
+    for c in /usr/local/lib/libjemalloc.so \
+             /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+             /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
+             /usr/lib64/libjemalloc.so.2 \
+             /opt/homebrew/lib/libjemalloc.dylib \
+             /usr/local/opt/jemalloc/lib/libjemalloc.dylib; do
+        [[ -e "$c" ]] && { echo "$c"; return 0; }
+    done
+    # Anything the loader knows about that we did not name.
+    c="$(ldconfig -p 2>/dev/null | awk '/libjemalloc\.so\.2/ {print $NF; exit}')"
+    [[ -n "$c" && -e "$c" ]] && { echo "$c"; return 0; }
+    return 1
+}
+
+# The deployed shape, and the parts of it we actually achieved. Written
+# beside the run so the page can state which of the four landed rather
+# than implying all of them did: a benchmark that claims Thruster and
+# silently ran without it is worse than one that never claimed it.
+report_shape() { [[ -n "$SHAPE_REPORT" ]] && printf '%s\n' "$1" >> "$SHAPE_REPORT"; return 0; }
+
 cmd_serve() {
     [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
     if [[ "$RAILS_ENV_NAME" == "production" && ! -f "$OUT/storage/db/production.sqlite3" ]]; then
         die "no production DB — run 'prepare' (it stages one from the seed)"
     fi
+    (( DEPLOYED )) && { cmd_serve_deployed; return; }
     step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT, fragment-cache=$FRAGMENT_CACHE"
     cd "$OUT"
     # WEB_CONCURRENCY is what campfire's config/puma.rb reads; without it the
@@ -258,11 +313,128 @@ cmd_serve() {
     # RAILS_LOG_LEVEL=warn: production.rb logs every request at info to
     # STDOUT. Our tree logs nothing, so leaving it on would charge Rails
     # for output the other lane does not produce.
+    # jemalloc on EVERY Ruby lane, deployed or diagnostic. Their
+    # Dockerfile preloads it; a memory column that compared their
+    # allocator against ours would be measuring malloc, not runtimes.
+    local jem=""
+    if (( JEMALLOC )); then
+        jem="$(find_jemalloc || true)"
+        [[ -n "$jem" ]] && report_shape "jemalloc=$jem" || report_shape "jemalloc=ABSENT"
+    else
+        report_shape "jemalloc=off"
+    fi
     WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS" \
     RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 \
     DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))" \
     RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
+    ${jem:+LD_PRELOAD="$jem"} \
         exec bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
+}
+
+# ── the deployed shape ───────────────────────────────────────────────
+#
+# once-campfire's Dockerfile ends `CMD ["bin/boot"]`, and bin/boot runs a
+# Procfile with three processes:
+#
+#   web:     bundle exec thrust bin/start-app
+#   redis:   redis-server config/redis.conf
+#   workers: FORK_PER_JOB=false INTERVAL=0.1 bundle exec resque-pool
+#
+# plus `ENV LD_PRELOAD=…libjemalloc.so` and a `config/puma.rb` that takes
+# `(Concurrent.processor_count * 0.666).ceil` workers with 5 threads
+# each. THAT is "the current deployment"; one Puma worker with five
+# threads is a diagnostic we invented to compare renderers per process.
+#
+# Two deliberate differences, both recorded in the shape report:
+#   * redis is the box's, already running, rather than a fourth process
+#     under our supervision — same server, one less thing to leak.
+#   * Puma is exec'd directly rather than through `bin/start-app`, which
+#     would run `bin/rails db:prepare` against the seeded database on
+#     every boot. Puma loads `config/puma.rb` either way, so the worker
+#     formula, the thread count and the bind are campfire's own.
+cmd_serve_deployed() {
+    cd "$OUT"
+    mkdir -p "$OUT/tmp"
+    local inner=$(( PORT + 1000 ))
+    local jem=""
+    if (( JEMALLOC )); then
+        jem="$(find_jemalloc || true)"
+        if [[ -n "$jem" ]]; then report_shape "jemalloc=$jem"; else report_shape "jemalloc=ABSENT"; fi
+    else
+        report_shape "jemalloc=off"
+    fi
+
+    # resque-pool, exactly as the Procfile runs it. It competes for the
+    # same cores in the deployment, which is part of what the deployment
+    # costs, so it runs here too — backgrounded, and killed with us.
+    RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 FORK_PER_JOB=false INTERVAL=0.1 \
+    ${jem:+LD_PRELOAD="$jem"} \
+        bundle exec resque-pool > "$OUT/tmp/resque-pool.log" 2>&1 &
+    JOBS_PID=$!
+    sleep 0.5
+    if kill -0 "$JOBS_PID" 2>/dev/null; then
+        report_shape "resque-pool=pid $JOBS_PID"
+    else
+        JOBS_PID=""
+        report_shape "resque-pool=FAILED (see tmp/resque-pool.log)"
+    fi
+    trap 'kill_jobs' INT TERM EXIT
+
+    # WEB_CONCURRENCY is UNSET rather than empty: campfire's puma.rb reads
+    # it with `ENV.fetch("WEB_CONCURRENCY") { worker_count }`, and an
+    # empty string is a value — it would boot ZERO workers and the
+    # deployed lane would silently become single-process, which is the
+    # exact thing this lane exists to stop doing.
+    #
+    # Thruster in front, on $PORT, proxying to Puma on $inner. campfire's
+    # puma.rb binds `ENV.fetch("PORT", 3000)`, so the inner port is
+    # passed as PORT rather than with `-p`. Its presence is probed with
+    # `bundle info` and never by running it: `thrust` treats its first
+    # argument as the command to wrap, so `thrust --version` starts a
+    # server on :80 before failing.
+    local common=(
+        RAILS_MAX_THREADS="$THREADS"
+        RUBY_YJIT_ENABLE="$YJIT"
+        RAILS_ENV="$RAILS_ENV_NAME"
+        DISABLE_SSL=1
+        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
+        RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
+    )
+    [[ -n "$jem" ]] && common+=( LD_PRELOAD="$jem" )
+
+    if bundle info thruster >/dev/null 2>&1; then
+        report_shape "thruster=front on :$PORT -> puma :$inner"
+        report_shape "workers=campfire's own formula (WEB_CONCURRENCY unset)"
+        step "deployed :$PORT — thruster -> puma :$inner, campfire's worker formula, $THREADS thread(s), fragment-cache=$FRAGMENT_CACHE"
+        # NOT `exec`. `exec` replaces this shell, and with it the EXIT
+        # trap that stops resque-pool — which would then outlive the
+        # lane, keep a Redis connection and keep taking cores from the
+        # next one. Run the server as a child and wait on it.
+        env -u WEB_CONCURRENCY "${common[@]}" \
+            PORT="$inner" TARGET_PORT="$inner" HTTP_PORT="$PORT" \
+            bundle exec thrust bundle exec puma -e "$RAILS_ENV_NAME" config.ru &
+        WEB_PID=$!
+        wait "$WEB_PID"
+    else
+        report_shape "thruster=ABSENT (puma serves :$PORT directly)"
+        report_shape "workers=campfire's own formula (WEB_CONCURRENCY unset)"
+        step "deployed :$PORT — puma (no thruster), campfire's worker formula, $THREADS thread(s)"
+        env -u WEB_CONCURRENCY "${common[@]}" PORT="$PORT" \
+            bundle exec puma -e "$RAILS_ENV_NAME" config.ru &
+        WEB_PID=$!
+        wait "$WEB_PID"
+    fi
+}
+
+JOBS_PID=""
+WEB_PID=""
+# Everything this lane started, stopped together. Thruster supervises the
+# Puma it wraps, so terminating it is enough for the web half; resque-pool
+# is ours alone and is the one that would be left behind.
+kill_jobs() {
+    [[ -n "$JOBS_PID" ]] && kill -TERM "$JOBS_PID" 2>/dev/null
+    [[ -n "$WEB_PID" ]] && kill -TERM "$WEB_PID" 2>/dev/null
+    return 0
 }
 
 cmd_login() {

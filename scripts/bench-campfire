@@ -10,16 +10,40 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | rails-nocache | rails-int | ruby | ruby-int }
-#          (default: rails rails-nocache ruby)
+#   LANE ∈ { rails | rails-nocache | ruby | spinel |
+#            rails-1p | ruby-1p | spinel-1p }
+#          (default: rails rails-nocache ruby spinel rails-1p ruby-1p spinel-1p)
 #
-#     rails          real Rails, PRODUCTION, YJIT — AS DEPLOYED, which
-#                    means the Redis-backed fragment cache is ON
-#     rails-nocache  the same, with `perform_caching = false`: Rails
+#   THE DEPLOYED LANES — what each project would actually run on this box:
+#
+#     rails          once-campfire AS ITS OWN DOCKERFILE RUNS IT: Thruster
+#                    in front of Puma, `(processor_count * 0.666).ceil`
+#                    workers x 5 threads from its own config/puma.rb,
+#                    jemalloc preloaded, resque-pool alongside, Redis
+#                    fragment cache ON, production, YJIT
+#     rails-nocache  the same shape with `perform_caching = false`: Rails
 #                    actually RENDERING
-#     rails-int      real Rails, PRODUCTION, no JIT (fragment cache on)
-#     ruby           roundhouse emit on CRuby, YJIT
-#     ruby-int       roundhouse emit on CRuby, no JIT
+#     ruby           roundhouse emit on CRuby, the same Puma shape and
+#                    the same allocator
+#     spinel         the roundhouse spinel BINARY, workers autodetected
+#
+#   THE ONE-PROCESS LANES — the diagnostic that explains the above:
+#
+#     rails-1p       Rails, one Puma worker x 5 threads, no proxy, no jobs
+#     ruby-1p        the CRuby emit, same
+#     spinel-1p      the binary, SPINEL_WORKERS=1
+#
+# WHY BOTH SETS. The question this page answers is campfire's own — "can
+# it beat the current deployment" — and a deployment is a worker count,
+# an allocator, a proxy and a job runner, not a renderer. But a single
+# deployed number cannot say WHY it landed where it did: Puma's five
+# threads share a GVL where the binary's workers do not, so the
+# one-process rows are what separate "their runtime is slower" from "we
+# gave them fewer cores". Publish the pair.
+#
+# NO no-JIT LANES. `rails-int` and `ruby-int` measured within a percent of
+# their YJIT siblings on these two pages (40 vs 40 req/s, 22 vs 23) and
+# cost a seventh of the run to say nothing.
 #
 # TWO RAILS LANES, AND THE REASON IS THE WHOLE BENCHMARK. campfire
 # renders its message list as `render partial: …, collection: @messages,
@@ -47,6 +71,14 @@
 #   --out DIR         results dir (default bench/results/campfire-<stamp>)
 #   --users N / --rooms N / --messages N   seed size, passed to
 #                     `campfire-oracle prepare` (default 50 / 5 / 100)
+#   --no-sockets      skip the WebSocket phase (HTTP + cold start only)
+#   --socket-sizes S  socket counts for that phase (default "1000")
+#   --socket-cpus C   cores to pin each socket-phase server to (default 0-3,
+#                     once.com/campfire's 1,000-user tier)
+#   --socket-db PATH  seeded database for the socket phase (default: the
+#                     oracle's). A 1,000-user seed makes every socket a
+#                     different user; the default 50-user one reuses them.
+#   --socket-cookies PATH   pre-minted cookie file for it
 #   --skip-prepare    reuse the oracle tree and emit already on disk
 #   --keep            leave servers running on exit
 #
@@ -97,6 +129,11 @@ ROOMS=5
 MESSAGES=100
 SKIP_PREPARE=0
 KEEP=0
+SOCKETS=1
+SOCKET_SIZES="1000"
+SOCKET_CPUS="0-3"
+SOCKET_DB=""
+SOCKET_COOKIES=""
 APP="$HOME/git/once-campfire"
 
 while [[ $# -gt 0 ]]; do
@@ -115,20 +152,31 @@ while [[ $# -gt 0 ]]; do
         --rooms)       ROOMS="$2"; shift 2 ;;
         --messages)    MESSAGES="$2"; shift 2 ;;
         --app)         APP="$2"; shift 2 ;;
+        --sockets)     SOCKETS=1; shift ;;
+        --no-sockets)  SOCKETS=0; shift ;;
+        --socket-sizes) SOCKET_SIZES="$2"; shift 2 ;;
+        --socket-cpus)  SOCKET_CPUS="$2"; shift 2 ;;
+        --socket-db)    SOCKET_DB="$2"; shift 2 ;;
+        --socket-cookies) SOCKET_COOKIES="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|rails-int|ruby|ruby-int) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|spinel|rails-1p|ruby-1p|spinel-1p) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby)
+(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby spinel rails-1p ruby-1p spinel-1p)
 (( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 EMIT="$REPO_ROOT/build/transpiled-campfire-ruby"
+SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
+# The binary verifies the session cookie it minted itself, so any stable
+# value works — but it has to be the SAME one the cable sweep uses, or a
+# pre-minted cookie file cannot be shared between the two harnesses.
+SPINEL_SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
 LOG_DIR="$OUT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -173,13 +221,49 @@ sum_rss_kb() {
     echo "$total"
 }
 
+# Their Dockerfile preloads jemalloc; every Ruby lane here does too, so
+# the memory column compares runtimes and not malloc implementations.
+# Echoes a path or nothing — a lane that cannot find one records ABSENT
+# rather than serving a shape it does not admit to.
+find_jemalloc() {
+    local c
+    for c in /usr/local/lib/libjemalloc.so \
+             /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+             /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
+             /usr/lib64/libjemalloc.so.2 \
+             /opt/homebrew/lib/libjemalloc.dylib \
+             /usr/local/opt/jemalloc/lib/libjemalloc.dylib; do
+        [[ -e "$c" ]] && { echo "$c"; return 0; }
+    done
+    c="$(ldconfig -p 2>/dev/null | awk '/libjemalloc\.so\.2/ {print $NF; exit}')"
+    [[ -n "$c" && -e "$c" ]] && { echo "$c"; return 0; }
+    return 1
+}
+
+# campfire's own worker count for THIS box: `(Concurrent.processor_count
+# * 0.666).ceil` out of its config/puma.rb. The emit's Puma has no such
+# formula, so the ruby lane is given the number rather than guessing at
+# one — the two lanes must be the same shape or the comparison is a core
+# count again.
+deployed_worker_count() {
+    local n
+    n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+    ruby -e 'print (ARGV[0].to_i * 0.666).ceil' "$n"
+}
+
 wait_for_port() {
     local url="$1" budget="${2:-60}"
     local deadline=$(( $(date +%s) + budget ))
+    local code
     while (( $(date +%s) < deadline )); do
-        # Any answer means the server is up: campfire 302s an unsigned-in
-        # client, so `curl --fail` would reject a perfectly healthy boot.
-        [[ "$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)" != "000" ]] && return 0
+        # An answer from the APP means it is up: campfire 302s an
+        # unsigned-in client, so `curl --fail` would reject a perfectly
+        # healthy boot. But 502 is Thruster answering for a Puma that has
+        # not finished booting — accepting it declared the deployed lane
+        # ready four seconds early and would have handed the cold-start
+        # measurement the proxy's startup instead of Rails'.
+        code="$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+        [[ "$code" != "000" && "$code" != "502" && "$code" != "503" ]] && return 0
         sleep 0.3
     done
     return 1
@@ -205,6 +289,41 @@ if (( SKIP_PREPARE == 0 )); then
     (cd "$EMIT" && rake assets >/dev/null 2>&1) || step "  (no assets task — continuing)"
 fi
 
+# ── the spinel binary ────────────────────────────────────────────────
+#
+# Campfire compiles, builds and serves on spinel now. Until 2026-09-04
+# this harness emitted the tree for the ARCHIVE only, with a comment
+# saying it "does not compile yet" — true when written, and the reason
+# the published page had no binary lane while the binary was holding five
+# thousand WebSocket connections in another harness.
+#
+# Strict emit (no --allow-unsupported), because CI holds campfire's
+# strict emit at zero errors and a regression should be loud here.
+build_spinel_binary() {
+    step "transpiling campfire → spinel (strict)"
+    cargo run --quiet --release --bin roundhouse -- --target spinel "$APP" \
+        -o "$SP_EMIT" > "$LOG_DIR/emit-spinel.log" 2>&1 \
+        || { fail "strict spinel emit failed (see $LOG_DIR/emit-spinel.log)"; return 1; }
+    command -v spin >/dev/null 2>&1 \
+        || { fail "spin not on PATH — cannot build the spinel binary"; return 1; }
+    step "building the spinel binary (a few minutes)"
+    ( cd "$SP_EMIT" && make build ) > "$LOG_DIR/build-spinel.log" 2>&1 \
+        || { fail "spinel build failed (see $LOG_DIR/build-spinel.log)"; return 1; }
+    [[ -x "$SP_EMIT/build/bin/blog" ]] \
+        || { fail "spinel build produced no binary"; return 1; }
+    ok "spinel binary at $SP_EMIT/build/bin/blog"
+}
+
+WANT_SPINEL=0
+for _l in "${LANES[@]}"; do [[ "$_l" == spinel* ]] && WANT_SPINEL=1; done
+if (( WANT_SPINEL )); then
+    if ! build_spinel_binary; then
+        fail "dropping the spinel lanes"
+        NEW_LANES=(); for _l in "${LANES[@]}"; do [[ "$_l" == spinel* ]] || NEW_LANES+=("$_l"); done
+        LANES=("${NEW_LANES[@]}")
+    fi
+fi
+
 # THE SAME ROWS, ALWAYS. Copied on every run, not only on prepare: a
 # previous run's POSTs would otherwise leave the two databases apart, and
 # a benchmark whose lanes read different data is not one.
@@ -213,23 +332,40 @@ step "staging the seeded DB into the emit"
     || die "no seeded production DB at $ORACLE — run without --skip-prepare"
 mkdir -p "$EMIT/storage"
 cp "$ORACLE/storage/db/production.sqlite3" "$EMIT/storage/development.sqlite3"
+# The binary reads the same rows from its own tree. WAL and SHM go with
+# it: a stale -wal beside a freshly copied database is a different
+# database, and sqlite will happily read the pair.
+if [[ -d "$SP_EMIT" ]]; then
+    mkdir -p "$SP_EMIT/storage"
+    cp "$ORACLE/storage/db/production.sqlite3" "$SP_EMIT/storage/development.sqlite3"
+    rm -f "$SP_EMIT/storage/development.sqlite3-wal" "$SP_EMIT/storage/development.sqlite3-shm"
+fi
+rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
 
 # ── per-lane lifecycle ───────────────────────────────────────────────
 
 start_lane() {
     local lane="$1" port="$2"
     local log="$LOG_DIR/$lane.log"
+    local shape="$LOG_DIR/shape-$lane.txt"
     case "$lane" in
-        rails|rails-int|rails-nocache)
-            local yjit=1; [[ "$lane" == "rails-int" ]] && yjit=0
+        rails|rails-nocache)
+            # AS THEIR DOCKERFILE RUNS IT. `--deployed` is the whole
+            # difference: campfire's own worker formula instead of a
+            # pinned count, jemalloc, Thruster, resque-pool.
             local nocache=""; [[ "$lane" == "rails-nocache" ]] && nocache="--no-fragment-cache"
-            scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
-                --workers "$WORKERS" --threads "$THREADS" \
-                $( (( yjit )) || echo --no-yjit ) $nocache > "$log" 2>&1 &
+            scripts/campfire-oracle serve --deployed --out "$ORACLE" --port "$port" \
+                --threads "$THREADS" --shape-report "$shape" \
+                $nocache > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        ruby|ruby-int)
-            local yjit=1; [[ "$lane" == "ruby-int" ]] && yjit=0
+        rails-1p)
+            scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
+                --workers 1 --threads "$THREADS" --shape-report "$shape" \
+                > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        ruby|ruby-1p)
             # RAILS_ENV=production, for the same reason the oracle serves it
             # (see campfire-oracle's header: development measured 11.4 req/s
             # against production's 141.1 — the SAME app, 12x apart). The emit
@@ -241,9 +377,37 @@ start_lane() {
             # free today is not one to leave in a published comparison. The
             # database does not move with it: the emit resolves its path from
             # DB_PATH or the literal `storage/development.sqlite3`.
-            ( cd "$EMIT" && RAILS_ENV=production RUBY_YJIT_ENABLE="$yjit" RAILS_MAX_THREADS="$THREADS" \
-                bundle exec puma -p "$port" -w "$WORKERS" -t "$THREADS:$THREADS" \
+            #
+            # THE SAME ALLOCATOR AS THEIRS. Their Dockerfile preloads
+            # jemalloc; this lane is Ruby too, and a memory column that
+            # compared their allocator against ours would be measuring
+            # malloc rather than runtimes.
+            local jem; jem="$(find_jemalloc || true)"
+            local w=1
+            [[ "$lane" == "ruby" ]] && w="$(deployed_worker_count)"
+            echo "jemalloc=${jem:-ABSENT}" > "$shape"
+            echo "workers=$w" >> "$shape"
+            ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
+                RAILS_MAX_THREADS="$THREADS" ${jem:+LD_PRELOAD="$jem"} \
+                bundle exec puma -p "$port" -w "$w" -t "$THREADS:$THREADS" \
                 config.ru ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        spinel|spinel-1p)
+            # THE BINARY. One process either way — it has no cluster mode
+            # — so the lane pair is its OS worker count: autodetected for
+            # the deployed row, one for the diagnostic. No allocator knob:
+            # it does not use Ruby's.
+            local workers_env=()
+            if [[ "$lane" == "spinel-1p" ]]; then
+                workers_env=(SPINEL_WORKERS=1); echo "workers=1" > "$shape"
+            else
+                echo "workers=autodetected" > "$shape"
+            fi
+            ( cd "$SP_EMIT" && exec env "${workers_env[@]}" \
+                DATABASE_POOL_SIZE=64 BLOG_DB=storage/development.sqlite3 \
+                PORT="$port" SECRET_KEY_BASE="$SPINEL_SECRET" \
+                ./build/bin/blog ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
     esac
@@ -263,11 +427,11 @@ login_cookie() {
     local jar="$LOG_DIR/jar-$lane.txt"
     rm -f "$jar"
     case "$lane" in
-        rails|rails-int|rails-nocache)
+        rails|rails-nocache|rails-1p)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
-        ruby|ruby-int)
+        ruby|ruby-1p|spinel|spinel-1p)
             # No CSRF token scrape: the emitted tree's session form does
             # not gate on one, and asking for a token it never issues
             # would fail for a reason that has nothing to do with speed.
@@ -305,8 +469,69 @@ parse_wrk() {
 # ── run ──────────────────────────────────────────────────────────────
 
 PER_RUN="$OUT_DIR/per-run.json"
+COLD="$OUT_DIR/coldstart.json"
 : > "$PER_RUN"
 : > "$OUT_DIR/parity.txt"
+: > "$COLD"
+
+# ── cold start ───────────────────────────────────────────────────────
+#
+# The first measure on campfire's own list, and the one no page here has
+# ever carried. TWO numbers, because for a chat app they are different
+# questions:
+#
+#   accept_ms  exec -> the port answers at all. For the deployed Rails
+#              lane this is Thruster, its Puma master, and eight forked
+#              workers; for the binary it is one execve.
+#   page_ms    exec -> a signed-in GET of /rooms/1 comes back 200. This
+#              is the honest one: it includes the first render, which on
+#              a fragment-cached lane is the COLD cache (measured at
+#              503 ms against a 5 ms warm read), and on ours is the only
+#              render there is.
+#
+# The cookie is minted against a server that is then stopped, so the jar
+# outlives the boot it was made in — every lane signs itself in once,
+# before this, and reuses that jar here.
+cold_start() {
+    local lane="$1" port="$2" jar="$3" reps="${4:-3}"
+    local rep t0 t_accept t_page code
+    for rep in $(seq 1 "$reps"); do
+        t0="$(date +%s.%N)"
+        start_lane_quiet "$lane" "$port" || { fail "$lane cold-start boot $rep failed"; return 0; }
+        t_accept="$(date +%s.%N)"
+        # The room page, authenticated, until it is really a 200: a lane
+        # still booting answers 502, and a jar that has gone stale
+        # answers 302, which would time out here rather than silently
+        # recording a redirect as a rendered page.
+        local deadline=$(( $(date +%s) + 120 ))
+        while (( $(date +%s) < deadline )); do
+            code="$(curl -s -b "$jar" -o /dev/null -w '%{http_code}' \
+                    "http://127.0.0.1:$port/rooms/1" 2>/dev/null)"
+            [[ "$code" == "200" ]] && break
+            sleep 0.05
+        done
+        t_page="$(date +%s.%N)"
+        stop_lane
+        printf '{"target":"%s","rep":%d,"accept_ms":%s,"page_ms":%s,"page_code":"%s"}\n' \
+            "$lane" "$rep" \
+            "$(awk -v a="$t0" -v b="$t_accept" 'BEGIN{printf "%.1f", (b-a)*1000}')" \
+            "$(awk -v a="$t0" -v b="$t_page" 'BEGIN{printf "%.1f", (b-a)*1000}')" \
+            "$code" >> "$COLD"
+    done
+}
+
+# start_lane without the banner, for the cold-start reps.
+start_lane_quiet() { start_lane "$@" >/dev/null 2>&1; }
+
+stop_lane() {
+    [[ -z "$SERVER_PID" ]] && return 0
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    local i
+    for i in $(seq 1 100); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+}
 
 port="$BASE_PORT"
 for lane in "${LANES[@]}"; do
@@ -329,7 +554,7 @@ for lane in "${LANES[@]}"; do
     # state it is meant to, rather than one cold render smeared across a
     # short run.
     case "$lane" in
-        rails|rails-int)
+        rails|rails-1p)
             for ep in "${ENDPOINTS[@]}"; do
                 curl -s -b "$LOG_DIR/jar-$lane.txt" -o /dev/null "http://127.0.0.1:$port$ep"
             done
@@ -374,12 +599,115 @@ for lane in "${LANES[@]}"; do
         done
     done
 
-    kill -TERM "$SERVER_PID" 2>/dev/null || true
-    sleep 0.5
-    kill -KILL "$SERVER_PID" 2>/dev/null || true
-    SERVER_PID=""
+    stop_lane
+
+    # Cold start, after the load and with this lane's jar in hand. Redis
+    # is NOT flushed between reps, deliberately: restarting a campfire
+    # container does not empty the cache its own Procfile keeps in a
+    # separate process, so a warm Redis is what their restart actually
+    # sees. Rep 1 still pays a cold render for anything the load did not
+    # touch.
+    step "cold start $lane (3 boots)"
+    cold_start "$lane" "$port" "$LOG_DIR/jar-$lane.txt" 3
+
     port=$(( port + 1 ))
 done
+
+# ── the WebSocket phase ──────────────────────────────────────────────
+#
+# The measure campfire's own discussion calls the one that matters most —
+# "how many concurrent WebSocket connections a given box will hold" — and
+# the one this page has never carried, because it lives in a different
+# harness. It still does: `scripts/campfire-cable-sweep` drives both
+# lanes with one client, and duplicating any of it here would be a second
+# implementation of the thing that makes the comparison honest. This runs
+# it and folds its results in.
+#
+# PINNED TO FOUR CORES, which is once.com/campfire's own 1,000-user tier
+# (4 CPU / 8 GB). Unpinned it would measure this box instead of a tier,
+# and campfire's puma.rb would size its worker count to the whole
+# machine while the row claimed to be a tier.
+run_socket_phase() {
+    local sweep="$REPO_ROOT/scripts/campfire-cable-sweep"
+    [[ -x "$sweep" ]] || { fail "no campfire-cable-sweep — skipping the socket phase"; return 0; }
+
+    local db="${SOCKET_DB:-$ORACLE/storage/db/production.sqlite3}"
+    local cookies="${SOCKET_COOKIES:-$ORACLE/tmp/session-cookies.txt}"
+    if [[ ! -f "$cookies" ]]; then
+        step "minting $USERS session cookies for the socket phase"
+        scripts/campfire-oracle cookies --out "$ORACLE" --count "$USERS" >/dev/null 2>&1 \
+            || { fail "could not mint cookies — skipping the socket phase"; return 0; }
+    fi
+    [[ -f "$cookies" ]] || { fail "no cookie file at $cookies — skipping the socket phase"; return 0; }
+
+    # Rooms come from the seed, not from a default: the sweep spreads N
+    # sockets over ceil(N / per-room) rooms and a room the seed does not
+    # have answers 302, which reads as a silent zero delivery.
+    local biggest=0 n
+    for n in $SOCKET_SIZES; do (( n > biggest )) && biggest=$n; done
+    local per_room=$(( (biggest + ROOMS - 1) / ROOMS ))
+    (( per_room < 1 )) && per_room=1
+
+    # campfire's own formula at the tier's core count, which is what its
+    # puma.rb would compute inside a 4-CPU container.
+    local tier_cpus rails_workers
+    tier_cpus="$(awk -F- '{ if (NF==2) print $2-$1+1; else print 1 }' <<< "$SOCKET_CPUS")"
+    rails_workers="$(ruby -e 'print (ARGV[0].to_i * 0.666).ceil' "$tier_cpus")"
+
+    if [[ -x "$SP_EMIT/build/bin/blog" ]]; then
+        step "socket phase: the binary, $SOCKET_SIZES sockets on cpus $SOCKET_CPUS"
+        "$sweep" --lane binary --bin "$SP_EMIT/build/bin/blog" \
+            --db "$db" --cookies "$cookies" --cpus "$SOCKET_CPUS" \
+            --workers "$tier_cpus" --sizes "$SOCKET_SIZES" --per-room "$per_room" \
+            --secret "$SPINEL_SECRET" --out "$OUT_DIR/sockets-binary" \
+            > "$LOG_DIR/sockets-binary.log" 2>&1 \
+            || fail "the binary's socket lane failed (see $LOG_DIR/sockets-binary.log)"
+    else
+        fail "no spinel binary — the socket phase has no binary lane"
+    fi
+
+    step "socket phase: rails, $SOCKET_SIZES sockets on cpus $SOCKET_CPUS ($rails_workers workers)"
+    "$sweep" --lane rails --oracle "$ORACLE" \
+        --db "$db" --cookies "$cookies" --cpus "$SOCKET_CPUS" \
+        --workers "$rails_workers" --threads "$THREADS" \
+        --sizes "$SOCKET_SIZES" --per-room "$per_room" \
+        --out "$OUT_DIR/sockets-rails" \
+        > "$LOG_DIR/sockets-rails.log" 2>&1 \
+        || fail "the rails socket lane failed (see $LOG_DIR/sockets-rails.log)"
+
+    # One file for the renderer, lanes labelled the way the HTTP rows are.
+    ruby - "$OUT_DIR/sockets-binary/results.jsonl" "$OUT_DIR/sockets-rails/results.jsonl" \
+           "$OUT_DIR/sockets.json" <<'RUBY'
+require "json"
+binary, rails, out = ARGV
+rows = []
+{ "spinel" => binary, "rails" => rails }.each do |lane, path|
+  next unless File.exist?(path)
+  File.readlines(path, chomp: true).reject(&:empty?).each do |line|
+    d = JSON.parse(line) rescue next
+    rows << {
+      "target" => lane, "sockets" => d["sockets"],
+      "subscribers_per_room" => d["subscribers_per_room"],
+      "storm_s" => d.dig("storm", "seconds"), "storm_cpu_s" => d.dig("storm", "cpu_seconds"),
+      "failed" => d.dig("storm", "failed"),
+      "idle_cores" => d.dig("idle", "cpu_cores"),
+      "rss_mb" => d.dig("idle", "rss_mb"), "pss_mb" => d.dig("idle", "pss_mb"),
+      "pings" => d.dig("idle", "pings"),
+      "delivered" => d.dig("chat", "delivered"), "expected" => d.dig("chat", "expected"),
+      "frame_p50_ms" => d.dig("chat", "frame_p50_ms"), "frame_p99_ms" => d.dig("chat", "frame_p99_ms"),
+      "chat_cores" => d.dig("chat", "cpu_cores"),
+      "driver_max_pass_ms" => d.dig("chat", "driver_max_pass_ms"),
+      "teardown_cpu_s" => d.dig("teardown", "cpu_seconds"),
+      "server" => d["server"],
+    }
+  end
+end
+File.write(out, JSON.pretty_generate(rows) + "\n") unless rows.empty?
+RUBY
+    [[ -f "$OUT_DIR/sockets.json" ]] && ok "socket phase -> $OUT_DIR/sockets.json"
+    return 0
+}
+(( SOCKETS )) && run_socket_phase
 
 # ── provenance ───────────────────────────────────────────────────────
 
@@ -451,11 +779,33 @@ env["notes"] = [
   "The emitted tree has no fragment cache, so <code>rails-nocache</code> " \
   "is the lane that compares renderers and <code>rails</code> is the lane " \
   "that says what a deployment costs. Publish both or publish neither.",
-  "Every lane runs ONE Puma worker with 5 threads. That is not campfire's " \
-  "deployed shape — its <code>config/puma.rb</code> sizes itself to the " \
-  "box — it is the shape in which both lanes are one process, so the " \
-  "comparison is per-process rather than a measurement of core count.",
+  "The deployed lanes are what each project would run on this box. " \
+  "<code>rails</code> is once-campfire AS ITS OWN DOCKERFILE RUNS IT: " \
+  "Thruster in front of Puma, <code>(processor_count * 0.666).ceil</code> " \
+  "workers x 5 threads from its own <code>config/puma.rb</code>, jemalloc " \
+  "preloaded, resque-pool alongside. <code>ruby</code> is the CRuby emit " \
+  "in the same Puma shape with the same allocator; <code>spinel</code> is " \
+  "the binary with its workers autodetected.",
+  "The <code>-1p</code> lanes are the diagnostic: one process each, no " \
+  "proxy and no job runner. They exist because a deployed number cannot " \
+  "say WHY it landed where it did — Puma's five threads share a GVL where " \
+  "the binary's workers do not, so these rows separate \"their runtime is " \
+  "slower\" from \"we gave them fewer cores\".",
+  "Known omissions, stated rather than discovered: the WebSocket phase's " \
+  "rails lane runs Puma with campfire's worker count and its allocator but " \
+  "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
 ]
+
+# WHAT EACH LANE ACTUALLY GOT. A deployed lane that claimed jemalloc and
+# ran without it would be the exact failure this shape is meant to end,
+# so the achieved parts travel with the data rather than the intent.
+shapes = {}
+Dir[File.join(File.dirname(out_path), "logs", "shape-*.txt")].sort.each do |f|
+  lane = File.basename(f, ".txt").sub(/\Ashape-/, "")
+  parts = File.readlines(f, chomp: true).reject(&:empty?)
+  shapes[lane] = parts unless parts.empty?
+end
+env["lane_shapes"] = shapes unless shapes.empty?
 
 File.write(out_path, JSON.pretty_generate(env) + "\n")
 RUBY
@@ -555,13 +905,16 @@ RUBY
 # are recovered from, so that output is truncated units rather than a
 # program -- also not a status worth recording.
 # ---------------------------------------------------------------------
-SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
 pack_spinel_tree() {
-    step "transpiling campfire → spinel (archive only, not benchmarked)"
-    if ! cargo run --quiet --release --bin roundhouse -- --target spinel "$APP" \
-            -o "$SP_EMIT" > "$LOG_DIR/emit-spinel.log" 2>&1; then
-        fail "strict spinel emit failed (see $LOG_DIR/emit-spinel.log) — tree not packed"
-        return 0
+    # Already emitted (and built) above when a spinel lane ran; only
+    # re-emit for a run that asked for no spinel lane at all.
+    if (( WANT_SPINEL == 0 )); then
+        step "transpiling campfire → spinel (archive only)"
+        if ! cargo run --quiet --release --bin roundhouse -- --target spinel "$APP" \
+                -o "$SP_EMIT" > "$LOG_DIR/emit-spinel.log" 2>&1; then
+            fail "strict spinel emit failed (see $LOG_DIR/emit-spinel.log) — tree not packed"
+            return 0
+        fi
     fi
 
     local rh sp build_status
@@ -595,16 +948,18 @@ Emitted by roundhouse \`$rh\` from once-campfire. Strict emit, no
     packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
     $build_status
 
-## What this is, and is not
+## What this is
 
-This tree is NOT benchmarked and, at the time of writing, does not
-compile: campfire is the third application we emit for spinel and the
-walls in front of it are ours, not spinel's. The status line above says
-where it stood on the day it was packed.
+The tree the `spinel` lanes on the benchmark page were built from. It
+compiles, links and serves: the same binary answers campfire's room
+pages under `wrk` and holds thousands of WebSocket connections under
+`scripts/campfire-cable-sweep`. Until 2026-09-04 this archive carried a
+paragraph saying it did not compile — accurate when it was written, and
+long outlived by the tree beside it.
 
-It is published so the history exists. When a wall here turns out to be
-spinel's rather than ours, this is the tree to point the issue at, and
-the dated copy is the one that will not have moved underneath it.
+The dated copy is still the point: when a wall here turns out to be
+spinel's rather than ours, this is the tree to point the issue at, and it
+will not have moved underneath the issue.
 
 ## Build it
 
