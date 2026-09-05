@@ -299,16 +299,34 @@ diffs between two IRs drop out from plain `diff` across the outputs.
   must not gate unrelated work: `build-spinel`,
   `framework-tests-spinel`, `toolchain-spinel`, `compare-spinel`,
   `smoke-spinel`, `smoke-campfire`, and `campfire-compare-spinel`,
-  which runs as two legs. The cost: an advisory failure is invisible
+  which runs as three legs. The cost: an advisory failure is invisible
   in the run's conclusion. Read the jobs, not the conclusion.
-- **`campfire-compare-spinel (default)` and `(minor-gc)`** serve the
-  same binary, from the same `build-spinel` artifact, through the same
-  Rails-oracle walk; the second under `SPINEL_GC_MINOR=1`, spinel's
-  generational collector, which is opt-in until it goes default-on.
-  matz asked for that leg (matz/spinel#4260): campfire is the
-  retained-heap shape the default-on decision lacks. A red `minor-gc`
-  beside a green `default` is the collector alone — reduce it, file it
-  upstream, and say minor-GC-only in the title.
+- **`campfire-compare-spinel (default)`, `(minor-gc)` and
+  `(verify-gen)`** serve the same binary, from the same `build-spinel`
+  artifact, through the same Rails-oracle walk. `minor-gc` adds
+  `SPINEL_GC_MINOR=1`, spinel's generational collector, which is opt-in
+  until it goes default-on. matz asked for that leg
+  (matz/spinel#4260): campfire is the retained-heap shape the
+  default-on decision lacks. A red `minor-gc` beside a green `default`
+  is the collector alone — reduce it, file it upstream, and say
+  minor-GC-only in the title.
+- **`(verify-gen)` is why the other two can be believed.** `minor-gc`
+  only fails when a missed write barrier reaches the page;
+  `SPINEL_GC_VERIFY_GEN=1` re-marks the whole heap after every minor
+  cycle and makes the runtime print the young object the barrier failed
+  to record, with the scan hook of the old object holding it — the
+  reduction, written by the collector, which
+  `scripts/campfire-compare` now greps out of the emit's log and fails
+  on (it used to go to a log deleted on success). It is not a
+  replacement: the check keeps alive what the minor missed, so it
+  reports the defect rather than crashing on it, and nothing ships in
+  that mode. matz/spinel#4311 is the shape it produces.
+- **All three legs attest what the collector did.** The emit is stopped
+  before the diff and `Tep.on_shutdown` prints `GC.stat` under
+  `TEP_GC_STAT=1`; a `minor-gc` leg reporting `remembered_peak=0` fails,
+  because a walk that never took a minor cycle with a live remembered
+  set is green about nothing. `full_runs` cannot stand in for it — it
+  counts full sweeps, not marks.
 - **`campfire-conformance` is blocking** — pinned input, so no churn
   to excuse noise.
 

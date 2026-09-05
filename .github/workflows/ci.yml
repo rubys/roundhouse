@@ -793,7 +793,7 @@ jobs:
   # in the run conclusion, so check these legs BY NAME when campfire
   # moves.
   #
-  # Two legs, one definition. `default` serves the binary with spinel's
+  # Three legs, one definition. `default` serves the binary with spinel's
   # whole-heap mark; `minor-gc` serves it under SPINEL_GC_MINOR=1, the
   # generational collector that is opt-in until it goes default-on.
   # matz asked for this leg by name (matz/spinel#4260): the default-on
@@ -806,6 +806,23 @@ jobs:
   # it upstream, and say minor-GC-only in the title. Only the served
   # binary sees the variable — scripts/campfire-compare exports it
   # explicitly, 0 or 1, on the launch line and nowhere else.
+  #
+  # `verify-gen` is the third leg, and it is why the other two can be
+  # believed. SPINEL_GC_MINOR alone only fails when a missed write
+  # barrier reaches the PAGE; SPINEL_GC_VERIFY_GEN=1 re-marks the whole
+  # heap after every minor cycle and makes the runtime name the young
+  # object the barrier did not record and the scan hook of the old
+  # object holding it — the reduction, written by the collector. It is
+  # NOT a replacement for `minor-gc`: the check keeps alive what the
+  # minor missed, so it reports the defect instead of crashing on it,
+  # and it is not the mode anything ships in. matz/spinel#4311 is the
+  # shape this produces (a `minor-GC-only` title, fixed the same day).
+  #
+  # All three legs also carry the collector's own attestation now: the
+  # emit is stopped before the diff and Tep.on_shutdown prints GC.stat,
+  # and a `minor-gc` leg reporting remembered_peak=0 FAILS — a walk that
+  # never took a minor cycle with a live remembered set is green about
+  # nothing.
   campfire-compare-spinel:
     name: campfire-compare-spinel (${{ matrix.gc }})
     needs: build-spinel
@@ -820,6 +837,8 @@ jobs:
             flag: ''
           - gc: minor-gc
             flag: --minor-gc
+          - gc: verify-gen
+            flag: --verify-gen
     services:
       redis:
         image: redis

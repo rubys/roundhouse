@@ -50,6 +50,22 @@
 #                 that appears ONLY under this flag is the report matz
 #                 wants most: file it upstream with a reduction and say
 #                 minor-GC-only in the title.
+#   --verify-gen  With --spinel: serve under SPINEL_GC_VERIFY_GEN=1, which
+#                 implies the minor mark and re-marks the whole heap after
+#                 every minor cycle, so the RUNTIME names a young object
+#                 the write barrier failed to record (and the scan hook of
+#                 the old object holding it) instead of waiting for the
+#                 miss to reach the page. NOT the shipped mode: the check
+#                 keeps alive what the minor missed, so it hides the crash
+#                 it reports. A third leg beside --minor-gc, never a
+#                 replacement for it.
+#
+# EITHER WAY the emit's log is scanned for the runtime's own
+# `GC generational check` lines and the run fails on them, keeping the
+# dumps: that output goes to the binary's STDERR, which lands in
+# $DUMPS/emit-server.log, which used to be deleted on success and never
+# read. A reduction the collector wrote for us is the report
+# matz/spinel#4260 asked us to keep filing.
 #
 # Requires: the Rails oracle prepared at build/campfire-oracle
 # (scripts/campfire-oracle prepare), redis-server running (Action Cable's
@@ -64,6 +80,7 @@ APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
 MINOR_GC=0
+VERIFY_GEN=0
 OUT=""
 KEEP=0
 REUSE=""
@@ -74,7 +91,11 @@ while [[ $# -gt 0 ]]; do
         --keep)   KEEP=1; shift ;;
         --spinel) LANE=spinel; shift ;;
         --minor-gc) MINOR_GC=1; shift ;;
-        -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+        # VERIFY_GEN implies the minor mark in the runtime
+        # (lib/sp_gc.c's constructor sets sp_gc_minor_on), so this lane
+        # says so on its own banner rather than leaving it implied.
+        --verify-gen) VERIFY_GEN=1; MINOR_GC=1; shift ;;
+        -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
         *) APP="$1"; shift ;;
     esac
 done
@@ -86,6 +107,9 @@ die()  { fail "$1"; exit 1; }
 
 if [[ $MINOR_GC -eq 1 && "$LANE" != spinel ]]; then
     die "--minor-gc needs --spinel: SPINEL_GC_MINOR is read by the compiled binary, nothing on the ruby lane"
+fi
+if [[ $VERIFY_GEN -eq 1 && "$LANE" != spinel ]]; then
+    die "--verify-gen needs --spinel: SPINEL_GC_VERIFY_GEN is read by the compiled binary, nothing on the ruby lane"
 fi
 
 ORACLE_PID=""
@@ -191,9 +215,10 @@ if [[ "$LANE" == spinel ]]; then
     # lane's whole-heap mark is then an attestation, not an assumption
     # about the caller's environment (scripts/lobsters-spinel-driver.rb
     # learned this when the upstream default flipped under it).
-    step "booting the emit on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC)"
+    step "booting the emit on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC SPINEL_GC_VERIFY_GEN=$VERIFY_GEN)"
     ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" \
-        SPINEL_GC_MINOR="$MINOR_GC" exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
+        SPINEL_GC_MINOR="$MINOR_GC" SPINEL_GC_VERIFY_GEN="$VERIFY_GEN" \
+        TEP_GC_STAT=1 exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
 else
     step "booting the emit on :$EMIT_PORT"
@@ -230,6 +255,66 @@ drive() {
 }
 drive rails "$ORACLE_PORT"
 drive emit "$EMIT_PORT"
+
+# ── 4b. the collector's own report ────────────────────────────────────
+# Under --verify-gen the runtime re-marks the whole heap after every
+# minor cycle and prints, to the binary's STDERR, every young object
+# that was reachable only through an old one the write barrier did not
+# record -- plus the scan hook of each old object holding one, which
+# names the type. That is the reduction matz/spinel#4260 asks us to keep
+# filing, written by the collector itself; before this it went to
+# emit-server.log and emit-server.log was deleted on success.
+#
+# The scan is unconditional. On the default and --minor-gc legs the
+# check is off and there is nothing to find, so it costs a grep and
+# cannot go stale by being forgotten on the leg that needs it.
+# The emit is stopped HERE rather than at EXIT, for two reasons: a
+# teardown collection is still a collection (its generational check
+# belongs in the scan below), and Tep.on_shutdown prints the collector's
+# attestation on its way out, which is no use in a log nobody reads
+# before deleting it.
+if [[ "$LANE" == spinel && -n "$EMIT_PID" ]]; then
+    step "stopping the emit and reading the collector's attestation"
+    kill "$EMIT_PID" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        kill -0 "$EMIT_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -9 "$EMIT_PID" 2>/dev/null || true
+    EMIT_PID=""
+    if grep -q "^tep: GC.stat" "$DUMPS/emit-server.log"; then
+        grep "^tep: GC.stat" "$DUMPS/emit-server.log" | tail -1
+        # remembered_peak is the only line item that distinguishes a
+        # generational mark from a whole-heap one; a minor-gc leg that
+        # reports 0 collected nothing with a live remembered set, and
+        # its green says nothing about the barrier.
+        if [[ $MINOR_GC -eq 1 ]] && \
+           grep -q "^tep: GC.stat.*remembered_peak=0$" "$DUMPS/emit-server.log"; then
+            fail "remembered_peak=0 under SPINEL_GC_MINOR=1: this walk never took a"
+            fail "minor cycle with a live remembered set, so its green is not evidence"
+            echo "  dumps kept at $DUMPS"
+            die "the leg is not attesting what matz/spinel#4260 asked it to attest"
+        fi
+    else
+        fail "the emit printed no GC attestation (TEP_GC_STAT=1, Tep.on_shutdown)"
+        fail "-- it was killed before its shutdown hook ran, or the hook is gone"
+        echo "  dumps kept at $DUMPS"
+        die "a leg that cannot say what the collector did is not the leg #4260 asked for"
+    fi
+fi
+
+if [[ "$LANE" == spinel ]]; then
+    step "scanning the emit's log for the collector's generational check"
+    if grep -q "GC generational check" "$DUMPS/emit-server.log"; then
+        fail "the runtime's generational check FIRED -- a write barrier missed a store"
+        grep -E "GC generational check|holder scan=" "$DUMPS/emit-server.log" | head -40
+        echo
+        echo "  dumps kept at $DUMPS"
+        die "file this upstream with minor-GC-only in the title (matz/spinel#4260); \
+the holder scan= addresses above resolve with \`nm $OUT/build/blog\`"
+    fi
+    ok "no missed barrier reported by the runtime"
+fi
 
 # ── 5. normalize + diff ───────────────────────────────────────────────
 step "diffing the artifacts"

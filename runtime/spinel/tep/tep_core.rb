@@ -54,9 +54,25 @@ module Tep
 
   # Shutdown hook. Tep::Server::Threaded calls Tep.on_shutdown after
   # the accept loop breaks on SIGTERM/SIGINT. Upstream tep fans this
-  # out to run_end / Events hooks; roundhouse has none, so it's a
-  # no-op (defined so the call resolves rather than emitting 0).
+  # out to run_end / Events hooks; roundhouse has none.
+  #
+  # What it does carry is the collector's attestation, on TEP_GC_STAT=1.
+  # matz/spinel#4260's advisory SPINEL_GC_MINOR=1 leg is only evidence
+  # if the walk actually COLLECTED: a green compare cannot tell "the
+  # write barrier held" from "nothing was ever marked". `remembered_peak`
+  # separates them -- 0 with the generational mark off, non-zero with it
+  # on and a live remembered set. `full_runs` does not: it counts full
+  # SWEEPS (every SP_GC_FULL_INTERVAL cycles), not marks.
   def self.on_shutdown
+    v = ENV["TEP_GC_STAT"] || ""
+    if v != "" && v != "0"
+      g = GC.stat
+      puts "tep: GC.stat cycle=" + g["cycle"].to_s +
+           " full_runs=" + g["full_runs"].to_s +
+           " remembered=" + g["remembered"].to_s +
+           " remembered_peak=" + g["remembered_peak"].to_s
+      $stdout.flush
+    end
     0
   end
 
