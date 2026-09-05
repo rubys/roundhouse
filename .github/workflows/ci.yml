@@ -841,8 +841,12 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: System libvips + libsqlite3-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev
+      - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        # libjemalloc-dev because the emitted spin.toml names jemalloc as
+        # this program's allocator and `spin build` links `-ljemalloc`.
+        # The DEV package, not libjemalloc2: the runtime library LD_PRELOAD
+        # uses cannot be linked against.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1205,9 +1209,12 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: Install libsqlite3-dev
+      - name: Install libsqlite3-dev + libjemalloc-dev
+        # jemalloc for the same reason the emitted README now lists it:
+        # spin.toml names it as the allocator, so the link needs the dev
+        # package present.
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
