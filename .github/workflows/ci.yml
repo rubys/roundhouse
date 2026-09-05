@@ -1554,9 +1554,9 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: Install libsqlite3-dev
+      - name: Install libsqlite3-dev + libjemalloc-dev
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1727,9 +1727,9 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: Install libsqlite3-dev
+      - name: Install libsqlite3-dev + libjemalloc-dev
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -1825,9 +1825,9 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: Install libsqlite3-dev
+      - name: Install libsqlite3-dev + libjemalloc-dev
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
