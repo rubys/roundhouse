@@ -210,7 +210,12 @@ storage/development.sqlite3: db/seed.sql
 # auto-linked `sp_net` — there's no vendored C extension to compile or
 # link (the former runtime/tep/sphttp.c + `@TEP_SPHTTP_O@` placeholder
 # were retired in the sp_net migration, matz/spinel#1466).
-$(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)
+# spin.toml is a prerequisite because it CHANGES THE BINARY: it carries
+# the package dependencies and, since matz/spinel#4344, the allocator
+# this program links. Without it here, editing the manifest leaves make
+# with nothing to do and the next `ldd` reads a binary built before the
+# edit — which is how this was found.
+$(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC) spin.toml
 	@mkdir -p $(BUILD)
 	$(SPINEL) main.rb $(RBS_FLAG) -o $@
 
