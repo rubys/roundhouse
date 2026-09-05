@@ -226,6 +226,44 @@ skip_lane() {   # $1 = lane, $2 = stage, $3 = reason, $4 = log to tail
 }
 
 
+# HOW a server died, not just that it did. A lane whose process vanished
+# mid-run used to leave three empty wrk outputs, a median computed from
+# nothing, and a log holding only the startup banner — the death itself was
+# never written down anywhere, so an intermittent one could not be chased.
+# The exit status is the only witness a silent crash leaves: 128+N means
+# signal N, and SIGSEGV/SIGABRT/SIGKILL are three different bugs.
+#
+# `kill -0` is not the liveness test here. It succeeds for a zombie — a
+# child that has exited and is waiting to be reaped — which is exactly the
+# state a just-crashed server is in, so the naive check reports the corpse
+# as alive.
+server_alive() {
+    [[ -n "$SERVER_PID" ]] || return 1
+    kill -0 "$SERVER_PID" 2>/dev/null || return 1
+    [[ "$(ps -p "$SERVER_PID" -o stat= 2>/dev/null)" != *Z* ]]
+}
+
+# Returns 0 while the server is up. When it is gone, reaps it, decodes the
+# status, and records the death in skipped.json so the published page says
+# a lane died and how, rather than showing a hole.
+reap_server() {   # $1 = lane, $2 = stage
+    server_alive && return 0
+    [[ -n "$SERVER_PID" ]] || return 1
+    local st=0
+    wait "$SERVER_PID" 2>/dev/null || st=$?
+    SERVER_PID=""
+    local how
+    if (( st > 128 )); then
+        local sig=$(( st - 128 ))
+        how="killed by SIG$(kill -l "$sig" 2>/dev/null || echo "$sig") (status $st)"
+    else
+        how="exited with status $st"
+    fi
+    fail "$1: server gone during $2 — $how"
+    skip_lane "$1" "$2" "server $how" "$LOG_DIR/$1.log"
+    return 1
+}
+
 step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
@@ -752,7 +790,7 @@ for lane in "${LANES[@]}"; do
             : > "$rss_out"
             # Two columns per sample: RSS sum, then PSS sum (empty
             # where the kernel has no smaps_rollup).
-            ( while kill -0 "$SERVER_PID" 2>/dev/null; do
+            ( while server_alive; do
                   echo "$(sum_rss_kb "$SERVER_PID") $(sum_pss_kb "$SERVER_PID")" >> "$rss_out"
                   sleep 1
               done ) &
@@ -766,6 +804,15 @@ for lane in "${LANES[@]}"; do
             printf '{"target":"%s","workers":%d,"endpoint":"%s","run":%d,"rss_kb":%s,"pss_kb":%s,%s}\n' \
                 "$lane" "$WORKERS" "$ep" "$run" "${rss:-0}" "${pss:-null}" \
                 "$(parse_wrk "$wrk_out" | sed 's/^{//;s/}$//')" >> "$PER_RUN"
+            # AFTER the row, not before. A cell whose server died still has
+            # to be written — with the null req_sec parse_wrk gives for a
+            # refused connection — because that is how bench-report tells
+            # "stopped partway" from "never ran": it compares rows attempted
+            # against rows that carry a number. Skipping the row instead
+            # makes a dead lane look complete but short, and the banner
+            # never fires. skipped.json then supplies the reason the row
+            # cannot: which signal.
+            reap_server "$lane" "measure $ep run=$run/$RUNS" || break 2
         done
     done
 

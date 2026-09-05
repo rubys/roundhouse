@@ -615,7 +615,22 @@ unless never_ran.empty? && dead_targets.empty? && partial.empty?
     counted = tally[:total] > 0 ? " (#{tally[:measured]} of #{tally[:total]} timed runs recorded)" : ''
     verb = dead_targets.include?(t) ? 'recorded no measurements' :
            'stopped answering partway through its cells'
-    "<li><code>#{t}</code> #{verb}#{counted}</li>"
+    line = "<li><code>#{t}</code> #{verb}#{counted}"
+    # A lane whose SERVER died mid-run writes the exit status to
+    # skipped.json, and this is the branch that lane lands in — it has
+    # partial cells, so it is not `never_ran`. Reading skipped_by here is
+    # what stops the banner saying "stopped answering partway" while
+    # discarding the one fact worth having: SIGSEGV, SIGABRT and SIGKILL
+    # are three different bugs, and an intermittent crash cannot be chased
+    # without knowing which.
+    recs = skipped_by[t]
+    unless recs.empty?
+      reasons = recs.map { |r| r['reason'].to_s.strip }.reject(&:empty?).uniq
+      line << ": <code>#{esc.(reasons.join('; '))}</code>" unless reasons.empty?
+      tail = recs.flat_map { |r| Array(r['log_tail']) }.join("\n").strip
+      line << %(<details><summary>last lines of its log</summary><pre style="white-space:pre-wrap;font-size:0.85em">#{esc.(tail)}</pre></details>) unless tail.empty?
+    end
+    line << '</li>'
   end
   missing = never_ran.size + dead_targets.size
   headline = if requested_targets.empty?
