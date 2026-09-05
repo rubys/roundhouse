@@ -51,6 +51,11 @@ behave differently from the one this archive was generated against.
 - [spinel](https://github.com/matz/spinel) — \`spinel\` and \`spin\` on PATH
   (the repo's \`bin/\` after \`make\`)
 - A C toolchain + SQLite headers (\`libsqlite3-dev\`) — the binary links \`-lsqlite3\`
+- jemalloc headers (\`libjemalloc-dev\`) — \`spin.toml\` names jemalloc as this
+  program's allocator, and a server is the shape where that is worth having.
+  Note the DEV package: the \`libjemalloc2\` runtime alone is what \`LD_PRELOAD\`
+  uses and cannot be linked against. Without it \`spin build\` stops at
+  \`cannot find -ljemalloc\` rather than quietly building something slower.
 - Node.js 18+ — for the End-to-end suite
 
 ## Build
