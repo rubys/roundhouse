@@ -38,7 +38,8 @@
 # `bind_text` is unblocked at the FFI layer (spinel #576 +
 # matz/spinel#686 doc fix).
 #
-# Module-level state is a single `@pool` (ActiveRecord ConnectionPool of N
+# Module-level state is `@pools`, N independent DbPool shards of M opaque
+# dbh ptrs each (see `configure` for why it is sharded rather than one
 # opaque dbh ptrs). `Db.current_conn` reads Thread.current[:db_conn] when
 # set (request-scoped checkout) and falls back to the pool's first free
 # handle otherwise (single-fiber test/dev mode). Existing call sites don't
@@ -757,7 +758,7 @@ module Db
   # pool object (DbPool, below) keeps its connections in an INSTANCE-ivar
   # array, which spinel types as a concrete DbConn PtrArray (same shape as
   # DbConn#@entries) — preserving the object tag.
-  @pool = nil
+  @pools = nil
   # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
   # accumulate the SQL each prepare/exec issues. Kept in parity with the
   # cruby shim (db_cruby.rb); see `capture_sql` below.
@@ -780,7 +781,57 @@ module Db
     if !ev.nil? && ev != ""
       n = ev.to_i
     end
-    @pool = DbPool.new(path, n)
+    # SHARDED, because one pool means one Mutex on every request and that
+    # mutex — not the queries under it — was what pinned the server to a
+    # couple of OS workers. `with_connection` takes the pool lock twice per
+    # request (lease, release) and holds it for a few instructions; measured
+    # on campfire's cheapest authenticated route at 12 workers, that cost
+    # 2,449 req/s on 1.32 cores. Taking the same lock once per THREAD instead
+    # of once per request gave 15,648 req/s on 8.05 cores, evenly spread over
+    # all twelve — 6x, from deleting contention rather than work.
+    #
+    # A thread cannot simply KEEP a connection, which is what that experiment
+    # did: campfire holds a green thread per WebSocket, thousands of them, and
+    # pinning a handle to each would exhaust any pool. So the pool is split
+    # into independent shards and a thread is assigned one for its life. The
+    # shard is a whole DbPool — the same class, unchanged — so this adds no
+    # new locking of its own: a thread leases from and releases to one shard,
+    # blocks only on that shard's own condition variable, and is woken only by
+    # its own shard's releases. There is no cross-shard wakeup to lose.
+    #
+    # The cost of the split is that a shard can be busy while another is idle.
+    # Threads are assigned round-robin, so shards carry equal numbers of them;
+    # sizing keeps at least 4 handles per shard, since a shard of one is a
+    # mutex with extra steps.
+    stripes = n / 4
+    stripes = 1 if stripes < 1
+    stripes = 8 if stripes > 8
+    @pools = []
+    per = n / stripes
+    per = 1 if per < 1
+    i = 0
+    while i < stripes
+      @pools.push(DbPool.new(path, per))
+      i += 1
+    end
+    @assign_lock = Mutex.new
+    @next_pool = 0
+  end
+
+  # The shard this thread uses, chosen once and remembered. Round-robin
+  # under a lock taken ONCE per thread — the thing being avoided is a lock
+  # per request, not a lock ever.
+  def self.pool_for_thread
+    pi = Thread.current[:db_pool]
+    return @pools[pi] if pi != nil
+    n = 0
+    @assign_lock.synchronize do
+      n = @next_pool
+      @next_pool = n + 1
+    end
+    pi = n % @pools.length
+    Thread.current[:db_pool] = pi
+    @pools[pi]
   end
 
   # Replace this database's contents with those of the file at `src_path`,
@@ -852,7 +903,7 @@ module Db
   def self.current_conn
     c = Thread.current[:db_conn]
     return c if !c.nil?
-    @pool.first
+    @pools[0].first
   end
 
   # Request-scoped connection lease for the thread-per-connection
@@ -865,8 +916,9 @@ module Db
   # a raise inside the block leaks the lease — acceptable on the happy
   # path; revisit if the dispatch path starts raising under load.
   def self.with_connection
-    idx = @pool.lease
-    conn = @pool.conn(idx)
+    pool = pool_for_thread
+    idx = pool.lease
+    conn = pool.conn(idx)
     Thread.current[:db_conn] = conn
     # Rails wraps every request in the query cache; so does this lease.
     conn.qc_begin
@@ -878,14 +930,18 @@ module Db
     # a stmt it refused to cache is a stmt nothing can ever finalize.
     conn.trim!
     Thread.current[:db_conn] = nil
-    @pool.release(idx)
+    pool.release(idx)
     result
   end
 
   def self.close
-    return if @pool.nil?
-    @pool.close_all
-    @pool = nil
+    return if @pools.nil?
+    i = 0
+    while i < @pools.length
+      @pools[i].close_all
+      i += 1
+    end
+    @pools = nil
   end
 
   # DDL + INSERT/UPDATE/DELETE. `sqlite3_exec` doesn't return rows;
