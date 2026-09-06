@@ -56,40 +56,77 @@ use crate::app::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
-/// (constant, stubbed method, keyed setter, catch-all setter).
+/// One stubbable method, and everything the emit needs to serve it.
 ///
-/// One row per method that has a slot. The table is the whole
-/// registration surface: a method absent from it keeps its mocha
-/// spelling and its loud failure.
-///
-/// Two setters because mocha has two shapes and they answer different
-/// questions — `.with(h).returns(v)` files an answer under `h`, and a
-/// bare `.returns(v)` answers for every argument.
-const STUBBABLE: &[(&str, &str, &str, &str)] =
-    &[("Resolv", "getaddresses", "stub_getaddresses", "stub_getaddresses_any")];
+/// The table is the whole registration surface: a method absent from it
+/// keeps its mocha spelling and its loud failure.
+struct Stubbable {
+    konst: &'static str,
+    method: &'static str,
+    /// `.with(a).returns(v)` — files an answer under `a`.
+    keyed: &'static str,
+    /// A bare `.returns(v)` — answers for every argument.
+    any: &'static str,
+    /// Drops every installed stub; the helper runs this between tests.
+    clear: &'static str,
+    /// The runtime file that DEFINES the slot. The helper requires it
+    /// so the clear call is unconditional — see `stub_preamble`.
+    require: &'static str,
+}
 
-/// The `clear` call for every slot in the table, one per line, for the
-/// emitted helper to run between tests.
+const STUBBABLE: &[Stubbable] = &[Stubbable {
+    konst: "Resolv",
+    method: "getaddresses",
+    keyed: "stub_getaddresses",
+    any: "stub_getaddresses_any",
+    clear: "clear_getaddresses_stubs",
+    require: "../runtime/resolv",
+}];
+
+/// `require_relative` lines for every runtime file that defines a slot.
+///
+/// The helper REQUIRES them rather than guarding the clear call with
+/// `defined?`, and that is not a style choice. On CRuby the stdlib
+/// `Resolv` is already loaded (net/http reaches it), so
+/// `defined?(Resolv)` is TRUE in a test file that never required our
+/// port — and the guard sailed through to a `NoMethodError` on
+/// `clear_getaddresses_stubs` in the setup of EVERY test. campfire's
+/// CRuby conformance went 255/288 to 34/288 on exactly that.
+///
+/// Requiring the file makes the method's existence a fact rather than a
+/// question. `require_relative`, because the helper's own note says the
+/// AOT model follows only static `require_relative` chains.
+pub fn stub_requires() -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = String::new();
+    for s in STUBBABLE {
+        if seen.contains(&s.require) {
+            continue;
+        }
+        seen.push(s.require);
+        out.push_str(&format!("require_relative \"{}\"\n", s.require));
+    }
+    out
+}
+
+/// The `clear` call for every slot, one per line, for the helper to run
+/// between tests.
 ///
 /// mocha unstubs in its own teardown, and a slot that does not is WORSE
 /// than no slot: a stub installed by one test answers for every later
-/// one in the file. That is not hypothetical — shipping this without a
-/// clear took `opengraph_location_test` from 7/7 to 6/7 under CRuby,
-/// and the test it broke (`test_read_valid_html`) does not stub DNS at
-/// all. It inherited the previous test's answer.
+/// one in the file. Not hypothetical — shipping this without a clear
+/// took `opengraph_location_test` from 7/7 to 6/7 under CRuby, and the
+/// test it broke (`test_read_valid_html`) does not stub DNS at all. It
+/// inherited the previous test's answer.
 pub fn stub_clear_lines(indent: &str) -> String {
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
     let mut out = String::new();
-    for (konst, _, _, _) in STUBBABLE {
-        if seen.contains(konst) {
+    for s in STUBBABLE {
+        if seen.contains(&(s.konst, s.clear)) {
             continue;
         }
-        seen.push(konst);
-        // Guarded: a test file that never reaches the facade has no
-        // such constant, and the helper is shared by every file.
-        out.push_str(&format!(
-            "{indent}{konst}.clear_getaddresses_stubs if defined?({konst})\n"
-        ));
+        seen.push((s.konst, s.clear));
+        out.push_str(&format!("{indent}{}.{}\n", s.konst, s.clear));
     }
     out
 }
@@ -122,8 +159,8 @@ fn setter_for(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<(&'static s
     };
     STUBBABLE
         .iter()
-        .find(|(k, m, _, _)| *k == konst && *m == stubbed.as_str())
-        .map(|(_, _, keyed, any)| (*keyed, *any))
+        .find(|s| s.konst == konst && s.method == stubbed.as_str())
+        .map(|s| (s.keyed, s.any))
 }
 
 /// `<Const>.stubs(:m).with(a).returns(v)` -> `<Const>.<setter>(a, v)`.

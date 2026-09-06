@@ -2636,6 +2636,24 @@ fn patch_mocha_lifecycle(helper: &mut String) {
         let verified = "  def teardown\n    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end";
         helper.replace_range(at..at + TEARDOWN.len(), verified);
     }
+
+    // LAST, and that ordering is load-bearing. This inserts near the TOP
+    // of the file, which shifts every offset after it — doing it between
+    // `find(SETUP)` and the matching `replace_range` spliced the
+    // replacement at a stale index and produced
+    // `SchemaSetup.reset! if defined?(SchemaSetup)Setup.reset! ...`,
+    // a syntax error that took every campfire test file down at once.
+    //
+    // The slots the clear calls reach have to be DEFINED in every test
+    // file, not just the ones that stub — see `lower::mocha::stub_requires`
+    // for what guarding on `defined?` cost instead.
+    let requires = crate::lower::mocha::stub_requires();
+    if !requires.is_empty() {
+        const BOOT: &str = "require_relative \"../boot\"\n";
+        if let Some(b) = helper.find(BOOT) {
+            helper.insert_str(b + BOOT.len(), &requires);
+        }
+    }
 }
 
 /// `WebMock::API` mixed into TestBase.
