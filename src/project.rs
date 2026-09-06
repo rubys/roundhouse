@@ -1052,6 +1052,66 @@ fn blog_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
 /// The seeded `storage/development.sqlite3` that `bin/rh` stages in is
 /// NOT included — `Schema.load!` is idempotent so a fresh DB still boots
 /// (the archive ships `storage/.keep` so the directory exists).
+/// The stub slot the ruby-family trees get bolted onto Ruby's own
+/// `Resolv`.
+///
+/// `lower::mocha` rewrites `Resolv.stubs(:getaddresses)` into
+/// `Resolv.stub_getaddresses(...)` on EVERY target, because a lowering
+/// may not branch on the target. The strict targets answer that from
+/// the port (`runtime/ruby/resolv.rb`); CRuby and JRuby reach for the
+/// stdlib resolver instead, so the slot has to be added on top of it.
+///
+/// REOPENED, not replaced: everything else about `Resolv` here is the
+/// real one, and `getaddresses_without_stub` keeps the genuine lookup
+/// reachable for any host no test stubbed. That is also why this tree
+/// does NOT fall back to `GemFacade.fail!` the way the port does — here
+/// there IS a resolver to fall through to.
+const RESOLV_STUB_REOPEN: &str = r##"require "resolv"
+
+# Stub slot for `lower::mocha` — see `project::RESOLV_STUB_REOPEN`.
+class Resolv
+  STUB_HOSTS = [ "" ]
+  STUB_ADDRS = [ [ "" ] ]
+  STUB_ANY = [ [ "" ] ]
+  STUB_ANY_ON = [ false ]
+
+  class << self
+    alias_method :getaddresses_without_stub, :getaddresses
+
+    def stub_getaddresses(host, addrs)
+      i = STUB_HOSTS.index(host)
+      if i.nil?
+        STUB_HOSTS << host
+        STUB_ADDRS << addrs
+      else
+        STUB_ADDRS[i] = addrs
+      end
+      nil
+    end
+
+    def stub_getaddresses_any(addrs)
+      STUB_ANY[0] = addrs
+      STUB_ANY_ON[0] = true
+      nil
+    end
+
+    def clear_getaddresses_stubs
+      STUB_HOSTS.replace([ "" ])
+      STUB_ADDRS.replace([ [ "" ] ])
+      STUB_ANY_ON[0] = false
+      nil
+    end
+
+    def getaddresses(host)
+      i = STUB_HOSTS.index(host)
+      return STUB_ADDRS[i] unless i.nil?
+      return STUB_ANY[0] if STUB_ANY_ON[0]
+      getaddresses_without_stub(host)
+    end
+  end
+end
+"##;
+
 fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
@@ -1102,11 +1162,11 @@ fn ruby_runtime_files(
         // `Resolv.getaddresses`, which only reaches the guard if the
         // guard dispatches to the class mocha patched.
         if path == "runtime/resolv.rb" {
-            *content = "# Ruby's own resolv — see `project::ruby_runtime_files`.\n\
-                        # The port at runtime/ruby/resolv.rb exists for the targets\n\
-                        # that have no resolver to bind to.\n\
-                        require \"resolv\"\n"
-                .to_string();
+            *content = format!(
+                "# Ruby's own resolv — see `project::ruby_runtime_files`.\n\
+                 # The port at runtime/ruby/resolv.rb exists for the targets\n\
+                 # that have no resolver to bind to.\n{RESOLV_STUB_REOPEN}"
+            );
         }
     }
 
@@ -2044,7 +2104,7 @@ fn jruby_runtime_files(
         // `ruby_runtime_files` for why this one is not optional: the
         // app's tests stub `Resolv.getaddresses`.
         if path == "runtime/resolv.rb" {
-            *content = "require \"resolv\"\n".to_string();
+            *content = RESOLV_STUB_REOPEN.to_string();
         }
     }
 

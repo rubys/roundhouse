@@ -57,6 +57,19 @@ class Resolv
   STUB_HOSTS = [ "" ]
   STUB_ADDRS = [ [ "" ] ]
 
+  # The catch-all form, `stubs(:getaddresses).returns(v)` with no
+  # `.with` — campfire's `stub_dns_resolution(*ips)` helper writes it,
+  # and it answers for EVERY host rather than a keyed one.
+  #
+  # Two holders rather than one nullable, because "no default" and
+  # "default is the empty list" are different answers and a single
+  # Array cannot tell them apart. Single-element Array as a settable
+  # holder is the `Broadcasts::TRANSPORTS` idiom; the value slot is
+  # seeded for the element-type reason the note above gives, and the
+  # flag is what actually says whether it counts.
+  STUB_ANY = [ [ "" ] ]
+  STUB_ANY_ON = [ false ]
+
   # Install or REPLACE one host's answer. Replacement matters: a single
   # test re-stubs the same host with a second value
   # (`opengraph_location_test` maps `metadata.internal` to an IPv4-mapped
@@ -76,6 +89,14 @@ class Resolv
     nil
   end
 
+  # Install the catch-all answer. A later keyed stub still wins: the
+  # host loop runs first.
+  def self.stub_getaddresses_any(addrs)
+    STUB_ANY[0] = addrs
+    STUB_ANY_ON[0] = true
+    nil
+  end
+
   # Drop every installed stub. The emitted helper's teardown calls this,
   # so a stub cannot outlive the test that wrote it — the same leak
   # mocha's own `mocha_teardown` exists to prevent.
@@ -84,6 +105,7 @@ class Resolv
     STUB_ADDRS.clear
     STUB_HOSTS << ""
     STUB_ADDRS << [ "" ]
+    STUB_ANY_ON[0] = false
     nil
   end
 
@@ -93,6 +115,7 @@ class Resolv
       return STUB_ADDRS[i] if STUB_HOSTS[i] == host
       i += 1
     end
+    return STUB_ANY[0] if STUB_ANY_ON[0]
     GemFacade.fail!("Resolv.getaddresses")
     [ host ]
   end

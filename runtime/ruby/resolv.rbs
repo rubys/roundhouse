@@ -7,6 +7,9 @@ class Resolv
   # Test stub slot — see the note in resolv.rb.
   STUB_HOSTS: Array[String]
   STUB_ADDRS: Array[Array[String]]
+  STUB_ANY: Array[Array[String]]
+  STUB_ANY_ON: Array[bool]
   def self.stub_getaddresses: (String host, Array[String] addrs) -> nil
+  def self.stub_getaddresses_any: (Array[String] addrs) -> nil
   def self.clear_getaddresses_stubs: () -> nil
 end

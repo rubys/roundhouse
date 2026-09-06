@@ -59,6 +59,7 @@ pub mod pathname_ctor;
 pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
+pub mod mocha;
 pub mod global_id_locate;
 pub mod array_ordinal;
 pub mod sti_is_a;
@@ -252,6 +253,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const-receiver one nothing else keys on, so no ordering
     // constraints.
     ("class_body_new", &[]),
+    ("mocha", &[]),
     // `GlobalID::Locator.locate(gid, only: K)` → `locate_<k>(gid)`.
     // Keys on a two-segment Const receiver and a literal `only:` kwarg,
     // neither of which any other pass produces or consumes, so no
@@ -596,6 +598,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("pathname_ctor");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
+    mocha::apply_mocha_lowering(app);
+    ran!("mocha");
     global_id_locate::apply_global_id_locate_lowering(app);
     ran!("global_id_locate");
     array_ordinal::apply_array_ordinal_lowering(app);
