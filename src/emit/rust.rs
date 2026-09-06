@@ -831,6 +831,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // thread-local buffer so app-side reads
                 // (`record.errors`) see the validation messages that
                 // accumulated during the most recent `save`.
+                //
+                // `save_after_validation` is the post-validation half,
+                // split out for the same reason
+                // `runtime/ruby/active_record/base.rb` splits it: the
+                // fixture loader uses it, because Rails loads fixtures
+                // with raw SQL and runs no validations. Rust needs its
+                // own copy — every other target's AR base is TRANSPILED
+                // from that Ruby file and inherits the split, but these
+                // model impls are generated here, so a tree-level grep
+                // for the name finds it in the runtime and still misses
+                // the model. `smoke (rust)` is what caught that.
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
@@ -839,6 +850,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\
                             if !crate::errors_ext::validation_errors_is_empty() {{ return false; }}\n\
+                            self.save_after_validation()\n\
+                        }}\n\
+                        pub fn save_after_validation(&mut self) -> bool {{\n\
                             if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
                             else if Self::_adapter_exists_by_id_pred(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
