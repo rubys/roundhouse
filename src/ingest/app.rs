@@ -3268,6 +3268,10 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
 /// keeping the module around, so there is exactly one definition of the
 /// value in the emitted file.
 fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
+    // Candidate pool: every shared instance method the class does not
+    // already define itself (its own definition wins, as Ruby's class
+    // body beats an included module).
+    let mut pool: Vec<&crate::dialect::MethodDef> = Vec::new();
     for lc in helpers {
         for m in &lc.methods {
             if m.receiver != MethodReceiver::Instance {
@@ -3279,15 +3283,64 @@ fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
             if tm.tests.iter().any(|t| t.name == m.name.as_str()) {
                 continue;
             }
-            let mut m = m.clone();
-            m.enclosing_class = Some(tm.name.0.clone());
-            tm.helpers.push(m);
+            pool.push(m);
         }
-        for (name, value) in &lc.constants {
-            if tm.constants.iter().any(|(n, _)| n == name) {
+    }
+
+    // Every name the class's OWN code mentions, as reachability roots.
+    let mut wanted: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    let mut consts: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    for t in &tm.tests {
+        collect_referenced_names(&t.body, &mut wanted, &mut consts);
+    }
+    if let Some(setup) = &tm.setup {
+        collect_referenced_names(setup, &mut wanted, &mut consts);
+    }
+    for h in &tm.helpers {
+        collect_referenced_names(&h.body, &mut wanted, &mut consts);
+    }
+    for ic in &tm.inner_classes {
+        for m in &ic.methods {
+            collect_referenced_names(&m.body, &mut wanted, &mut consts);
+        }
+    }
+
+    // Fixpoint — a helper that IS reached pulls in the helpers it calls.
+    let mut taken: Vec<crate::dialect::MethodDef> = Vec::new();
+    loop {
+        let mut grew = false;
+        for m in &pool {
+            if taken.iter().any(|t| t.name == m.name) || !wanted.contains(&m.name) {
                 continue;
             }
-            tm.constants.push((name.clone(), value.clone()));
+            collect_referenced_names(&m.body, &mut wanted, &mut consts);
+            let mut m = (*m).clone();
+            m.enclosing_class = Some(tm.name.0.clone());
+            taken.push(m);
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    tm.helpers.extend(taken);
+
+    // Constants follow the methods that survived. A constant's own value
+    // can name another, so this settles too.
+    loop {
+        let mut grew = false;
+        for lc in helpers {
+            for (name, value) in &lc.constants {
+                if !consts.contains(name) || tm.constants.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                collect_referenced_names(value, &mut wanted, &mut consts);
+                tm.constants.push((name.clone(), value.clone()));
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
         }
     }
 
@@ -3312,6 +3365,40 @@ fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
     for h in &mut tm.helpers {
         unqualify_helper_constants(&mut h.body, &qualified);
     }
+}
+
+/// Every method-ish and constant name an expression mentions.
+///
+/// Over-approximates on purpose. A bare zero-arg call can reach the IR
+/// as `Var` rather than `Send` depending on how the source spelled it,
+/// so both are collected; the cost of a false positive is one helper
+/// that stays, and the cost of a false negative is a NameError at
+/// runtime. Constants take the LAST path segment, which catches both
+/// `WEB_PUSH_PUBLIC_TEST_IP` and `DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP`
+/// — the two spellings the splice has to keep working (see
+/// `splice_test_helpers`).
+fn collect_referenced_names(
+    expr: &crate::expr::Expr,
+    methods: &mut std::collections::HashSet<Symbol>,
+    consts: &mut std::collections::HashSet<Symbol>,
+) {
+    use crate::expr::ExprNode as EN;
+    match &*expr.node {
+        EN::Send { method, .. } => {
+            methods.insert(method.clone());
+        }
+        EN::Var { name, .. } => {
+            methods.insert(name.clone());
+        }
+        EN::Const { path } => {
+            if let Some(last) = path.last() {
+                consts.insert(last.clone());
+            }
+        }
+        _ => {}
+    }
+    expr.node
+        .for_each_child(&mut |c| collect_referenced_names(c, methods, consts));
 }
 
 /// `DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP` -> `WEB_PUSH_PUBLIC_TEST_IP`
