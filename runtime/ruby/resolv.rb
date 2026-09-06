@@ -35,7 +35,64 @@ class Resolv
   class ResolvError < StandardError
   end
 
+  # ---- Test stub slot ---------------------------------------------
+  #
+  # campfire's suite stubs this method thirteen times
+  # (`Resolv.stubs(:getaddresses).with(host).returns([ip])`), and mocha
+  # is a Ruby metaprogramming library with nothing for a strict target
+  # to compile against. Rather than treat those tests as a permanent
+  # ceiling, the facade carries the seam: a stub REPLACES the answer,
+  # and with no stub installed the body fails loudly exactly as before.
+  #
+  # Parallel constant Arrays, not a Hash and not a module-level ivar —
+  # the idiom `runtime/broadcasts.rb` establishes and explains: spinel
+  # supports constants and array mutation, module-level instance
+  # variables are less certain.
+  #
+  # SEEDED for the same reason `Broadcasts::TRANSPORTS` is. An
+  # always-empty literal gives spinel nothing to infer the element type
+  # from, and the whole table lands behind unresolved-call gates. `""`
+  # is the seed because no real lookup asks for the empty host, so the
+  # sentinel can never match.
+  STUB_HOSTS = [ "" ]
+  STUB_ADDRS = [ [ "" ] ]
+
+  # Install or REPLACE one host's answer. Replacement matters: a single
+  # test re-stubs the same host with a second value
+  # (`opengraph_location_test` maps `metadata.internal` to an IPv4-mapped
+  # IPv6 address and then to its compressed spelling), so a
+  # write-once slot would silently answer the first value twice.
+  def self.stub_getaddresses(host, addrs)
+    i = 0
+    while i < STUB_HOSTS.length
+      if STUB_HOSTS[i] == host
+        STUB_ADDRS[i] = addrs
+        return nil
+      end
+      i += 1
+    end
+    STUB_HOSTS << host
+    STUB_ADDRS << addrs
+    nil
+  end
+
+  # Drop every installed stub. The emitted helper's teardown calls this,
+  # so a stub cannot outlive the test that wrote it — the same leak
+  # mocha's own `mocha_teardown` exists to prevent.
+  def self.clear_getaddresses_stubs
+    STUB_HOSTS.clear
+    STUB_ADDRS.clear
+    STUB_HOSTS << ""
+    STUB_ADDRS << [ "" ]
+    nil
+  end
+
   def self.getaddresses(host)
+    i = 0
+    while i < STUB_HOSTS.length
+      return STUB_ADDRS[i] if STUB_HOSTS[i] == host
+      i += 1
+    end
     GemFacade.fail!("Resolv.getaddresses")
     [ host ]
   end

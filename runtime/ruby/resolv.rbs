@@ -3,4 +3,10 @@ class Resolv
   end
 
   def self.getaddresses: (String host) -> Array[String]
+
+  # Test stub slot — see the note in resolv.rb.
+  STUB_HOSTS: Array[String]
+  STUB_ADDRS: Array[Array[String]]
+  def self.stub_getaddresses: (String host, Array[String] addrs) -> nil
+  def self.clear_getaddresses_stubs: () -> nil
 end
