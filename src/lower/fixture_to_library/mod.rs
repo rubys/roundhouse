@@ -487,11 +487,42 @@ fn build_load_method_body(
                 Span::synthetic(),
                 ExprNode::Send {
                     recv: Some(save_recv),
-                    method: Symbol::from("save"),
+                    // NOT `save`: Rails loads fixtures with raw SQL
+                    // (`insert_fixtures_set`), so a fixture row runs NO
+                    // validations. Ours built a model and saved it, and
+                    // the difference is not cosmetic — it silently
+                    // dropped every row whose model validated something
+                    // the fixture did not satisfy (see the note in
+                    // `lower::fixtures` about `Room`'s creator taking
+                    // all seven room fixtures with it), and it walked
+                    // campfire's push-subscription fixtures into a live
+                    // DNS lookup via `Surfguard`, which is a loud
+                    // failure on every strict target.
+                    //
+                    // `save_after_validation` is the seam
+                    // `runtime/ruby/active_record/base.rb` already
+                    // factors out for Rails' validation-skipping writes,
+                    // and because every target's AR base is TRANSPILED
+                    // from that file, every target already has it —
+                    // `SaveAfterValidation` in C#/Go, `saveAfterValidation`
+                    // in Kotlin/Swift. No per-runtime work.
+                    //
+                    // Validations only. Rails skips the callbacks too,
+                    // but this loader has always run them and the
+                    // emitted helper already compensates (it resets the
+                    // broadcast log after loading for exactly that
+                    // reason). Dropping them is a separate, larger
+                    // change; this closes the half that is actively
+                    // wrong.
+                    //
+                    // Safe because a fixture assigns only scalar
+                    // columns — never an association object — so the
+                    // `belongs_to` autosave that `before_validation`
+                    // carries has nothing to do here.
+                    method: Symbol::from("save_after_validation"),
                     args: vec![],
                     block: None,
-                    // `save` is a real method on `ActiveRecord::Base`;
-                    // explicit parens so per-target emit doesn't drop
+                    // Explicit parens so per-target emit doesn't drop
                     // them (the lowerer doesn't re-run the body-typer
                     // on this synth, so the auto-parens rule for Method
                     // accessors doesn't fire).
