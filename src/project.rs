@@ -3799,8 +3799,8 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "RBS_FLAG := --rbs .",
         ),
         (
-            "\t$(SPINEL) --rbs sig $< -o $@",
-            "\t$(SPINEL) $(RBS_FLAG) $< -o $@",
+            "\t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@",
+            "\t$(SPINEL) $(RBS_FLAG) $(SPINEL_TEST_FLAGS) $< -o $@",
         ),
         (
             "SPINEL_TESTS := \\\n\ttest/models/article_test \\\n\ttest/models/comment_test \\\n\ttest/controllers/articles_controller_test \\\n\ttest/controllers/comments_controller_test",
@@ -4754,7 +4754,7 @@ mod tests {
         let makefile = "RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
              RBS_FLAG := $(if $(wildcard sig),--rbs sig)\n\
              $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
-             \t$(SPINEL) --rbs sig $< -o $@\n\
+             \t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@\n\
              SPINEL_TESTS := \\\n\
              \ttest/models/article_test \\\n\
              \ttest/models/comment_test \\\n\
@@ -4840,7 +4840,7 @@ mod tests {
         // Makefile re-pointed at the sidecar layout + actual lane list.
         let mk = get("Makefile");
         assert!(mk.contains("RBS_FLAG := --rbs ."));
-        assert!(mk.contains("$(SPINEL) $(RBS_FLAG) $< -o $@"));
+        assert!(mk.contains("$(SPINEL) $(RBS_FLAG) $(SPINEL_TEST_FLAGS) $< -o $@"));
         assert!(mk.contains("SPINEL_TESTS := \\\n\ttest/article_test \\\n\ttest/query_count_test\n"));
         assert!(!mk.contains("test/models/article_test"));
     }
@@ -4859,7 +4859,7 @@ mod tests {
              \t@mkdir -p $(BUILD)\n\
              \t$(SPINEL) main.rb $(RBS_FLAG) -o $@\n\
              $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
-             \t$(SPINEL) --rbs sig $< -o $@\n\
+             \t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@\n\
              SPINEL_TESTS := \\\n\
              \ttest/models/article_test \\\n\
              \ttest/models/comment_test \\\n\
@@ -4915,7 +4915,7 @@ mod tests {
              \t@mkdir -p $(BUILD)\n\
              \t$(SPINEL) main.rb $(RBS_FLAG) -o $@\n\
              $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
-             \t$(SPINEL) --rbs sig $< -o $@\n\
+             \t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@\n\
              SPINEL_TESTS := \\\n\
              \ttest/models/article_test \\\n\
              \ttest/models/comment_test \\\n\

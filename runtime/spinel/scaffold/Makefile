@@ -253,9 +253,29 @@ SPINEL_TESTS := \
 SPINEL_TEST_BINS := $(addprefix $(BUILD)/,$(SPINEL_TESTS))
 SPINEL_TEST_RBS  := $(addsuffix .rb,$(SPINEL_TESTS))
 
+# A test binary is run once and thrown away, so it is built for COMPILE
+# speed, not run speed — the opposite trade from `$(BUILD)/blog`, which
+# keeps the default -O2.
+#
+# Measured on campfire's `room_test` (99,718 lines of C, mac M4 Max,
+# spinel 37fb43be), one full compile:
+#
+#   -O 2 (default)          31.4 s   = 21.7 s frontend + 10.7 s cc
+#   -O 0                    23.8 s
+#   -O 0 --no-inline-hot    23.3 s   (1.35x)
+#
+# `cc` alone is 10.7 s at -O2 against 1.9 s at -O0, so the win is the
+# whole optimizer. It is capped at 1.35x because the SPINEL FRONTEND is
+# 69% of a test compile — see the note on `spinel-test-build` below.
+#
+# Behaviour is unaffected: all three binaries above produce byte-identical
+# test output. Note `-O 0`, TWO ARGS — spinel parses `-O` and its level
+# separately (src/main.c), so a glued `-O0` is silently ignored.
+SPINEL_TEST_FLAGS ?= -O 0 --no-inline-hot
+
 $(BUILD)/test/%: test/%.rb $(RUBY_SRC)
 	@mkdir -p $(dir $@)
-	$(SPINEL) --rbs sig $< -o $@
+	$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@
 
 .PHONY: spinel-test spinel-test-build cruby-test
 spinel-test-build: $(SPINEL_TEST_BINS)
