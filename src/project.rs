@@ -3837,14 +3837,50 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     //
     // It is also what the emitted README has always told the reader to
     // run, and what the published archive's three-line script runs. The
-    // Makefile was the odd one out. (The per-test compile recipe keeps the
-    // raw lane: dep-carrying apps run tests via `spin test`.)
+    // Makefile was the odd one out.
+    //
+    // THE TEST RECIPE NEEDS THE PACKAGES TOO, and used to say so in a
+    // parenthesis here ("dep-carrying apps run tests via `spin test`")
+    // that nothing implemented. The raw lane cannot resolve
+    // `require "bcrypt"`, so every campfire test binary was built with
+    // BCrypt missing — spinel warns and carries on, the constant resolves
+    // to nothing, and the first fixture to hash a password dies with
+    // `undefined method 'create' for unknown` (BCrypt::Password.create,
+    // test/fixtures/users.rb). That is in `_fixtures_load!`, which every
+    // test's `setup` runs, so it took out all six of room_test's tests
+    // including the ones that touch no password at all. The lane could not
+    // have passed whatever the app code said.
+    //
+    // `spin flags` is the supported seam for exactly this (spinel #4105):
+    // it resolves the dependencies, warms the native cache, and prints the
+    // `-I` / `--rbs` / `--link` line for a build spin does not itself
+    // drive. It also supplies the `--rbs` root, so the test recipe drops
+    // `$(RBS_FLAG)` rather than passing two.
+    //
+    // MINUS `--require-gate`, which `spin flags` includes and the app
+    // binary should keep: it turns an unresolvable require into a
+    // compile-time refusal. A TEST tree requires gems that have no spinel
+    // surface at all — campfire's suite pulls vips, mocha and webmock —
+    // and gating those fails the compile before the type errors this lane
+    // exists to count. The gate is right for `spin build` and wrong here.
+    //
+    // Lazy `=`, not `:=`: this shells out, and `:=` would run it on every
+    // `make assets` (cloning and building packages on a cold cache) rather
+    // than only when a test is compiled. Warm cost is 0.75 s against a
+    // ~23 s compile.
     {
-        let dep_patches: [(&str, &str); 2] = [
-            ("SPINEL ?= spinel", "SPINEL ?= spinel\nSPIN   ?= spin"),
+        let dep_patches: [(&str, &str); 3] = [
+            (
+                "SPINEL ?= spinel",
+                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--require-gate` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed 's/--require-gate //')",
+            ),
             (
                 "\t$(SPINEL) main.rb $(RBS_FLAG) -o $@",
                 "\t$(SPIN) build\n\tcp build/bin/blog $@",
+            ),
+            (
+                "\t$(SPINEL) $(RBS_FLAG) $(SPINEL_TEST_FLAGS) $< -o $@",
+                "\t$(SPINEL) $(SPIN_TEST_FLAGS) $(SPINEL_TEST_FLAGS) $< -o $@",
             ),
         ];
         // Both anchors or neither: half a patch would define $(SPIN) and
