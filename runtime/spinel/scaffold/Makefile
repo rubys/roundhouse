@@ -273,7 +273,16 @@ SPINEL_TEST_RBS  := $(addsuffix .rb,$(SPINEL_TESTS))
 # separately (src/main.c), so a glued `-O0` is silently ignored.
 SPINEL_TEST_FLAGS ?= -O 0 --no-inline-hot
 
-$(BUILD)/test/%: test/%.rb $(RUBY_SRC)
+# The test's OWN support files are prerequisites too. `$(RUBY_SRC)` is
+# main.rb plus `runtime app config` — it does not reach `test/`, and
+# `test/%.rb` matches only the test file itself. So editing
+# `test/test_helper.rb` or a fixture left `make` reporting
+# "'build/test/X' is up to date" and re-running a STALE binary: a probe
+# that changed a fixture appeared to change nothing, which reads as a
+# falsified hypothesis rather than a build that never happened.
+TEST_SUPPORT := $(shell find test -type f -name '*.rb' -not -name '*_test.rb' 2>/dev/null)
+
+$(BUILD)/test/%: test/%.rb $(RUBY_SRC) $(TEST_SUPPORT)
 	@mkdir -p $(dir $@)
 	$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@
 

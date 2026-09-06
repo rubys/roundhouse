@@ -2544,6 +2544,19 @@ enum Marker {
 /// silent if either moves — the demand for mocha comes from the app, so
 /// a tree that misses this patch fails loudly on the first `stubs` call
 /// rather than passing with stubs that never took.
+///
+/// GUARDED ON `defined?(Mocha)`, because a STRICT target has no mocha at
+/// all. Unguarded, the three lifecycle calls are the first thing every
+/// test runs, so `undefined local variable or method 'mocha_setup'`
+/// failed all six of campfire's `room_test` — none of which stubs
+/// anything. The gem ceiling is real (mocha is a Ruby metaprogramming
+/// library; there is nothing to compile against), but it belongs to the
+/// tests that actually stub, not to every test in the tree.
+///
+/// The guard does NOT weaken the paragraph above: `mocha_verify` is
+/// skipped only where mocha could not have installed an expectation in
+/// the first place. A test that writes `stubs` on a target without the
+/// gem still fails loudly, on that call, which is the honest place.
 fn patch_mocha_lifecycle(helper: &mut String) {
     const SETUP: &str = "  def setup\n    SchemaSetup.reset! if defined?(SchemaSetup)";
     const TEARDOWN: &str = "  def teardown\n  end";
@@ -2553,11 +2566,11 @@ fn patch_mocha_lifecycle(helper: &mut String) {
     }
     if let Some(at) = helper.find(SETUP) {
         let with_include =
-            format!("  include Mocha::API\n\n  def setup\n    mocha_setup\n    SchemaSetup.reset! if defined?(SchemaSetup)");
+            format!("  include Mocha::API\n\n  def setup\n    mocha_setup if defined?(Mocha)\n    SchemaSetup.reset! if defined?(SchemaSetup)");
         helper.replace_range(at..at + SETUP.len(), &with_include);
     }
     if let Some(at) = helper.find(TEARDOWN) {
-        let verified = "  def teardown\n    mocha_verify\n  ensure\n    mocha_teardown\n  end";
+        let verified = "  def teardown\n    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end";
         helper.replace_range(at..at + TEARDOWN.len(), verified);
     }
 }
