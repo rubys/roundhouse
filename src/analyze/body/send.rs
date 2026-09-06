@@ -1410,6 +1410,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             variants: vec![elem.clone(), Ty::Nil],
         },
         "dup" | "clone" => Ty::Array { elem: Box::new(elem.clone()) },
+        // `clear` empties in place and returns SELF, so it keeps the
+        // element type — the array is empty, not differently-typed.
+        // Reached by `Resolv.clear_getaddresses_stubs` resetting the
+        // mocha stub table (`lower::mocha`).
+        "clear" => Ty::Array { elem: Box::new(elem.clone()) },
         // Array `+` (concat), `-` (set difference), `&` (set
         // intersection), and `|` (set union) preserve Array[elem].
         // `<<` mutates in place and returns self (the array). `concat` /

@@ -2626,7 +2626,10 @@ fn patch_mocha_lifecycle(helper: &mut String) {
     }
     if let Some(at) = helper.find(SETUP) {
         let with_include =
-            format!("  include Mocha::API\n\n  def setup\n    mocha_setup if defined?(Mocha)\n    SchemaSetup.reset! if defined?(SchemaSetup)");
+            format!(
+                "  include Mocha::API\n\n  def setup\n    mocha_setup if defined?(Mocha)\n{}    SchemaSetup.reset! if defined?(SchemaSetup)",
+                crate::lower::mocha::stub_clear_lines("    "),
+            );
         helper.replace_range(at..at + SETUP.len(), &with_include);
     }
     if let Some(at) = helper.find(TEARDOWN) {

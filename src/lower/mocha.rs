@@ -68,6 +68,32 @@ use crate::ident::Symbol;
 const STUBBABLE: &[(&str, &str, &str, &str)] =
     &[("Resolv", "getaddresses", "stub_getaddresses", "stub_getaddresses_any")];
 
+/// The `clear` call for every slot in the table, one per line, for the
+/// emitted helper to run between tests.
+///
+/// mocha unstubs in its own teardown, and a slot that does not is WORSE
+/// than no slot: a stub installed by one test answers for every later
+/// one in the file. That is not hypothetical — shipping this without a
+/// clear took `opengraph_location_test` from 7/7 to 6/7 under CRuby,
+/// and the test it broke (`test_read_valid_html`) does not stub DNS at
+/// all. It inherited the previous test's answer.
+pub fn stub_clear_lines(indent: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = String::new();
+    for (konst, _, _, _) in STUBBABLE {
+        if seen.contains(konst) {
+            continue;
+        }
+        seen.push(konst);
+        // Guarded: a test file that never reaches the facade has no
+        // such constant, and the helper is shared by every file.
+        out.push_str(&format!(
+            "{indent}{konst}.clear_getaddresses_stubs if defined?({konst})\n"
+        ));
+    }
+    out
+}
+
 pub fn apply_mocha_lowering(app: &mut App) {
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
