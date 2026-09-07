@@ -580,7 +580,30 @@ start_lane() {
             else
                 echo "workers=autodetected" > "$shape"
             fi
+            # THE COLLECTOR IS THIS LANE'S CEILING, so measuring
+            # everything except it was the gap: these logs carried two
+            # lines and no GC data at all. `SPINEL_GC_STATS` gives the
+            # collection count and the stopped share; `SPINEL_GC_PHASES`
+            # (matz/spinel#4382) splits that into mark / old sweep /
+            # slot sweep / remembered clear / string sweep / trim.
+            #
+            # ARMED ON THE MEASURED RUNS, which needs justifying because
+            # it means publishing throughput from an instrumented
+            # binary. Six clock reads per collection, ~36k over a cell,
+            # order 1 ms against 40 s. A/B'd rather than asserted --
+            # five interleaved rounds, medians within noise, response
+            # byte-identical. Re-run it if the reporter ever grows a
+            # cost.
+            #
+            # WHY NIGHTLY AND NOT ON DEMAND: it cannot be got
+            # retroactively. When a number moves, THAT night's phase
+            # split is what explains it, and a diagnostic run days later
+            # is a different binary on a different tree. The 09-03
+            # threaded halving and the tail that outlived the 09-06
+            # recovery both started from "the number moved" with nothing
+            # to look at.
             ( cd "$SP_EMIT" && exec env "${workers_env[@]}" \
+                SPINEL_GC_STATS=1 SPINEL_GC_PHASES=1 \
                 DATABASE_POOL_SIZE=64 BLOG_DB=storage/development.sqlite3 \
                 PORT="$port" SECRET_KEY_BASE="$SPINEL_SECRET" \
                 ./build/bin/blog ) > "$log" 2>&1 &
@@ -980,6 +1003,58 @@ RUBY
     return 0
 }
 (( SOCKETS )) && run_socket_phase
+
+# ── collector, per spinel lane ───────────────────────────────────────
+#
+# One file rather than a column on summary.json, and the reason is the
+# shape of the data: ONE server process serves all three runs of BOTH
+# endpoints, so `[gc]` is cumulative across the lane and cannot be
+# attributed to a row. Folding it into the rows would duplicate it and
+# imply an attribution that is not there. Same reasoning that gives
+# sockets.json and coldstart.json their own files.
+#
+# Cumulative-per-lane is enough for what this is for -- "which phase
+# moved since last night" -- and per-cell deltas (what the scale ladder
+# takes) would be a bigger apparatus for a question nobody has asked
+# yet. The limitation is recorded in the file rather than left implicit.
+ruby - "$LOG_DIR" "$OUT_DIR/gc.json" <<'RUBY'
+require "json"
+log_dir, out = ARGV
+rows = []
+Dir.glob(File.join(log_dir, "spinel*.log")).sort.each do |path|
+  lane = File.basename(path, ".log")
+  lines = File.readlines(path, chomp: true) rescue next
+  gc  = lines.reverse.find { |l| l.start_with?("[gc] ") }
+  gcp = lines.reverse.find { |l| l.start_with?("[gcph] ") }
+  next unless gc || gcp
+  row = { "target" => lane, "note" => "cumulative over the whole lane: all runs of both endpoints, one process" }
+  if gc
+    row["gc_line"] = gc
+    if (m = gc.match(/\[gc\] (\d+) collections \((\d+) full\) in ([\d.]+)s of ([\d.]+)s wall \(([\d.]+)%\), ([\d.]+)ms avg/))
+      row.merge!("collections" => m[1].to_i, "full_collections" => m[2].to_i,
+                 "gc_seconds" => m[3].to_f, "wall_seconds" => m[4].to_f,
+                 "gc_pct_of_wall" => m[5].to_f, "avg_ms" => m[6].to_f)
+    end
+    if (m = gc.match(/live ([\d.]+) MB obj \+ ([\d.]+) MB str/))
+      row.merge!("live_obj_mb" => m[1].to_f, "live_str_mb" => m[2].to_f)
+    end
+  end
+  if gcp
+    row["gcph_line"] = gcp
+    # Phase names are the collector's own words (matz/spinel#4382), so a
+    # number here leads to the code that spent it without a translation.
+    { "mark" => /mark ([\d.]+)s/, "old_sweep" => /old sweep ([\d.]+)s/,
+      "slot_sweep" => /slot sweep ([\d.]+)s/, "remembered_clear" => /remembered clear ([\d.]+)s/,
+      "string_sweep" => /string sweep ([\d.]+)s/, "trim" => /trim ([\d.]+)s/,
+      "phase_total" => /of ([\d.]+)s total/ }.each do |k, re|
+      row[k] = gcp[re, 1].to_f if gcp =~ re
+    end
+  end
+  rows << row
+end
+File.write(out, JSON.pretty_generate(rows) + "\n") unless rows.empty?
+RUBY
+[[ -f "$OUT_DIR/gc.json" ]] && ok "collector -> $OUT_DIR/gc.json"
 
 # ── provenance ───────────────────────────────────────────────────────
 
