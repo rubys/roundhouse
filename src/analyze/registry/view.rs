@@ -7,6 +7,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::analyze::ClassInfo;
+use crate::expr::{ExprNode, Literal};
 use crate::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
@@ -53,11 +54,8 @@ pub(in crate::analyze) fn register(
     // the block yields a mime Collector whose format methods return
     // nil. (`respond_to` itself is registered on ApplicationController.)
     let mut collector = ClassInfo::default();
-    for m in [
-        "html", "json", "xml", "js", "rss", "atom", "text", "csv", "any",
-        "all", "none",
-    ] {
-        collector.instance_methods.insert(Symbol::from(m), Ty::Nil);
+    for m in collector_format_names() {
+        collector.instance_methods.insert(Symbol::from(m.as_str()), Ty::Nil);
     }
     classes.insert(
         ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
@@ -275,4 +273,53 @@ pub(in crate::analyze) fn register(
             flash,
         );
     }
+}
+
+/// The format names `respond_to`'s Collector answers.
+///
+/// Rails' Collector has no such methods: it responds to a format
+/// through `method_missing`, driven by the MIME registry, so the set is
+/// whatever has been registered. The analyzer still enumerates it —
+/// enumerating is what makes an unregistered format a REPORTED gap
+/// instead of a silent pass, which is the property the ledger is for.
+///
+/// But the enumeration is DERIVED, not hand-kept. `runtime/ruby/mime.rb`
+/// already carries actionpack's registry, ported from its own
+/// `mime_types.rb` rather than retyped; reading its `SYMBOLS` table here
+/// means the analyzer's idea of "a format Rails answers" cannot drift
+/// from the runtime's. A second hand-kept list is exactly how
+/// `format.turbo_stream` came to read as a dispatch failure in an app
+/// whose views and broadcasts handled Turbo Streams fine (issue #74).
+fn collector_format_names() -> Vec<String> {
+    // `turbo_stream` is registered by turbo-rails, not actionpack, so it
+    // is not in the ported table — and it is the format a Rails 8 app
+    // reaches for most after html. `any`/`all`/`none` are the
+    // Collector's OWN methods, not MIME types at all.
+    let mut names: Vec<String> =
+        ["turbo_stream", "any", "all", "none"].iter().map(|s| s.to_string()).collect();
+    let consts = crate::runtime_src::parse_module_constant_exprs(include_str!(
+        "../../../runtime/ruby/mime.rb"
+    ))
+    .expect("runtime/ruby/mime.rb should parse");
+    let (_, table) = consts
+        .into_iter()
+        .find(|(n, _)| n.as_str() == "SYMBOLS")
+        .expect("runtime/ruby/mime.rb should define SYMBOLS");
+    let ExprNode::Hash { entries, .. } = &*table.node else {
+        panic!("mime.rb's SYMBOLS should be a Hash literal");
+    };
+    // Loud rather than graceful on all three steps above: the file is
+    // compiled in, so the only way any of them fails is that the shipped
+    // runtime changed shape. Degrading to a partial set would strip
+    // `html` and `json` off the Collector and turn every `respond_to` in
+    // every app into a dispatch failure — a far quieter, far worse
+    // outcome than a build the tests catch.
+    for (_, v) in entries {
+        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*v.node {
+            names.push(sym.as_str().to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
