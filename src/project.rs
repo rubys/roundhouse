@@ -2861,6 +2861,7 @@ const GEM_REQUIRES: &[&str] = &[
     "SVG/Graph/TimeSeries",
     "sentry-ruby",
     "rails-html-sanitizer",
+    "net/http/persistent",
 ];
 
 /// The guarded-require block, minus any gem this tree provides another
@@ -2887,7 +2888,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 10] = [
+    const RUNTIME_GEMS: [(Marker, &str); 11] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -2896,6 +2897,23 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         (Marker::Constant("Parslet"), "parslet"),
         (Marker::Constant("TypeID"), "typeid"),
         (Marker::Constant("RQRCode"), "rqrcode"),
+        // campfire's web push builds one `Net::HTTP::Persistent` pool
+        // per process (`WebPush::Pool`), and the gem went undeclared
+        // exactly as bcrypt did — the façade names the constant and
+        // nothing put it in the Gemfile.
+        //
+        // ITS ABSENCE IS FATAL TO A WRITE, not to a feature, and that
+        // is why it belongs in this table rather than in a ledger. The
+        // job adapter is `:inline`, so `Room::MessagePusher` runs
+        // INSIDE the message-create request: with no gem, every
+        // `POST /rooms/N/messages` answers 500 with
+        // `uninitialized constant Net::HTTP::Persistent`. Found by the
+        // ruby socket lane, which is the first harness to post a
+        // message on this tree WITHOUT the walk's stubs spliced in —
+        // the HTTP bench lanes only GET, and campfire-compare stubs the
+        // pusher. A gem the app depends on is not a modeling gap; it is
+        // a line in the Gemfile.
+        (Marker::Constant("Net::HTTP::Persistent"), "net-http-persistent"),
         // campfire's message helpers rescue through
         // `Sentry.capture_exception`, and the gem was standing in
         // `scripts/campfire-walk-stubs.rb` as a hand-written module. A
