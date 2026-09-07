@@ -85,6 +85,15 @@ module Db
     ActiveRecord::ConnectionAdapters::ConnectionPool.new(@pool_size) do
       db = SQLite3::Database.new(path)
       db.results_as_hash = false
+      # PINNED, not inherited. This lane reads `synchronous = NORMAL`
+      # today without asking for it, because the sqlite3 gem's bundled
+      # SQLite defaults WAL that way — while the binary's own SQLite
+      # defaults to FULL, which cost the spinel lane 5.5s on a
+      # 1,000-socket connect storm (one fsync per presence write; see
+      # runtime/spinel/db.rb's PRAGMAS). Three lanes agreeing by
+      # compile-time accident is not agreement, so each states it.
+      db.execute("PRAGMA journal_mode=WAL")
+      db.execute("PRAGMA synchronous=NORMAL")
       db
     end
   end

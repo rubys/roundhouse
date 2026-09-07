@@ -115,6 +115,13 @@ module Db
     pool_size.times do
       raw = ds.get_connection
       raw.set_auto_commit(true)
+      # STATED, not inherited — see the note in db_cruby.rb's open_pool.
+      # The three Db shims must not agree on durability by whichever
+      # SQLite each happened to link.
+      st = raw.create_statement
+      st.execute("PRAGMA journal_mode=WAL")
+      st.execute("PRAGMA synchronous=NORMAL")
+      st.close
       conn = Conn.new(raw)
       @free << conn
       @all  << conn
