@@ -10,10 +10,10 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | rails-nocache | ruby | spinel |
-#            rails-1p | rails-nocache-1p | ruby-1p | spinel-1p }
-#          (default: rails rails-nocache ruby spinel
-#                     rails-1p rails-nocache-1p ruby-1p spinel-1p)
+#   LANE ∈ { rails | ruby | spinel | rails-1p | ruby-1p | spinel-1p |
+#            rails-nocache | rails-nocache-1p }
+#          (default: rails ruby spinel rails-1p ruby-1p spinel-1p —
+#                     the nocache pair is a DIAGNOSTIC, ask for it by name)
 #
 #   THE DEPLOYED LANES — what each project would actually run on this box:
 #
@@ -22,8 +22,9 @@
 #                    workers x 5 threads from its own config/puma.rb,
 #                    jemalloc preloaded, resque-pool alongside, Redis
 #                    fragment cache ON, production, YJIT
-#     rails-nocache  the same shape with `perform_caching = false`: Rails
-#                    actually RENDERING
+#     rails-nocache  DIAGNOSTIC, not in the default set: the same shape
+#                    with `perform_caching = false`, i.e. Rails actually
+#                    RENDERING
 #     ruby           roundhouse emit on CRuby, the same Puma shape and
 #                    the same allocator
 #     spinel         the roundhouse spinel BINARY, workers autodetected
@@ -31,10 +32,8 @@
 #   THE ONE-PROCESS LANES — the diagnostic that explains the above:
 #
 #     rails-1p       Rails, one Puma worker x 5 threads, no proxy, no jobs
-#     rails-nocache-1p  the same, rendering rather than reading Redis —
-#                    the operand that makes the one-process set a
-#                    RENDERER comparison, which is the only thing it can
-#                    honestly be
+#     rails-nocache-1p  DIAGNOSTIC, not in the default set: the same,
+#                    rendering rather than reading Redis
 #     ruby-1p        the CRuby emit, same
 #     spinel-1p      the binary, SPINEL_WORKERS=1
 #
@@ -50,15 +49,28 @@
 # their YJIT siblings on these two pages (40 vs 40 req/s, 22 vs 23) and
 # cost a seventh of the run to say nothing.
 #
-# TWO RAILS LANES, AND THE REASON IS THE WHOLE BENCHMARK. campfire
-# renders its message list as `render partial: …, collection: @messages,
-# cached: true`. With Redis up, the 40 message fragments are read back
-# rather than rendered — `/rooms/1/messages` measures 503 ms cold and
-# 5 ms warm. The emitted tree has no fragment cache and renders all 40
-# every request, so the warm number is not its opponent: it is Redis's
-# throughput. `rails-nocache` is the operand that compares renderers,
-# and `rails` is the operand that says what a deployment costs. Publish
-# both or publish neither.
+# ONE RAILS LANE NOW, AND THAT IS THE WHOLE POINT OF THE LAST YEAR.
+# campfire renders its message list as `render partial: …, collection:
+# @messages, cached: true`, so with Redis up the 40 fragments are read
+# back rather than rendered. `rails-nocache` existed because the emitted
+# tree had NO fragment cache: comparing a caching Rails against a
+# rendering emit measured Redis, not Rails, so the honest renderer-vs-
+# renderer operand had to be published beside it.
+#
+# The emit caches as of 72474b41 (`<% cache %>` served from Rails.cache,
+# /rooms/1/messages 127 -> 7 sqlite round trips, the same 7 Rails
+# spends). Both sides now read fragments back, the deployed lanes
+# compare like with like, and `rails` is the only opponent the page
+# needs. Publishing a rendering-Rails column beside two caching lanes
+# would be the mirror of the error the old pairing prevented.
+#
+# THE PAIR IS STILL REQUESTABLE BY NAME, and deliberately so:
+# `--no-fragment-cache` is how we measured that Rails' own renderer
+# costs 93 queries on /rooms/1 and 127 on /rooms/1/messages — campfire's
+# messages index preloads only `with_creator`, so boosts, rich text and
+# attachments are N+1 in Rails too. That number is what justified
+# building the cache, and it has to stay re-takeable. It is a
+# DIAGNOSTIC, never a headline; it is no longer published by default.
 #
 # Options:
 #   --workers N       Puma workers per lane (default 1). PIN IT: campfire's
@@ -188,7 +200,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby spinel rails-1p rails-nocache-1p ruby-1p spinel-1p)
+(( ${#LANES[@]} )) || LANES=(rails ruby spinel rails-1p ruby-1p spinel-1p)
 (( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
@@ -977,10 +989,12 @@ env["benchmark"] = "campfire"
 oracle = read_json(oracle_path)
 env["oracle"] = oracle if oracle
 
-# The lane note travels WITH the data. A campfire page that carries
-# `rails` without saying what `rails-nocache` is has published the number
-# this harness exists to prevent — and the renderer is generic, so the
-# only place that sentence can live is here, beside the run it describes.
+# The lane note travels WITH the data, because the renderer is generic
+# and the only place a sentence about THESE lanes can live is here,
+# beside the run it describes. It used to say what `rails-nocache` was,
+# because a page carrying `rails` without it published a caching Rails
+# against a rendering emit. Both sides cache now, so the note says that
+# instead — and the nocache gloss appears only when that lane ran.
 # The app server is part of the measurement and the two lanes resolve it
 # separately — campfire's lockfile pins one, the emitted Gemfile asks for
 # whatever is current. They came out 7.2.1 and 8.0.1, which the published
@@ -997,12 +1011,31 @@ servers = {
 }.compact
 env["servers"] = servers unless servers.empty?
 
+# The note is CONDITIONAL on the nocache lane actually running. It used
+# to be unconditional because that lane was always published; now it is a
+# diagnostic, and a page that explains a column it does not carry is
+# noise.
+#
+# `targets` lives under `harness` (scripts/bench-env writes
+# `harness[:targets]`), NOT at the top level — a top-level read returns
+# nil, which reads as "not requested" and would silently keep the note
+# off the page on the very run that needed it.
+nocache_ran = Array(env.dig("harness", "targets")).include?("rails-nocache")
+
 env["notes"] = [
-  "<code>rails</code> serves campfire's message fragments from Redis " \
-  "(<code>cached: true</code>); <code>rails-nocache</code> renders them. " \
-  "The emitted tree has no fragment cache, so <code>rails-nocache</code> " \
-  "is the lane that compares renderers and <code>rails</code> is the lane " \
-  "that says what a deployment costs. Publish both or publish neither.",
+  ("<code>rails</code> and the emit lanes BOTH serve campfire's message " \
+   "fragments from a cache — Rails from Redis (<code>cached: true</code>), " \
+   "the emitted tree from its own process-local store — so the deployed " \
+   "lanes compare like with like. Until 2026-09-07 the emit had no " \
+   "fragment cache and this page carried a <code>rails-nocache</code> " \
+   "column so the comparison was renderer against renderer rather than " \
+   "emit against Redis; that column is now a diagnostic, requested by " \
+   "name, and is not published here." unless nocache_ran),
+  ("<code>rails-nocache</code> is Rails RENDERING, with " \
+   "<code>perform_caching = false</code>. It is a diagnostic — campfire's " \
+   "messages index preloads only <code>with_creator</code>, so boosts, " \
+   "rich text and attachments are N+1 in Rails too — and never the " \
+   "headline: what campfire's users get is the cached page." if nocache_ran),
   "The deployed lanes are what each project would run on this box. " \
   "<code>rails</code> is once-campfire AS ITS OWN DOCKERFILE RUNS IT: " \
   "Thruster in front of Puma, <code>(processor_count * 0.666).ceil</code> " \
@@ -1019,6 +1052,7 @@ env["notes"] = [
   "rails lane runs Puma with campfire's worker count and its allocator but " \
   "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
 ]
+env["notes"] = env["notes"].compact
 
 # WHAT EACH LANE ACTUALLY GOT. A deployed lane that claimed jemalloc and
 # ran without it would be the exact failure this shape is meant to end,
@@ -1089,12 +1123,17 @@ cells.group_by { |c| c[:endpoint] }.each do |ep, eg|
       md << "\n_%s / ruby = %.2fx_\n" % [name, cmp[:req_sec] / ruby[:req_sec]]
     end
   end
-  if eg.any? { |c| c[:target] == "rails" } && eg.any? { |c| c[:target] == "rails-nocache" }
-    md << "\n`rails` serves campfire's message fragments from Redis " \
-          "(`cached: true`); `rails-nocache` renders them. The emitted " \
-          "tree has no fragment cache, so `rails-nocache` is the lane " \
-          "that compares renderers and `rails` is the lane that says " \
-          "what a deployment costs.\n"
+  # Only when the diagnostic lane was actually requested. Both sides
+  # cache now, so `rails` is the like-for-like opponent and needs no
+  # gloss; a rendering-Rails column does, because a reader who takes it
+  # for the deployed number gets the mirror of the error the old
+  # `rails`/`rails-nocache` pairing existed to prevent.
+  if eg.any? { |c| c[:target] == "rails-nocache" }
+    md << "\n`rails-nocache` is Rails RENDERING (`perform_caching = " \
+          "false`) — a diagnostic, not the deployed number. campfire's " \
+          "messages index preloads only `with_creator`, so boosts, rich " \
+          "text and attachments are N+1 in Rails too; what its users get " \
+          "is the cached page, which is what `rails` measures.\n"
   end
   md << "\n"
 end
