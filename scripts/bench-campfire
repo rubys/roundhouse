@@ -509,7 +509,16 @@ rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3
 
 start_lane() {
     local lane="$1" port="$2"
-    local log="$LOG_DIR/$lane.log"
+    # OVERRIDABLE for the same reason `shape` below is, and it took the
+    # first nightly with GC capture to notice: `cold_start` boots each
+    # lane three MORE times after the measured runs, and every boot
+    # reopened this path with `>`. So the lane log a reader (or a
+    # parser) sees was the last cold-start boot -- one page served, one
+    # collection -- and the measured run's output had been truncated
+    # away hours earlier. Nothing noticed while these logs held only a
+    # banner; `gc.json` came out saying "1 collections, 0.0s" for a lane
+    # that had just served thousands of requests.
+    local log="${LOG_OVERRIDE:-$LOG_DIR/$lane.log}"
     # The shape record belongs to the MEASURED boot. `cold_start` boots
     # each lane three more times and would otherwise leave the file
     # holding whatever its last boot managed to write — which is how
@@ -673,6 +682,7 @@ COLD="$OUT_DIR/coldstart.json"
 # Set only while cold_start is booting, so those boots write their shape
 # somewhere other than the measured run's record.
 SHAPE_OVERRIDE=""
+LOG_OVERRIDE=""
 # The deployed lanes run a job runner beside the server. `stop_lane` TERMs
 # the supervisor, whose EXIT trap stops it — but a supervisor that has to
 # be KILLed never runs that trap, and resque-pool is then orphaned with
@@ -711,12 +721,13 @@ cold_start() {
     # published appendix.
     mkdir -p "$LOG_DIR/coldstart"
     SHAPE_OVERRIDE="$LOG_DIR/coldstart/shape-$lane.txt"
+    LOG_OVERRIDE="$LOG_DIR/coldstart/$lane.log"
     for rep in $(seq 1 "$reps"); do
         t0="$(date +%s.%N)"
         if ! start_lane_quiet "$lane" "$port"; then
             fail "$lane cold-start boot $rep failed"
             stop_lane "$port"
-            SHAPE_OVERRIDE=""
+            SHAPE_OVERRIDE=""; LOG_OVERRIDE=""
             return 0
         fi
         t_accept="$(date +%s.%N)"
@@ -739,7 +750,7 @@ cold_start() {
             "$(awk -v a="$t0" -v b="$t_page" 'BEGIN{printf "%.1f", (b-a)*1000}')" \
             "$code" >> "$COLD"
     done
-    SHAPE_OVERRIDE=""
+    SHAPE_OVERRIDE=""; LOG_OVERRIDE=""
 }
 
 # start_lane without the banner, for the cold-start reps.
@@ -1024,8 +1035,17 @@ rows = []
 Dir.glob(File.join(log_dir, "spinel*.log")).sort.each do |path|
   lane = File.basename(path, ".log")
   lines = File.readlines(path, chomp: true) rescue next
-  gc  = lines.reverse.find { |l| l.start_with?("[gc] ") }
-  gcp = lines.reverse.find { |l| l.start_with?("[gcph] ") }
+  # THE LINE WITH THE MOST COLLECTIONS, not the last one. Belt to
+  # LOG_OVERRIDE's braces: if anything ever boots a lane twice into one
+  # log again, "last" silently reports the short-lived process (the
+  # first nightly with this capture said "1 collections, 0.0s" for a
+  # lane that had served thousands of requests) while "most" still finds
+  # the run that did the work. Cumulative counters only rise, so the
+  # maximum IS the longest-lived process's final word.
+  gc  = lines.select { |l| l.start_with?("[gc] ") }
+              .max_by { |l| l[/\[gc\] (\d+)/, 1].to_i }
+  gcp = lines.select { |l| l.start_with?("[gcph] ") }
+              .max_by { |l| l[/of ([\d.]+)s total/, 1].to_f }
   next unless gc || gcp
   row = { "target" => lane, "note" => "cumulative over the whole lane: all runs of both endpoints, one process" }
   if gc
