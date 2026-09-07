@@ -709,6 +709,19 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = self.assoc_extension_ty(recv.as_ref(), method) {
                     return t;
                 }
+                // `group(:col).count` answers a Hash, not an Int. Resolved
+                // here rather than in `dispatch` because the discriminator
+                // is the receiver EXPRESSION (`Ty::Relation` carries no
+                // grouped state) and `dispatch` sees only its type.
+                if let Some(t) = self.grouped_count_ty(
+                    recv.as_ref(),
+                    recv_ty.as_ref(),
+                    method,
+                    args,
+                    block.as_ref(),
+                ) {
+                    return t;
+                }
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
             }
 

@@ -62,6 +62,79 @@ impl<'a> BodyTyper<'a> {
         })
     }
 
+    /// `rel.group(:col).count` — Rails' GROUPED count, a Hash of
+    /// group-key => COUNT rather than the scalar Integer.
+    ///
+    /// The pipeline already handles this shape end to end:
+    /// `lower::group_count` renames the terminal to `group_count`
+    /// (splitting the name is what keeps both returns monomorphic — a
+    /// `count` answering Integer-or-Hash is the polymorphic-API shape
+    /// the runtime avoids), and `ActiveRecord::Relation#group_count`
+    /// builds the `SELECT … GROUP BY` and hydrates the Hash. But that
+    /// lowering runs on the POST-ANALYZE hook, so the typer still sees
+    /// the source spelling `count` and the catalog answers `Int` —
+    /// `.keys` on the result then read as a dispatch failure against a
+    /// feature the pipeline fully supports (issue #75).
+    ///
+    /// The shape test mirrors `lower::group_count::rewrite` exactly —
+    /// zero-arg, block-less `count` whose receiver is a `group(...)`
+    /// send — so the type this reports and the method the lowering
+    /// actually emits cannot disagree. Widening one without the other
+    /// is the failure mode to avoid: `sum`/`average`/`minimum`/
+    /// `maximum` switch to a grouped Hash in Rails too, but no
+    /// `group_sum` lowering or runtime method exists, so typing them
+    /// here would trade a false error for a false PASS.
+    ///
+    /// The key type is the grouped COLUMN's, read off the schema the
+    /// same way `column_projection` does — `group(:feed_id).count.keys`
+    /// wants `Array[Int]`, not `Array[Untyped]`. Anything the schema
+    /// cannot answer (a multi-column group, a String or expression
+    /// argument, an unknown column) falls back to `Untyped`, matching
+    /// `relation.rbs`'s `Hash[untyped, Integer]`.
+    pub(super) fn grouped_count_ty(
+        &self,
+        recv: Option<&Expr>,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        args: &[Expr],
+        block: Option<&Expr>,
+    ) -> Option<Ty> {
+        if method.as_str() != "count" || !args.is_empty() || block.is_some() {
+            return None;
+        }
+        let ExprNode::Send { method: gm, args: group_args, .. } = &*recv?.node else {
+            return None;
+        };
+        if gm.as_str() != "group" {
+            return None;
+        }
+        // The receiver of `count` is the `group(...)` result, so its
+        // type names the model whose schema owns the grouped column.
+        // Both relation representations reach here: an inline
+        // `Model.where(...).group(...)` chain carries the Array shape,
+        // a scope or association read carries `Ty::Relation`.
+        let model = match recv_ty? {
+            Ty::Relation { of } => of,
+            Ty::Array { elem } => match &**elem {
+                Ty::Class { id, .. } => id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let key = self.grouped_key_ty(model, group_args).unwrap_or(Ty::Untyped);
+        Some(Ty::Hash { key: Box::new(key), value: Box::new(Ty::Int) })
+    }
+
+    /// The column type a single-symbol `group(:col)` groups by, when the
+    /// model's schema answers it. `None` for every other argument shape.
+    fn grouped_key_ty(&self, model: &ClassId, args: &[Expr]) -> Option<Ty> {
+        let [arg] = args else { return None };
+        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+            return None;
+        };
+        self.classes().get(model)?.instance_methods.get(col).cloned()
+    }
+
     /// Build the Ctx used to analyze a block passed to `recv.method(...) { |p1, p2| ... }`.
     /// Seeds the block's local_bindings with parameter types derived from the receiver
     /// and method (e.g. `array.each { |x| }` binds `x` to the array's element type).
