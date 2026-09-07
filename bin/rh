@@ -174,7 +174,13 @@ def cmd_doctor(argv)
     node:   version_of(probe('node', '--version')),
     sqlite: version_of(probe('sqlite3', '--version')),
     rails:  version_of(probe('rails', '--version')),
-    wrk:    version_of(probe('wrk', '--version', allow_fail: true), /wrk\s+(\d+\.\d+(?:\.\d+)?)/),
+    # Debian and Ubuntu replace wrk's version string with their package
+    # version (`wrk debian/4.1.0-4build2`), so the token after the name
+    # does not start with a digit. `\S*?` skips that prefix; upstream's
+    # `wrk 4.2.0` still matches with nothing to skip. Without it, doctor
+    # reported wrk absent on the very platform whose install hint it had
+    # just printed.
+    wrk:    version_of(probe('wrk', '--version', allow_fail: true), /wrk\s+\S*?(\d+\.\d+(?:\.\d+)?)/),
   }
 
   puts 'Roundhouse environment check:'
