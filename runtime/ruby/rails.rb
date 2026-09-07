@@ -185,11 +185,6 @@ module Rails
     def initialize
       @entries = {}
       @expires_at = {}
-      # Insertion order, for eviction. A Hash iterates in insertion
-      # order in Ruby, Crystal and Python and in NO order in Go or
-      # Rust, so the order this store evicts by has to be carried
-      # explicitly rather than read back out of the Hash.
-      @keys = []
     end
 
     def fetch(key, opts = {})
@@ -228,30 +223,36 @@ module Rails
 
     def write_str(key, value, ttl)
       k = key.to_s
-      @keys.push(k) unless @entries.key?(k)
       @entries[k] = value
       @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
-      # FIFO, not LRU. MemoryStore prunes by least-recently-USED, which
-      # needs a touch on every read; this evicts by least-recently-
-      # WRITTEN, which needs nothing on the read path — and the read
-      # path is the one a fragment cache exists to make cheap. The
-      # cost of the weaker policy is a hot entry evicted early, which
-      # is one rebuild, not an error.
-      while @keys.length > MAX_ENTRIES
-        oldest = @keys.shift
-        @entries.delete(oldest)
-        @expires_at.delete(oldest)
+      # FLUSH THE WHOLE STORE at the cap, rather than evicting the
+      # oldest entry. MemoryStore prunes by least-recently-USED, which
+      # needs a touch on every READ — and the read path is the one a
+      # fragment cache exists to make cheap. FIFO would need only a
+      # write-side insertion-order Array, which is what this carried
+      # first, but that Array is a data structure whose whole purpose
+      # is ordering, and a BOUND does not need an order: any subset may
+      # go. Dropping the ordering array removes a per-write push, a
+      # per-eviction shift, and (on the sharded spinel twin) an untyped
+      # element read that cost the AOT lane a whole dispatch table.
+      #
+      # The cost is a cliff instead of a slope: at the cap every entry
+      # rebuilds at once rather than one falling off per write. The
+      # spinel override shards this 32 ways, so there a flush drops
+      # 1/32 of the store. Neither lane's corpus reaches the cap —
+      # campfire holds 500-1000 stable fragments against 5,000 — so
+      # this is the shape of the bound, not a cost anything pays today.
+      if @entries.size > MAX_ENTRIES
+        @entries.clear
+        @expires_at.clear
       end
       value
     end
 
-    # Drop one key from all three structures. `@keys` is a linear scan,
-    # which is why it is only reached on an EXPIRY or an explicit
-    # `delete` — never on the eviction path, which shifts.
+    # Drop one key. Reached on an EXPIRY and on an explicit `delete`.
     def forget(k)
       @entries.delete(k)
       @expires_at.delete(k)
-      @keys.delete(k)
       nil
     end
 

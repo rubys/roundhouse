@@ -18,45 +18,23 @@
 # MRI holds the GVL across `Hash#[]=`, so the same store is already
 # atomic there. JRuby is not, and its lane is smoke-only.
 #
-# SHARDED, AND THE FIRST CUT WAS NOT — the note it replaced said "one
-# lock, not shards, until something measures otherwise", and the very
-# next benchmark measured otherwise. A single `STORE_LOCK` is taken once
-# per FRAGMENT, so ~40+ times on the room page, by every connection at
-# once. On the published run (20260907-085458 vs -011858, the same
-# binary, the two lanes differing only in `SPINEL_WORKERS`):
-#
-#   workers  /rooms/1 req/s   /rooms/1/messages req/s
-#   1        58 -> 221 (3.8x) 57  -> 389 (6.8x)
-#   auto=12  188 -> 181 (.96) 192 -> 215 (1.1x)
-#
-# The ratios are not the tell. The SCALING is: before the cache, 12
-# workers bought 3.2x and 3.4x over one; after it, 12 workers ran at
-# 0.82x and 0.55x OF ONE WORKER. Adding cores made it slower, and p99
-# went 206 -> 914 ms and 161 -> 1360 ms. That is a convoy, and on this
-# runtime it is worse than a plain one: a contended `Mutex` parks the
-# green thread, and waking it goes through the one-condvar broadcast in
-# sp_sched.c that [[project_blog_bench_spinel_threaded_regression_2026_09_03]]
-# already identified as the source of a 600 ms tail. The CRuby lane took
-# the same lowering and improved on BOTH axes (8.3x/18.7x, p99 4-16x
-# better) because MRI's GVL makes that contention nearly free.
-#
-# So: N independent sub-stores, each with its own Mutex, chosen by key.
-# Same reasoning and same fix as [[project_db_pool_sharding]] — one pool
-# meant one mutex on every request, and splitting it was worth 3.3-3.8x
-# on this very page.
+# ONE LOCK, NOT SHARDS, until something measures otherwise. The DB pool
+# is sharded because one pool meant one mutex on every REQUEST held
+# across a query ([[project_db_pool_sharding]]); this one is held across
+# a Hash lookup and an Array push, tens of nanoseconds, and matz's
+# uncontended-Mutex fast path (fc866b04) makes the uncontended case
+# nearly free. Shard it when a profile says the room page contends on
+# it, not before.
 #
 # A read-then-write PAIR is still not atomic, and that is deliberate:
-# holding a lock across the render would serialize every request on the
-# page's first fragment. Two threads that miss the same key both render
-# and one write wins — the cost is a duplicate render, which is what the
-# cache was avoiding anyway, not a wrong answer.
+# holding the lock across the render would serialize every request on
+# the page's first fragment. Two threads that miss the same key both
+# render and one write wins — the cost is a duplicate render, which is
+# what the cache was avoiding anyway, not a wrong answer.
 #
 # Reopens the three methods that touch the store's state and nothing
 # else: `fetch_str` is defined in terms of them, `fetch` never touches
 # it, and the no-op `read`/`write`/`exist?` have no state to guard.
-# `initialize` is NOT reopened — the shards are class-level, built once
-# at load, so the shared runtime keeps sole ownership of instance setup
-# and this file cannot drift from it.
 module Rails
   class Cache
     # More shards than the box has OS workers (autodetect is one per
@@ -65,6 +43,10 @@ module Rails
     # state.
     SHARD_COUNT = 32
 
+    # Per-shard cap, so the total stays what the shared runtime
+    # documents (`MAX_ENTRIES`) rather than that times the shard count.
+    SHARD_MAX = (MAX_ENTRIES / SHARD_COUNT) > 0 ? (MAX_ENTRIES / SHARD_COUNT) : 1
+
     # Built with a `while` loop rather than `Array.new(n) { … }` or
     # `(0...n).map`: a block that constructs per-element state is the
     # kind of shape the AOT lane types poorly, and this runs once at
@@ -72,21 +54,13 @@ module Rails
     SHARD_LOCKS = []
     SHARD_ENTRIES = []
     SHARD_EXPIRES = []
-    SHARD_KEYS = []
     i = 0
     while i < SHARD_COUNT
       SHARD_LOCKS.push(Mutex.new)
       SHARD_ENTRIES.push({})
       SHARD_EXPIRES.push({})
-      SHARD_KEYS.push([])
       i = i + 1
     end
-
-    # Per-shard entry cap, so the total stays what the shared runtime
-    # documents (`MAX_ENTRIES`) rather than that times the shard count.
-    # At least one, so a small cap cannot round to a store that evicts
-    # everything it writes.
-    SHARD_MAX = (MAX_ENTRIES / SHARD_COUNT) > 0 ? (MAX_ENTRIES / SHARD_COUNT) : 1
 
     # Which shard owns a key. Read from the TAIL, because that is where
     # our keys differ: a fragment key is
@@ -130,15 +104,12 @@ module Rails
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]
       expires = SHARD_EXPIRES[s]
-      keys = SHARD_KEYS[s]
       SHARD_LOCKS[s].synchronize do
-        keys.push(k) unless entries.key?(k)
         entries[k] = value
         expires[k] = ttl > 0 ? Time.now.to_i + ttl : 0
-        while keys.length > SHARD_MAX
-          oldest = keys.shift
-          entries.delete(oldest)
-          expires.delete(oldest)
+        if entries.size > SHARD_MAX
+          entries.clear
+          expires.clear
         end
       end
       value
@@ -149,7 +120,6 @@ module Rails
       SHARD_LOCKS[s].synchronize do
         SHARD_ENTRIES[s].delete(k)
         SHARD_EXPIRES[s].delete(k)
-        SHARD_KEYS[s].delete(k)
       end
       nil
     end

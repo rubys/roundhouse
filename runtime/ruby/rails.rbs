@@ -34,7 +34,6 @@ module Rails
   class Cache
     @entries: Hash[String, String]
     @expires_at: Hash[String, Integer]
-    @keys: Array[String]
     def initialize: () -> void
     def fetch: (untyped key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
     def fetch_str: (String key, Integer ttl) { () -> String } -> String
