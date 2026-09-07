@@ -738,6 +738,31 @@ module ActionView
     # it, so nothing leaks into later requests. (Statement-position
     # begin/ensure is likewise a construct half the targets have no
     # arm for.)
+    # The namespace a `<% cache %>` key sits under, so a fragment
+    # rendered FOR A BROADCAST and one rendered for a request can never
+    # be served for each other.
+    #
+    # They are not interchangeable, and the difference is exactly the
+    # thing `csrf_token_hidden_input` branches on two methods up: a
+    # broadcast render omits the authenticity_token input because its
+    # output is for OTHER sessions' pages. Cache them together and the
+    # first render of a message decides for all of them — a request
+    # warms the entry and every subscriber gets the warming session's
+    # token, or a broadcast warms it and the page that posted the
+    # message renders a form without one. Rails has this hazard and
+    # lives with it (its cached fragment encodes render history, which
+    # is the one divergence scripts/campfire-compare forgives by name);
+    # separating the namespaces costs one prefix and removes it.
+    #
+    # A prefix rather than a flag consulted inside `Rails::Cache`,
+    # because this is a VIEW-layer distinction and the store should not
+    # have to know about it — and because a namespace lets broadcasts
+    # keep a cache of their own instead of forgoing one.
+    def self.cache_scope
+      return "broadcast/" if @broadcast_rendering == true
+      ""
+    end
+
     def self.begin_broadcast_render
       @broadcast_rendering = true
       ""

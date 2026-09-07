@@ -34,9 +34,16 @@ module Rails
   class Cache
     @entries: Hash[String, String]
     @expires_at: Hash[String, Integer]
+    @keys: Array[String]
     def initialize: () -> void
     def fetch: (untyped key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
     def fetch_str: (String key, Integer ttl) { () -> String } -> String
+    # `String?` because nil is the MISS. An empty String is a HIT — a
+    # fragment can legitimately render to nothing, and reading that back
+    # as a miss would re-render it on every request forever.
+    def read_str: (String key) -> String?
+    def write_str: (String key, String value, Integer ttl) -> String
+    def forget: (String k) -> void
     def read: (untyped key) -> untyped
     def write: (untyped key, untyped value) -> untyped
     def delete: (untyped key) -> untyped

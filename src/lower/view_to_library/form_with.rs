@@ -1429,6 +1429,7 @@ mod tests {
             locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
+            view_name: String::new(),
             accumulator: "io".to_string(),
             form_records: Vec::new(),
             nullable_locals: Default::default(),

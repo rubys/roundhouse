@@ -154,4 +154,8 @@ require_relative "app/views"
 # same ordering contract as the CRuby overlay's
 # action_controller_session require).
 require_relative "runtime/csrf_token"
+# Synchronized fragment store — reopens Rails::Cache, so it must load
+# AFTER runtime/rails defines the unsynchronized shared one. Same
+# ordering contract as the csrf reopen above.
+require_relative "runtime/fragment_cache"
 

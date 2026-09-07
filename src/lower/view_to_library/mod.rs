@@ -663,6 +663,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         dyn_pools: dyn_pools.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
+        view_name: view.name.as_str().to_string(),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
     };
 
@@ -3809,6 +3810,13 @@ pub(super) struct ViewCtx {
     /// Rails' `param_key` does; without the fact the name convention
     /// yields nothing and the form falls back to the view directory.
     /// Only names whose type is a KNOWN MODEL appear.
+    /// This view's own name (`messages/_message`), the constant half
+    /// of a `<% cache %>` key. Two cache sites in different templates
+    /// can key on the SAME record — campfire's `_message` and a
+    /// `_message` in a turbo-stream refresh both cache `[message,
+    /// "presentation-v2"]` — so the site has to be in the key or one
+    /// would serve the other's markup.
+    pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<std::collections::HashMap<String, String>>,
 }

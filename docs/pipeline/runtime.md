@@ -3139,6 +3139,87 @@ identical at submit time; a byte divergence in every boost form of
 every broadcast frame. Found by `scripts/campfire-compare`
 (2026-08-31); forgiven by name in the comparator.
 
+### `<% cache %>` is served from `Rails.cache`
+
+`lower::view_to_library::walker` lowers a view's fragment-cache block to
+a read, a render into the site's own accumulator on a miss, and a write:
+
+    __cache_hit_352 = Rails.cache.read_str("views/#{ViewHelpers.cache_scope}messages/_message/#{message.cache_key_with_version}/presentation-v2")
+    if __cache_hit_352.nil?
+      __cache_io_352 = String.new
+      … body …
+      io << Rails.cache.write_str(<same key>, __cache_io_352, 0)
+    else
+      io << __cache_hit_352
+    end
+
+**What it closed.** `/rooms/1/messages` cost 127 sqlite round trips
+against Rails-as-deployed's 7 — and the 127 *was* Rails' own uncached
+renderer, because campfire's messages index preloads only
+`with_creator`, so boosts, rich text and attachments are N+1 in Rails
+too. Rails' 7 was its Redis fragment cache. Because the cache block
+wraps the WHOLE partial body, a hit runs none of it. Measured with
+`scripts/campfire-queries` (2026-09-06): **7 vs 7**, and every other
+route at or below Rails. That was the last query-parity gap.
+
+**No template digest, unlike Rails.** Rails hashes the template and its
+render tree into the key because Redis outlives the deploy that changed
+the template. This store lives in the process: a template change means a
+recompile, a new binary and an empty store, so the digest would be a
+constant that changes exactly when the thing it guards is already gone.
+An app's own manual version string still works — campfire's
+`"presentation-v2"` is a literal and folds into the key's constant text
+at compile time.
+
+**The key builder DECLINES rather than guesses.** Only two element
+shapes are claimed: a literal, and a name that is both one of this
+view's locals and a model's snake singular. Anything else renders
+transparently, which is what every site did before the store existed. A
+key that misses costs a render; a key that collides, or that fails to
+move when the row does, serves the WRONG BYTES — and nothing in this
+repo would catch that, because `campfire-compare` renders each lane once
+from cold. `model_singulars` alone would claim a helper named `message`;
+`locals` alone would claim `notice`; the conjunction claims exactly the
+Rails convention these partials are written to.
+
+Not by TYPE, which was the first cut and declined every site in the
+corpus: a view body reaches the walker as compiled ERB whose locals are
+still bare `Send { recv: None }` barewords with `ty: None`, because
+models type before views lower.
+
+**Invalidation is `belongs_to … touch:`**, which is why that had to land
+first (see its section above). Nothing deletes a fragment; the key moves
+when `updated_at` does, and a boost's touch cascades through its Message
+to its Room.
+
+**Two stores answer `Rails.cache`** — the shared runtime's `Rails::Cache`
+and the CRuby overlay's `Rails::MemoryStore` — and every method the
+compiler emits a call to has to exist on both. `read_str`/`write_str`
+landed on the shared one first and every campfire page 500'd on the
+CRuby lane with `undefined method 'read_str'`; the suite went 256 -> 229
+and `campfire-compare`'s emit walk died on the room page. Same shape as
+the Db shims' parity rule.
+
+**The lock is in the lane that needs it.** `runtime/ruby` is transpiled
+to nine targets and cannot spell `Mutex`; the single-threaded lanes have
+nothing to guard, rust and go already lock a class-level slot per
+access, the CRuby overlay's store has held a Mutex since it was written
+(Puma is threaded), and the spinel binary — a green thread per
+connection, no GVL — gets `runtime/spinel/fragment_cache.rb`, a reopen
+of the three state-touching methods that wins by load order the way
+`csrf_token.rb` does. A read-then-write PAIR is deliberately not atomic
+on any of them: holding a lock across the render would serialize every
+request on the page's first fragment, and two threads that miss the same
+key both render with one write winning — a duplicate render, not a wrong
+answer.
+
+**Known residue.** The shared store caps entries (5,000, FIFO — LRU
+needs a touch on every READ, and the read path is what a fragment cache
+exists to make cheap); the CRuby overlay's `MemoryStore` has no cap and
+never had one, which mattered less before there were fragments in it.
+The spinel lock compiles and serves but has not been load-tested under
+green-thread contention.
+
 ### Room-page boost forms and the fragment cache
 
 Rails fragment-caches each message row (`cache [ message,
@@ -3148,16 +3229,23 @@ forms carry the `authenticity_token` hidden input; a broadcast renders
 without one, so they don't. Token presence in the room page's boost
 forms therefore encodes each row's RENDER HISTORY — after a cable post,
 Rails' own page serves both spellings side by side (36 seeded rows with
-tokens, the 4 cable-posted rows without, on the compare walk). The emit
-has no fragment cache and re-renders every request inside a session, so
-its forms always carry the token. Neither spelling is wrong to the app:
+tokens, the 4 cable-posted rows without, on the compare walk). The emit's
+forms always carry the token, and since 2026-09-06 that is a DECISION
+rather than an absence: it fragment-caches the same rows now, but the
+key carries a `ViewHelpers.cache_scope` namespace, so a broadcast render
+(which omits the token) and a request render (which does not) can never
+be served for each other. Our entries are therefore always
+session-rendered and always token-carrying. Rails puts both in one
+namespace, which is exactly what makes its answer history-dependent.
+Neither spelling is wrong to the app:
 the JS submits with `X-CSRF-Token` from the page meta, which is why
 Rails can ship the token-less cached copy at all.
 
 Matching Rails here would mean reproducing not its renderer but its
-cache's history-dependence, which no per-request renderer can do —
-so the comparator forgives exactly this, by name, and ONLY on the room
-page: the mask is scoped so a token reappearing in a broadcast FRAME
+cache's history-dependence — and now that we have a cache of our own,
+matching it would mean deliberately DROPPING the namespace that keeps
+the two renders apart, i.e. adopting the bug. So the comparator still
+forgives exactly this, by name, and ONLY on the room page: the mask is scoped so a token reappearing in a broadcast FRAME
 still fails the run (that ratchet is the "Broadcast forms and CSRF"
 fix above). Found by `scripts/campfire-compare` when the room page was
 triaged for gating (2026-09-01).

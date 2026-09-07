@@ -24,6 +24,14 @@
 # eviction are exactly the is_a?-dispatching dynamic shapes the shared
 # runtime's typing bar excludes; other targets keep the no-op until
 # their lobsters turn.
+#
+# TWO STORES ANSWER `Rails.cache`, and every method the compiler emits
+# a call to has to exist on BOTH — this one and the shared runtime's
+# `Rails::Cache`. `read_str`/`write_str` landed on the shared one first
+# and every campfire page 500'd here with `undefined method 'read_str'
+# for an instance of Rails::MemoryStore`, which is the cache's version
+# of the dual-runtime parity rule the Db shims carry
+# ([[feedback_dual_runtime_parity]]).
 module Rails
   def self.cache
     @cache_store ||= MemoryStore.new
@@ -52,6 +60,27 @@ module Rails
     # dups Strings on both sides, which is what the typed half gives up.
     def fetch_str(key, ttl, &block)
       fetch(key, ttl.to_i > 0 ? { expires_in: ttl.to_i } : {}, &block)
+    end
+
+    # The BLOCK-FREE half of the same seam, which a view's `<% cache %>`
+    # lowers to (`lower::view_to_library::walker`): read, render into
+    # the site's own accumulator on a miss, write. A block there would
+    # have to capture the accumulator, and on the AOT lane a captured
+    # block dissolves into a heap poly proc (matz/spinel#4245).
+    #
+    # Thin delegates, as `fetch_str` above is — `read`/`write` already
+    # hold the Mutex and already dup Strings on both sides. `read_str`
+    # narrows to String because the caller appends the answer to a
+    # string builder; a non-String under that key is a MISS rather than
+    # a TypeError at the append, and the write that follows corrects it.
+    def read_str(key)
+      value = read(key)
+      value.is_a?(String) ? value : nil
+    end
+
+    def write_str(key, value, ttl)
+      write(key, value, ttl.to_i > 0 ? { expires_in: ttl.to_i } : {})
+      value
     end
 
     def read(key)

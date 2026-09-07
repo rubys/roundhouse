@@ -888,6 +888,9 @@ fn build_methods(
     // Also after push_user_methods: its BODY branches on whether the
     // model carries its own `to_key` (campfire's Message does).
     self::markers::push_dom_record_key_method(&mut methods, model);
+    // After push_user_methods too: a model that writes its own
+    // `cache_key` keeps it.
+    self::markers::push_cache_key_methods(&mut methods, model, schema);
     push_broadcasts_methods(&mut methods, model);
     // `has_secure_token` — the token default folds into the
     // `before_create` hook, so it runs BEFORE `push_callback_methods`:

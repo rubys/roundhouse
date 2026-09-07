@@ -160,14 +160,36 @@ module Rails
   # 114 visits in the benchmark sequence and most of the spinel lane's
   # iteration time.
   #
-  # Process-local and unsynchronized, matching the serving shape (one
-  # request at a time per process). ActiveSupport::Cache::MemoryStore
-  # holds a Mutex because Puma runs threads; a threaded server here needs
-  # the same before this is safe.
+  # Process-local and UNSYNCHRONIZED, which is a two-layer decision.
+  # `Mutex` is not a construct this file can spell: runtime/ruby is
+  # transpiled to nine targets and a lock would need an arm in each. On
+  # the single-threaded lanes there is nothing to guard, and on rust and
+  # go the emitter already puts a class-level slot behind its own lock
+  # per access. The lane that has real parallelism is the spinel binary
+  # (a green thread per connection), and that is where the synchronized
+  # store lives — runtime/spinel reopens this class, the same override
+  # seam csrf_token.rb uses. A read-then-write pair is not atomic even
+  # there, and for a cache that is benign: two threads both render, one
+  # write wins.
   class Cache
+    # Entry cap. A view fragment is the big consumer and campfire's
+    # message fragments run 2-5 KB, so 5,000 is roughly 10-25 MB —
+    # inside the neighbourhood of ActiveSupport::Cache::MemoryStore's
+    # 32 MB default, which is what deployed Rails would be sized
+    # against if it were not on Redis. A COUNT and not a byte total on
+    # purpose: measuring bytes means measuring every stored String on
+    # nine targets whose String is nine different things, and the cap
+    # exists to bound growth, not to hit a number.
+    MAX_ENTRIES = 5000
+
     def initialize
       @entries = {}
       @expires_at = {}
+      # Insertion order, for eviction. A Hash iterates in insertion
+      # order in Ruby, Crystal and Python and in NO order in Go or
+      # Rust, so the order this store evicts by has to be carried
+      # explicitly rather than read back out of the Hash.
+      @keys = []
     end
 
     def fetch(key, opts = {})
@@ -178,16 +200,59 @@ module Rails
     # checked lazily on read, as MemoryStore does.
     def fetch_str(key, ttl)
       k = key.to_s
-      if @entries.key?(k)
-        due = @expires_at[k]
-        return @entries[k] if due == 0 || due > Time.now.to_i
-        @entries.delete(k)
-        @expires_at.delete(k)
-      end
-      value = yield
+      hit = read_str(k)
+      return hit unless hit.nil?
+      write_str(k, yield, ttl)
+    end
+
+    # The two halves of `fetch_str`, callable separately — because the
+    # caller that matters most cannot use a block. A view's `<% cache %>`
+    # lowers to a read, a conditional render into its own accumulator,
+    # and a write; a BLOCK there would have to capture the accumulator
+    # and carry the render's return type through nine emitters, and on
+    # the AOT lane a captured block dissolves into a heap poly proc
+    # (matz/spinel#4245). Two plain calls are the same shape
+    # `ViewHelpers.broadcast_render` landed on, for the same reason.
+    #
+    # `nil` means MISS. An empty String is a HIT — a fragment can
+    # legitimately render to nothing, and treating that as a miss would
+    # re-render it on every request forever.
+    def read_str(key)
+      k = key.to_s
+      return nil unless @entries.key?(k)
+      due = @expires_at[k]
+      return @entries[k] if due == 0 || due > Time.now.to_i
+      forget(k)
+      nil
+    end
+
+    def write_str(key, value, ttl)
+      k = key.to_s
+      @keys.push(k) unless @entries.key?(k)
       @entries[k] = value
       @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
+      # FIFO, not LRU. MemoryStore prunes by least-recently-USED, which
+      # needs a touch on every read; this evicts by least-recently-
+      # WRITTEN, which needs nothing on the read path — and the read
+      # path is the one a fragment cache exists to make cheap. The
+      # cost of the weaker policy is a hot entry evicted early, which
+      # is one rebuild, not an error.
+      while @keys.length > MAX_ENTRIES
+        oldest = @keys.shift
+        @entries.delete(oldest)
+        @expires_at.delete(oldest)
+      end
       value
+    end
+
+    # Drop one key from all three structures. `@keys` is a linear scan,
+    # which is why it is only reached on an EXPIRY or an explicit
+    # `delete` — never on the eviction path, which shifts.
+    def forget(k)
+      @entries.delete(k)
+      @expires_at.delete(k)
+      @keys.delete(k)
+      nil
     end
 
     def read(key)
@@ -203,10 +268,7 @@ module Rails
     # surviving its explicit delete would be a behaviour change, not a
     # missing optimization.
     def delete(key)
-      k = key.to_s
-      @entries.delete(k)
-      @expires_at.delete(k)
-      nil
+      forget(key.to_s)
     end
 
     def exist?(key)

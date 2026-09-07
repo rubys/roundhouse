@@ -16,6 +16,7 @@
 //! preserving source order across sources.
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param, Touch};
+use crate::schema::Schema;
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
@@ -824,6 +825,170 @@ fn push_belongs_to_defaults(methods: &mut Vec<MethodDef>, model: &Model) {
             },
         );
         fold_into_or_push(methods, model, "before_validation", stmt);
+    }
+}
+
+/// Per-model `cache_key` / `cache_key_with_version` — the identity a
+/// fragment cache keys on.
+///
+///   def cache_key
+///     return "messages/new" if new_record?
+///     "messages/#{@id}"
+///   end
+///
+///   def cache_key_with_version
+///     "#{cache_key}-#{@updated_at_raw}"
+///   end
+///
+/// THE TABLE NAME, NOT THE CLASS NAME, and that is a deliberate
+/// divergence from Rails. Rails builds the prefix from `model_name
+/// .cache_key`, so a `Rooms::Open` keys under `rooms/opens` while the
+/// `Room` holding the same row keys under `rooms` — two entries for
+/// one row. This emit hydrates an association's records as the BASE
+/// class ([[project_campfire_compare_harness]], the STI dom_id
+/// finding), so a class-derived prefix would make the key depend on
+/// which read reached the row. The table name is the row's identity
+/// and does not move.
+///
+/// THE VERSION IS `<col>_raw`, THE STORED TEXT, not Rails'
+/// `updated_at.utc.to_fs(:usec)`. Both change exactly when the row's
+/// timestamp changes, which is the whole contract; the raw text needs
+/// no clock, no zone conversion and no strftime, and those are three
+/// things that would each need an arm in nine emitters to agree on.
+/// The key is never compared against a key Rails wrote — this store
+/// is ours — so the FORMAT is free and only the invalidation matters.
+///
+/// A model with no `updated_at` column gets `cache_key_with_version ==
+/// cache_key`, matching Rails, where `cache_version` is nil and the
+/// suffix is dropped. Such a record can only be invalidated by its key
+/// changing, which is Rails' exposure too.
+pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model, schema: &Schema) {
+    if is_abstract_class(model) {
+        return;
+    }
+    // NO TABLE, NO KEY — and for an STI subclass that is the point, not
+    // a gap. `Rooms::Open`'s `table` is the class-derived `opens`, which
+    // is in no schema; every schema-driven synthesizer here skips it for
+    // the same reason and the subclass inherits the base's. Emitting one
+    // anyway would key the SAME ROW under `opens/1` when a `Rooms::Open`
+    // read reached it and `rooms/1` when a `Room` read did — the exact
+    // two-entries-for-one-row split the table-name prefix exists to
+    // avoid. A tableless model has no row to cache and falls out here
+    // too.
+    let Some(table) = schema.tables.get(&model.table.0) else { return };
+    // A hand-written `cache_key` wins, as everywhere else here.
+    if methods.iter().any(|m| {
+        m.name.as_str() == "cache_key" && m.receiver == MethodReceiver::Instance
+    }) {
+        return;
+    }
+    let span = Span::synthetic();
+    let table_name = model.table.0.as_str().to_string();
+
+    // `return "<table>/new" if new_record?` — Rails' own answer for an
+    // unsaved record. It is not a useful cache entry, but it is a
+    // STABLE string, and the alternative is every unsaved record of a
+    // class sharing the key `"<table>/0"`.
+    let new_guard = Expr::new(
+        span,
+        ExprNode::If {
+            cond: Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("new_record?"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            then_branch: Expr::new(
+                span,
+                ExprNode::Return {
+                    value: with_ty(
+                        Expr::new(
+                            span,
+                            ExprNode::Lit { value: Literal::Str { value: format!("{table_name}/new") } },
+                        ),
+                        Ty::Str,
+                    ),
+                },
+            ),
+            else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+    let key_body = with_ty(
+        Expr::new(
+            span,
+            ExprNode::StringInterp {
+                parts: vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/") },
+                    crate::expr::InterpPart::Expr {
+                        expr: Expr::new(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                    },
+                ],
+            },
+        ),
+        Ty::Str,
+    );
+    methods.push(str_method(model, "cache_key", seq(vec![new_guard, key_body])));
+
+    // `updated_at` decides the version. Read through the `<col>_raw`
+    // storage ivar (`col_storage_name`), which for a temporal column is
+    // the ISO-8601 text as stored — the public reader would parse it
+    // back into a Time only for us to format it again.
+    let version_ivar = table
+        .columns
+        .iter()
+        .find(|c| c.name.as_str() == "updated_at")
+        .map(super::schema::col_storage_name);
+
+    let cache_key_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("cache_key"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let versioned = match version_ivar {
+        Some(ivar) => with_ty(
+            Expr::new(
+                span,
+                ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Expr { expr: cache_key_call },
+                        crate::expr::InterpPart::Text { value: "-".to_string() },
+                        crate::expr::InterpPart::Expr {
+                            expr: Expr::new(span, ExprNode::Ivar { name: ivar }),
+                        },
+                    ],
+                },
+            ),
+            Ty::Str,
+        ),
+        None => with_ty(cache_key_call, Ty::Str),
+    };
+    methods.push(str_method(model, "cache_key_with_version", versioned));
+}
+
+/// A no-arg instance method returning String — the shape both cache-key
+/// methods share.
+fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
+    MethodDef {
+        name: Symbol::from(name),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 

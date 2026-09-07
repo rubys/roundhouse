@@ -25,7 +25,7 @@ use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, todo_io_append, view_helpers_call, ViewCtx,
+    nil_lit, seq, send, todo_io_append, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -199,26 +199,48 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 },
             )]
         }
-        // `<% cache <key> do %> … <% end %>` — Rails fragment caching.
-        // The block is a pure OPTIMIZATION wrapper: its body is what the
-        // page renders, served from the store on a hit and evaluated on
-        // a miss. With no fragment store, evaluating it every time is
-        // the correct output and only forgoes the cache.
+        // `<% cache <key> do %> … <% end %>` — Rails fragment caching,
+        // served from `Rails.cache` when the key can be built and
+        // rendered transparently when it cannot:
         //
-        // Transparent rather than dropped, because dropped is what it
-        // was: `cache` fell through to the catch-all and took the whole
-        // BODY with it, so lobsters' `users/tree.html.erb` (44 lines,
-        // entirely wrapped) and `users/list.html.erb` each emitted
-        // `io << ""` — two blank pages, reported by nothing. The
-        // residue ledger this commit adds to `todo_io_append` is what
-        // surfaced them.
-        ExprNode::Send { recv: None, method, block: Some(block), .. }
+        //   __cache_hit_1 = Rails.cache.read_str("views/messages/_message/…")
+        //   if __cache_hit_1.nil?
+        //     __cache_io_1 = String.new
+        //     … body …
+        //     io << Rails.cache.write_str(<same key>, __cache_io_1, 0)
+        //   else
+        //     io << __cache_hit_1
+        //   end
+        //
+        // TWO APPENDS, not one through a reassigned local. `read_str`
+        // answers `String?` and the body produces a `String`; a single
+        // local holding both is a type that changes mid-method, which
+        // the strict targets have to widen. Each arm here appends a
+        // value of one type, and the else arm reads the local where it
+        // is already narrowed non-nil — the shape `attached.rs` uses.
+        //
+        // NO BLOCK, for the reason `Rails::Cache#read_str`'s note
+        // records: a block would capture the accumulator, and on the
+        // AOT lane a captured block dissolves into a heap poly proc
+        // (matz/spinel#4245).
+        //
+        // Transparent when `cache_key_parts` declines the key, which is
+        // also what this arm did for every site before the store
+        // existed. Transparent and not DROPPED, because dropped is what
+        // it was before that: `cache` fell through to the catch-all and
+        // took the whole BODY with it, so lobsters' `users/tree.html.erb`
+        // (44 lines, entirely wrapped) and `users/list.html.erb` each
+        // emitted `io << ""` — two blank pages, reported by nothing.
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
             if method.as_str() == "cache" =>
         {
-            match &*block.node {
-                ExprNode::Lambda { body, .. } => walk_body(body, ctx),
-                _ => vec![todo_io_append("cache block shape", stmt.span)],
-            }
+            let ExprNode::Lambda { body, .. } = &*block.node else {
+                return vec![todo_io_append("cache block shape", stmt.span)];
+            };
+            let Some(parts) = cache_key_parts(args, ctx) else {
+                return walk_body(body, ctx);
+            };
+            emit_cached_fragment(&parts, cache_ttl(args), body, ctx, stmt.span)
         }
         // Block-form `<% content_for :subnav do %> … <% end %>` —
         // slot capture (lobsters' subnav pattern: pages and partials
@@ -1534,8 +1556,150 @@ mod tests {
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
         }
+    }
+
+    /// `test_ctx` plus what makes a `<% cache %>` key groundable: the
+    /// partial's record local, and the app's model singulars.
+    fn cache_ctx() -> ViewCtx {
+        ViewCtx {
+            locals: vec!["message".to_string(), "notice".to_string()],
+            model_singulars: std::rc::Rc::new(
+                ["message", "room"].iter().map(|s| s.to_string()).collect(),
+            ),
+            ..test_ctx()
+        }
+    }
+
+    /// `<% cache <args> do %> inner <% end %>` — campfire's shape, in
+    /// statement position (the `<% %>` form, not `<%= %>`). The body is
+    /// a compiled-ERB `_buf` append, which is what the walker is handed
+    /// in a real template.
+    fn cache_call(args: Vec<Expr>) -> Expr {
+        let inner = buf_append(Expr::new(
+            Span::default(),
+            ExprNode::Lit { value: Literal::Str { value: "inner".to_string() } },
+        ));
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("cache"),
+                args,
+                block: Some(Expr::new(
+                    Span::default(),
+                    ExprNode::Lambda {
+                        rest_param: None,
+                        params: Vec::new(),
+                        block_param: None,
+                        body: inner,
+                        block_style: crate::expr::BlockStyle::Do,
+                    },
+                )),
+                parenthesized: false,
+            },
+        )
+    }
+
+    fn cache_emit(args: Vec<Expr>) -> String {
+        walk_body(&cache_call(args), &cache_ctx())
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn cache_block_reads_renders_and_writes() {
+        // campfire's `<% cache [ message, "presentation-v2" ] do %>`.
+        let key = Expr::new(
+            Span::default(),
+            ExprNode::Array {
+                elements: vec![var("message"), str_lit("presentation-v2")],
+                style: Default::default(),
+            },
+        );
+        let emitted = cache_emit(vec![key]);
+
+        assert!(emitted.contains("Rails.cache.read_str("), "the read leads:\n{emitted}");
+        assert!(emitted.contains("Rails.cache.write_str("), "the miss arm writes:\n{emitted}");
+        assert!(
+            emitted.contains("message.cache_key_with_version"),
+            "the record contributes its versioned key:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("views/") && emitted.contains("messages/_message/"),
+            "the site is in the key, so two templates caching one record cannot collide:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("presentation-v2"),
+            "a literal folds into the key at COMPILE time — this is the app's own \
+             version bump and it still works:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("cache_scope"),
+            "the broadcast namespace keeps a request render and a broadcast render \
+             (which omits the CSRF input) from being served for each other:\n{emitted}"
+        );
+        assert!(emitted.contains("inner"), "the body still renders on a miss:\n{emitted}");
+        assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
+    }
+
+    #[test]
+    fn the_body_renders_into_its_own_accumulator_not_the_page() {
+        let key = Expr::new(
+            Span::default(),
+            ExprNode::Array { elements: vec![var("message")], style: Default::default() },
+        );
+        let emitted = cache_emit(vec![key]);
+        assert!(
+            emitted.contains("__cache_io_"),
+            "the miss arm needs its own builder — what it accumulates is what gets \
+             STORED, and appending straight to `io` would store nothing:\n{emitted}"
+        );
+        // Two appends, not one reassigned local: `read_str` answers
+        // `String?` and the render answers `String`, and a single local
+        // holding both is a type that changes mid-method.
+        assert_eq!(
+            emitted.matches("io << ").count(),
+            2,
+            "one append per arm:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn an_ungroundable_key_renders_transparently() {
+        // `cache [ma, ma.item, @user]` (lobsters' mod activity table) —
+        // `ma` is not a model singular and not a local here. Declining
+        // is the SAFE answer: a key that misses costs a render, a key
+        // that collides serves the wrong bytes and no gate would see it.
+        let key = Expr::new(
+            Span::default(),
+            ExprNode::Array { elements: vec![var("ma")], style: Default::default() },
+        );
+        let emitted = cache_emit(vec![key]);
+        assert!(!emitted.contains("read_str"), "no cache:\n{emitted}");
+        assert!(
+            emitted.contains("inner"),
+            "but the body still renders — transparent, never DROPPED:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn a_helper_that_shares_a_model_name_is_not_a_record() {
+        // `model_singulars` alone would claim this; the conjunction with
+        // `locals` is what keeps a helper call out of a cache key.
+        let key = Expr::new(
+            Span::default(),
+            ExprNode::Array { elements: vec![var("room")], style: Default::default() },
+        );
+        let emitted = cache_emit(vec![key]);
+        assert!(
+            !emitted.contains("read_str"),
+            "`room` is a model singular but not one of THIS view's locals:\n{emitted}"
+        );
     }
 
     fn nil_lit() -> Expr {
@@ -2054,3 +2218,227 @@ mod tests {
     }
 }
 
+
+// ── `<% cache %>` fragment caching ───────────────────────────────
+
+/// The key a `<% cache %>` site reads and writes under, as interpolation
+/// parts — or None when any element of the key is something this pass
+/// cannot ground, in which case the site renders transparently.
+///
+/// DECLINING IS THE SAFE ANSWER and the reason this is conservative. A
+/// key that misses costs a render; a key that collides or fails to move
+/// when the record does serves the WRONG BYTES, and no gate in this repo
+/// would see it — the compare harness renders each lane once from cold.
+/// So only two element shapes are claimed: a literal, which folds into
+/// the constant text at compile time, and a record, which contributes
+/// `cache_key_with_version`. Anything else and the site keeps the
+/// behaviour it had before there was a store.
+///
+/// The view's own name leads, because two templates can cache on the
+/// same record — campfire caches `[message, "presentation-v2"]` from
+/// `messages/_message`, and a turbo-stream refresh renders the same
+/// partial — and without the site in the key one would serve the
+/// other's markup.
+///
+/// NO TEMPLATE DIGEST, unlike Rails. Rails hashes the template source
+/// (and its render tree) into the key because its store is Redis and
+/// outlives the deploy that changed the template. This store lives in
+/// the process; a template change means a recompile, a new binary and
+/// an empty store, so the digest would be a constant that changes
+/// exactly when the thing it guards is already gone. An app's own
+/// manual version string still works and is still honoured — campfire's
+/// `"presentation-v2"` is a literal and folds into the text.
+fn cache_key_parts(args: &[Expr], ctx: &ViewCtx) -> Option<Vec<InterpPart>> {
+    // `cache(key)` or `cache(key, expires_in: …)`. More than that is a
+    // shape this has not seen.
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let elements: Vec<&Expr> = match &*args[0].node {
+        ExprNode::Array { elements, .. } => elements.iter().collect(),
+        _ => vec![&args[0]],
+    };
+
+    // `views/` + the broadcast namespace + this site + the key parts.
+    // `cache_scope` is a runtime read, not a constant: the same partial
+    // renders both for a request and for a broadcast, and those two
+    // outputs differ (the broadcast omits the CSRF input). See its note
+    // in view_helpers.rb.
+    let mut parts: Vec<InterpPart> = vec![
+        InterpPart::Text { value: "views/".to_string() },
+        InterpPart::Expr { expr: view_helpers_call("cache_scope", Vec::new()) },
+        InterpPart::Text { value: format!("{}/", ctx.view_name) },
+    ];
+    for (i, el) in elements.iter().enumerate() {
+        if i > 0 {
+            push_key_text(&mut parts, "/");
+        }
+        match key_element(el, ctx)? {
+            KeyPart::Text(t) => push_key_text(&mut parts, &t),
+            KeyPart::Expr(e) => parts.push(InterpPart::Expr { expr: e }),
+        }
+    }
+    Some(parts)
+}
+
+enum KeyPart {
+    Text(String),
+    Expr(Expr),
+}
+
+/// Append literal text, merging into the previous chunk so the emitted
+/// string carries one `Text` run rather than a chain of adjacent ones.
+fn push_key_text(parts: &mut Vec<InterpPart>, t: &str) {
+    if let Some(InterpPart::Text { value }) = parts.last_mut() {
+        value.push_str(t);
+        return;
+    }
+    parts.push(InterpPart::Text { value: t.to_string() });
+}
+
+/// One key element: a literal folds to compile-time text, a record
+/// contributes `record.cache_key_with_version`, everything else declines.
+fn key_element(el: &Expr, ctx: &ViewCtx) -> Option<KeyPart> {
+    if let ExprNode::Lit { value } = &*el.node {
+        return match value {
+            Literal::Str { value } => Some(KeyPart::Text(value.clone())),
+            Literal::Sym { value } => Some(KeyPart::Text(value.as_str().to_string())),
+            Literal::Int { value } => Some(KeyPart::Text(value.to_string())),
+            Literal::Bool { value } => Some(KeyPart::Text(value.to_string())),
+            _ => None,
+        };
+    }
+    if !is_record(el, ctx) {
+        return None;
+    }
+    Some(KeyPart::Expr(send(
+        Some(el.clone()),
+        "cache_key_with_version",
+        Vec::new(),
+        None,
+        false,
+    )))
+}
+
+/// Does this expression evaluate to one of the app's model records?
+///
+/// NOT BY TYPE, because at this point there is none to read. A view
+/// body reaches the walker as compiled ERB whose locals are still bare
+/// `Send { recv: None }` barewords with `ty: None` — models type before
+/// views lower. So this asks the two questions the rest of this file
+/// asks about a name: is it one of this view's LOCALS (rather than a
+/// helper call that happens to share the name), and is that name a
+/// model's snake singular? Both, or it is not a record.
+///
+/// The conjunction is the conservative half. `model_singulars` alone
+/// would claim a helper named `message`; `locals` alone would claim
+/// `notice`. Together they claim exactly the Rails convention these
+/// partials are written to — `messages/_message.html.erb` receives a
+/// `message` — which is every cache site in the corpus.
+///
+/// `ivar_models` covers the other spelling: a view's `@story` is
+/// rewritten to a local by the time it gets here, and that map holds
+/// only names whose type IS a known model.
+///
+/// The type check stays first for the day these carry one.
+fn is_record(el: &Expr, ctx: &ViewCtx) -> bool {
+    if let Some(crate::ty::Ty::Class { id, .. }) = &el.ty {
+        return ctx.model_singulars.contains(&crate::naming::snake_case(id.0.as_str()));
+    }
+    let name = match &*el.node {
+        ExprNode::Var { name, .. } => name.as_str(),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            method.as_str()
+        }
+        _ => return false,
+    };
+    if ctx.ivar_models.contains_key(name) {
+        return true;
+    }
+    ctx.locals.iter().any(|l| l == name) && ctx.model_singulars.contains(name)
+}
+
+/// `expires_in:` off the options hash, in whole seconds; 0 (never
+/// expires) when absent, which is Rails' behaviour for an entry with no
+/// TTL and the only spelling the corpus writes. `.to_i` reads seconds
+/// off an Integer literal and off an `ActiveSupport::Duration` alike —
+/// the same forwarding `lower::rails_cache` does for the controller-side
+/// `Rails.cache.fetch`.
+fn cache_ttl(args: &[Expr]) -> Expr {
+    let zero = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 0 } });
+    let Some(opts) = args.get(1) else { return zero() };
+    let ExprNode::Hash { entries, .. } = &*opts.node else { return zero() };
+    entries
+        .iter()
+        .find(|(k, _)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == "expires_in")
+        })
+        .map(|(_, v)| send(Some(v.clone()), "to_i", Vec::new(), None, false))
+        .unwrap_or_else(zero)
+}
+
+/// The read / render / write triple. See the walker arm's note for the
+/// shape and why it is spelled without a block.
+fn emit_cached_fragment(
+    parts: &[InterpPart],
+    ttl: Expr,
+    body: &Expr,
+    ctx: &ViewCtx,
+    span: Span,
+) -> Vec<Expr> {
+    // Distinct per site within a view function: two `<% cache %>` blocks
+    // in one template would otherwise share a local, and a nested one
+    // would shadow its parent's hit mid-render.
+    let uniq = span.start;
+    let hit = Symbol::from(format!("__cache_hit_{uniq}"));
+    let cap = format!("__cache_io_{uniq}");
+
+    let key = || Expr::new(span, ExprNode::StringInterp { parts: parts.to_vec() });
+    let store = || {
+        send(
+            Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Rails")] })),
+            "cache",
+            Vec::new(),
+            None,
+            false,
+        )
+    };
+    let hit_ref = || Expr::new(span, ExprNode::Var { id: VarId(0), name: hit.clone() });
+
+    let read = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: hit.clone() },
+            value: send(Some(store()), "read_str", vec![key()], None, true),
+        },
+    );
+
+    // Miss: render into the site's own accumulator, then append what
+    // `write_str` answers — it returns the value it stored, so the
+    // fragment reaches the page and the store in one statement.
+    let mut miss = vec![assign_accumulator_string_new(&cap)];
+    miss.extend(walk_body(body, &ViewCtx { accumulator: cap.clone(), ..ctx.clone() }));
+    miss.push(accumulator_append_call(
+        send(
+            Some(store()),
+            "write_str",
+            vec![key(), accumulator_result_ref(&cap), ttl],
+            None,
+            true,
+        ),
+        ctx,
+    ));
+
+    vec![
+        read,
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: send(Some(hit_ref()), "nil?", Vec::new(), None, false),
+                then_branch: seq(miss),
+                else_branch: seq(vec![accumulator_append_call(hit_ref(), ctx)]),
+            },
+        ),
+    ]
+}
