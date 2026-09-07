@@ -885,36 +885,33 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     let span = Span::synthetic();
     let table_name = model.table.0.as_str().to_string();
 
-    // `return "<table>/new" if new_record?` — Rails' own answer for an
-    // unsaved record. It is not a useful cache entry, but it is a
-    // STABLE string, and the alternative is every unsaved record of a
-    // class sharing the key `"<table>/0"`.
-    let new_guard = Expr::new(
+    // Rails' own answer for an unsaved record. Not a useful entry, but
+    // a STABLE string, and the alternative is every unsaved record of a
+    // class sharing the key `"<table>/0"` — a silent wrong-bytes
+    // collision, which is the one failure mode this whole pass is
+    // arranged to avoid.
+    //
+    // `self.persisted?`, NOT `new_record?`, and with an explicit
+    // receiver. Only `persisted?` is synthesized per model on every
+    // target (rust emits it as `self.id != 0`); `new_record?` lives on
+    // the runtime Base, which a rust struct and a go struct do not
+    // inherit — the first cut spelled it as a bare `new_record?` and
+    // broke four CI jobs with `cannot find function new_record_pred`
+    // and `undefined: NewRecord`. The explicit `self` is the spelling
+    // `functionalize::mutation_to_struct_return` already uses for the
+    // same call.
+    //
+    // An if-EXPRESSION rather than an early return: both arms are
+    // String, so the strict targets get one typed value out of one
+    // construct.
+    let persisted = Expr::new(
         span,
-        ExprNode::If {
-            cond: Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: None,
-                    method: Symbol::from("new_record?"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                },
-            ),
-            then_branch: Expr::new(
-                span,
-                ExprNode::Return {
-                    value: with_ty(
-                        Expr::new(
-                            span,
-                            ExprNode::Lit { value: Literal::Str { value: format!("{table_name}/new") } },
-                        ),
-                        Ty::Str,
-                    ),
-                },
-            ),
-            else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::SelfRef)),
+            method: Symbol::from("persisted?"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
         },
     );
     let key_body = with_ty(
@@ -931,7 +928,21 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
         ),
         Ty::Str,
     );
-    methods.push(str_method(model, "cache_key", seq(vec![new_guard, key_body])));
+    let unsaved = with_ty(
+        Expr::new(
+            span,
+            ExprNode::Lit { value: Literal::Str { value: format!("{table_name}/new") } },
+        ),
+        Ty::Str,
+    );
+    let key = with_ty(
+        Expr::new(
+            span,
+            ExprNode::If { cond: persisted, then_branch: key_body, else_branch: unsaved },
+        ),
+        Ty::Str,
+    );
+    methods.push(str_method(model, "cache_key", key));
 
     // `updated_at` decides the version. Read through the `<col>_raw`
     // storage ivar (`col_storage_name`), which for a temporal column is

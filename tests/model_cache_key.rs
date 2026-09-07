@@ -98,10 +98,20 @@ fn the_key_is_table_slash_id_and_the_version_is_the_stored_timestamp() {
 #[test]
 fn an_unsaved_record_gets_rails_own_new_key() {
     // Not a useful entry, but a STABLE string. The alternative is every
-    // unsaved record of a class sharing `"messages/0"`.
+    // unsaved record of a class sharing `"messages/0"` — a silent
+    // wrong-bytes collision.
+    //
+    // Through `self.persisted?`, NOT `new_record?`. Only `persisted?`
+    // is synthesized per model on every target (rust emits it as
+    // `self.id != 0`, go as a field read); `new_record?` lives on the
+    // runtime Base, which a rust struct and a go struct do not inherit
+    // — spelling it that way broke four CI jobs with `cannot find
+    // function new_record_pred` and `undefined: NewRecord`.
     let out = emit();
     let key = method(&out, "class Message", "cache_key");
-    assert!(key.contains(r#"return "messages/new" if new_record?"#), "{key}");
+    assert!(key.contains("self.persisted?"), "guarded on persisted?:\n{key}");
+    assert!(!key.contains("new_record?"), "never new_record?:\n{key}");
+    assert!(key.contains(r#""messages/new""#), "Rails' own unsaved key:\n{key}");
 }
 
 #[test]
