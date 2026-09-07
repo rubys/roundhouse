@@ -517,9 +517,17 @@ start_lane() {
     local shape="${SHAPE_OVERRIDE:-$LOG_DIR/shape-$lane.txt}"
     case "$lane" in
         rails|rails-nocache)
-            # AS THEIR DOCKERFILE RUNS IT. `--deployed` is the whole
-            # difference: campfire's own worker formula instead of a
-            # pinned count, jemalloc, Thruster, resque-pool.
+            # AS THEIR DOCKERFILE RUNS IT. `--deployed` buys campfire's
+            # own worker formula instead of a pinned count, Thruster,
+            # and resque-pool. NOT jemalloc, which this comment used to
+            # claim: `campfire-oracle` preloads it on EVERY ruby lane,
+            # deployed or diagnostic ("jemalloc on EVERY Ruby lane" at
+            # its serve path), and the shape reports confirm it —
+            # `shape-rails-1p.txt` names the same libjemalloc as
+            # `shape-rails.txt`. The binary links it at build time
+            # (`--link -ljemalloc`), so the ALLOCATOR IS CONSTANT across
+            # all six lanes and the memory column compares runtimes
+            # rather than mallocs.
             local nocache=""; [[ "$lane" == "rails-nocache" ]] && nocache="--no-fragment-cache"
             scripts/campfire-oracle serve --deployed --out "$ORACLE" --port "$port" \
                 --threads "$THREADS" --shape-report "$shape" \
@@ -911,13 +919,41 @@ run_socket_phase() {
         > "$LOG_DIR/sockets-rails.log" 2>&1 \
         || fail "the rails socket lane failed (see $LOG_DIR/sockets-rails.log)"
 
+    # THE SAME cable.rb AS THE BINARY, ON CRuby — which is the only way
+    # to say whether this design's cost is the DESIGN or the COMPILER.
+    # Measured 2026-09-07: idle 0.009 cores against the binary's 0.011
+    # and Rails' 0.0125, delivering 0.044 against 0.041 and 0.157. The
+    # two lanes running our reactor are indistinguishable on both axes
+    # and Rails is ~3.6x dearer to deliver on, so the win is the design.
+    # What the binary adds is memory (141 vs 199 MB) and tail (84 vs
+    # 119 ms p99).
+    #
+    # ONE WORKER, and `campfire-cable-sweep` refuses anything else on
+    # this lane: `Cable::Registry` is per-process and cross-worker
+    # broadcast needs a transport behind `Broadcasts.set_transport`,
+    # which is not implemented. So this row is one process against the
+    # binary's $tier_cpus workers and Rails' $rails_workers — the
+    # per-connection columns (idle, delivering, per-frame) are the fair
+    # comparison; the totals are not.
+    if [[ -d "$EMIT" ]]; then
+        step "socket phase: ruby, $SOCKET_SIZES sockets on cpus $SOCKET_CPUS (1 worker)"
+        "$sweep" --lane ruby --emit "$EMIT" \
+            --db "$db" --cookies "$cookies" --cpus "$SOCKET_CPUS" \
+            --workers 1 --threads "$THREADS" \
+            --sizes "$SOCKET_SIZES" --per-room "$per_room" \
+            --secret "$SPINEL_SECRET" --out "$OUT_DIR/sockets-ruby" \
+            > "$LOG_DIR/sockets-ruby.log" 2>&1 \
+            || fail "the ruby socket lane failed (see $LOG_DIR/sockets-ruby.log)"
+    fi
+
     # One file for the renderer, lanes labelled the way the HTTP rows are.
     ruby - "$OUT_DIR/sockets-binary/results.jsonl" "$OUT_DIR/sockets-rails/results.jsonl" \
-           "$OUT_DIR/sockets.json" <<'RUBY'
+           "$OUT_DIR/sockets-ruby/results.jsonl" "$OUT_DIR/sockets.json" <<'RUBY'
 require "json"
-binary, rails, out = ARGV
+binary, rails, emit_ruby, out = ARGV
 rows = []
-{ "spinel" => binary, "rails" => rails }.each do |lane, path|
+# Order is the page's: our two lanes, then theirs.
+{ "spinel" => binary, "ruby" => emit_ruby, "rails" => rails }.each do |lane, path|
   next unless File.exist?(path)
   File.readlines(path, chomp: true).reject(&:empty?).each do |line|
     d = JSON.parse(line) rescue next
@@ -1043,14 +1079,41 @@ env["notes"] = [
   "preloaded, resque-pool alongside. <code>ruby</code> is the CRuby emit " \
   "in the same Puma shape with the same allocator; <code>spinel</code> is " \
   "the binary with its workers autodetected.",
-  "The <code>-1p</code> lanes are the diagnostic: one process each, no " \
-  "proxy and no job runner. They exist because a deployed number cannot " \
-  "say WHY it landed where it did — Puma's five threads share a GVL where " \
-  "the binary's workers do not, so these rows separate \"their runtime is " \
-  "slower\" from \"we gave them fewer cores\".",
+  "<code>ruby</code> IS A MATCHED-SHAPE RUNTIME COMPARISON, NOT A " \
+  "DEPLOYMENT CLAIM. It runs Rails' worker count so the number is not a " \
+  "core count, but the emitted tree's Action Cable registry and its job " \
+  "queue are both in-process: at more than one worker a broadcast reaches " \
+  "only the subscribers sharing a process with the poster, so campfire " \
+  "could not actually run this shape. Its deployable CRuby shape today is " \
+  "one worker, which is the <code>ruby-1p</code> row. Cross-worker pubsub " \
+  "would go behind the existing <code>Broadcasts.set_transport</code> " \
+  "seam and is not implemented. <code>spinel</code> needs none of this: " \
+  "one process, green threads, one shared registry — which is why it is " \
+  "the emit lane the WebSocket tier can measure at its full worker count.",
+  "The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
+  "ONE CPU rather than one process — CRuby needs a process per core " \
+  "because of the GVL, while the binary is a single process either way " \
+  "and varies its OS worker count instead (<code>SPINEL_WORKERS=1</code>). " \
+  "They exist because a deployed number cannot say WHY it landed where it " \
+  "did, so these rows separate \"their runtime is slower\" from \"we gave " \
+  "them fewer cores\". Read them per lane-family: <code>ruby</code> and " \
+  "<code>spinel</code> differ from their <code>-1p</code> twins in worker " \
+  "count and NOTHING else, but <code>rails-1p</code> also sheds Thruster " \
+  "and resque-pool, so its delta is not attributable to cores alone.",
   "Known omissions, stated rather than discovered: the WebSocket phase's " \
   "rails lane runs Puma with campfire's worker count and its allocator but " \
   "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
+  "MEMORY IS THE SERVER PROCESS TREE, and the rails lanes keep part of " \
+  "themselves outside it. Their fragment cache, their Action Cable " \
+  "adapter and Resque's queue all live in a system Redis (~16 MB RSS " \
+  "here) that is nobody's descendant and so is in no lane's number — " \
+  "while the emit lanes hold their equivalent inside the measured " \
+  "process. Throughput is unaffected: the rails lanes pay for every " \
+  "Redis round trip in their req/s. Counted for rails: Thruster, the " \
+  "Puma master and its workers, resque-pool and its workers.",
+  "The CRuby fragment store is PER PROCESS, so the <code>ruby</code> " \
+  "lane holds one cache per worker where <code>spinel</code> holds one " \
+  "for the whole binary.",
 ]
 env["notes"] = env["notes"].compact
 
