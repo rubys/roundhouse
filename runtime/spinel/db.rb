@@ -661,6 +661,37 @@ class DbPool
     # runtimes set, and what a pool of connections on one file needs.
     "PRAGMA journal_mode=WAL",
     "PRAGMA busy_timeout=5000",
+    # NORMAL, because FULL fsyncs the WAL on EVERY COMMIT and Rails does
+    # not. Measured on the bench box: 1000 commits cost 5.573s at FULL
+    # and 0.046s at NORMAL — 5.57ms against 0.05ms, a factor of 100.
+    #
+    # It was costing us a published number. campfire writes a presence
+    # row per cable connection, so the 1,000-socket connect storm read
+    # 5.87s with presence on and 0.32s with it off; the 5.55s difference
+    # is 1000 fsyncs almost exactly. Nothing about the accept path was
+    # slow — it does ~10,000 accepts/s, and draining the backlog is no
+    # faster than one accept per wake.
+    #
+    # AND IT WAS NOT A LIKE-FOR-LIKE COMPARISON — for a reason that is
+    # not in anyone's code. Asked directly, the Rails oracle's live
+    # connection answers `synchronous = 1`, and so does the CRuby emit's,
+    # which sets NO pragmas at all: both link the sqlite3 gem's bundled
+    # SQLite, whose WAL default is NORMAL. The binary links its own, and
+    # that one defaults to FULL. So three lanes on one benchmark were
+    # running two different durability settings, decided by a
+    # compile-time default nobody had written down.
+    #
+    # Which is why this is SET rather than left to agree by accident.
+    # The sibling shims (db_cruby.rb, db_jruby.rb) still set nothing and
+    # happen to read NORMAL today; a gem rebuilt with a different
+    # default would move them silently, and that is the shape of bug
+    # this line exists to remove.
+    #
+    # The trade is the standard WAL one and worth stating: NORMAL is
+    # safe across a process crash and risks only the most recent commits
+    # on OS or power failure. That is the guarantee campfire ships with,
+    # so it is the one to match.
+    "PRAGMA synchronous=NORMAL",
   ].freeze
 
   def initialize(path, n)
