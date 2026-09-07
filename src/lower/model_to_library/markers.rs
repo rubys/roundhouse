@@ -15,7 +15,7 @@
 //! matching name it folds the new body into that method's Seq,
 //! preserving source order across sources.
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param, Touch};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
@@ -827,6 +827,127 @@ fn push_belongs_to_defaults(methods: &mut Vec<MethodDef>, model: &Model) {
     }
 }
 
+/// `belongs_to :message, touch: true` → the parent's `updated_at` is
+/// stamped on four of this record's hooks:
+///
+///   def after_create
+///     __touch_message = message
+///     __touch_message.touch unless __touch_message.nil?
+///   end
+///
+/// and the same in `after_update`, `after_destroy` and `after_touch`.
+/// That is Rails' own registration set (`Builder::BelongsTo
+/// .add_touch_callbacks`), and `after_touch` is the one that matters
+/// most here: it is what makes the cascade transitive, so campfire's
+/// Boost → Message → Room chain moves all three rows. `Base#touch`
+/// fires it (runtime/ruby/active_record/base.rb).
+///
+/// THE LOCAL IS NOT A CONVENIENCE. The belongs_to reader is the
+/// row-LOADING one and its signature is `Target | nil` whatever
+/// `optional:` says, so a bare `message.touch unless message.nil?`
+/// would issue the SELECT twice and read as a nilable receiver at the
+/// call. Binding once and guarding the local is the shape
+/// `attached.rs` already uses for the same reason.
+///
+/// Rails guards the update hook with `if: :saved_changes?` and skips
+/// the touch when nothing actually changed. This runtime's `save`
+/// issues an unconditional UPDATE, so there is no no-op save to skip
+/// and the guard would never be false — omitted rather than emitted
+/// as a constant true.
+fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
+    for assoc in model.associations() {
+        let crate::dialect::Association::BelongsTo { name, touch: Some(touch), .. } = assoc else {
+            continue;
+        };
+        let span = Span::synthetic();
+        let local = Symbol::from(format!("__touch_{}", name.as_str()));
+        let read_local =
+            || Expr::new(span, ExprNode::Var { id: VarId(0), name: local.clone() });
+
+        let bind = Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: local.clone() },
+                value: Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: name.clone(),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+            },
+        );
+
+        let mut guarded = Vec::new();
+        // `touch: :last_message_at` stamps that column ALONGSIDE
+        // `updated_at`. Written through the column WRITER and with
+        // `ActiveSupport.db_now` for the same two reasons `column_ops`
+        // spells it that way: the writer is what formats a temporal
+        // value for storage, and `db_now` is the single clock the
+        // `touch` below stamps `updated_at` from, so both columns
+        // carry one instant and `travel_to` moves both.
+        if let Touch::Column(col) = touch {
+            guarded.push(Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(read_local()),
+                    method: Symbol::from(format!("{}=", col.as_str())),
+                    args: vec![Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(Expr::new(
+                                span,
+                                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                            )),
+                            method: Symbol::from("db_now"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )],
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+        }
+        guarded.push(Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(read_local()),
+                method: Symbol::from("touch"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+
+        let stmt = Expr::new(
+            span,
+            ExprNode::If {
+                cond: Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(read_local()),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                then_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                else_branch: seq(guarded),
+            },
+        );
+
+        for hook in ["after_create", "after_update", "after_destroy", "after_touch"] {
+            fold_into_or_push(methods, model, hook, seq(vec![bind.clone(), stmt.clone()]));
+        }
+    }
+}
+
 /// Lifecycle hook names that appear as block-form Unknown items. Names
 /// not in this set fall through to plain Unknown (they're future
 /// lowerer or emit work). Includes the `_commit` variants Rails sugar
@@ -868,6 +989,7 @@ pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model)
     // callbacks. A user callback that reads `creator` therefore sees
     // the default already applied, which is the order that matters.
     push_belongs_to_defaults(methods, model);
+    push_belongs_to_touches(methods, model);
     for item in &model.body {
         match item {
             ModelBodyItem::Callback { callback, .. } => {

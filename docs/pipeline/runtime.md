@@ -682,6 +682,42 @@ writes. The bare `increment!(:col)` keeps its NoMethodError: reproducing
 it would mean persisting the counter WITHOUT stamping `updated_at`, and
 a silently wrong timestamp is worse than a missing method.
 
+### `belongs_to … touch:` cascades, and `touch` fires `after_touch`
+
+`lower::model_to_library::markers` expands the option onto the four
+hooks Rails registers it on — `after_create`, `after_update`,
+`after_destroy` and `after_touch` — each binding the belongs_to reader
+to a local, guarding it for nil and calling the parent's no-arg
+`touch`. `touch: :some_column` stamps that column through its writer
+first, from `ActiveSupport.db_now`, so it and `updated_at` carry one
+instant.
+
+`after_touch` is the load-bearing one. It is what makes the cascade
+TRANSITIVE, and `ActiveRecord::Base#touch` fires it: campfire's boost
+touches its Message, whose own `belongs_to :room, touch: true` carries
+the stamp on to the Room. Without it the chain stops one level short —
+and no behavioral test can see that, because nothing renders
+`updated_at`. What does see it is a fragment cache keyed on
+`cache_key_with_version`.
+
+Two residues, both smaller than they look:
+
+* **`touch` still runs no COMMIT callbacks.** Rails fires
+  `after_commit` (and the `_commit` variants) after a touch; this
+  runtime fires `after_touch` only.
+* **The update hook is unguarded.** Rails registers its touch with
+  `if: :saved_changes?` and skips the parent when the child's save
+  changed nothing. This runtime's `save` issues an unconditional
+  UPDATE, so there is no no-op save for the guard to catch and the
+  condition would never be false. A save that writes the same bytes
+  therefore moves the parent's `updated_at` where Rails leaves it —
+  which busts a cache entry early rather than serving a stale one.
+
+Rails also SKIPS the create and destroy registrations when the
+association carries a `counter_cache:` (the counter update touches on
+its own). This runtime has no counter-cache support, so it registers
+all four unconditionally, which reaches the same observable row.
+
 ### A bad signed id raises `RecordNotFound`, not `InvalidSignature`
 
 `record.signed_id(purpose:)` and `Model.find_signed(id, purpose:)` are

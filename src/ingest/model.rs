@@ -1217,6 +1217,7 @@ fn parse_association(
     let mut polymorphic: Option<bool> = None;
     let mut as_interface: Option<String> = None;
     let mut belongs_to_default: Option<crate::expr::Expr> = None;
+    let mut touch: Option<crate::dialect::Touch> = None;
 
     for arg in iter {
         // Positional lambda between name and kwargs — the association
@@ -1255,6 +1256,17 @@ fn parse_association(
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
                 "optional" => optional = bool_value(&value),
+                // `touch: true` / `touch: :last_message_at`. A `false`
+                // is Rails' explicit opt-out and reads as no touch,
+                // which is what `None` already means.
+                "touch" => {
+                    touch = match bool_value(&value) {
+                        Some(true) => Some(crate::dialect::Touch::UpdatedAt),
+                        Some(false) => None,
+                        None => symbol_value(&value)
+                            .map(|s| crate::dialect::Touch::Column(Symbol::from(s.as_str()))),
+                    }
+                }
                 "join_table" => join_table = string_value(&value),
                 "polymorphic" => polymorphic = bool_value(&value),
                 "as" => as_interface = symbol_value(&value),
@@ -1376,6 +1388,7 @@ fn parse_association(
             // model's inverse `as:` declarations are ingested.
             polymorphic_targets: Vec::new(),
             default: belongs_to_default,
+            touch,
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),

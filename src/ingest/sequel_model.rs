@@ -265,6 +265,9 @@ fn parse_sequel_association(
             polymorphic: false,
             polymorphic_targets: Vec::new(),
             default: None,
+            // Sequel has no `touch:` on the association; its equivalent
+            // is the `touch` plugin, declared on the model.
+            touch: None,
         },
         "many_to_many" => Association::HasAndBelongsToMany {
             name: name.clone(),

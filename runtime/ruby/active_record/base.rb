@@ -646,12 +646,18 @@ module ActiveRecord
     # which is the honest failure — campfire's `Membership#connected`
     # is the one corpus site.
     #
-    # DIVERGENCE: Rails fires `after_touch` and the commit callbacks
-    # here. This runtime has no `after_touch` hook, so a touch runs no
-    # callbacks at all.
+    # `after_touch` FIRES, and that is load-bearing rather than
+    # cosmetic: it is the only thing that makes `belongs_to … touch:
+    # true` transitive. campfire boosts a message, the boost touches
+    # its Message, and Message's own `belongs_to :room, touch: true`
+    # is registered on `after_touch` — so without this call the
+    # cascade stops one level short and a room's `updated_at` never
+    # moves. (Rails also fires the commit callbacks here; this runtime
+    # still does not, and that half of the divergence stands.)
     def touch
       fill_timestamps(false)
       _adapter_update
+      after_touch
       true
     end
 

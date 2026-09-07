@@ -759,7 +759,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // Rails' 13. Typing Relation's element (the generic-Relation
     // refinement its header names) would retire most of this along with
     // the rest of the file's 400-odd.
-    const CEILING: usize = 915;
+    // 2026-09-06 915 -> 916, +1 for the `after_touch` call `Base#touch`
+    // now makes. MEASURED both ways on this gate: 915 with the line
+    // commented out, 916 with it. It is one more of the same shape the
+    // other eleven lifecycle-hook calls already contribute — the hooks
+    // are declared `() -> void` and this gate resolves none of the
+    // class's own self-sends, so a hook call in statement position is a
+    // TyVar however it is spelled. What it buys: `belongs_to … touch:
+    // true` becomes TRANSITIVE, which is what carries campfire's stamp
+    // from a boost through its Message to its Room. See
+    // docs/pipeline/runtime.md, "`belongs_to … touch:` cascades".
+    const CEILING: usize = 916;
 
     assert!(
         all_untyped.len() <= CEILING,

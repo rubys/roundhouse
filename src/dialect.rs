@@ -317,6 +317,18 @@ pub enum Association {
         /// ([[feedback_self_describing_ir]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Expr>,
+        /// `belongs_to :message, touch: true` — Rails stamps the
+        /// PARENT's `updated_at` after this record is created, updated
+        /// or destroyed, and again when this record is itself touched
+        /// (which is what makes the cascade transitive: campfire's
+        /// Boost touches its Message, whose touch touches its Room).
+        ///
+        /// Recorded rather than expanded at ingest for the same reason
+        /// `default` is: the expansion needs the association reader and
+        /// the nil guard, which the model lowerer owns
+        /// ([[feedback_self_describing_ir]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        touch: Option<Touch>,
     },
     HasMany {
         name: Symbol,
@@ -374,6 +386,19 @@ impl Association {
             | Association::HasAndBelongsToMany { name, .. } => name,
         }
     }
+}
+
+/// The `touch:` option on a `belongs_to`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Touch {
+    /// `touch: true` — stamp the parent's `updated_at` only.
+    UpdatedAt,
+    /// `touch: :last_message_at` — Rails stamps that column ALONGSIDE
+    /// `updated_at`, not instead of it. No corpus app writes this form
+    /// yet; it is carried in the IR so the lowerer can refuse it by
+    /// name rather than silently dropping the column.
+    Column(Symbol),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

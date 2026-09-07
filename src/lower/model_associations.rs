@@ -293,6 +293,7 @@ mod tests {
             polymorphic: false,
             polymorphic_targets: vec![],
             default: None,
+            touch: None,
         }
     }
 
