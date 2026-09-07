@@ -7,13 +7,32 @@
 # are read off the process TREE, which is what lets the same harness time
 # a one-process binary and a clustered Puma.
 #
-# TWO LANES, ONE SCRIPT, and that is the point. `--lane binary` runs the
-# emitted campfire; `--lane rails` runs campfire itself, as ONCE deploys
+# THREE LANES, ONE SCRIPT, and that is the point. `--lane binary` runs
+# the compiled campfire; `--lane ruby` runs the SAME EMITTED APP on
+# CRuby under Puma; `--lane rails` runs campfire itself, as ONCE deploys
 # it — clustered Puma, Redis for the cable adapter and the fragment
 # cache, production env — out of the tree `scripts/campfire-oracle
 # prepare` builds. Same driver, same seeded database, same cores, same
-# cookie file. A number from either lane that was produced by a different
+# cookie file. A number from any lane that was produced by a different
 # script is not a comparison.
+#
+# WHY THE `ruby` LANE EXISTS, and it is not "one more target". `binary`
+# and `ruby` run THE SAME cable.rb — the same event loop, the same
+# shared sliced heartbeat, the same fan-out — on two different runtimes.
+# Without it, every number this harness prints about our cable confounds
+# the DESIGN with SPINEL: an idle cost of 0.011 cores against Rails'
+# 0.0125 could be the reactor or it could be the compiler, and nothing
+# on the page can tell you which. One process each, same design, two
+# runtimes is the comparison that separates them.
+#
+# THE `ruby` LANE IS SINGLE-WORKER, AND THAT IS ENFORCED BELOW, not
+# documented and hoped for. The emitted `cable.rb` says it: "Single-
+# worker only. Clustered Puma (workers > 1) needs an inter-worker pubsub
+# — Redis in campfire's own deployment — behind the same
+# `Broadcasts.set_transport` seam this file plugs into." `Cable::Registry`
+# is per-process, so at two workers a broadcast reaches only the
+# subscribers that happen to share a process with the poster and the
+# harness would report a delivery rate as a performance number.
 #
 # WHY THE COOKIE FILE IS NOT OPTIONAL ABOVE A FEW DOZEN SOCKETS: campfire
 # rate-limits sign-in to 10 per 3 minutes per IP. `scripts/campfire-oracle
@@ -22,7 +41,7 @@
 # minted under, which is why it is passed to the binary too.
 #
 # Usage: scripts/campfire-cable-sweep --bin PATH --db PATH [--cpus 0-3]
-#        [--lane binary|rails] [--oracle DIR] [--threads 5]
+#        [--lane binary|ruby|rails] [--emit DIR] [--oracle DIR] [--threads 5]
 #        [--workers 4] [--sizes "10 30 100 300 1000"] [--per-room 50]
 #        [--idle 20] [--messages 30] [--rate 2] [--out DIR] [--port 19800]
 #        [--cookies FILE] [--secret KEY] [--no-presence] [--env K=V ...]
@@ -31,6 +50,7 @@ set -uo pipefail
 BIN=""; DB=""; CPUS="0-3"; WORKERS=4; SIZES="10 30 100 300 1000"; PER_ROOM=50
 IDLE=20; MESSAGES=30; RATE=2; OUT=""; PORT=19800; BIG_ROOM=""
 LANE=binary; ORACLE=""; THREADS=5; COOKIES=""; PRESENCE=1; EXTRA_ENV=(); PACE=""
+EMIT=""
 SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --idle) IDLE="$2"; shift 2 ;; --messages) MESSAGES="$2"; shift 2 ;; --rate) RATE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;; --big-room) BIG_ROOM="$2"; shift 2 ;;
     --lane) LANE="$2"; shift 2 ;; --oracle) ORACLE="$2"; shift 2 ;; --threads) THREADS="$2"; shift 2 ;;
+    --emit) EMIT="$2"; shift 2 ;;
     --cookies) COOKIES="$2"; shift 2 ;; --secret) SECRET="$2"; shift 2 ;;
     --no-presence) PRESENCE=0; shift ;;
     # A/B ONE BINARY AGAINST ITSELF. The runtime knob that decides a
@@ -60,6 +81,21 @@ if [[ "$LANE" == binary ]]; then
   [[ -x "$BIN" ]] || { echo "need --bin (executable) on the binary lane" >&2; exit 2; }
   BINDIR="$(cd "$(dirname "$BIN")/../.." && pwd)"   # spin layout: build/bin/campfire under the tree
   SERVER_NAME="$(basename "$BIN")"
+elif [[ "$LANE" == ruby ]]; then
+  [[ -d "$EMIT" ]] || { echo "need --emit DIR (the transpiled CRuby tree) on the ruby lane" >&2; exit 2; }
+  EMIT="$(cd "$EMIT" && pwd)"
+  [[ -f "$EMIT/config.ru" ]] || { echo "no config.ru under $EMIT — is that the emitted tree?" >&2; exit 2; }
+  # REFUSED, not warned. `Cable::Registry` is per-process; at two workers
+  # a broadcast reaches only the poster's own process and the driver
+  # would record the misses as a delivery RATE rather than as a broken
+  # configuration. A harness that can report a wrong number confidently
+  # is worse than one that stops.
+  if [[ "$WORKERS" != 1 ]]; then
+    echo "the ruby lane is single-worker only (asked for $WORKERS): the emitted cable's" >&2
+    echo "registry is per-process and cross-worker broadcast needs a transport behind" >&2
+    echo "Broadcasts.set_transport, which is not implemented. Re-run with --workers 1." >&2
+    exit 2
+  fi
 else
   [[ -d "$ORACLE" ]] || { echo "no oracle at $ORACLE — scripts/campfire-oracle prepare" >&2; exit 2; }
   command -v redis-cli >/dev/null && redis-cli ping >/dev/null 2>&1 \
@@ -111,7 +147,7 @@ for c in /usr/local/lib/libjemalloc.so /usr/lib/x86_64-linux-gnu/libjemalloc.so.
          /opt/homebrew/lib/libjemalloc.dylib; do
     [[ -e "$c" ]] && { JEMALLOC="$c"; break; }
 done
-[[ "$LANE" == rails ]] && echo "sweep: rails lane allocator: ${JEMALLOC:-stock malloc (no jemalloc found)}"
+[[ "$LANE" == rails || "$LANE" == ruby ]] && echo "sweep: $LANE lane allocator: ${JEMALLOC:-stock malloc (no jemalloc found)}"
 # The pin is the whole point of a tier — but a Mac has no taskset, and a
 # harness that only runs where it publishes cannot be smoke-tested before
 # it gets there. Absent, the run says so rather than silently measuring
@@ -134,6 +170,25 @@ start_server() {   # $1 = label
         BLOG_DB=storage/development.sqlite3 PORT="$PORT" SECRET_KEY_BASE="$SECRET" \
         ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
         "${PIN[@]}" "./build/bin/$SERVER_NAME" > "$OUT/server-$label.log" 2>&1 ) &
+  elif [[ "$LANE" == ruby ]]; then
+    # THE SAME APP AS THE BINARY LANE, on CRuby. Same seeded database
+    # (the emit reads `storage/development.sqlite3`), same
+    # SECRET_KEY_BASE so the minted cookie file verifies here too, same
+    # pin, same jemalloc as the rails lane — their Dockerfile preloads
+    # it and the headline column on this phase is memory, so an
+    # allocator difference here would be measuring malloc.
+    #
+    # `-w 1` is not a tuning choice, it is the only correct one: see the
+    # single-worker note in the header. The guard above has already
+    # refused anything else, so this cannot silently drift.
+    [[ "$DB" -ef "$EMIT/storage/development.sqlite3" ]] || cp "$DB" "$EMIT/storage/development.sqlite3"
+    rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
+    ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
+        RAILS_MAX_THREADS="$THREADS" ${JEMALLOC:+LD_PRELOAD="$JEMALLOC"} \
+        DB_PATH=storage/development.sqlite3 SECRET_KEY_BASE="$SECRET" \
+        RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
+        "${PIN[@]}" bundle exec puma -p "$PORT" -w 1 -t "$THREADS:$THREADS" config.ru \
+        > "$OUT/server-$label.log" 2>&1 ) &
   else
     # AS ONCE DEPLOYS IT. WEB_CONCURRENCY is what campfire's config/puma.rb
     # reads; unpinned it computes `(processor_count * 0.666).ceil` and the
