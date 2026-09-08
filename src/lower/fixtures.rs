@@ -167,7 +167,9 @@ fn resolve_field_inner(
                         .unwrap_or_else(|| (ty.clone(), raw.clone()));
                     LoweredFixtureValue::Literal { ty, raw }
                 }
-                FixtureValue::Ruby(expr) => LoweredFixtureValue::Ruby(expr.clone()),
+                FixtureValue::Ruby(expr) => {
+                    LoweredFixtureValue::Ruby(erb_value_for_column(expr, ty))
+                }
             },
         }]);
     }
@@ -289,6 +291,79 @@ fn split_polymorphic_reference(scalar: &str) -> Option<(String, String)> {
 /// Reads the same `Model::enums` table `lower::enum_symbols` uses for
 /// hand-written `where(role: :bot)`; the two are the query side and the
 /// fixture side of one fact.
+/// Whether a column stores text. A NULLable column arrives as
+/// `Union { variants: [Str, Nil] }`, not `Str` — and campfire's
+/// `password_digest` is exactly that, so a bare `matches!(ty, Ty::Str)`
+/// matched none of the four fields this rule exists for.
+fn is_string_column(ty: &Ty) -> bool {
+    match ty {
+        Ty::Str => true,
+        Ty::Union { variants } => {
+            let mut saw_str = false;
+            for v in variants {
+                match v {
+                    Ty::Str => saw_str = true,
+                    Ty::Nil => {}
+                    _ => return false,
+                }
+            }
+            saw_str
+        }
+        _ => false,
+    }
+}
+
+/// A `<%= … %>` fixture value, made faithful to what Rails actually
+/// loads.
+///
+/// RAILS RENDERS THE FIXTURE FILE TO TEXT FIRST. `password_digest:
+/// <%= password_digest %>` is ERB over a YAML document: the tag's value
+/// goes through `to_s` on its way into the document, and YAML then
+/// reads that text back as a scalar. We bind the expression straight
+/// into `instance.<column> = <expr>` instead, which skips the
+/// stringification — so campfire's `users.yml`, whose preamble binds
+/// `BCrypt::Password.create("secret123456")`, assigned the Password
+/// OBJECT to a string column.
+///
+/// Under CRuby that is invisible: the object is stored as-is and
+/// duck-types through every later read. Under spinel the object lands
+/// in the String-typed slot as `"\xDD"` — one byte, no diagnostic —
+/// and the next `BCrypt::Password.new` raises `invalid hash` out of
+/// `_fixtures_load!`, which every `setup` runs. That was 60 of the
+/// spinel suite lane's 288 tests, in whole controller files at a time.
+///
+/// Only a STRING column needs the wrap. For Int/Float/Bool the text
+/// round-trip is `5` -> `"5"` -> `5`, which is what splicing the value
+/// already does; wrapping those would be strictly wrong.
+///
+/// `String#to_s` is identity, so this costs nothing on the common case
+/// where the tag already produced a String.
+///
+/// NOT the whole of `ActiveModel::Type::String#cast`: that maps `true`
+/// to `"t"` and `false` to `"f"`, where `to_s` gives `"true"`/`"false"`.
+/// A boolean interpolated into a string column is the one shape this
+/// still gets wrong, and it is named here rather than silently rounded
+/// off — the cast is a runtime branch on the value, not a wrap the
+/// lowering can apply statically.
+fn erb_value_for_column(expr: &Expr, ty: &Ty) -> Expr {
+    if !is_string_column(ty) {
+        return expr.clone();
+    }
+    crate::lower::typing::with_ty(
+        Expr::new(
+            expr.span,
+            crate::expr::ExprNode::Send {
+                recv: Some(expr.clone()),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Str,
+    )
+}
+
 fn enum_stored_value(
     model: &Model,
     column: &Symbol,
