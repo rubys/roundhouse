@@ -132,6 +132,7 @@ pub mod ty_coerce_insertion;
 pub mod typing;
 pub mod validations;
 pub mod view;
+pub mod view_buffer_passing;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;

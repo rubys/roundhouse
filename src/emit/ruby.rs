@@ -661,6 +661,12 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // Ruby resolves the inner module first. No-op unless a view
     // directory shares a name with a class.
     library::apply_constant_rooting(&mut lcs, app, library::RootingScope::AppAndRuntime);
+    // Give each view a `<name>_into(io, …)` variant and point
+    // view-to-view appends at it, so a nested fragment is written into
+    // the caller's buffer instead of being materialised as a string
+    // that the caller then appends. Ruby-family only: the construct
+    // needs a mutable buffer a callee can write through.
+    crate::lower::view_buffer_passing::apply(&mut lcs);
     html_views
         .iter()
         .zip(lcs.iter())
