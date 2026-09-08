@@ -1368,14 +1368,16 @@ fn lowered_index_view_rewrites_view_helpers() {
 fn lowered_index_view_renders_collection_partial_via_each() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/index.rb");
-    // `<%= render @articles %>` → `articles.each { |a| io <<
-    // Views::Articles.article(a) }`.
+    // `<%= render @articles %>` → `articles.each { |a|
+    // Views::Articles.article_into(io, a) }` — the per-element partial
+    // writes into this view's buffer rather than returning a string
+    // this view then appends (`lower::view_buffer_passing`).
     assert!(
         src.contains("articles.each"),
         "expected collection `each` iteration; got:\n{src}",
     );
     assert!(
-        src.contains("Views::Articles.article("),
+        src.contains("Views::Articles.article_into(io, "),
         "expected per-element partial dispatch; got:\n{src}",
     );
 }
@@ -1864,13 +1866,15 @@ fn lowered_show_view_emits_module_method() {
 fn lowered_show_view_renders_association_partial_via_each() {
     // `<%= render @article.comments %>` — has_many association
     // partial. Lowered to `article.comments.each { |c| io <<
-    // Views::Comments.comment(c) }`. The receiver is the
+    // Views::Comments.comment_into(io, c, nil, nil) }`. The variant takes
+    // every parameter as required, so the call spells the partial's
+    // notice/alert defaults. The receiver is the
     // post-ivar-rewrite `article`; the var name is the singular's
     // first letter (`c`).
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("article.comments.each { |c| io << Views::Comments.comment(c) }"),
+        src.contains("article.comments.each { |c| Views::Comments.comment_into(io, c, nil, nil) }"),
         "expected article.comments.each association iteration; got:\n{src}",
     );
 }
@@ -2106,8 +2110,8 @@ fn lowered_new_view_dispatches_named_partial() {
         "expected `def self._new(article, notice, alert)`; got:\n{src}",
     );
     assert!(
-        src.contains("Views::Articles.form(article)"),
-        "expected named-partial dispatch to Views::Articles.form(article); got:\n{src}",
+        src.contains("Views::Articles.form_into(io, article, nil, nil)"),
+        "expected named-partial dispatch to Views::Articles.form_into(io, article, nil, nil); got:\n{src}",
     );
 }
 
@@ -2121,7 +2125,7 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
     );
     // Same shared partial as `new.html.erb`.
     assert!(
-        src.contains("Views::Articles.form(article)"),
+        src.contains("Views::Articles.form_into(io, article, nil, nil)"),
         "expected named-partial dispatch; got:\n{src}",
     );
     // `<%= link_to "Show this article", @article, ... %>` — the URL
