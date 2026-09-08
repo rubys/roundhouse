@@ -874,9 +874,10 @@ pub(crate) fn for_each_model_body_named(
 ///
 /// Deliberately NOT folded into [`for_each_hook_body`]: most passes
 /// that use that walk are about app semantics and have their own
-/// reasons for skipping test bodies (the blank pass says so in its
-/// header). A pass that wants test bodies asks for them by name, which
-/// keeps the widening reviewable one pass at a time.
+/// reasons for skipping test bodies. A pass that wants test bodies asks
+/// for them by name, which keeps the widening reviewable one pass at a
+/// time — `blank` asks (its header explains the one walk it still
+/// declines, which is VIEWS, not tests).
 pub(crate) fn for_each_test_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),

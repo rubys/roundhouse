@@ -95,6 +95,24 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     // when the view pipeline migrates to shared lowerings.
     super::for_each_hook_body(app, &mut |body| walk(body, &defs, &mut diags));
 
+    // TEST BODIES TOO, asked for by name — the widening
+    // `for_each_test_body` exists to make reviewable.
+    //
+    // campfire's `sign_in` helper ends
+    // `assert cookies[:session_token].present?`, and that site reaches
+    // roughly twenty controller test files through their `setup`. Left
+    // dynamic it is `undefined method 'present?' for an instance of
+    // String` on every one of them — 58 of the spinel suite lane's 288
+    // tests, all inside the helper that gates every authenticated
+    // request, so the tests behind it had never run at all.
+    //
+    // The receiver types in a test body are the ones the analyzer
+    // already stamped, so this grounds through exactly the same rules as
+    // an app body; there is no test-specific vocabulary here. On CRuby
+    // the overlay served these already and the rewrite is neutral — it
+    // is the AOT and strict targets that could not dispatch them.
+    super::for_each_test_body(app, &mut |body| walk(body, &defs, &mut diags));
+
     diags
 }
 
