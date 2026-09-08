@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# A/B one spinel binary's collector against itself: default whole-heap
+# mark vs SPINEL_GC_MINOR=1 generational. Written for matz/spinel#4386,
+# whose ask was specific — "the useful run is the losing shape, not the
+# winning one: something churn-heavy with a small live set, under both
+# collectors, long enough to matter."
+#
+# The blog fixture IS that shape in a real application rather than a
+# synthetic: ~15k req/s off a handful of articles, so nearly everything
+# it allocates dies young and the retained heap stays under ~1 MB.
+#
+# THREE THINGS THIS SCRIPT REFUSES TO GET WRONG, each learned the
+# expensive way:
+#
+# 1. IT DATES THE BINARY AGAINST spinel HEAD AND STOPS IF IT IS OLDER.
+#    `spin build` and `make build` have no prerequisite on spinel's
+#    runtime archive, so pulling spinel and rebuilding prints "up to
+#    date" and hands you a binary linked against the collector you were
+#    trying to stop measuring. The first run of this experiment was
+#    made on a binary built 1h48m BEFORE the collector commit under
+#    discussion, and the tell was negative output: SPINEL_GC_PHASES=1
+#    was armed and no [gcph] line appeared.
+#
+# 2. IT ATTESTS THAT THE FLAG ENGAGED, PER CELL. Two arms that differ
+#    by <2% on every counter are either the finding or a flag that
+#    never took, and those look identical in a table. TEP_GC_STAT=1
+#    makes Tep.on_shutdown print GC.stat, and `remembered_peak`
+#    separates them: 0 with the generational mark off, non-zero with
+#    it on. (`full_runs` does NOT separate them — it counts full
+#    SWEEPS on SP_GC_FULL_INTERVAL, so it sits at ~1-in-8 in both arms
+#    and looks like a dead flag when nothing is wrong.)
+#
+# 3. IT COIN-FLIPS THE ORDER WITHIN EACH ROUND. Running default-then-
+#    minor ten times confounds the arm with the clock: the first pass
+#    of this showed minor's p99 rising monotonically across rounds,
+#    which is indistinguishable from the box warming up until the
+#    order is randomised.
+#
+# Kills servers BY RECORDED PID. `pkill -f <pattern>` matches this
+# script's own command line and the ssh session running it.
+#
+# usage: scripts/gc-collector-ab [rounds] [seconds] [connections] [path]
+set -u
+ROUNDS="${1:-10}"; SECS="${2:-20}"; CONNS="${3:-16}"; EP="${4:-/articles}"
+TREE="${TREE:-$HOME/roundhouse/build/transpiled-blog-spinel}"
+SPINEL="${SPINEL_SRC:-$HOME/spinel}"
+PORT="${PORT:-4409}"
+OUT="${OUT:-/tmp/gc-collector-ab-out}"
+
+command -v wrk >/dev/null || { echo "gc-collector-ab: wrk not on PATH" >&2; exit 1; }
+BIN="$TREE/build/bin/blog"
+[[ -x "$BIN" ]] || { echo "gc-collector-ab: no $BIN (spin build first)" >&2; exit 1; }
+
+# (1) the binary must be newer than spinel's HEAD commit.
+if [[ -d "$SPINEL/.git" ]]; then
+  bin_t=$(stat -c %Y "$BIN" 2>/dev/null || stat -f %m "$BIN")
+  head_t=$(cd "$SPINEL" && git log -1 --format=%ct)
+  if (( bin_t < head_t )); then
+    echo "gc-collector-ab: REFUSING — $BIN is $(( (head_t-bin_t)/60 )) min OLDER than" >&2
+    echo "  spinel HEAD $(cd "$SPINEL" && git log -1 --format='%h %s')" >&2
+    echo "  Run: (cd $TREE && spin clean && spin build)" >&2
+    exit 1
+  fi
+fi
+
+rm -rf "$OUT"; mkdir -p "$OUT"
+pid=""
+cleanup(){ [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null; wait 2>/dev/null; }
+trap cleanup EXIT
+
+cell(){ # arm round
+  local arm="$1" r="$2" extra=()
+  [[ "$arm" == minor ]] && extra=(SPINEL_GC_MINOR=1)
+  ( cd "$TREE" && exec env "${extra[@]}" TEP_GC_STAT=1 SPINEL_GC_STATS=1 \
+      SPINEL_GC_PHASES=1 BLOG_DB=storage/development.sqlite3 PORT="$PORT" \
+      "$BIN" ) > "$OUT/srv-$arm-$r.log" 2>&1 &
+  pid=$!
+  local i; for i in $(seq 1 60); do
+    curl -s -o /dev/null "http://127.0.0.1:$PORT$EP" && break; sleep 1; done
+  wrk -t4 -c"$CONNS" -d5s "http://127.0.0.1:$PORT$EP" >/dev/null 2>&1   # warm
+  wrk -t4 -c"$CONNS" -d"${SECS}s" --latency "http://127.0.0.1:$PORT$EP" \
+      > "$OUT/wrk-$arm-$r.txt" 2>&1
+  kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; pid=""
+  printf "  %-8s r%-3s %9s req/s  p99 %9s  %s\n" "$arm" "$r" \
+    "$(awk '/Requests\/sec/{print $2}' "$OUT/wrk-$arm-$r.txt")" \
+    "$(awk '/^ *99%/{print $2}' "$OUT/wrk-$arm-$r.txt")" \
+    "$(grep -a 'tep: GC.stat' "$OUT/srv-$arm-$r.log" | grep -o 'remembered_peak=[0-9]*')"
+}
+
+echo "$EP  c=$CONNS  ${SECS}s x $ROUNDS rounds, order coin-flipped per round"
+echo "binary: $(stat -c %y "$BIN" 2>/dev/null || stat -f %Sm "$BIN")"
+for r in $(seq 1 "$ROUNDS"); do
+  if (( RANDOM % 2 )); then echo "round $r (minor first)";   cell minor "$r"; cell default "$r"
+  else                      echo "round $r (default first)"; cell default "$r"; cell minor "$r"; fi
+done
+
+echo
+echo "--- medians over $ROUNDS rounds ---"
+for arm in default minor; do
+  rq=$(for r in $(seq 1 "$ROUNDS"); do awk '/Requests\/sec/{print $2}' "$OUT/wrk-$arm-$r.txt"; done \
+       | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+  p9=$(for r in $(seq 1 "$ROUNDS"); do awk '/^ *99%/{print $2}' "$OUT/wrk-$arm-$r.txt"; done \
+       | sed 's/ms$//; s/us$/e-3/; s/s$/e3/' | sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+  # Collector share of wall is the SENSITIVE axis: when the collector is
+  # only ~7% of wall, a few-percent collector cost dilutes below the
+  # end-to-end noise floor, so req/s alone cannot see it.
+  gc=$(for r in $(seq 1 "$ROUNDS"); do
+         grep -a '^\[gc\]' "$OUT/srv-$arm-$r.log" | tail -1 \
+         | sed -n 's/.*wall (\([0-9.]*\)%).*/\1/p'; done \
+       | sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+  printf "%-8s %9s req/s   p99 %8sms   collector %s%% of wall\n" "$arm" "$rq" "$p9" "$gc"
+done
+echo
+echo "--- phase split, last round of each arm (matz/spinel#4382) ---"
+for arm in default minor; do
+  printf "%-8s %s\n" "$arm" "$(grep -a '^\[gcph\]' "$OUT/srv-$arm-$ROUNDS.log" | tail -1)"
+done
