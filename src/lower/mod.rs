@@ -520,7 +520,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Pure ledger (no rewrite): counts Relation-typed chains still
     // dynamic after every grounding pass has had its say — last so a
     // chain a pass grounds doesn't false-positive.
-    ("relation_residue", &["duration"]),
+    // AFTER `group_count`: the ledger asks `try_build_arel` whether
+    // each Relation-typed head would fold, and the builder recognizes
+    // the grouped-count chain by its LOWERED terminal (`group_count`).
+    // Ledgered before the rename, every grouped count would read as a
+    // chain that stays dynamic — and on a relation-less target that is
+    // now an error (issue #76), not a suppressed warning.
+    ("relation_residue", &["duration", "group_count"]),
 ];
 
 /// True iff `POST_ANALYZE_PASS_ORDER` is a valid topological order —

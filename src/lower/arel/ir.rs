@@ -181,6 +181,24 @@ pub enum ColumnSpec {
     /// strict targets have no shared vocabulary for — so the builder
     /// declines those and they stay on the runtime Relation path.
     Pluck(ColRef),
+    /// `group(:col).count` — `SELECT <col>, COUNT(*) … GROUP BY <col>`,
+    /// hydrated into a `Hash[<column ty>, Int]`. Rails' grouped count,
+    /// which the `group_count` lowering has already renamed off `count`
+    /// by the time the builder sees it (splitting the name is what keeps
+    /// the scalar `count` monomorphic).
+    ///
+    /// The grouped column rides in the PROJECTION rather than in a
+    /// separate `Select::group` field, because a `group` this builder
+    /// folds is a group this builder also terminates: the arm only
+    /// recognizes the `group(:col).count` pair, never a bare `group`
+    /// (a bare one would render `SELECT * … GROUP BY col`, one arbitrary
+    /// row per group, which is not what any of the chains that carry it
+    /// mean). One column, one aggregate, one place naming both — and no
+    /// field that is empty on every Select ever built. `sum`/`average`/
+    /// `minimum`/`maximum` take the same grouped-Hash return in Rails
+    /// and would each land as a sibling variant here, once each has a
+    /// lowering and a runtime method to be consistent with (issue #78).
+    GroupCount(ColRef),
 }
 
 /// Boolean expression in the WHERE position. Phase 1 is small on

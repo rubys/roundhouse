@@ -137,6 +137,7 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
         }
         ColumnSpec::All => emit_multi_hydrate(sel, table, owner, schema, param),
         ColumnSpec::Pluck(col) => emit_pluck(sel, table, col, param),
+        ColumnSpec::GroupCount(col) => emit_group_count(sel, table, col, param),
         ColumnSpec::Named(_) => {
             // Reserved — no Phase 1 builder produces Named yet (it's for
             // find_by(<col>)). Degrade instead of crashing: report the
@@ -484,6 +485,109 @@ fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool)
     seq(stmts)
 }
 
+/// `SELECT <col>, COUNT(*) FROM <table> [WHERE …] GROUP BY <col>` →
+/// `Hash[<column ty>, Int]`, Rails' grouped count.
+///
+/// Statement shape is `emit_pluck`'s — prepare, bind, loop, finalize,
+/// answer the accumulator — with two differences, both of them the
+/// reason this shape had no precedent in the visitor: the row read is
+/// TWO positional reads (the group key at 0, the aggregate at 1), and
+/// the accumulator is a Hash rather than an Array. Every result shape
+/// emitted before this one was Array-of-model, Array-of-column, a
+/// single record, or a scalar.
+///
+/// The key read is the same schema-driven `column_read_method_for` the
+/// row hydrate and `pluck` use — that is where the nullable `_opt` rule
+/// lives, and a second copy of it would be a second description of the
+/// same column. The value read is `column_int` unconditionally:
+/// `COUNT(*)` is an integer whatever the grouped column is.
+///
+/// The empty-Hash seed carries its `Hash<K, Int>` type explicitly for
+/// the reason the pluck/hydrate seeds carry theirs: an untyped `{}`
+/// types as an open Hash and the strict targets emit the wrong empty-map
+/// default under it (rust picks its `HashMap` annotation off exactly
+/// this stamp, and routes `[]=` on a Hash-typed receiver to `.insert`
+/// rather than the index syntax `HashMap` has no `IndexMut` for). The
+/// receiver of each write carries it too, not just the seed.
+fn emit_group_count(
+    sel: &Select,
+    table: &Table,
+    col: &super::ir::ColRef,
+    param: bool,
+) -> Expr {
+    let stmt = Symbol::from("stmt");
+    let results = Symbol::from("results");
+    let db = ClassId(Symbol::from(DB_MOD));
+
+    // The builder verified the column is in the table before it built
+    // the GroupCount, so this lookup cannot miss.
+    let column = table
+        .columns
+        .iter()
+        .find(|c| c.name == col.column)
+        .unwrap_or_else(|| {
+            panic!(
+                "Arel visitor: group column {} not in table {}",
+                col.column.as_str(),
+                table.name.as_str(),
+            )
+        });
+    let key_read = crate::lower::model_to_library::schema::column_read_method_for(column);
+    let key_ty = crate::lower::model_to_library::ty_of_column_slot(column);
+    let hash_ty = crate::ty::Ty::Hash {
+        key: Box::new(key_ty),
+        value: Box::new(crate::ty::Ty::Int),
+    };
+
+    let mut binds = Vec::new();
+    let sql = compose_sql_select(sel, table, param, &mut binds);
+    let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
+
+    let results_init = assign_var(
+        &results,
+        crate::lower::typing::with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash { entries: vec![], kwargs: false },
+            ),
+            hash_ty.clone(),
+        ),
+    );
+
+    // while Db.step?(stmt) ; results[Db.column_*(stmt, 0)] = Db.column_int(stmt, 1) ; end
+    //
+    // Written as the Send form of indexed assignment (`recv.[]=(k, v)`)
+    // rather than `LValue::Index`: it is the spelling every target's
+    // emitter already routes (the go emitter has no Index assign-target
+    // arm at all, and rust needs the Hash-receiver branch that only the
+    // Send form reaches).
+    let loop_body = vec![send_to(
+        crate::lower::typing::with_ty(var_ref(&results), hash_ty.clone()),
+        "[]=",
+        vec![
+            db_call(&db, key_read, vec![var_ref(&stmt), lit_int(0)]),
+            db_call(&db, "column_int", vec![var_ref(&stmt), lit_int(1)]),
+        ],
+        false,
+    )];
+    let while_loop = Expr::new(
+        Span::synthetic(),
+        ExprNode::While {
+            cond: db_call(&db, "step?", vec![var_ref(&stmt)]),
+            body: seq(loop_body),
+            until_form: false,
+        },
+    );
+
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(results_init);
+    stmts.push(while_loop);
+    stmts.push(db_call(&db, "finalize", vec![var_ref(&stmt)]));
+    stmts.push(crate::lower::typing::with_ty(var_ref(&results), hash_ty));
+    seq(stmts)
+}
+
 /// `SELECT COUNT(*) FROM <table> [WHERE …]` → integer scalar.
 fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
@@ -647,6 +751,9 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
         ColumnSpec::Count => "COUNT(*)".to_string(),
         ColumnSpec::Exists => "1".to_string(),
         ColumnSpec::Pluck(col) => col.column.as_str().to_string(),
+        // The grouped column is projected BESIDE the aggregate, in that
+        // order — the hydrate reads key at index 0, count at index 1.
+        ColumnSpec::GroupCount(col) => format!("{}, COUNT(*)", col.column.as_str()),
     };
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "SELECT {} FROM {}",
@@ -654,6 +761,13 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
         table.name.as_str()
     ))];
     push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, binds);
+    // GROUP BY sits between WHERE and ORDER BY. Read off the
+    // projection rather than a `Select` field: the grouped column is
+    // the projection here (see `ColumnSpec::GroupCount`), so one place
+    // names it and the SELECT list and the GROUP BY cannot disagree.
+    if let ColumnSpec::GroupCount(col) = &sel.columns {
+        segments.push(lit_str(format!(" GROUP BY {}", col.column.as_str())));
+    }
     push_order_segment(&mut segments, &sel.orders);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));

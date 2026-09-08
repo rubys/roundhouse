@@ -727,3 +727,42 @@ allocated bytes, not ~1%, so specializing it (by folding more chains or by monom
 the Relation) is a real LANE-SHARED win of the same family as the 2026-07-16 `to_a`
 memoization fix that took the sequence down 20%. Priced as an optimization it is worth
 more than the first pass said; priced as an AOT-gap closer it is still worth nothing.
+
+
+### Ladder rung 1, first item: `group(…).count` LANDED (2026-09-08, issues #77/#78)
+
+The "Widen `try_build_arel`" rung named five gaps — `.first` as a terminal,
+`joins`, a scope reference, `where.not`, and `group(…).count`. The last one is in:
+`Select`'s projection gained a `ColumnSpec::GroupCount(col)` variant, the builder
+gained an arm, and the visitor gained the first Hash-yielding hydrate it has ever
+emitted (`SELECT <col>, COUNT(*) … GROUP BY <col>`, key read at index 0 through the
+same schema-driven `column_read_method_for` the row hydrate uses, `COUNT(*)` at
+index 1, into a typed empty Hash). One change in one place, serving every
+relation-less target at once — the alternative, porting `group_count` to each
+runtime, is the wrong shape: those targets have no Relation to hang it on.
+
+Three things the shape taught:
+
+* **The fold is licensed by the TERMINAL, not by the refiner.** A `group` arm that
+  set a field and let the chain end there would render `SELECT * … GROUP BY col` —
+  one arbitrary row per group. The builder recognizes the `group(:col).count` PAIR
+  and declines a `group` reached any other way, which is also why the grouped
+  column rides in the projection rather than in a `Select::group` field that would
+  be empty on every Select ever built.
+* **A recognizer must not depend on a rename having happened.** The terminal
+  arrives as `count` or as the `group_count` that `lower::group_count` renames it
+  to, depending on the caller: the transpile driver runs the post-analyze lowerings
+  first, while the emit-only harnesses (`tests/*_toolchain.rs`) call `Analyzer` +
+  `emit` directly. Keyed on one spelling, the builder folded under one caller and
+  emitted a call to a `group` method no target defines under the other — which is
+  exactly what the new tiny-blog fixture caught, in go and typescript, before it
+  could reach anyone. `lower::group_count::grouped_count_parts` is now the one
+  predicate both readers ask.
+* **`fixtures/` had no grouped query at all**, which is why none of this surfaced
+  until a real app was checked. `Comment.counts_by_post` in tiny-blog is the
+  forcing function; the crystal / python / elixir / typescript / go toolchain gates
+  compile it now.
+
+Scope stays at `count`: `sum` / `average` / `minimum` / `maximum` take the same
+grouped-Hash return in Rails, and each needs its own lowering and runtime method
+before typing it would accept anything a target can emit.

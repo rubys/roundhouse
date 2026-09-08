@@ -145,6 +145,44 @@ impl BuildTarget {
         }
     }
 
+    /// Does this target ship a runtime `ActiveRecord::Relation` for a
+    /// query chain the Arel builder could not fold to SQL?
+    ///
+    /// The ruby-family targets (`ruby`, `jruby`, `spinel`) emit
+    /// `runtime/ruby/active_record/relation.rb`, so an unfolded chain
+    /// executes there — a missed specialization, not a defect. Nothing
+    /// under `runtime/{rust,go,crystal,python,typescript,…}` defines a
+    /// Relation or any of its methods, so for those targets the same
+    /// chain is a call into a type that does not exist: uncompilable
+    /// output. That is what makes the `relation_residue` ledger's
+    /// "unsupported at strict-target emit" a WARNING on one side of
+    /// this predicate and an ERROR on the other (issue #76).
+    ///
+    /// `Roda` converts to real Sequel datasets and skips the lowerings
+    /// entirely (`bin/roundhouse`), so no residue is ever raised
+    /// against it; `Blog` is the source fixture walked verbatim.
+    /// Matched exhaustively on purpose — a new target has to answer
+    /// this question rather than inherit an answer.
+    pub fn has_runtime_relation(self) -> bool {
+        match self {
+            BuildTarget::Blog
+            | BuildTarget::Spinel
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
+            | BuildTarget::Roda => true,
+            BuildTarget::Crystal
+            | BuildTarget::Elixir
+            | BuildTarget::Go
+            | BuildTarget::Kotlin
+            | BuildTarget::Python
+            | BuildTarget::Rust
+            | BuildTarget::Swift
+            | BuildTarget::CSharp
+            | BuildTarget::Typescript
+            | BuildTarget::TypescriptWorker => false,
+        }
+    }
+
     /// Parse a CLI string. Returns `None` for unknown names. Chains
     /// `TRANSPILE` after `ALL` so transpile-only targets not in the
     /// `--site` matrix (e.g. `kotlin`) still parse for `--target`.

@@ -67,6 +67,32 @@ pub fn rewrite_arel_in_expr_with_assocs(
     let mut refined = std::collections::HashSet::new();
     collect_relation_refined_names(expr, &mut refined);
     rewrite_arel_inner(expr, schema, registry, assocs, &refined);
+    // Both call sites hand us a METHOD BODY, and a body that is a
+    // single statement is not a `Seq` — so the hoist post-pass inside
+    // `rewrite_arel_inner`, which walks a Seq's statement list, had no
+    // list to walk. A one-line action (`def counts; @counts =
+    // Comment.group(:post_id).count; end` — the shape issues #77/#78
+    // reproduce with) then kept the whole hydrate Seq in the assign's
+    // value position, and the Ruby emitter rendered it as `@counts =
+    // stmt = Db.prepare(…)` with the accumulator dangling on the last
+    // line: the ivar bound to the statement handle. Same break for any
+    // folded chain in that position (`pluck`, `count`, a hydrate) —
+    // visible only because a second statement in the body made the
+    // body a Seq and hid it. Give the root its own statement list when
+    // there is something to hoist into it.
+    if !matches!(&*expr.node, ExprNode::Seq { .. }) {
+        let mut hoisted = Vec::new();
+        hoist_value_seqs(expr, &mut hoisted);
+        if !hoisted.is_empty() {
+            let span = expr.span;
+            let placeholder = Expr::new(
+                span,
+                ExprNode::Lit { value: crate::expr::Literal::Nil },
+            );
+            hoisted.push(std::mem::replace(expr, placeholder));
+            *expr = Expr::new(span, ExprNode::Seq { exprs: hoisted });
+        }
+    }
 }
 
 const RELATION_REFINERS: &[&str] = &[

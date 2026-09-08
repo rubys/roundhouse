@@ -114,7 +114,29 @@ pub fn try_build_arel_with_assocs(
         // `InvitationRequest.verified_count` is that site. It is the
         // same missing arm as `pluck` one link over, which is why the
         // two land together.
-        "count" if args.is_empty() => {
+        //
+        // `group_count` rides along: it is the same terminal after
+        // `lower::group_count` renames it, and which spelling arrives
+        // here depends on the caller (see `grouped_count_parts`).
+        "count" | "group_count" if args.is_empty() => {
+            // `group(:col).count` — recognized as a PAIR, never as a
+            // `group` refiner on its own. A lone `group(:col)` would
+            // fold to `SELECT * … GROUP BY col`, one arbitrary row per
+            // group, which is not what any chain carrying it means; so
+            // the fold is licensed by the TERMINAL, and a `group`
+            // reached any other way stays on the runtime Relation
+            // (issue #78).
+            if let Some(grouped) = crate::lower::group_count::grouped_count_parts(send) {
+                let base = grouped.base?;
+                let (op, owner) = try_chain_recv(base, schema, registry, assocs)?;
+                return apply_group_count(op, grouped.group_args, schema)
+                    .map(|op| (op, owner));
+            }
+            if method.as_str() == "group_count" {
+                // The renamed terminal with no `group` under it is not a
+                // shape this builder composes SQL for.
+                return None;
+            }
             let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
             return apply_count(op).map(|op| (op, owner));
         }
@@ -310,6 +332,48 @@ fn apply_count(op: ArelOp) -> Option<ArelOp> {
         return None;
     }
     sel.columns = ColumnSpec::Count;
+    Some(ArelOp::Select(sel))
+}
+
+/// `.group(:col).count` — project the grouped column beside `COUNT(*)`
+/// and let the visitor hydrate the Hash Rails answers with.
+///
+/// Single group column only, and it must be in the schema: the same
+/// rule `pluck` applies, for the same reason (a group of a name the
+/// table lacks would compose SQL that fails at run time), plus the
+/// runtime's own limit — `Relation#group_count` joins its groups into
+/// one key expression and hydrates a flat Hash, so a multi-column group
+/// would need a composite key on both sides before either could carry
+/// it. Rails' multi-group answers Array keys.
+///
+/// Declines a `limit` for the reason `apply_count` does — Rails'
+/// `limit(5).group(:c).count` limits the GROUPS, and neither the SQL
+/// composed here nor `emit_count` beside it expresses that — and
+/// declines any `order`, whose column may not survive the aggregation.
+/// Declining leaves the chain on the runtime Relation, which is the
+/// honest answer rather than a guess.
+fn apply_group_count(op: ArelOp, group_args: &[Expr], schema: &Schema) -> Option<ArelOp> {
+    let mut sel = match op {
+        ArelOp::Select(s) => s,
+        _ => return None,
+    };
+    if !matches!(sel.columns, ColumnSpec::All)
+        || sel.limit.is_some()
+        || !sel.orders.is_empty()
+        || sel.single_record
+    {
+        return None;
+    }
+    let [arg] = group_args else { return None };
+    let column = column_name_arg(arg)?;
+    let table = schema.tables.get(&sel.table.0)?;
+    if !table.columns.iter().any(|c| c.name == column) {
+        return None;
+    }
+    sel.columns = ColumnSpec::GroupCount(super::ir::ColRef {
+        table: sel.table.clone(),
+        column,
+    });
     Some(ArelOp::Select(sel))
 }
 

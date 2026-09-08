@@ -295,6 +295,35 @@ All 48 execute correctly on the runtime Relation in the ruby-family lanes today;
 count is the tier-2/tier-3 decision input. Bigger than the plan's "small handful" guess —
 which strengthens, not weakens, the case for R7's splice decision.
 
+### R6 follow-up — the ledger's SEVERITY is a target question (issues #76, #78)
+
+The R6 warning's own text ends "unsupported at strict-target emit", and it was
+filed at the kind default (Warning) for every target — and suppressed by default,
+so `roundhouse --target rust` wrote a call into a type nothing in the emitted tree
+defines and exited 0. Only the ruby-family targets (`ruby`, `jruby`, `spinel`) ship
+`runtime/ruby/active_record/relation.rb`; nothing under
+`runtime/{rust,go,crystal,python,typescript,…}` defines a Relation or any of its
+methods. The pass cannot make that distinction — it runs once, target-agnostically,
+inside `apply_post_analyze_lowerings` — so the emit-bound driver does:
+`relation_residue::elevate_dynamic_relation_for_target` raises the entry to Error
+for a target whose `BuildTarget::has_runtime_relation` is false, before
+`attribute_ingest_gaps`, which keeps the last word (a residue traced to an ingest
+gap is our coverage problem and stays a note). **The invariant: a residue that
+predicts "unsupported at emit" for the target being emitted must fail that emit.**
+
+Two consequences worth knowing:
+
+* **tiny-blog's two scope bodies now fail a relation-less transpile.** `scope
+  :recent, -> { limit(10) }` and its sibling are the true positives R6 documented:
+  the relation-less emitters drop them silently, so a `roundhouse --target rust
+  fixtures/tiny-blog` needs `--allow-unsupported`. real-blog has 0 residue and is
+  unaffected; the toolchain harnesses call `emit` directly and never reach the gate.
+* **A chain the builder claims is claimed WHOLE.** The ledger now asks
+  `try_build_arel` at every Send, not only Relation-typed ones. `group(:col).count`
+  folds as a PAIR (issue #78) while the `group(:col)` link beneath it declines on
+  its own by design — read link by link, that spine looked like residue and, once
+  the severity was real, failed the emit of a chain that folds.
+
 ### Post-plan fix — `ac4e438d` (CI caught, bisected to R3, CI green after)
 CI `browser-smoke-ide` regressed on Mastodon: `@account : Account | untyped`. Bisect
 (pre-plan → R3 → R4a probes via `roundhouse-mcp type_at` against the pinned Mastodon

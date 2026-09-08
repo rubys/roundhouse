@@ -295,6 +295,20 @@ fn run_transpile(
         if target == BuildTarget::Roda { Vec::new() } else { diagnose(&app) };
     analyze_diags.extend(lower_diags);
 
+    // A residue whose own text says the construct is "unsupported at
+    // strict-target emit" has to fail the emit it predicts that for.
+    // The ledger runs once, target-agnostically, inside the shared
+    // post-analyze pipeline, so it files the same Warning whichever
+    // target is being built — right for the ruby-family targets, where
+    // the chain executes on the runtime `ActiveRecord::Relation`, and a
+    // silent write of uncompilable output for the ones that have no
+    // Relation at all (issue #76). The target is known HERE, so the
+    // severity is decided here.
+    roundhouse::lower::relation_residue::elevate_dynamic_relation_for_target(
+        &mut analyze_diags,
+        target,
+    );
+
     // A diagnostic whose root cause is a recorded ingest gap is OUR
     // coverage problem, not the app's: the nil placeholder survey mode
     // substituted is what the analyzer then failed to resolve. Downgrade
