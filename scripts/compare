@@ -159,6 +159,7 @@ fi
 # -------- paths --------
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
 COMPARE_BIN="$REPO_ROOT/tools/compare/target/release/roundhouse-compare"
 LOG_DIR="$(mktemp -d -t roundhouse-compare-logs.XXXXXX)"
@@ -434,6 +435,7 @@ case "$TARGET" in
         step "building spinel assets (tailwind + turbo.min.js)"
         (cd "$BUILD_DIR" && BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" make assets >/dev/null)
         step "AOT-compiling main.rb → build/blog (spinel)"
+        spinel_link_path
         (cd "$BUILD_DIR" && make build >/dev/null)
         ;;
 esac

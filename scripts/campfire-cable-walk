@@ -55,6 +55,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 APP="$HOME/git/once-campfire"
 OUT=""
 KEEP=0
@@ -160,6 +161,7 @@ LOG="$OUT/cable-walk-server.log"
 
 if [[ "$LANE" == spinel ]]; then
     step "building the binary (whole-program C compile — minutes, not seconds)"
+    spinel_link_path
     (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \
         || { tail -30 "$OUT/build.log"; fail "the spinel build failed"; }
     # `make` reports a failed build correctly; do NOT pipe it through

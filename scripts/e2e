@@ -65,6 +65,7 @@ esac
 # -------- paths --------
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 E2E_DIR="$REPO_ROOT/e2e"
 BUILD_DIR="$(mktemp -d -t roundhouse-e2e.XXXXXX)"
 LOG_DIR="$(mktemp -d -t roundhouse-e2e-logs.XXXXXX)"
@@ -181,6 +182,7 @@ case "$TARGET" in
         # turbo bundle as the ruby target; `make build` runs `spinel
         # main.rb -o build/blog`.
         command -v spinel >/dev/null || { fail "spinel not on PATH"; exit 1; }
+        spinel_link_path
         (cd "$APP_DIR" && bundle install && make assets && make build) \
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }

@@ -78,6 +78,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 
 APP="$HOME/git/once-campfire"
 OUT=""
@@ -141,18 +142,9 @@ command -v sqlite3 >/dev/null || { echo "campfire-suite: needs the sqlite3 CLI" 
 if [[ "$TARGET" == spinel ]]; then
     command -v spinel >/dev/null || { echo "campfire-suite: --target spinel needs spinel on PATH" >&2; exit 2; }
     command -v spin   >/dev/null || { echo "campfire-suite: --target spinel needs spin on PATH" >&2; exit 2; }
-    # The emitted spin.toml names an allocator (jemalloc), and `spin flags`
-    # prints `--link -ljemalloc` with no `-L` — the manifest states what the
-    # program needs and leaves finding it to the environment (spinel
-    # docs/spin.md, "Building outside spin"). On a mac that library lives in
-    # a homebrew prefix, which is not a default clang search path, so every
-    # test binary failed at `ld: library 'jemalloc' not found` while the
-    # linux lanes were fine. Composed here rather than exported by hand:
-    # a lane that only builds for whoever knows the trick is not a lane.
-    for d in /opt/homebrew/lib /usr/local/lib; do
-        [[ -d "$d" ]] && LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}$d"
-    done
-    export LIBRARY_PATH
+    # The emit names jemalloc and `spin` links it with no -L; on a mac that
+    # is not on clang's search path. See the helper for the whole story.
+    spinel_link_path
 fi
 
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }

@@ -141,6 +141,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 cd "$REPO_ROOT"
 
 ORIG_ARGS=("$@")
@@ -462,6 +463,7 @@ build_spinel_binary() {
         || { fail "strict spinel emit failed (see $LOG_DIR/emit-spinel.log)"; return 1; }
     command -v spin >/dev/null 2>&1 \
         || { fail "spin not on PATH — cannot build the spinel binary"; return 1; }
+    spinel_link_path
     step "building the spinel binary (a few minutes)"
     ( cd "$SP_EMIT" && make build ) > "$LOG_DIR/build-spinel.log" 2>&1 \
         || { fail "spinel build failed (see $LOG_DIR/build-spinel.log)"; return 1; }

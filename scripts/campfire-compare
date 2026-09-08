@@ -76,6 +76,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
@@ -113,24 +114,9 @@ if [[ $VERIFY_GEN -eq 1 && "$LANE" != spinel ]]; then
 fi
 
 if [[ "$LANE" == spinel ]]; then
-    # The emitted spin.toml names an allocator (jemalloc), and `spin flags`
-    # prints `--link -ljemalloc` with no `-L` — the manifest states what the
-    # program needs and leaves finding it to the environment (spinel
-    # docs/spin.md, "Building outside spin"). On a mac that library lives in
-    # a homebrew prefix, which is not a default clang search path, so the
-    # build died at `ld: library 'jemalloc' not found` while the linux lanes
-    # were fine. Same block, same reason, as scripts/campfire-suite: this
-    # gate has been un-runnable on a mac since 60d4e2e3 named the allocator.
-    for d in /opt/homebrew/lib /usr/local/lib; do
-        [[ -d "$d" ]] && LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}$d"
-    done
-    # Only when something was found: gcc reads an EMPTY element of
-    # LIBRARY_PATH as `.`, so exporting an empty one on linux — where
-    # neither directory exists and the system jemalloc is already on the
-    # default path — would quietly add the working directory to the link.
-    # (an `&&` here would be the if-body's exit status, and `set -e` would
-    # take a linux miss for a failure)
-    if [[ -n "${LIBRARY_PATH:-}" ]]; then export LIBRARY_PATH; fi
+    # The emit names jemalloc and `spin` links it with no -L; on a mac that
+    # is not on clang's search path. See the helper for the whole story.
+    spinel_link_path
 fi
 
 ORACLE_PID=""
