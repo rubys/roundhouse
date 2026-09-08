@@ -36,6 +36,11 @@
 #   --app DIR         the campfire checkout, for its SHA
 #   --campfire-sha S  state the SHA directly (CI pins it and never clones
 #                     a git tree — the tarball has no .git)
+#   --target T        which lane produced the tally, `ruby` (default) or
+#                     `spinel`. The page must say: the two lanes run the
+#                     SAME emitted source through different runtimes, and
+#                     only the compiled one can report a file that never
+#                     linked (status `build`).
 #   --stubs FILE      the spliced ledger (default
 #                     scripts/campfire-walk-stubs.rb)
 #   --no-stubs        the run spliced nothing
@@ -49,7 +54,7 @@ ROOT = File.expand_path("..", __dir__)
 CAUSES_FILE = File.join(ROOT, "bench", "campfire", "suite-causes.json")
 
 opts = {
-  tally: nil, fail_log: nil, emit_log: nil, app: nil, sha: nil,
+  tally: nil, fail_log: nil, emit_log: nil, app: nil, sha: nil, target: "ruby",
   stubs: File.join(ROOT, "scripts", "campfire-walk-stubs.rb"),
   out: File.join(ROOT, "build", "campfire-suite", "summary.json"),
 }
@@ -61,6 +66,7 @@ until args.empty?
   when "--emit-log"     then opts[:emit_log] = args.shift
   when "--app"          then opts[:app] = args.shift
   when "--campfire-sha" then opts[:sha] = args.shift
+  when "--target"       then opts[:target] = args.shift
   when "--stubs"        then opts[:stubs] = args.shift
   when "--no-stubs"     then opts[:stubs] = nil
   when "--out"          then opts[:out] = args.shift
@@ -263,8 +269,18 @@ rh = {
 }
 
 files_green = by_file.count { |f| f["status"] == "pass" }
+# The compiled lane runs the same emitted Ruby as the interpreted one, so
+# every difference between two summaries with the same campfire SHA is the
+# COMPILER's, not the app's. Only this lane has a `build` row.
+lane = {
+  "target" => opts[:target],
+  "runner" => opts[:target] == "spinel" ?
+    "each test file compiled to its own native binary by spinel, then run" :
+    "each test file run by CRuby",
+}
 out = {
   "generated_at" => Time.now.utc.iso8601,
+  "lane" => lane,
   "campfire" => campfire,
   "roundhouse" => rh,
   "ruby" => { "version" => RUBY_VERSION },
@@ -287,6 +303,10 @@ out = {
     "total" => by_file.size,
     "green" => files_green,
     "aborted" => by_file.count { |f| f["aborted"] },
+    # Files that never LINKED — a spinel-lane row, and the number the
+    # compiled lane should be read by first: a file that did not compile
+    # has said nothing about whether the emit is correct.
+    "unbuilt" => by_file.count { |f| f["status"] == "build" },
   },
   "scope" => {
     "note" => "Every test file campfire's own suite declares, read from the emitted Makefile's " \
@@ -301,6 +321,9 @@ require "fileutils"
 FileUtils.mkdir_p(File.dirname(opts[:out]))
 File.write(opts[:out], JSON.pretty_generate(out))
 warn "campfire-suite-summary: wrote #{opts[:out]}"
+unbuilt = out["files"]["unbuilt"]
 warn "  #{out["tests"]["passed"]}/#{out["tests"]["total"]} tests · " \
-     "#{files_green}/#{by_file.size} files green · #{unpassed_total} unpassed across " \
+     "#{files_green}/#{by_file.size} files green · " \
+     "#{unbuilt.zero? ? "" : "#{unbuilt} never linked · "}" \
+     "#{unpassed_total} unpassed across " \
      "#{causes.count { |c| c["failures"] > 0 }} cause(s)"

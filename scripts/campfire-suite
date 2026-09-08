@@ -2,8 +2,8 @@
 # scripts/campfire-suite — run ONCE Campfire's OWN test suite against the emit.
 #
 # The C4 rung of the campfire coverage ladder: transpile campfire for the
-# `ruby` target, then run each of the app's own test files and tally
-# pass/fail. Unlike the walk (scripts/campfire-walk), which drives one
+# `ruby` target (or `spinel` — see below), then run each of the app's own
+# test files and tally pass/fail. Unlike the walk (scripts/campfire-walk), which drives one
 # hand-written path, this measures the app's own assertions — the suite is
 # the spec campfire's authors wrote, so "how many of its files run green" is
 # the honest coverage number.
@@ -20,15 +20,41 @@
 # rule — a gap closed in the compiler is an entry DELETED there. `--no-stubs`
 # runs without it to check whether an entry still earns its place.
 #
+# THE SPINEL LANE (`--target spinel`) compiles each of campfire's test
+# files to its own native binary and runs THAT. Same emitted source and
+# the same autorun shim (emit/ruby.rs::render_autorun_shim is emitted for
+# both ruby shapes), so a compiled test prints the per-test lines this
+# script already parses and the tally format is unchanged — with ONE
+# addition. The compiled lane has a failure mode the interpreted one
+# cannot have: a file that never links. That is a third status, BUILD,
+# carrying the file's whole test count against its first compile error.
+# Three outcomes per file, and the three are the point of the lane:
+# didn't link / linked and diverged / linked and agreed.
+#
+# The compiles are PARALLEL (`--jobs`, default 8) and the runs are
+# SERIAL — the binaries share one sqlite file. Each compile is a whole-
+# program build, so this lane costs minutes where the ruby lane costs
+# seconds. Never batch several test files into one compile: that is what
+# found matz/spinel#4340, and it measures a different thing.
+#
+# NO STUBS BY DEFAULT ON THAT LANE. walk_stubs.rb is Ruby spliced into
+# boot.rb, which every test requires — under spinel it must also COMPILE,
+# so a stub that does not takes all 54 files rather than the one it was
+# written for. `--stubs` asks for it anyway; the JSON records which.
+#
 # Usage:  scripts/campfire-suite [options] [APP_PATH]
 #
 #   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
 #
 # Options:
+#   --target T   `ruby` (default) or `spinel` — see above.
+#   --jobs N     Parallel compiles for --target spinel (default 8).
+#   --timeout N  Seconds a single spinel binary may run (default 120).
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
 #   --reuse DIR  Skip transpiling; run against an emit DIR prepared earlier.
 #   --no-stubs   Splice nothing (see scripts/campfire-walk's note).
+#   --stubs      Splice anyway — the spinel lane's default is off.
 #   --filter PAT Only run test files whose path matches PAT (grep -E).
 #   --tally FILE Write the `STATUS|file|passed|total|first-error` table
 #                to FILE.
@@ -57,6 +83,10 @@ APP="$HOME/git/once-campfire"
 OUT=""
 KEEP=0
 STUBS=1
+STUBS_SET=0
+TARGET=ruby
+JOBS=8
+TIMEOUT=120
 REUSE=""
 FILTER=""
 TALLY=""
@@ -70,7 +100,11 @@ while [[ $# -gt 0 ]]; do
         --out)       OUT="$2"; KEEP=1; shift 2 ;;
         --keep)      KEEP=1;   shift ;;
         --reuse)     REUSE="$2"; shift 2 ;;
-        --no-stubs)  STUBS=0;  shift ;;
+        --no-stubs)  STUBS=0; STUBS_SET=1; shift ;;
+        --stubs)     STUBS=1; STUBS_SET=1; shift ;;
+        --target)    TARGET="$2"; shift 2 ;;
+        --jobs)      JOBS="$2"; shift 2 ;;
+        --timeout)   TIMEOUT="$2"; shift 2 ;;
         --filter)    FILTER="$2"; shift 2 ;;
         --tally)     TALLY="$2"; shift 2 ;;
         --fail-log)  FAIL_LOG="$2"; shift 2 ;;
@@ -93,7 +127,33 @@ if [[ -n "$JSON" ]]; then
     fi
 fi
 
+case "$TARGET" in
+    ruby)   ;;
+    spinel) ;;
+    *) echo "campfire-suite: --target must be ruby or spinel, got $TARGET" >&2; exit 2 ;;
+esac
+
+# See NO STUBS BY DEFAULT in the header: on the spinel lane a stub has to
+# compile as well as run, and boot.rb is loaded by every test file.
+if [[ "$TARGET" == spinel && $STUBS_SET -eq 0 ]]; then STUBS=0; fi
+
 command -v sqlite3 >/dev/null || { echo "campfire-suite: needs the sqlite3 CLI" >&2; exit 2; }
+if [[ "$TARGET" == spinel ]]; then
+    command -v spinel >/dev/null || { echo "campfire-suite: --target spinel needs spinel on PATH" >&2; exit 2; }
+    command -v spin   >/dev/null || { echo "campfire-suite: --target spinel needs spin on PATH" >&2; exit 2; }
+    # The emitted spin.toml names an allocator (jemalloc), and `spin flags`
+    # prints `--link -ljemalloc` with no `-L` — the manifest states what the
+    # program needs and leaves finding it to the environment (spinel
+    # docs/spin.md, "Building outside spin"). On a mac that library lives in
+    # a homebrew prefix, which is not a default clang search path, so every
+    # test binary failed at `ld: library 'jemalloc' not found` while the
+    # linux lanes were fine. Composed here rather than exported by hand:
+    # a lane that only builds for whoever knows the trick is not a lane.
+    for d in /opt/homebrew/lib /usr/local/lib; do
+        [[ -d "$d" ]] && LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}$d"
+    done
+    export LIBRARY_PATH
+fi
 
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -122,10 +182,10 @@ trap cleanup EXIT INT TERM
 if [[ -z "$REUSE" ]]; then
     # `--allow-unsupported` for the same reason the walk uses it: campfire is
     # a ledger app. The point is to run what DOES work and count it.
-    step "transpiling $APP → $OUT (target: ruby)"
+    step "transpiling $APP → $OUT (target: $TARGET)"
     rm -rf "$OUT"
     (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
     # The suite's own fixtures populate every table, so the database only
@@ -165,15 +225,116 @@ if [[ -n "$FILTER" ]]; then
     mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]}" | grep -E "$FILTER" || true)
 fi
 
+# -------- the spinel lane: one native binary per test file --------
+
+BUILD_LOGS=""
+if [[ "$TARGET" == spinel ]]; then
+    BUILD_LOGS="$OUT/build-logs"
+    mkdir -p "$BUILD_LOGS"
+
+    # `spin flags` resolves the packages and prints the -I / --rbs / --link
+    # line the per-test compiles need (spinel docs/spin.md, "Building
+    # outside spin"). Resolved ONCE here and passed to every make on the
+    # command line, which overrides the emitted Makefile's own
+    # `SPIN_TEST_FLAGS = $(shell $(SPIN) flags ...)`.
+    #
+    # NOT an optimization. CONCURRENT `spin flags` IN ONE TREE COLLIDE:
+    # each re-resolves the git dependency through a FIXED staging path
+    # (~/.cache/spin/packages/.fetch-bcrypt), so all but one fail with
+    #
+    #   fatal: destination path '.../.fetch-bcrypt' already exists
+    #   spin: fetch failed: git clone https://github.com/rubys/spinel-bcrypt
+    #
+    # and exit 1 — 7 of 8 in a plain probe. The Makefile's `2>/dev/null`
+    # then turns that into an EMPTY flag set, and the compile proceeds with
+    # no -I, no --rbs and no bcrypt. That is not a build failure: it
+    # SUCCEEDS, and reports type errors from a program missing its
+    # dependencies. Thirteen of the first seventeen files of a -j8 sweep
+    # built that way before this was caught — exactly the fault f19692bc
+    # fixed, reintroduced by parallelism.
+    #
+    # `tail -1` because a COLD cache prints its `cc bcrypt/...` progress
+    # above the flag line, and `$(shell)` would fold those into the
+    # arguments too. `--require-gate` is stripped for the reason the
+    # Makefile strips it: a test tree requires gems with no spinel surface
+    # at all (vips, mocha, webmock), and gating them fails the compile
+    # ahead of the type errors this lane exists to count.
+    step "resolving package flags"
+    SPIN_FLAGS="$( (cd "$OUT" && spin flags 2>/dev/null) | tail -1 | sed 's/--require-gate //' )"
+    if [[ -z "$SPIN_FLAGS" ]]; then
+        echo "campfire-suite: \`spin flags\` produced nothing in $OUT." >&2
+        echo "  Every test would compile without its dependencies and the run would" >&2
+        echo "  measure a program that is not the one under test. Refusing." >&2
+        exit 2
+    fi
+    echo "  ${SPIN_FLAGS:0:100}…"
+
+    step "compiling ${#TESTS[@]} test binaries (-j $JOBS)"
+    started=$SECONDS
+    # ONE FILE PER COMPILE — never batched, see the header — and one log
+    # per file, because a row's `why` is its own first compile error and
+    # `make -j` interleaves every file's into a single stream.
+    printf '%s\n' "${TESTS[@]}" |
+        (cd "$OUT" && xargs -P "$JOBS" -I{} sh -c '
+            t="$1"; log="$2/$(echo "$t" | tr / _).log"
+            if make SPIN_TEST_FLAGS="$3" "build/$t" >"$log" 2>&1; then
+                printf "  \033[32mok   \033[0m %s\n" "$t"
+            else
+                printf "  \033[33mBUILD\033[0m %s\n" "$t"
+            fi
+        ' _ {} "$BUILD_LOGS" "$SPIN_FLAGS")
+    echo "  compiled in $((SECONDS - started))s; logs in $BUILD_LOGS"
+fi
+
 step "running ${#TESTS[@]} test files"
 
 cd "$OUT"
 pass=0
 fail=0
+unbuilt=0
 tests_total=0
 tests_pass=0
 table=""
 fail_lines=""
+
+# The two lanes differ in exactly one thing: what runs the file. Same
+# emitted source, same autorun shim, same output to parse. The timeout is
+# `perl -e alarm` because a binary that hangs has no analogue on the ruby
+# lane and macOS ships no coreutils `timeout`.
+run_test() {
+    local t="$1"
+    export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}"
+    if [[ "$TARGET" == spinel ]]; then
+        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "./build/$t"
+    else
+        ruby -Itest "$t.rb"
+    fi
+}
+
+# The first line of a failed compile, for the BUILD row's `why`.
+#
+# THREE DIFFERENT SPELLINGS, and only one of them says "error". clang's
+# type mismatches do (`error: passing 'sp_PolyArray *' to parameter of
+# incompatible type`), and so do spinel's own; but a spinel FRONTEND
+# refusal reads `spinel: <file>:<line>: unsupported call: ...` with no
+# such token, and matching only on `error` sends every one of those to
+# the fallback, where the row's label becomes `make: *** Error 1` — true,
+# and useless to triage against. Warnings are excluded explicitly: spinel
+# prints several on every compile, before any of them.
+#
+# The `note:` under a clang error is what names the C parameter, so the
+# whole log is kept and this is only the label.
+build_error() {
+    local log line
+    log="$BUILD_LOGS/$(printf '%s' "$1" | tr / _).log"
+    [[ -f "$log" ]] || { echo "(no build log)"; return 0; }
+    line=$(grep -E "error:|error\[|unsupported |cannot |fatal:" "$log" |
+           grep -vE "warning:|^make|^cc |^spinel .*-o build/" | head -1 || true)
+    if [[ -z "$line" ]]; then
+        line=$(grep -vE "^\s*$|^make" "$log" | tail -1 || true)
+    fi
+    printf '%s' "$line" | sed "s|$OUT/||g" | cut -c1-160
+}
 for t in "${TESTS[@]}"; do
     # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
     # EVERY test and prints one `FAIL <Class>#<test>: <msg>` line per
@@ -182,8 +343,18 @@ for t in "${TESTS[@]}"; do
     # exist even when the file dies before running any of them.
     n=$(grep -cE '^  __t\.test_' "$t.rb" || true)
     tests_total=$((tests_total + n))
-    if out=$(SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}" \
-             ruby -Itest "$t.rb" 2>&1); then
+    # THE THIRD STATUS, and only the spinel lane can produce it: a file
+    # that never linked ran nothing, so nothing can be credited and its
+    # whole count goes against the compile error.
+    if [[ "$TARGET" == spinel && ! -x "build/$t" ]]; then
+        why=$(build_error "$t")
+        fail=$((fail + 1))
+        unbuilt=$((unbuilt + 1))
+        printf '\033[1;33m BUILD\033[0m %-56s %d/%d\n         %s\n' "$t" 0 "$n" "$why"
+        table+="BUILD|$t|0|$n|$why"$'\n'
+        continue
+    fi
+    if out=$(run_test "$t" 2>&1); then
         pass=$((pass + 1))
         tests_pass=$((tests_pass + n))
         printf '\033[1;32m  ok  \033[0m %-56s %d/%d\n' "$t" "$n" "$n"
@@ -243,7 +414,7 @@ fi
 if [[ -n "$JSON" ]]; then
     # The SHA, not the checkout: CI unpacks a tarball, which has no .git.
     # $CAMPFIRE_SHA is what pinned it, so it is the authority when set.
-    summary_args=(--tally "$TALLY" --fail-log "$FAIL_LOG" --out "$JSON")
+    summary_args=(--tally "$TALLY" --fail-log "$FAIL_LOG" --out "$JSON" --target "$TARGET")
     if [[ -f "$OUT.log" ]]; then summary_args+=(--emit-log "$OUT.log"); fi
     if [[ -n "${CAMPFIRE_SHA:-}" ]]; then
         summary_args+=(--campfire-sha "$CAMPFIRE_SHA")
@@ -254,4 +425,8 @@ if [[ -n "$JSON" ]]; then
     ruby "$REPO_ROOT/scripts/campfire-suite-summary" "${summary_args[@]}"
 fi
 
-step "$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"
+summary_line="$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"
+if [[ "$TARGET" == spinel ]]; then
+    summary_line="$summary_line — $unbuilt of $((pass + fail)) never linked"
+fi
+step "$summary_line"
