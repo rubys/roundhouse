@@ -1068,7 +1068,15 @@ module RequestDispatch
     # `room_messages_url(@room, before: @messages.third)`, which is how
     # a query string reaches a test path at all: a route helper renders
     # its non-segment options into one.
-    match_path, _, query = path.partition("?")
+    # `index` + slice, not `String#partition`: spinel's String has no
+    # `partition`, and this harness COMPILES on the spinel lane — a
+    # dynamic dispatch to a method its runtime does not define is
+    # `undefined method 'partition' for an instance of String` at run
+    # time, which took every test in a file that dispatches a path.
+    # Same idiom the assert_select helpers above already use.
+    qmark      = path.index("?")
+    match_path = qmark.nil? ? path : path[0, qmark].to_s
+    query      = qmark.nil? ? "" : path[qmark + 1, path.length].to_s
     matched = ActionDispatch::Router.match(
       method, match_path, [RouteTable.root] + RouteTable.table
     )
@@ -1161,7 +1169,11 @@ module RequestDispatch
     # applied OVER the defaults below (so a test can override
     # REMOTE_ADDR / HTTP_USER_AGENT) but under the four keys the
     # dispatch itself owns.
-    request_path, _, request_query = path.partition("?")
+    # See the `qmark` note in `dispatch` above — no `String#partition`
+    # on the spinel lane.
+    q             = path.index("?")
+    request_path  = q.nil? ? path : path[0, q].to_s
+    request_query = q.nil? ? "" : path[q + 1, path.length].to_s
     env = {
       "HTTP_HOST"       => host,
       "REMOTE_ADDR"     => "127.0.0.1",
