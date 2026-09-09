@@ -101,6 +101,7 @@ pub fn lower_test_modules_with_inner(
     // bare-name dispatch resolves.
     crate::lower::view_to_library::insert_framework_stubs(&mut classes);
     insert_minitest_test_baseline(&mut classes);
+    insert_cookie_jar_baseline(&mut classes);
 
     // Inner classes (e.g. `class Validatable; include
     // ActiveRecord::Validations; end` inside ValidationsTest) need
@@ -236,6 +237,11 @@ pub fn lower_test_modules_with_inner(
         })
         .collect();
 
+    // The blank-predicate grounding this registry finally makes
+    // possible — see `blank::ground_body`. Built once, outside the
+    // per-method loop.
+    let blank_defs = crate::lower::blank::AppDefinitions::from_class_registry(&classes);
+
     for (idx, lc) in all_lcs.iter_mut().enumerate() {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
@@ -267,6 +273,15 @@ pub fn lower_test_modules_with_inner(
             // `raise`, Crystal `raise`, TS `throw`, …) — see the
             // issue's "Cross-target benefits" table.
             method.body = inline_assertions::inline_assertions(&method.body);
+            // Ground `blank?`/`present?`/`presence` by receiver type,
+            // AFTER the assertion inlining that wraps them in a `raise
+            // … if !(…)` and BEFORE the re-type that stamps the result.
+            // campfire's `sign_in` ends `assert
+            // cookies[:session_token].present?` and reaches ~20
+            // controller test files; on a strict target the dynamic
+            // send is `undefined method 'present?' for an instance of
+            // String` and takes every test behind it.
+            crate::lower::blank::ground_body(&mut method.body, &blank_defs);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
         out.push(LoweredTestModule {
@@ -769,7 +784,16 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     ("response", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
     ("request", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
     ("session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
-    ("cookies", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    // NOT Untyped, unlike its neighbours: `cookies[k]` is the receiver
+    // of campfire's `assert cookies[:session_token].present?`, which
+    // `sign_in` runs on the way into roughly twenty controller test
+    // files. Untyped there is not a missing convenience — `lower::blank`
+    // grounds by receiver type, so an untyped jar left every one of
+    // those sites a dynamic `present?` send, which CRuby's overlay
+    // serves and a strict target cannot: `undefined method 'present?'
+    // for an instance of String`, 82 of the spinel suite lane's 288
+    // tests, inside the helper that gates every authenticated request.
+    ("cookies", || crate::lower::typing::fn_sig(vec![], cookie_jar_ty())),
     ("flash", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
 ];
 
@@ -782,6 +806,85 @@ fn fn_sig_two(a: Ty, b: Ty, ret: Ty) -> Ty {
         vec![(Symbol::from("a"), a), (Symbol::from("b"), b)],
         ret,
     )
+}
+
+/// The jar `cookies` answers with, and the signed view over it.
+///
+/// THE TYPES ARE READ OFF THE RUNTIME'S OWN CONTRACT, not invented
+/// here: `runtime/ruby/action_controller/cookies.rbs` is the authority
+/// and this table restates the surface campfire's tests touch (`[]`,
+/// `[]=`, `signed`, `to_hash`). Restated rather than ingested because
+/// `app.rbs_signatures` carries the APP's `sig/**/*.rbs` and the
+/// façade contracts — the framework runtime's own sidecars have never
+/// fed app analysis, which is the general gap this closes one class
+/// of. If that changes, delete this table rather than let two
+/// descriptions of one class drift.
+///
+/// `[]` answers a non-nullable `Str` DELIBERATELY, and it is the whole
+/// point of the entry: the runtime returns `""` for a missing cookie
+/// (see the note on `CookieJar#[]`), so `present?` grounds to the
+/// String form and a signed-out jar reads blank rather than raising.
+/// The SIGNED jar really is nullable — verification can fail — so it
+/// answers `Str | Nil` and grounds through the union arm instead.
+fn cookie_jar_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("ActionController::CookieJar")), args: vec![] }
+}
+
+fn signed_cookie_jar_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("ActionController::SignedCookieJar")), args: vec![] }
+}
+
+fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
+    use crate::lower::typing::fn_sig;
+    let str_hash = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let key = || (Symbol::from("key"), Ty::Untyped);
+    let value = || (Symbol::from("value"), Ty::Untyped);
+
+    let mut jar = ClassInfo::default();
+    for (name, sig) in [
+        ("[]", fn_sig(vec![key()], Ty::Str)),
+        ("[]=", fn_sig(vec![key(), value()], Ty::Str)),
+        ("raw", fn_sig(vec![key()], Ty::Str)),
+        ("raw_set", fn_sig(vec![key(), value()], Ty::Str)),
+        ("delete", fn_sig(vec![key()], Ty::Str)),
+        ("permanent", fn_sig(vec![], cookie_jar_ty())),
+        ("signed", fn_sig(vec![], signed_cookie_jar_ty())),
+        ("pending", fn_sig(vec![], str_hash.clone())),
+        ("to_h", fn_sig(vec![], str_hash.clone())),
+        ("to_hash", fn_sig(vec![], str_hash)),
+    ] {
+        let sym = Symbol::from(name);
+        jar.instance_methods.insert(sym.clone(), sig);
+        jar.instance_method_kinds.insert(sym, AccessorKind::Method);
+    }
+
+    let mut signed = ClassInfo::default();
+    for (name, sig) in [
+        // Nullable where the unsigned jar is not: an unverifiable
+        // cookie answers nil, which is what campfire's
+        // `Session.find_signed(cookies.signed[:session_token])` is
+        // written against.
+        ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil] })),
+        ("[]=", fn_sig(vec![key(), value()], Ty::Untyped)),
+        ("delete", fn_sig(vec![key()], Ty::Str)),
+        ("permanent", fn_sig(vec![], signed_cookie_jar_ty())),
+    ] {
+        let sym = Symbol::from(name);
+        signed.instance_methods.insert(sym.clone(), sig);
+        signed.instance_method_kinds.insert(sym, AccessorKind::Method);
+    }
+
+    // Qualified and bare, the way `insert_minitest_test_baseline`
+    // registers both spellings: a test body reaches these through the
+    // `cookies` reader, but a Const path (`ActionController::CookieJar
+    // .new`) appears in the emitted harness itself.
+    classes.insert(ClassId(Symbol::from("ActionController::CookieJar")), jar.clone());
+    classes.insert(ClassId(Symbol::from("CookieJar")), jar);
+    classes.insert(
+        ClassId(Symbol::from("ActionController::SignedCookieJar")),
+        signed.clone(),
+    );
+    classes.insert(ClassId(Symbol::from("SignedCookieJar")), signed);
 }
 
 /// Insert a `Minitest::Test` ClassInfo entry — the parent of every

@@ -116,16 +116,67 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     diags
 }
 
+/// Ground the blank predicates in ONE already-typed body.
+///
+/// The app-wide pass above cannot serve test bodies: a test body is
+/// typed by `lower::test_module_to_library`, which runs at EMIT time
+/// against a registry it builds itself (fixture helpers, route
+/// helpers, the Minitest surface), so when `apply_blank_lowering` runs
+/// every receiver in a test body is still `Untyped` and every site can
+/// only be declined. Walking them there produced 34 honest declines
+/// and not one grounding. This entry point is how the test lowering
+/// asks the same question at the point where the answer exists.
+///
+/// Diagnostics go to the emit-time sink, the way every other lowering
+/// that runs this late reports (`lower::time_current`,
+/// `view_to_library`).
+pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) {
+    let mut diags = Vec::new();
+    walk(body, defs, &mut diags);
+    for d in diags {
+        crate::emit::diagnostics::push(d);
+    }
+}
+
 /// Which classes define their own `blank?`/`present?`/`presence`
 /// (leave the dispatch alone) or an `empty?` (ground through it).
 /// Keyed by the class name's last segment — the same resolution
 /// `Ty::Class` receivers get elsewhere.
-struct AppDefinitions {
+pub(crate) struct AppDefinitions {
     own_predicate: HashSet<String>,
     own_empty: HashSet<String>,
 }
 
 impl AppDefinitions {
+    /// Same question asked of a class REGISTRY rather than an `App` —
+    /// which class defines its own blank-predicate (leave the dispatch
+    /// alone) or its own `empty?` (ground through it).
+    ///
+    /// The test lowering needs this because it has no `App`: it builds
+    /// its registry itself, at emit time, and that is also the first
+    /// moment a test body HAS types (see `ground_body`).
+    pub(crate) fn from_class_registry(
+        classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    ) -> Self {
+        let mut own_predicate = HashSet::new();
+        let mut own_empty = HashSet::new();
+        for (id, info) in classes {
+            let last = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()).to_string();
+            for name in info.instance_methods.keys() {
+                match name.as_str() {
+                    "blank?" | "present?" | "presence" => {
+                        own_predicate.insert(last.clone());
+                    }
+                    "empty?" => {
+                        own_empty.insert(last.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Self { own_predicate, own_empty }
+    }
+
     fn collect(app: &App) -> Self {
         let mut own_predicate = HashSet::new();
         let mut own_empty = HashSet::new();
