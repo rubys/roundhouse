@@ -84,8 +84,25 @@ def git(dir, *a)
   st.success? ? out.strip : nil
 end
 
+# THE COMPILER'S BYTES ARE NOT GUARANTEED UTF-8. A BUILD row's `why` is
+# the first line of a failed compile, verbatim, and a toolchain is free
+# to put a non-UTF-8 byte in it (a locale-specific message, a source
+# fragment quoted mid-multibyte). `String#split` raises
+# `ArgumentError: invalid byte sequence in UTF-8` on such a line and
+# takes the whole summary with it — which is exactly how the first
+# LINUX run of the spinel lane died AFTER its 19 minutes of compiles,
+# having already written a perfectly good tally. The mac run of the
+# same commit never hit it, so this is only reachable on the machine
+# the lane is meant to be PUBLISHED from.
+#
+# `scrub` rather than a rescue: an undecodable byte in an error message
+# must not lose the row, and the row is what the ledger counts.
+def read_lines_scrubbed(path)
+  File.read(path, encoding: "BINARY").force_encoding("UTF-8").scrub("?").lines
+end
+
 # ── The run ──────────────────────────────────────────────────────────
-by_file = File.readlines(opts[:tally]).filter_map do |line|
+by_file = read_lines_scrubbed(opts[:tally]).filter_map do |line|
   line = line.chomp
   next if line.empty?
   status, file, passed, total, why = line.split("|", 5)
@@ -106,7 +123,7 @@ fails_by_file = Hash.new { |h, k| h[k] = [] }
 # attribution" would raise the page's alarm on the best possible result.
 have_fail_log = !!(opts[:fail_log] && File.exist?(opts[:fail_log]))
 if have_fail_log
-  File.readlines(opts[:fail_log]).each do |line|
+  read_lines_scrubbed(opts[:fail_log]).each do |line|
     line = line.chomp
     next if line.empty?
     file, rest = line.split("|", 2)
@@ -192,7 +209,7 @@ end
 # ── Emit diagnostics ─────────────────────────────────────────────────
 emit = {}
 if opts[:emit_log] && File.exist?(opts[:emit_log])
-  log = File.read(opts[:emit_log])
+  log = File.read(opts[:emit_log], encoding: "BINARY").force_encoding("UTF-8").scrub("?")
   diags = log.scan(/\b(error|warning)\[([a-z_]+)\]/)
   emit["errors"] = diags.count { |k, _| k == "error" }
   emit["warnings"] = diags.count { |k, _| k == "warning" }

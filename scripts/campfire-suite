@@ -325,7 +325,15 @@ build_error() {
     if [[ -z "$line" ]]; then
         line=$(grep -vE "^\s*$|^make" "$log" | tail -1 || true)
     fi
-    printf '%s' "$line" | sed "s|$OUT/||g" | cut -c1-160
+    # TRUNCATE BY CHARACTER, NOT BY BYTE. `cut -c` counts bytes in a C
+    # locale, and GCC quotes identifiers with U+2018/U+2019 (`initialization
+    # of âsp_Relation *â`) where clang uses ASCII
+    # quotes — so on LINUX this cut landed mid-character and wrote an
+    # invalid UTF-8 byte into the tally. `campfire-suite-summary` then died
+    # on `String#split` AFTER a 19-minute sweep whose tally was otherwise
+    # complete, and the mac never reproduced it.
+    printf '%s' "$line" | sed "s|$OUT/||g" |
+        ruby -e 'print ARGF.read.force_encoding("UTF-8").scrub("?")[0, 160].to_s' 
 }
 for t in "${TESTS[@]}"; do
     # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
