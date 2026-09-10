@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# scripts/campfire-suite-publish — one run of the COMPILED conformance
+# lane, written where the bench box already serves it.
+#
+# THE SPLIT: REPO LOGIC HERE, MACHINE LAYOUT THERE. What a publisher
+# does — pin the app, sweep, keep the compile logs, repoint `latest`,
+# render — is this repo's business and belongs beside the scripts it
+# calls, where it can be reviewed and bisected with them. Where one
+# person's clones live, what is on their PATH, and when their cron fires
+# are not of public interest, so they stay in a thin `~/bin/campfire-suite`
+# wrapper alongside the box's other publishers. Nothing below names a
+# host or an absolute path that is not a default you can override.
+#
+# NOT BESIDE THE BENCHMARK. This lane counts pass/fail, so contention
+# cannot corrupt ITS number — but 54 whole-program compiles beside a
+# running benchmark corrupt the BENCHMARK's, and Rails' one-worker
+# control cells are the rows that suffer (2026-09-05: a transpile run
+# alongside `bin/benchmark` made Rails look slower, which is the
+# direction that flatters us). The guard below is one-directional for
+# that reason, and the cron slot is 03:00 against the bench's 06:00.
+#
+# Usage:  scripts/campfire-suite-publish [options]
+#
+#   --app DIR      campfire checkout to pin and emit (default ~/once-campfire)
+#   --jobs N       parallel compiles (default 8)
+#   --out-root DIR where runs are written (default bench/results/campfire-suite)
+#   --no-pin       do not touch the app checkout; emit whatever is there
+#   --force        run even if a benchmark appears to be running
+#
+# Writes <out-root>/<stamp>/{summary.json,tally.txt,failures.txt,
+# index.html,build-logs/} and repoints <out-root>/latest at it. On the
+# bench box that is served immediately, with no deploy, as
+# roundbench.showcase.party/archive/campfire-suite/latest/ — Caddy roots
+# /archive/* at the bench/results mount and resolves the symlink live.
+#
+# Requires: cargo, ruby, sqlite3, and `spinel` + `spin` on PATH.
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT" || exit 2
+
+APP="$HOME/once-campfire"
+JOBS=8
+OUT_ROOT="bench/results/campfire-suite"
+PIN=1
+FORCE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --app)      APP="$2"; shift 2 ;;
+        --jobs)     JOBS="$2"; shift 2 ;;
+        --out-root) OUT_ROOT="$2"; shift 2 ;;
+        --no-pin)   PIN=0; shift ;;
+        --force)    FORCE=1; shift ;;
+        -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)          echo "campfire-suite-publish: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+for tool in spinel spin sqlite3; do
+    command -v "$tool" >/dev/null || {
+        echo "campfire-suite-publish: needs $tool on PATH" >&2; exit 2; }
+done
+
+# See NOT BESIDE THE BENCHMARK above. `pgrep -f` on the publisher names
+# rather than on `cargo`/`spinel`, which this run legitimately uses.
+if (( ! FORCE )) && pgrep -f 'bench-campfire|bin/benchmark|bench-lobsters' >/dev/null 2>&1; then
+    echo "campfire-suite-publish: a benchmark is running — not starting (--force overrides)" >&2
+    exit 1
+fi
+
+# THE SAME PIN THE BENCHMARK AND CI USE, read from the one place that
+# states it, so the conformance page and the benchmark page describe the
+# same app rather than two commits that happened to be current.
+if (( PIN )); then
+    CAMPFIRE_SHA="$(sed -n 's/^  CAMPFIRE_SHA: *//p' .github/workflows/ci.yml)"
+    if [[ -z "$CAMPFIRE_SHA" ]]; then
+        echo "campfire-suite-publish: no CAMPFIRE_SHA in .github/workflows/ci.yml" >&2
+        exit 2
+    fi
+    if [[ ! -d "$APP" ]]; then
+        git clone https://github.com/basecamp/once-campfire.git "$APP" || exit 2
+    fi
+    git -C "$APP" fetch --quiet origin || exit 2
+    git -C "$APP" checkout --quiet --detach "$CAMPFIRE_SHA" || exit 2
+fi
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="$OUT_ROOT/$STAMP"
+EMIT="$OUT/emit"
+mkdir -p "$OUT" || exit 2
+
+echo "campfire-suite-publish: $STAMP → $OUT"
+echo "  spinel:  $(spinel --version 2>&1 | head -1)"
+echo "  app:     $APP $(git -C "$APP" rev-parse --short HEAD 2>/dev/null)"
+
+scripts/campfire-suite \
+    --target spinel \
+    --jobs "$JOBS" \
+    --out "$EMIT" \
+    --tally "$OUT/tally.txt" \
+    --fail-log "$OUT/failures.txt" \
+    --json "$OUT/summary.json" \
+    "$APP"
+rc=$?
+
+# THE SYMLINK MOVES ONLY ON A COMPLETE RUN, the way `~/bin/campfire`
+# repoints only when the bench returned 0: `latest` is what the page and
+# any CI fetch resolve, so a half-written run must not become the
+# published one. The stamped directory stays either way — a failed run is
+# evidence, and /archive/<stamp>/ still addresses it.
+if (( rc != 0 )) || [[ ! -f "$OUT/summary.json" ]]; then
+    echo "campfire-suite-publish: run did not complete (rc=$rc) — leaving latest alone" >&2
+    rm -rf "$EMIT"
+    exit 1
+fi
+
+# The per-file compile logs are the triage handle for every never-linked
+# row, and they are text. Keep those; drop the emit, which is 54 native
+# binaries and a whole Rails tree.
+if [[ -d "$EMIT/build-logs" ]]; then
+    cp -R "$EMIT/build-logs" "$OUT/build-logs"
+fi
+rm -rf "$EMIT"
+
+scripts/campfire-suite-report "$OUT" "$OUT/index.html" || exit 1
+
+ln -sfn "$STAMP" "$OUT_ROOT/latest"
+echo "campfire-suite-publish: published $OUT_ROOT/latest -> $STAMP"
