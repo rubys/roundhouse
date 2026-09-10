@@ -1068,11 +1068,17 @@ module RequestDispatch
     # `room_messages_url(@room, before: @messages.third)`, which is how
     # a query string reaches a test path at all: a route helper renders
     # its non-segment options into one.
-    # `index` + slice, not `String#partition`: spinel's String has no
-    # `partition`, and this harness COMPILES on the spinel lane — a
-    # dynamic dispatch to a method its runtime does not define is
-    # `undefined method 'partition' for an instance of String` at run
-    # time, which took every test in a file that dispatches a path.
+    # `index` + slice, not `String#partition`. spinel HAS String#partition
+    # — runtime function, typed-receiver arm and poly inference all exist.
+    # What it does not survive is a SHADOW: our own ActiveRecord runtime
+    # declares `Relation#partition`, and any class declaring a method of
+    # that name switches off the builtin treatment, so `path` (boxed, not
+    # statically a String here) compiles to a class dispatch whose default
+    # arm raises `undefined method 'partition' for an instance of String`.
+    # Declaring the method is enough; it is never called. matz/spinel#4413.
+    #
+    # Kept even once that is fixed: a builtin a same-named user method can
+    # shadow is not one a shared harness should depend on.
     # Same idiom the assert_select helpers above already use.
     qmark      = path.index("?")
     match_path = qmark.nil? ? path : path[0, qmark].to_s
@@ -1169,8 +1175,8 @@ module RequestDispatch
     # applied OVER the defaults below (so a test can override
     # REMOTE_ADDR / HTTP_USER_AGENT) but under the four keys the
     # dispatch itself owns.
-    # See the `qmark` note in `dispatch` above — no `String#partition`
-    # on the spinel lane.
+    # See the `qmark` note in `dispatch` above — String#partition is
+    # shadowed on this lane (matz/spinel#4413).
     q             = path.index("?")
     request_path  = q.nil? ? path : path[0, q].to_s
     request_query = q.nil? ? "" : path[q + 1, path.length].to_s
