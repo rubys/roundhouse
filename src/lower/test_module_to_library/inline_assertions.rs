@@ -213,6 +213,22 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 msg,
             ))
         }
+        // `assert_operator a, :>, b` — the operator is a Symbol literal in
+        // every corpus site, so it becomes the send itself: raise unless
+        // `a > b`. A non-literal operator is left to dispatch.
+        "assert_operator" if args.len() >= 3 => {
+            let ExprNode::Lit { value: crate::expr::Literal::Sym { value: op } } = &*args[1].node else {
+                return None;
+            };
+            let a = args[0].clone();
+            let b = args[2].clone();
+            let op = op.as_str().to_string();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, a, &op, vec![b])),
+                "assert_operator failed".to_string(),
+            ))
+        }
         "refute_equal" | "assert_not_equal" if args.len() >= 2 => {
             // Inverted assert_equal — raise *if* the values are equal.
             let a = args[0].clone();

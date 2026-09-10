@@ -128,6 +128,12 @@ end
 
 module WebPush
   def self.payload_send: (message: String, endpoint: String, p256dh: String, auth: String, vapid: Hash[Symbol, String], ?connection: untyped, ?urgency: String) -> String
+  # The `lower::mocha` stub slot — see the .rb.
+  def self.stub_payload_send: () -> nil
+  def self.stub_payload_send_any: (untyped value) -> nil
+  def self.expect_payload_send: (Integer count) -> nil
+  def self.clear_payload_send_stubs: () -> nil
+  def self.verify_payload_send_expectations: () -> nil
 end
 
 module Sentry

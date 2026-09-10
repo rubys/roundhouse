@@ -387,7 +387,61 @@ end
 # the module-function half is the gem's, the classes under it are the
 # app's, exactly as they sit at runtime.
 module WebPush
+  # The stub slot `lower::mocha` writes for `WebPush.stubs(:payload_send)`
+  # and `WebPush.expects(:payload_send).never / .times(n)`. Single-element
+  # Arrays as settable holders, the `Resolv` slot's idiom; `EXPECTED` is
+  # -1 for "no count filed", since 0 is a real expectation (`never`).
+  #
+  # With a stub installed the façade counts the call and answers the
+  # stubbed value; with none it fails as loudly as before. The emitted
+  # test helper clears in setup and verifies in teardown — a count that
+  # was not met raises there, which the autorun shim charges to the test
+  # that filed it, exactly where `mocha_verify` would.
+  STUB_ON = [ false ]
+  STUB_VALUE = [ "" ]
+  CALLS = [ 0 ]
+  EXPECTED = [ -1 ]
+
+  def self.stub_payload_send
+    STUB_ON[0] = true
+    STUB_VALUE[0] = ""
+    nil
+  end
+
+  def self.stub_payload_send_any(value)
+    STUB_ON[0] = true
+    STUB_VALUE[0] = value.to_s
+    nil
+  end
+
+  def self.expect_payload_send(count)
+    STUB_ON[0] = true
+    EXPECTED[0] = count
+    nil
+  end
+
+  def self.clear_payload_send_stubs
+    STUB_ON[0] = false
+    STUB_VALUE[0] = ""
+    CALLS[0] = 0
+    EXPECTED[0] = -1
+    nil
+  end
+
+  def self.verify_payload_send_expectations
+    expected = EXPECTED[0]
+    return nil if expected < 0
+    got = CALLS[0]
+    EXPECTED[0] = -1
+    raise "WebPush.payload_send was expected #{expected} time(s), got #{got}" if got != expected
+    nil
+  end
+
   def self.payload_send(message:, endpoint:, p256dh:, auth:, vapid:, connection: nil, urgency: nil)
+    if STUB_ON[0]
+      CALLS[0] = CALLS[0] + 1
+      return STUB_VALUE[0]
+    end
     GemFacade.fail!("WebPush.payload_send")
     ""
   end

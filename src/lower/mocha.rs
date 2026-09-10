@@ -43,47 +43,162 @@
 //! the same slot every other target uses, which is the parity this
 //! pipeline is for.
 //!
-//! WHAT IS DELIBERATELY LEFT ALONE. A chain this pass does not fully
-//! understand is not rewritten, so it still fails loudly at the `stubs`
-//! call rather than being silently dropped — the failure mode that
-//! matters is a stub that never took while the test reports green.
-//! `expects` (verification), `.raises`, `.times`/`.never`/`.once`,
-//! `any_instance`, and the structural matchers (`has_entry`,
-//! `hash_including`) are all still ceiling; each wants its own slot
-//! shape and its own teardown assertion.
+//! WHAT A CHAIN THIS PASS DOES NOT SERVE BECOMES. It used to be left
+//! spelled as mocha, which is loud in the right place under CRuby (real
+//! mocha) and loud in the WRONG place on a strict target: `stubs` is a
+//! frontend refusal there, so one unserved chain took its whole FILE off
+//! the compiled lane — `push_subscription_test`, 17 tests, for one
+//! `.with { |*| … }` block predicate most of them never reach. Now every
+//! recognised chain the table cannot serve is handed to `MochaBridge.
+//! chain(...)` AS DATA: the constant by name, the kind, the method, the
+//! ops list, and the `with` block if there was one. The file that
+//! defines the bridge is per target (`project.rs`): the ruby family
+//! REPLAYS it through the real gem, so nothing those lanes passed
+//! changes; a strict target raises, per test, at the call. Same for a
+//! bare structural matcher (`has_entry(...)`) — `MochaBridge.matcher`.
+//!
+//! `expects` is served for the rows that declare a count slot:
+//! `.never`/`.once`/`.twice`/`.times(n)` (and a bare `expects`, which
+//! mocha reads as once) become `<Const>.expect_<m>(n)`, and the helper's
+//! teardown runs each row's verify, which raises on a mismatch the way
+//! `mocha_verify` does — a failure of THAT test.
 
 use crate::app::App;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 /// One stubbable method, and everything the emit needs to serve it.
 ///
-/// The table is the whole registration surface: a method absent from it
-/// keeps its mocha spelling and its loud failure.
+/// The table is the whole registration surface: a (constant, method)
+/// absent from it, or a chain shape a row has no setter for, goes to
+/// the bridge.
 struct Stubbable {
     konst: &'static str,
     method: &'static str,
     /// `.with(a).returns(v)` — files an answer under `a`.
-    keyed: &'static str,
+    keyed: Option<&'static str>,
     /// A bare `.returns(v)` — answers for every argument.
-    any: &'static str,
-    /// Drops every installed stub; the helper runs this between tests.
+    any: Option<&'static str>,
+    /// `stubs(:m)` with nothing chained — answers the row's default.
+    bare: Option<&'static str>,
+    /// `expects(:m).times(n)` — installs the stub and files a count the
+    /// row's `verify` checks at teardown.
+    expect: Option<&'static str>,
+    /// Drops every installed stub and count; the helper runs this in
+    /// setup, between tests.
     clear: &'static str,
+    /// Raises when a filed count was not met; the helper runs this in
+    /// teardown. Rows sharing a slot share the name and it is run once.
+    verify: Option<&'static str>,
     /// The runtime file that DEFINES the slot. The helper requires it
     /// so the clear call is unconditional — see `stub_preamble`.
     require: &'static str,
 }
 
-const STUBBABLE: &[Stubbable] = &[Stubbable {
-    konst: "Resolv",
-    method: "getaddresses",
-    keyed: "stub_getaddresses",
-    any: "stub_getaddresses_any",
-    clear: "clear_getaddresses_stubs",
-    require: "../runtime/resolv",
-}];
+const STUBBABLE: &[Stubbable] = &[
+    Stubbable {
+        konst: "Resolv",
+        method: "getaddresses",
+        keyed: Some("stub_getaddresses"),
+        any: Some("stub_getaddresses_any"),
+        bare: None,
+        expect: None,
+        clear: "clear_getaddresses_stubs",
+        verify: None,
+        require: "../runtime/resolv",
+    },
+    // The façade for the `web-push` gem. A bare `stubs` answers `""`,
+    // which is what a test that only wants delivery to not happen
+    // needs; `expects(...).never` / `.times(n)` are the shapes
+    // campfire's push tests write.
+    Stubbable {
+        konst: "WebPush",
+        method: "payload_send",
+        keyed: None,
+        any: Some("stub_payload_send_any"),
+        bare: Some("stub_payload_send"),
+        expect: Some("expect_payload_send"),
+        clear: "clear_payload_send_stubs",
+        verify: Some("verify_payload_send_expectations"),
+        require: "../runtime/gem_facades",
+    },
+    // Our own channel class (`runtime/spinel/turbo_streams.rb`, every
+    // ruby-family tree carries it). campfire's messages controller
+    // tests expect one replace / one remove per update / destroy.
+    Stubbable {
+        konst: "Turbo::StreamsChannel",
+        method: "broadcast_replace_to",
+        keyed: None,
+        any: None,
+        bare: None,
+        expect: Some("expect_broadcast_replace_to"),
+        clear: "clear_broadcast_expectations",
+        verify: Some("verify_broadcast_expectations"),
+        require: "../runtime/turbo_streams",
+    },
+    Stubbable {
+        konst: "Turbo::StreamsChannel",
+        method: "broadcast_remove_to",
+        keyed: None,
+        any: None,
+        bare: None,
+        expect: Some("expect_broadcast_remove_to"),
+        clear: "clear_broadcast_expectations",
+        verify: Some("verify_broadcast_expectations"),
+        require: "../runtime/turbo_streams",
+    },
+];
 
-/// `require_relative` lines for every runtime file that defines a slot.
+/// The file that defines `MochaBridge` — per target, see `project.rs`.
+const BRIDGE_REQUIRE: &str = "../runtime/mocha_bridge";
+
+/// The chain methods mocha's expectation API answers. A method outside
+/// this set ends the chain: the expression is not a stub and is left
+/// alone.
+const OPS: &[&str] = &[
+    "with",
+    "returns",
+    "raises",
+    "throws",
+    "never",
+    "once",
+    "twice",
+    "times",
+    "at_least",
+    "at_least_once",
+    "at_most",
+    "at_most_once",
+    "then",
+    "in_sequence",
+    "yields",
+    "multiple_yields",
+];
+
+/// mocha's bare parameter matchers (`Mocha::ParameterMatchers`), which
+/// a test body calls as if they were its own methods. They are not, on
+/// a strict target — so they travel to the bridge by name.
+const MATCHERS: &[&str] = &[
+    "anything",
+    "any_parameters",
+    "has_entry",
+    "has_entries",
+    "has_key",
+    "has_value",
+    "hash_including",
+    "includes",
+    "instance_of",
+    "is_a",
+    "kind_of",
+    "regexp_matches",
+    "equals",
+    "optionally",
+    "all_of",
+    "any_of",
+    "responds_with",
+];
+
+/// `require_relative` lines for every runtime file that defines a slot,
+/// plus the bridge.
 ///
 /// The helper REQUIRES them rather than guarding the clear call with
 /// `defined?`, and that is not a style choice. On CRuby the stdlib
@@ -99,12 +214,12 @@ const STUBBABLE: &[Stubbable] = &[Stubbable {
 pub fn stub_requires() -> String {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = String::new();
-    for s in STUBBABLE {
-        if seen.contains(&s.require) {
+    for s in STUBBABLE.iter().map(|s| s.require).chain(std::iter::once(BRIDGE_REQUIRE)) {
+        if seen.contains(&s) {
             continue;
         }
-        seen.push(s.require);
-        out.push_str(&format!("require_relative \"{}\"\n", s.require));
+        seen.push(s);
+        out.push_str(&format!("require_relative \"{s}\"\n"));
     }
     out
 }
@@ -131,6 +246,23 @@ pub fn stub_clear_lines(indent: &str) -> String {
     out
 }
 
+/// The `verify` call for every slot that files counts, for the helper's
+/// teardown. Each raises on an unmet count — the same moment, and the
+/// same failure, as `mocha_verify`.
+pub fn stub_verify_lines(indent: &str) -> String {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    let mut out = String::new();
+    for s in STUBBABLE {
+        let Some(verify) = s.verify else { continue };
+        if seen.contains(&(s.konst, verify)) {
+            continue;
+        }
+        seen.push((s.konst, verify));
+        out.push_str(&format!("{indent}{}.{}\n", s.konst, verify));
+    }
+    out
+}
+
 pub fn apply_mocha_lowering(app: &mut App) {
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
@@ -145,70 +277,371 @@ pub fn apply_mocha_lowering(app: &mut App) {
     }
 }
 
-/// The setter pair for a `<Const>.stubs(:method)` head, if it has one.
-fn setter_for(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<(&'static str, &'static str)> {
-    if method.as_str() != "stubs" || args.len() != 1 {
-        return None;
-    }
-    let ExprNode::Const { path } = &*recv.node else { return None };
-    // Match on the LAST segment, so `::Resolv` and `Resolv` both hit.
-    let konst = path.last()?.as_str();
-    let ExprNode::Lit { value: crate::expr::Literal::Sym { value: stubbed } } = &*args[0].node
-    else {
-        return None;
-    };
-    STUBBABLE
-        .iter()
-        .find(|s| s.konst == konst && s.method == stubbed.as_str())
-        .map(|s| (s.keyed, s.any))
+/// One link of an expectation chain: `.with(a)`, `.returns(v)`,
+/// `.times(n)`, `.with { … }`.
+struct Op {
+    name: Symbol,
+    args: Vec<Expr>,
+    block: Option<Expr>,
 }
 
-/// `<Const>.stubs(:m).with(a).returns(v)` -> `<Const>.<setter>(a, v)`.
-///
-/// Peels outside-in, because that is how the chain nests: `returns` is
-/// the outermost send and `stubs` the innermost receiver.
-fn rewrite(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite);
+/// A recognised chain, head to tail: `<konst>[.any_instance].<kind>(:<method>)` then `ops`.
+struct Chain {
+    konst: Expr,
+    /// The constant as spelled, `::`-joined.
+    path: String,
+    any_instance: bool,
+    /// `stubs` or `expects`.
+    kind: Symbol,
+    method: Symbol,
+    /// In source order, innermost first.
+    ops: Vec<Op>,
+}
 
-    let ExprNode::Send { recv: Some(outer), method, args, .. } = &*expr.node else { return };
-    // `returns` with more than one argument is a SEQUENCE — first call
-    // gets the first value, second the second. A single slot cannot say
-    // that, so leave it mocha-spelled and loudly broken rather than
-    // answer the first value forever.
-    if method.as_str() != "returns" || args.len() != 1 {
+/// Read a chain off `expr`, walking receivers inward until the
+/// `stubs`/`expects` head. Anything else along the way — a method that
+/// is not one of mocha's, a head whose receiver is not a constant, a
+/// non-Symbol method name — means this is not a stub, and `None` leaves
+/// the expression alone.
+fn parse_chain(expr: &Expr) -> Option<Chain> {
+    let mut ops: Vec<Op> = Vec::new();
+    let mut cur = expr;
+    loop {
+        let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*cur.node else {
+            return None;
+        };
+        let m = method.as_str();
+        if (m == "stubs" || m == "expects") && args.len() == 1 && block.is_none() {
+            let ExprNode::Lit { value: Literal::Sym { value: stubbed } } = &*args[0].node else {
+                return None;
+            };
+            let (konst, any_instance) = match &*recv.node {
+                ExprNode::Const { .. } => (recv.clone(), false),
+                ExprNode::Send { recv: Some(k), method: ai, args: a, block: None, .. }
+                    if ai.as_str() == "any_instance"
+                        && a.is_empty()
+                        && matches!(&*k.node, ExprNode::Const { .. }) =>
+                {
+                    (k.clone(), true)
+                }
+                _ => return None,
+            };
+            let ExprNode::Const { path } = &*konst.node else { return None };
+            let path = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            ops.reverse();
+            return Some(Chain { konst, path, any_instance, kind: method.clone(), method: stubbed.clone(), ops });
+        }
+        if !OPS.contains(&m) {
+            return None;
+        }
+        ops.push(Op { name: method.clone(), args: args.clone(), block: block.clone() });
+        cur = recv;
+    }
+}
+
+/// The row for a chain's head, if the table has one. A row spelled
+/// without `::` matches on the constant's last segment (`::Resolv` and
+/// `Resolv` both hit); one spelled with it wants the whole path.
+fn row_for(path: &str, method: &str) -> Option<&'static Stubbable> {
+    let last = path.rsplit("::").next().unwrap_or(path);
+    STUBBABLE.iter().find(|s| {
+        s.method == method
+            && if s.konst.contains("::") { s.konst == path || path.ends_with(&format!("::{}", s.konst)) } else { s.konst == last }
+    })
+}
+
+/// Top-down, and that direction is load-bearing: a chain is one
+/// expression and has to be read whole. The bottom-up walk this used to
+/// do would have rewritten (or bridged) the inner `stubs(:m)` before the
+/// outer `.returns(v)` was ever seen.
+fn rewrite(expr: &mut Expr) {
+    if let Some(chain) = parse_chain(expr) {
+        let span = expr.span;
+        *expr = lower_chain(span, chain);
         return;
     }
-    let returned = args[0].clone();
+    expr.node.for_each_child_mut(&mut rewrite);
+}
 
-    // Either `<Const>.stubs(:m)` directly (catch-all), or
-    // `<Const>.stubs(:m).with(a)` (keyed on `a`).
-    let (konst, setter, mut call_args) = match &*outer.node {
-        ExprNode::Send { recv: Some(head), method: with_m, args: with_args, .. }
-            if with_m.as_str() == "with" && with_args.len() == 1 =>
+fn lower_chain(span: crate::span::Span, chain: Chain) -> Expr {
+    if !chain.any_instance {
+        if let Some(row) = row_for(&chain.path, chain.method.as_str()) {
+            if let Some(served) = lower_known(span, &chain, row) {
+                return served;
+            }
+        }
+    }
+    bridge_chain(span, chain)
+}
+
+fn int_lit(span: crate::span::Span, v: i64) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } })
+}
+
+fn call(span: crate::span::Span, recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true },
+    )
+}
+
+/// The count an `expects` link files, if it is one of the counting
+/// links: `never` 0, `once` 1, `twice` 2, `times(n)` n.
+fn count_of(op: &Op) -> Option<Expr> {
+    if op.block.is_some() {
+        return None;
+    }
+    match (op.name.as_str(), op.args.as_slice()) {
+        ("never", []) => Some(int_lit(Span_of(op), 0)),
+        ("once", []) => Some(int_lit(Span_of(op), 1)),
+        ("twice", []) => Some(int_lit(Span_of(op), 2)),
+        ("times", [n]) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+#[allow(non_snake_case)]
+fn Span_of(op: &Op) -> crate::span::Span {
+    op.args.first().map(|a| a.span).unwrap_or_else(crate::span::Span::synthetic)
+}
+
+/// A chain the row can serve, as the slot call — or `None`, and the
+/// bridge takes it.
+fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Option<Expr> {
+    let konst = chain.konst.clone();
+    let ops = &chain.ops;
+    let plain = |op: &Op, name: &str, arity: usize| op.name.as_str() == name && op.args.len() == arity && op.block.is_none();
+    match chain.kind.as_str() {
+        "stubs" => match ops.as_slice() {
+            [] => row.bare.map(|bare| call(span, konst, bare, vec![])),
+            [ret] if plain(ret, "returns", 1) => row.any.map(|any| call(span, konst, any, vec![ret.args[0].clone()])),
+            [with, ret] if plain(with, "with", 1) && plain(ret, "returns", 1) => {
+                row.keyed.map(|keyed| call(span, konst, keyed, vec![with.args[0].clone(), ret.args[0].clone()]))
+            }
+            _ => None,
+        },
+        "expects" => {
+            let expect = row.expect?;
+            match ops.as_slice() {
+                // mocha reads a bare `expects` as exactly once.
+                [] => Some(call(span, konst, expect, vec![int_lit(span, 1)])),
+                [count] => count_of(count).map(|n| call(span, konst, expect, vec![n])),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn array_lit(span: crate::span::Span, elems: Vec<Expr>) -> Expr {
+    Expr::new(span, ExprNode::Array { elements: elems, style: crate::expr::ArrayStyle::default() })
+}
+
+fn sym_lit(span: crate::span::Span, s: &str) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
+}
+
+fn str_lit(span: crate::span::Span, s: &str) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
+}
+
+fn bridge() -> Expr {
+    Expr::new(crate::span::Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("MochaBridge")] })
+}
+
+/// One argument of a chain link, as the bridge wants it. A constant
+/// travels by NAME (`raises(Net::OpenTimeout)`): a class as a value is
+/// not a shape every target carries, and the replay side resolves the
+/// name. A bare matcher call becomes `MochaBridge.matcher(:name, arg)`.
+fn bridge_arg(arg: Expr) -> Expr {
+    let span = arg.span;
+    match &*arg.node {
+        ExprNode::Const { path } => str_lit(span, &path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")),
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if MATCHERS.contains(&method.as_str()) && args.len() <= 1 =>
         {
-            let ExprNode::Send { recv: Some(k), method: sm, args: sa, .. } = &*head.node else {
-                return;
-            };
-            let Some((keyed, _)) = setter_for(k, sm, sa) else { return };
-            (k.clone(), keyed, vec![with_args[0].clone()])
+            let mut margs = vec![sym_lit(span, method.as_str())];
+            margs.extend(args.iter().cloned().map(bridge_arg));
+            call(span, bridge(), "matcher", margs)
         }
-        ExprNode::Send { recv: Some(k), method: sm, args: sa, .. } => {
-            let Some((_, any)) = setter_for(k, sm, sa) else { return };
-            (k.clone(), any, vec![])
-        }
-        _ => return,
-    };
-    call_args.push(returned);
+        _ => arg,
+    }
+}
 
-    let span = expr.span;
-    *expr = Expr::new(
+/// `MochaBridge.chain("<Const>", :<kind>, :<method>, [[:op, [args…]], …]) { with-block }`.
+fn bridge_chain(span: crate::span::Span, chain: Chain) -> Expr {
+    let mut block: Option<Expr> = None;
+    let mut links: Vec<Expr> = Vec::new();
+    for op in chain.ops {
+        let args: Vec<Expr> = op.args.into_iter().map(bridge_arg).collect();
+        if op.block.is_some() {
+            block = op.block;
+        }
+        links.push(array_lit(span, vec![sym_lit(span, op.name.as_str()), array_lit(span, args)]));
+    }
+    let kind = if chain.any_instance { format!("any_instance_{}", chain.kind.as_str()) } else { chain.kind.as_str().to_string() };
+    Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(konst),
-            method: Symbol::from(setter),
-            args: call_args,
-            block: None,
+            recv: Some(bridge()),
+            method: Symbol::from("chain"),
+            args: vec![
+                str_lit(span, &chain.path),
+                sym_lit(span, &kind),
+                sym_lit(span, chain.method.as_str()),
+                array_lit(span, links),
+            ],
+            block,
             parenthesized: true,
         },
-    );
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::Span;
+
+    fn sp() -> Span {
+        Span::synthetic()
+    }
+    fn sym(s: &str) -> Expr {
+        sym_lit(sp(), s)
+    }
+    fn konst(path: &[&str]) -> Expr {
+        Expr::new(sp(), ExprNode::Const { path: path.iter().map(|s| Symbol::from(*s)).collect() })
+    }
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(sp(), ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized: true })
+    }
+    fn send_blk(recv: Expr, method: &str, block: Expr) -> Expr {
+        Expr::new(
+            sp(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: vec![], block: Some(block), parenthesized: false },
+        )
+    }
+    fn lambda() -> Expr {
+        Expr::new(
+            sp(),
+            ExprNode::Lambda {
+                rest_param: None,
+                params: vec![],
+                block_param: None,
+                body: Expr::new(sp(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+                block_style: crate::expr::BlockStyle::Brace,
+            },
+        )
+    }
+    fn as_send(e: &Expr) -> (&Expr, &str, &[Expr], &Option<Expr>) {
+        let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { panic!("{:?}", e.node) };
+        (recv, method.as_str(), args, block)
+    }
+    fn const_path(e: &Expr) -> String {
+        let ExprNode::Const { path } = &*e.node else { panic!("{:?}", e.node) };
+        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+    }
+    fn int_of(e: &Expr) -> i64 {
+        let ExprNode::Lit { value: Literal::Int { value } } = &*e.node else { panic!("{:?}", e.node) };
+        *value
+    }
+
+    #[test]
+    fn a_keyed_returns_still_lowers_to_the_typed_slot() {
+        let mut e = send(
+            Some(send(Some(send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")])), "with", vec![str_lit(sp(), "h")])),
+            "returns",
+            vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])],
+        );
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "Resolv");
+        assert_eq!(m, "stub_getaddresses");
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn a_bare_stubs_lowers_to_the_rows_default() {
+        let mut e = send(Some(konst(&["WebPush"])), "stubs", vec![sym("payload_send")]);
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "WebPush");
+        assert_eq!(m, "stub_payload_send");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn expects_with_a_count_files_the_count() {
+        for (link, n) in [("never", 0), ("once", 1), ("twice", 2)] {
+            let mut e = send(Some(send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")])), link, vec![]);
+            rewrite(&mut e);
+            let (_, m, args, _) = as_send(&e);
+            assert_eq!(m, "expect_payload_send", "{link}");
+            assert_eq!(int_of(&args[0]), n, "{link}");
+        }
+        // `.times(n)` carries its argument; a bare `expects` is once.
+        let mut e = send(
+            Some(send(Some(konst(&["Turbo", "StreamsChannel"])), "expects", vec![sym("broadcast_remove_to")])),
+            "times",
+            vec![int_lit(sp(), 3)],
+        );
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "Turbo::StreamsChannel");
+        assert_eq!(m, "expect_broadcast_remove_to");
+        assert_eq!(int_of(&args[0]), 3);
+        let mut e = send(Some(konst(&["Turbo", "StreamsChannel"])), "expects", vec![sym("broadcast_replace_to")]);
+        rewrite(&mut e);
+        let (_, m, args, _) = as_send(&e);
+        assert_eq!(m, "expect_broadcast_replace_to");
+        assert_eq!(int_of(&args[0]), 1);
+    }
+
+    #[test]
+    fn a_chain_the_table_cannot_serve_travels_to_the_bridge_as_data() {
+        // Resolv.stubs(:getaddresses).with { … }.returns([ip])
+        let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
+        let with = send_blk(head, "with", lambda());
+        let mut e = send(Some(with), "returns", vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])]);
+        rewrite(&mut e);
+        let (recv, m, args, block) = as_send(&e);
+        assert_eq!(const_path(recv), "MochaBridge");
+        assert_eq!(m, "chain");
+        assert!(block.is_some(), "the with-block rides on the bridge call");
+        assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Resolv"));
+        assert!(matches!(&*args[1].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "stubs"));
+        let ExprNode::Array { elements: elems, .. } = &*args[3].node else { panic!("{:?}", args[3].node) };
+        assert_eq!(elems.len(), 2, "with, returns — in source order");
+        let ExprNode::Array { elements: first, .. } = &*elems[0].node else { panic!() };
+        assert!(matches!(&*first[0].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "with"));
+    }
+
+    #[test]
+    fn a_matcher_and_a_constant_travel_by_name() {
+        // WebPush.expects(:payload_send).with(has_entry(endpoint_ip: ip)).raises(Net::OpenTimeout)
+        let matcher = send(None, "has_entry", vec![Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("endpoint_ip"), str_lit(sp(), "1.2.3.4"))], kwargs: true })]);
+        let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
+        let with = send(Some(head), "with", vec![matcher]);
+        let mut e = send(Some(with), "raises", vec![konst(&["Net", "OpenTimeout"])]);
+        rewrite(&mut e);
+        let (_, m, args, _) = as_send(&e);
+        assert_eq!(m, "chain");
+        let ExprNode::Array { elements: elems, .. } = &*args[3].node else { panic!() };
+        let ExprNode::Array { elements: with_link, .. } = &*elems[0].node else { panic!() };
+        let ExprNode::Array { elements: with_args, .. } = &*with_link[1].node else { panic!() };
+        let (recv, mm, margs, _) = as_send(&with_args[0]);
+        assert_eq!(const_path(recv), "MochaBridge");
+        assert_eq!(mm, "matcher");
+        assert!(matches!(&*margs[0].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "has_entry"));
+        let ExprNode::Array { elements: raises_link, .. } = &*elems[1].node else { panic!() };
+        let ExprNode::Array { elements: raises_args, .. } = &*raises_link[1].node else { panic!() };
+        assert!(matches!(&*raises_args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Net::OpenTimeout"));
+    }
+
+    #[test]
+    fn a_send_that_is_not_a_chain_is_left_alone() {
+        let mut e = send(Some(konst(&["Resolv"])), "getaddresses", vec![str_lit(sp(), "h")]);
+        let before = format!("{:?}", e);
+        rewrite(&mut e);
+        assert_eq!(format!("{:?}", e), before);
+    }
 }

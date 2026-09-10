@@ -1104,6 +1104,123 @@ fn blog_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
 /// reachable for any host no test stubbed. That is also why this tree
 /// does NOT fall back to `GemFacade.fail!` the way the port does — here
 /// there IS a resolver to fall through to.
+/// The ruby-family `MochaBridge` — see `runtime/spinel/mocha_bridge.rb`
+/// for the strict half and `lower::mocha` for what arrives here.
+///
+/// A REPLAY, not a reimplementation: the chain comes as data and goes
+/// back out as the exact mocha calls the test wrote, block included, so
+/// these lanes keep exercising the gem for every shape the typed slots
+/// do not serve. A constant travels by name (`raises("Net::OpenTimeout")`)
+/// and is resolved here; a bare matcher (`has_entry`) is one of
+/// `Mocha::ParameterMatchers`, which the module extends for the purpose.
+const MOCHA_BRIDGE_REPLAY: &str = r##"# `lower::mocha` bridge, ruby-family half — see `project::MOCHA_BRIDGE_REPLAY`.
+begin
+  require "mocha/api"
+rescue LoadError
+  nil
+end
+
+module MochaBridge
+  CONST_NAME = /\A[A-Z]\w*(::[A-Z]\w*)*\z/
+
+  def self.chain(konst, kind, meth, ops, &blk)
+    target = Object.const_get(konst)
+    expectation =
+      case kind.to_s
+      when "stubs" then target.stubs(meth)
+      when "expects" then target.expects(meth)
+      when "any_instance_stubs" then target.any_instance.stubs(meth)
+      when "any_instance_expects" then target.any_instance.expects(meth)
+      else raise ArgumentError, "mocha bridge: unknown kind #{kind}"
+      end
+    ops.each do |op, args|
+      args = args.map { |a| a.is_a?(String) && a.match?(CONST_NAME) && Object.const_defined?(a) ? Object.const_get(a) : a } if op == :raises
+      expectation =
+        if op == :with && blk
+          expectation.with(&blk)
+        else
+          expectation.public_send(op, *args)
+        end
+    end
+    nil
+  end
+
+  # Extended lazily: this file is required from the helper's preamble,
+  # ahead of the gem in some trees, and the matchers are only needed
+  # once a test reaches one.
+  def self.matcher(name, arg = nil)
+    # `Mocha::ParameterMatchers::Methods` is where mocha 3 keeps the
+    # matcher methods; `Mocha::API` includes it into a test class.
+    extend Mocha::ParameterMatchers::Methods unless singleton_class.include?(Mocha::ParameterMatchers::Methods)
+    arg.nil? ? public_send(name) : public_send(name, arg)
+  end
+end
+"##;
+
+/// The `WebPush.payload_send` stub slot the ruby-family trees get bolted
+/// onto the real `web-push` gem — the same shape as `RESOLV_STUB_REOPEN`,
+/// for the same reason: `lower::mocha` rewrites `WebPush.stubs(:payload_send)`
+/// and `WebPush.expects(:payload_send).times(n)` on every target, and
+/// on this one there IS a gem to fall through to. The strict trees carry
+/// the slot inside the façade (`runtime/ruby/gem_facades.rb`).
+const WEB_PUSH_STUB_REOPEN: &str = r##"
+# Stub slot for `lower::mocha` — see `project::WEB_PUSH_STUB_REOPEN`.
+module WebPush
+  STUB_ON = [ false ]
+  STUB_VALUE = [ "" ]
+  CALLS = [ 0 ]
+  EXPECTED = [ -1 ]
+
+  class << self
+    alias_method :payload_send_without_stub, :payload_send if respond_to?(:payload_send)
+
+    def stub_payload_send
+      STUB_ON[0] = true
+      STUB_VALUE[0] = ""
+      nil
+    end
+
+    def stub_payload_send_any(value)
+      STUB_ON[0] = true
+      STUB_VALUE[0] = value.to_s
+      nil
+    end
+
+    def expect_payload_send(count)
+      STUB_ON[0] = true
+      EXPECTED[0] = count
+      nil
+    end
+
+    def clear_payload_send_stubs
+      STUB_ON[0] = false
+      STUB_VALUE[0] = ""
+      CALLS[0] = 0
+      EXPECTED[0] = -1
+      nil
+    end
+
+    def verify_payload_send_expectations
+      expected = EXPECTED[0]
+      return nil if expected < 0
+      got = CALLS[0]
+      EXPECTED[0] = -1
+      raise "WebPush.payload_send was expected #{expected} time(s), got #{got}" if got != expected
+      nil
+    end
+
+    def payload_send(**options)
+      if STUB_ON[0]
+        CALLS[0] += 1
+        return STUB_VALUE[0]
+      end
+      raise NotImplementedError, "web-push is not installed" unless respond_to?(:payload_send_without_stub)
+      payload_send_without_stub(**options)
+    end
+  end
+end
+"##;
+
 const RESOLV_STUB_REOPEN: &str = r##"require "resolv"
 
 # Stub slot for `lower::mocha` — see `project::RESOLV_STUB_REOPEN`.
@@ -1258,6 +1375,11 @@ fn ruby_runtime_files(
         if path == "runtime/http_stub.rb" {
             *content = HTTP_STUB_WEBMOCK_DELEGATE.to_string();
         }
+        // `MochaBridge`: the chains `lower::mocha`'s table cannot serve,
+        // replayed through the real gem here; the strict file raises.
+        if path == "runtime/mocha_bridge.rb" {
+            *content = MOCHA_BRIDGE_REPLAY.to_string();
+        }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
         }
@@ -1363,8 +1485,9 @@ fn ruby_runtime_files(
                  # commonmark-java Markly shim — from the same list, minus that\n\
                  # one name.)\n\
                  require_relative \"module_delegate\"\n\
-                 {}",
-                gem_require_block(&[])
+                 {}{}",
+                gem_require_block(&[]),
+                WEB_PUSH_STUB_REOPEN
             );
         }
     }
@@ -2203,6 +2326,10 @@ fn jruby_runtime_files(
         if path == "runtime/http_stub.rb" {
             *content = HTTP_STUB_WEBMOCK_DELEGATE.to_string();
         }
+        // …and the mocha bridge, replayed through the gem here too.
+        if path == "runtime/mocha_bridge.rb" {
+            *content = MOCHA_BRIDGE_REPLAY.to_string();
+        }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
         }
@@ -2746,11 +2873,20 @@ fn patch_stub_lifecycle(helper: &mut String, with_mocha: bool) {
         };
         helper.replace_range(at..at + SETUP.len(), &with_include);
     }
-    if with_mocha {
-        if let Some(at) = helper.find(TEARDOWN) {
-            let verified = "  def teardown\n    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end";
-            helper.replace_range(at..at + TEARDOWN.len(), verified);
-        }
+    // The slots' own verifies run in teardown whether or not the gem is
+    // there: a count filed by `expect_<m>(n)` and not met raises here,
+    // which the autorun shim charges to the test that filed it — the
+    // same moment, and the same failure, as `mocha_verify`.
+    let verifies = crate::lower::mocha::stub_verify_lines("    ");
+    if let Some(at) = helper.find(TEARDOWN) {
+        let verified = if with_mocha {
+            format!(
+                "  def teardown\n{verifies}    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end"
+            )
+        } else {
+            format!("  def teardown\n{verifies}  end")
+        };
+        helper.replace_range(at..at + TEARDOWN.len(), &verified);
     }
 
     // LAST, and that ordering is load-bearing. This inserts near the TOP
@@ -2848,7 +2984,14 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // the gem — and that is the demand.
     const TEST_GEMS: [(Marker, &str, &str); 3] = [
         (Marker::AnyText(&["WebMock.", "WebMock::", "HttpStub."]), "webmock", "webmock/minitest"),
-        (Marker::AnyText(&[".stubs(", ".expects(", ".any_instance"]), "mocha", "mocha/api"),
+        // `MochaBridge.` is the lowering's own spelling of a chain it hands
+        // back to the gem (`lower::mocha`), and the paren-less forms are
+        // campfire's `@membership.user.expects :reset_remote_connections`.
+        (
+            Marker::AnyText(&[".stubs(", ".expects(", ".stubs ", ".expects ", ".any_instance", "MochaBridge."]),
+            "mocha",
+            "mocha/api",
+        ),
         // ruby-vips, named as `::Vips::Image` — campfire's logo and
         // avatar tests decode the response body to assert its PIXEL
         // dimensions, which is the only honest way to check that an

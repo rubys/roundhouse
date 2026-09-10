@@ -164,11 +164,69 @@ module Turbo
       Broadcasts.record(action: :prepend, stream: stream, target: target, html: html, attributes: attributes)
     end
 
+    # The count slots `lower::mocha` writes for
+    # `Turbo::StreamsChannel.expects(:broadcast_replace_to).once` (and
+    # `_remove_to`). Single-element Arrays as settable holders, the
+    # `Resolv` slot's idiom; -1 is "no count filed", since 0 is a real
+    # expectation (`never`).
+    #
+    # With a count filed the call is COUNTED AND NOT RECORDED — mocha
+    # replaces the method, so a mocked channel broadcasts nothing, and
+    # a test that expects the broadcast does not also read the log. The
+    # emitted helper clears in setup and verifies in teardown; an unmet
+    # count raises there, charged to the test that filed it.
+    REPLACE_CALLS = [ 0 ]
+    REMOVE_CALLS = [ 0 ]
+    REPLACE_EXPECTED = [ -1 ]
+    REMOVE_EXPECTED = [ -1 ]
+
+    def self.expect_broadcast_replace_to(count)
+      REPLACE_EXPECTED[0] = count
+      nil
+    end
+
+    def self.expect_broadcast_remove_to(count)
+      REMOVE_EXPECTED[0] = count
+      nil
+    end
+
+    def self.clear_broadcast_expectations
+      REPLACE_CALLS[0] = 0
+      REMOVE_CALLS[0] = 0
+      REPLACE_EXPECTED[0] = -1
+      REMOVE_EXPECTED[0] = -1
+      nil
+    end
+
+    def self.verify_broadcast_expectations
+      replace_expected = REPLACE_EXPECTED[0]
+      remove_expected = REMOVE_EXPECTED[0]
+      replace_got = REPLACE_CALLS[0]
+      remove_got = REMOVE_CALLS[0]
+      REPLACE_EXPECTED[0] = -1
+      REMOVE_EXPECTED[0] = -1
+      if replace_expected >= 0 && replace_got != replace_expected
+        raise "Turbo::StreamsChannel.broadcast_replace_to was expected #{replace_expected} time(s), got #{replace_got}"
+      end
+      if remove_expected >= 0 && remove_got != remove_expected
+        raise "Turbo::StreamsChannel.broadcast_remove_to was expected #{remove_expected} time(s), got #{remove_got}"
+      end
+      nil
+    end
+
     def self.broadcast_replace_to(stream, target:, html:, attributes: "")
+      if REPLACE_EXPECTED[0] >= 0
+        REPLACE_CALLS[0] = REPLACE_CALLS[0] + 1
+        return nil
+      end
       Broadcasts.record(action: :replace, stream: stream, target: target, html: html, attributes: attributes)
     end
 
     def self.broadcast_remove_to(stream, target:, attributes: "")
+      if REMOVE_EXPECTED[0] >= 0
+        REMOVE_CALLS[0] = REMOVE_CALLS[0] + 1
+        return nil
+      end
       Broadcasts.record(action: :remove, stream: stream, target: target, html: "", attributes: attributes)
     end
   end
