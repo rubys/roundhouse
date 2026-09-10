@@ -769,7 +769,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // true` becomes TRANSITIVE, which is what carries campfire's stamp
     // from a boost through its Message to its Room. See
     // docs/pipeline/runtime.md, "`belongs_to … touch:` cascades".
-    const CEILING: usize = 916;
+    // 2026-09-10 916 -> 922, +6, MEASURED one method at a time on this
+    // gate: +3 for the blank family (`blank?`/`present?`/`presence`, each
+    // a self-send of `empty?`), +3 for `include?` (`record.nil?` and
+    // `record.id` on the untyped parameter, plus the `ids` self-send).
+    // Every one is the self-send shape the paragraphs above describe;
+    // none is a new declared `untyped`. What it buys: campfire's has_many
+    // extension `revise(granted: [])` and `room.users.include?(user)` on
+    // the compiled lane — record `==` exists only on the CRuby overlay,
+    // so a compiled target compared pointers.
+    const CEILING: usize = 922;
 
     assert!(
         all_untyped.len() <= CEILING,

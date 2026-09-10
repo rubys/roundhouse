@@ -626,17 +626,15 @@ module ActiveRecord
     # by pointer, and campfire's `room.users.include?(users(:david))`
     # read false for a user the room had just been granted.
     #
-    # Loads rather than asking `exists?(record.id)` the way Rails does
-    # for an unloaded relation: the caller's record is untyped, and
-    # handing its `id` to the nullable `Integer?` parameter is a shape
-    # spinel refuses at the C level (`passing 'int' to parameter of
-    # incompatible type 'sp_RbVal'`). Every caller in the corpus is a
-    # test assertion on a room's users, where the load is a handful of
-    # rows.
+    # Through `ids` rather than `exists?(record.id)` the way Rails asks
+    # it: the caller's record is untyped, and handing its `id` to the
+    # nullable `Integer?` parameter is a shape spinel refuses at the C
+    # level (`passing 'int' to parameter of incompatible type
+    # 'sp_RbVal'`). `ids` is one projected query and a typed
+    # `Array[Integer]`, so the comparison stays typed end to end.
     def include?(record)
       return false if record.nil?
-      wanted = record.id
-      to_a.any? { |x| x.id == wanted }
+      ids.include?(record.id)
     end
 
     def each
