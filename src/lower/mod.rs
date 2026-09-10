@@ -60,6 +60,7 @@ pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
 pub mod mocha;
+pub mod webmock;
 pub mod global_id_locate;
 pub mod array_ordinal;
 pub mod sti_is_a;
@@ -255,6 +256,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    // `WebMock.stub_request(v, u).to_return(...)` → `HttpStub.stub(...)`.
+    // Keys on a `WebMock` Const receiver and a `to_return` send, neither
+    // of which any other pass produces or consumes; the `.to_s` it
+    // wraps header values in is a plain send. No ordering constraints.
+    ("webmock", &[]),
     // `GlobalID::Locator.locate(gid, only: K)` → `locate_<k>(gid)`.
     // Keys on a two-segment Const receiver and a literal `only:` kwarg,
     // neither of which any other pass produces or consumes, so no
@@ -607,6 +613,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("class_body_new");
     mocha::apply_mocha_lowering(app);
     ran!("mocha");
+    webmock::apply_webmock_lowering(app);
+    ran!("webmock");
     global_id_locate::apply_global_id_locate_lowering(app);
     ran!("global_id_locate");
     array_ordinal::apply_array_ordinal_lowering(app);

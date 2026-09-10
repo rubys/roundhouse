@@ -6010,6 +6010,13 @@ fn require_path_for_body_const(
         // same reason IPAddr is: `resolv` is not in `project::BUNDLED`,
         // so nothing inserts a bare `require "resolv"` of its own.
         "Resolv" => Some("runtime/resolv".to_string()),
+        // `Net::HTTP` — a real client on both lanes (`project::BUNDLED`
+        // writes the `require "net/http"`), REOPENED on spinel by
+        // `runtime/spinel/net_http.rb` to add the block form of
+        // `#request` and the stub seam `lower::webmock` fills. Anchored
+        // so every file that names the client loads the reopen; the ruby
+        // family's copy of the file is a bare `require "net/http"`.
+        "Net" => Some("runtime/net_http".to_string()),
         // `Surfguard` — basecamp/surfguard's address policy, ported into
         // `runtime/ruby/surfguard.rb`. Anchored for every target: the
         // gem is a GIT dependency, so no `gem install` and no bare

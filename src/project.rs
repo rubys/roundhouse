@@ -1150,6 +1150,53 @@ class Resolv
 end
 "##;
 
+/// `HttpStub` for the ruby family — the same three calls
+/// `lower::webmock` rewrites every test to, delegated onto the real
+/// WebMock gem. The strict targets answer them from a table
+/// (`runtime/spinel/http_stub.rb`) and a reopened `Net::HTTP`; over
+/// here the gem already intercepts CRuby's own client, so the delegate
+/// is all that is needed, and today's CRuby lane keeps running the gem
+/// it always did rather than betting its number on new code.
+///
+/// `require "webmock"` INSIDE `stub`, not at the top of the file. Every
+/// emitted helper requires this file unconditionally (the clear call
+/// has to exist in every test, stubbing or not — see
+/// `lower::mocha::stub_requires`), and an app whose Gemfile never named
+/// webmock would otherwise fail to load its entire suite on this line.
+/// A test that stubs is the demand; `apply_test_gem_wiring` has already
+/// declared the gem for it.
+const HTTP_STUB_WEBMOCK_DELEGATE: &str = r##"# `HttpStub` over the real WebMock gem — see
+# `project::HTTP_STUB_WEBMOCK_DELEGATE`. The table at
+# runtime/spinel/http_stub.rb exists for the targets that have no gem
+# to intercept their HTTP client.
+module HttpStub
+  def self.stub(verb, url, status, body, headers)
+    require "webmock"
+    WebMock.stub_request(verb.downcase.to_sym, url)
+      .to_return(status: status, body: body, headers: headers)
+    nil
+  end
+
+  def self.allow_net_connect(hosts)
+    require "webmock"
+    WebMock.disable_net_connect!(allow: hosts)
+    nil
+  end
+
+  def self.clear
+    WebMock.reset! if defined?(WebMock)
+    nil
+  end
+end
+"##;
+
+/// The ruby family's `runtime/net_http.rb`: Ruby's own client. The
+/// reopen at runtime/spinel/net_http.rb exists for spinel, whose
+/// bundled client lacks the block form of `#request` and where the stub
+/// table has to sit above the transport; over here WebMock sits there.
+const NET_HTTP_STDLIB: &str = "# Ruby's own net/http — see `project::NET_HTTP_STDLIB`.\n\
+                               require \"net/http\"\n";
+
 fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
@@ -1205,6 +1252,14 @@ fn ruby_runtime_files(
                  # The port at runtime/ruby/resolv.rb exists for the targets\n\
                  # that have no resolver to bind to.\n{RESOLV_STUB_REOPEN}"
             );
+        }
+        // `HttpStub` / `Net::HTTP`: the WebMock seam. The strict table
+        // and the reopened client are spinel's; this tree has the gem.
+        if path == "runtime/http_stub.rb" {
+            *content = HTTP_STUB_WEBMOCK_DELEGATE.to_string();
+        }
+        if path == "runtime/net_http.rb" {
+            *content = NET_HTTP_STDLIB.to_string();
         }
     }
 
@@ -2144,6 +2199,13 @@ fn jruby_runtime_files(
         if path == "runtime/resolv.rb" {
             *content = RESOLV_STUB_REOPEN.to_string();
         }
+        // …and the WebMock seam, same as `ruby_runtime_files`.
+        if path == "runtime/http_stub.rb" {
+            *content = HTTP_STUB_WEBMOCK_DELEGATE.to_string();
+        }
+        if path == "runtime/net_http.rb" {
+            *content = NET_HTTP_STDLIB.to_string();
+        }
     }
 
     // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
@@ -2655,24 +2717,40 @@ enum Marker {
 /// skipped only where mocha could not have installed an expectation in
 /// the first place. A test that writes `stubs` on a target without the
 /// gem still fails loudly, on that call, which is the honest place.
-fn patch_mocha_lifecycle(helper: &mut String) {
+///
+/// `with_mocha` is whether the tree demanded the gem: the `Mocha::API`
+/// include and its three lifecycle calls go in only then (an app that
+/// stubs HTTP but never mocks would otherwise `NameError` on the
+/// include). The stub-slot clears — mocha's and webmock's — go in
+/// whichever of the two was demanded, because the slots they clear are
+/// defined by runtime files every helper requires, not by either gem.
+fn patch_stub_lifecycle(helper: &mut String, with_mocha: bool) {
     const SETUP: &str = "  def setup\n    SchemaSetup.reset! if defined?(SchemaSetup)";
     const TEARDOWN: &str = "  def teardown\n  end";
 
-    if helper.contains("Mocha::API") {
+    if helper.contains("Mocha::API") || helper.contains("HttpStub.clear") {
         return;
     }
+    let clears = format!(
+        "{}{}",
+        crate::lower::mocha::stub_clear_lines("    "),
+        crate::lower::webmock::stub_clear_lines("    "),
+    );
     if let Some(at) = helper.find(SETUP) {
-        let with_include =
+        let with_include = if with_mocha {
             format!(
-                "  include Mocha::API\n\n  def setup\n    mocha_setup if defined?(Mocha)\n{}    SchemaSetup.reset! if defined?(SchemaSetup)",
-                crate::lower::mocha::stub_clear_lines("    "),
-            );
+                "  include Mocha::API\n\n  def setup\n    mocha_setup if defined?(Mocha)\n{clears}    SchemaSetup.reset! if defined?(SchemaSetup)",
+            )
+        } else {
+            format!("  def setup\n{clears}    SchemaSetup.reset! if defined?(SchemaSetup)")
+        };
         helper.replace_range(at..at + SETUP.len(), &with_include);
     }
-    if let Some(at) = helper.find(TEARDOWN) {
-        let verified = "  def teardown\n    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end";
-        helper.replace_range(at..at + TEARDOWN.len(), verified);
+    if with_mocha {
+        if let Some(at) = helper.find(TEARDOWN) {
+            let verified = "  def teardown\n    mocha_verify if defined?(Mocha)\n  ensure\n    mocha_teardown if defined?(Mocha)\n  end";
+            helper.replace_range(at..at + TEARDOWN.len(), verified);
+        }
     }
 
     // LAST, and that ordering is load-bearing. This inserts near the TOP
@@ -2685,7 +2763,11 @@ fn patch_mocha_lifecycle(helper: &mut String) {
     // The slots the clear calls reach have to be DEFINED in every test
     // file, not just the ones that stub — see `lower::mocha::stub_requires`
     // for what guarding on `defined?` cost instead.
-    let requires = crate::lower::mocha::stub_requires();
+    let requires = format!(
+        "{}{}",
+        crate::lower::mocha::stub_requires(),
+        crate::lower::webmock::stub_requires(),
+    );
     if !requires.is_empty() {
         const BOOT: &str = "require_relative \"../boot\"\n";
         if let Some(b) = helper.find(BOOT) {
@@ -2759,8 +2841,13 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // test/test_helper.rb is deliberately Minitest-free. `mocha/api` is
     // the documented entry point for a foreign test framework, and it
     // needs the lifecycle wiring below.
+    //
+    // `HttpStub.` beside `WebMock`: `lower::webmock` has already rewritten
+    // every understood `stub_request` chain to the slot by the time this
+    // scan runs, so on the ruby family the slot's delegate is what reaches
+    // the gem — and that is the demand.
     const TEST_GEMS: [(Marker, &str, &str); 3] = [
-        (Marker::Constant("WebMock"), "webmock", "webmock/minitest"),
+        (Marker::AnyText(&["WebMock.", "WebMock::", "HttpStub."]), "webmock", "webmock/minitest"),
         (Marker::AnyText(&[".stubs(", ".expects(", ".any_instance"]), "mocha", "mocha/api"),
         // ruby-vips, named as `::Vips::Image` — campfire's logo and
         // avatar tests decode the response body to assert its PIXEL
@@ -2804,10 +2891,12 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
                 helper.insert_str(0, &format!("{line}\n"));
             }
         }
-        if needed.iter().any(|(gem, _)| *gem == "mocha") {
-            patch_mocha_lifecycle(helper);
+        let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
+        let with_webmock = needed.iter().any(|(gem, _)| *gem == "webmock");
+        if with_mocha || with_webmock {
+            patch_stub_lifecycle(helper, with_mocha);
         }
-        if needed.iter().any(|(gem, _)| *gem == "webmock") {
+        if with_webmock {
             patch_webmock_api_include(helper);
         }
     }
@@ -3651,15 +3740,19 @@ const BUNDLED: [(&str, &str); 12] = [
 fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
     let mut gaps = Vec::new();
     for (konst, feature) in BUNDLED {
+        let require_line = format!("require {feature:?}");
         // The program defines the constant itself, so the bundled
-        // library is not what the name refers to.
-        if files
-            .iter()
-            .any(|(p, c)| p.ends_with(".rb") && defines_constant(c, konst))
-        {
+        // library is not what the name refers to. A file that REQUIRES
+        // the library and then opens the constant is not that: it is a
+        // reopen over the bundled one (`runtime/net_http.rb` adds the
+        // block form of `#request` on top of spinel's `packages/net`),
+        // and every other file naming the constant still needs the
+        // require.
+        if files.iter().any(|(p, c)| {
+            p.ends_with(".rb") && defines_constant(c, konst) && !c.contains(&require_line)
+        }) {
             continue;
         }
-        let require_line = format!("require {feature:?}");
         for (i, (path, content)) in files.iter().enumerate() {
             if path.ends_with(".rb")
                 && names_constant(content, konst)
