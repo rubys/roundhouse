@@ -122,8 +122,32 @@ module Broadcasts
     nil
   end
 
+  # A COPY LOOP, NOT `__log.dup`, and the difference is a type rather
+  # than a behaviour: both answer the same entries.
+  #
+  # `Thread.current[:broadcast_log]` is untyped, so `__log` answers a
+  # BOXED VALUE and `.dup` on a boxed receiver answers another one. A
+  # boxed value is not an array: the caller in test/test_helper.rb
+  # declares `capture_turbo_stream_broadcasts` returns
+  # `Array[Hash[Symbol, untyped]]`, spinel gives that call an
+  # `sp_PolyArray *` slot, and the boxed `sp_RbVal` coming back could
+  # not be assigned to it —
+  #
+  #     test_helper.rb: error: assigning to 'sp_PolyArray *'
+  #                            from incompatible type 'sp_RbVal'
+  #
+  # which took SIX controller test files off the compiled lane at 42
+  # tests, the largest single wall on it. Building a fresh array here
+  # gives the value a concrete array type at the one seam where the log
+  # leaves the thread-local, so every reader gets it.
+  #
+  # The entries stay boxed, which is right — a log row really is a
+  # Symbol-keyed bag of mixed values, and only the CONTAINER needed a
+  # type.
   def self.log
-    __log.dup
+    out = []
+    __log.each { |e| out << e }
+    out
   end
 
   # One entry onto this request's log. `ActionCable::Server#pubsub`
