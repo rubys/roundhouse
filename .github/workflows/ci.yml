@@ -2347,6 +2347,48 @@ jobs:
             rmdir _site/bench 2>/dev/null || true
           fi
 
+      # Campfire conformance, COMPILED — the same emitted source as the
+      # page above, with each test file built to its own native binary by
+      # spinel and run. Fetched from the bench box rather than produced
+      # here, and that split is the whole difference between the two:
+      #
+      #   * The interpreted lane runs IN CI because it is seconds of work
+      #     against a pinned app, so every movement belongs to the commit
+      #     the page is published beside.
+      #   * This one is 54 whole-program compiles — nineteen minutes on
+      #     the box — so it runs nightly at 04:00 and the page describes
+      #     WHATEVER roundhouse and spinel were that morning, not this
+      #     commit. Its summary records all four inputs (campfire pin,
+      #     roundhouse SHA, spinel version read from the BINARY) so a
+      #     movement can be attributed without this page having to.
+      #
+      # Rendered here rather than fetching the HTML the box already
+      # rendered, for the reason the lobsters conformance step gives: the
+      # renderer lives in this repo and a fix to it should reach the site
+      # on the next CI run rather than on the box's next cron cycle.
+      #
+      # Only summary.json is fetched because that is all the renderer
+      # reads. The tally, the per-test failures and the 54 per-file
+      # compile logs stay on the box, one link away under
+      # roundbench.showcase.party/campfire-suite/.
+      - name: Fetch latest compiled campfire conformance data
+        id: fetch-campfire-suite-spinel
+        env:
+          BENCH_URL: https://roundbench.showcase.party/campfire-suite
+        run: |
+          mkdir -p _site/bench/campfire-suite-spinel
+          if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/campfire-suite-spinel/summary.json; then
+            echo "compiled_data=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::compiled campfire conformance data unavailable at $BENCH_URL; skipping that page"
+            rm -rf _site/bench/campfire-suite-spinel
+            rmdir _site/bench 2>/dev/null || true
+            echo "compiled_data=absent" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Render compiled campfire conformance page
+        if: steps.fetch-campfire-suite-spinel.outputs.compiled_data == 'present'
+        run: scripts/campfire-suite-report _site/bench/campfire-suite-spinel _site/bench/campfire-suite-spinel/index.html
+
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to rubys.github.io/roundhouse.
       - name: Upload browse archives

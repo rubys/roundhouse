@@ -35,6 +35,7 @@
       <a href="../playground/?app=campfire">Transpile it (Playground)</a>
       <a href="../bench/campfire/">Benchmark results</a>
       <a href="../bench/campfire-suite/">Conformance (their test suite)</a>
+      <a href="../bench/campfire-suite-spinel/">Conformance, compiled</a>
     </div>
 
     <h2>Why Campfire</h2>
@@ -86,6 +87,20 @@
       than to upstream drift. And the page lists what the harness stubs in to
       get the suite running at all — a pass rate propped up by the harness is
       not a pass rate about the emit, so the props are on the page beside it.
+    </p>
+    <p>
+      The same suite runs a second way, and the difference is the interesting
+      part. On the
+      <strong><a href="../bench/campfire-suite-spinel/">compiled conformance page</a></strong>
+      each test file is built to its own native binary by the Spinel AOT
+      compiler and that binary is run — same emitted source, different runtime
+      — so a gap between the two pages belongs to the compiler rather than to
+      the app or to the emit. It also reports something the interpreted lane
+      cannot: a file that never <em>linked</em>. Under CRuby a test file passes
+      or fails; compiled, it can also fail to build, and its tests are then
+      charged to a compile error without anything behind that error having been
+      observed at all. Those two questions — does it compile, does it behave —
+      are what the compiled page keeps in separate columns.
     </p>
 
     <h2>Further reading</h2>
