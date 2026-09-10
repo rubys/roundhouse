@@ -205,7 +205,7 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
     match method.as_str() {
         "assert_equal" if args.len() >= 2 => {
             let expected = args[0].clone();
-            let actual = args[1].clone();
+            let actual = materialised_for_array_literal(&expected, args[1].clone());
             let msg = format!("assert_equal failed");
             Some(raise_if(
                 span,
@@ -716,6 +716,56 @@ fn raise_if(span: Span, cond: Expr, msg: String) -> Expr {
     )
 }
 
+/// `assert_equal [ user ], message.mentionees` — an Array literal against
+/// a call that answers a relation. Rails makes that pass through
+/// `Relation#to_ary`, which a strict target has no way to reach: spinel
+/// refuses `[…] != <object>` outright (`unsupported equality:
+/// recv=ArrayNode … arg0ty<Relation>`), and the refusal is a compile
+/// error that takes the whole file. So when the EXPECTED side is an
+/// Array literal and the actual is a call whose type is not already a
+/// container or a scalar, the actual is asked for `.to_a` — identity on
+/// an Array, a load on a relation, and the comparison stays the one the
+/// test wrote. A literal or a scalar-typed actual is left alone: on
+/// those the array comparison was already well-formed, and `nil.to_a`
+/// is `[]`, which would turn an honest nil-vs-array failure into a pass.
+fn materialised_for_array_literal(expected: &Expr, actual: Expr) -> Expr {
+    // A literal, or a local the typer already knows holds an Array —
+    // `messages = [...]; assert_equal messages, room.messages.search(q)`.
+    let expected_is_array = matches!(&*expected.node, ExprNode::Array { .. })
+        || matches!(&expected.ty, Some(crate::ty::Ty::Array { .. }));
+    if !expected_is_array {
+        return actual;
+    }
+    if !matches!(&*actual.node, ExprNode::Send { .. }) {
+        return actual;
+    }
+    // Anything that is not a scalar or a Hash: an object, a relation,
+    // `untyped`, a type variable the first pass left unresolved, a
+    // union of those — and an actual the analyzer already calls an
+    // Array. That last one is not redundant: campfire's
+    // `rooms(:x).messages.search(q)` is typed `Array[Message]` here and
+    // answers a Relation at run time, which is exactly the refusal
+    // (`arg0ty<Relation>`), and `Array#to_a` is identity when the
+    // analyzer was right.
+    use crate::ty::Ty;
+    let wrap = !matches!(
+        &actual.ty,
+        Some(Ty::Int)
+            | Some(Ty::Float)
+            | Some(Ty::Bool)
+            | Some(Ty::Str)
+            | Some(Ty::Sym)
+            | Some(Ty::Nil)
+            | Some(Ty::Time)
+            | Some(Ty::Hash { .. })
+    );
+    if !wrap {
+        return actual;
+    }
+    let span = actual.span;
+    send_method(span, actual, "to_a", vec![])
+}
+
 fn send_method(span: Span, recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
     Expr::new(
         span,
@@ -742,4 +792,60 @@ fn not_expr(span: Span, cond: Expr) -> Expr {
             parenthesized: false,
         },
     )
+}
+
+#[cfg(test)]
+mod array_literal_tests {
+    use super::*;
+    use crate::ident::Symbol;
+
+    fn sp() -> Span {
+        Span::synthetic()
+    }
+    fn arr(elems: Vec<Expr>) -> Expr {
+        Expr::new(sp(), ExprNode::Array { elements: elems, style: crate::expr::ArrayStyle::default() })
+    }
+    fn var(name: &str) -> Expr {
+        Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+    fn call(recv: Expr, m: &str, ty: Option<crate::ty::Ty>) -> Expr {
+        let mut e = send_method(sp(), recv, m, vec![]);
+        e.ty = ty;
+        e
+    }
+    fn method_of(e: &Expr) -> &str {
+        let ExprNode::Send { method, .. } = &*e.node else { panic!("{:?}", e.node) };
+        method.as_str()
+    }
+
+    #[test]
+    fn an_array_literal_against_an_untyped_call_asks_for_to_a() {
+        let actual = call(var("message"), "mentionees", None);
+        let out = materialised_for_array_literal(&arr(vec![var("user")]), actual);
+        assert_eq!(method_of(&out), "to_a");
+        let actual = call(var("message"), "mentionees", Some(crate::ty::Ty::Untyped));
+        let out = materialised_for_array_literal(&arr(vec![]), actual);
+        assert_eq!(method_of(&out), "to_a", "an empty literal too — `[]` vs a relation is the same refusal");
+        let rel = crate::ty::Ty::Relation { of: crate::ident::ClassId(Symbol::from("Message")) };
+        let out = materialised_for_array_literal(&arr(vec![var("m")]), call(var("Message"), "search", Some(rel)));
+        assert_eq!(method_of(&out), "to_a", "a typed relation is the case the refusal names");
+        let out = materialised_for_array_literal(&arr(vec![]), call(var("messages"), "search", Some(crate::ty::Ty::Var { var: crate::ident::TyVar(0) })));
+        assert_eq!(method_of(&out), "to_a", "an unresolved type variable is still a call whose answer may be a relation");
+    }
+
+    #[test]
+    fn a_scalar_actual_is_left_alone() {
+        let actual = call(var("message"), "ids", Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Int) }));
+        let out = materialised_for_array_literal(&arr(vec![var("one")]), actual);
+        assert_eq!(method_of(&out), "to_a", "an Array-typed call is still asked: `Array#to_a` is identity, and the analyzer's Array is sometimes a relation");
+        let actual = call(var("message"), "title", Some(crate::ty::Ty::Nil));
+        let out = materialised_for_array_literal(&arr(vec![]), actual);
+        assert_eq!(method_of(&out), "title", "nil.to_a is [] — would turn a failure into a pass");
+        let out = materialised_for_array_literal(&var("expected"), call(var("m"), "mentionees", None));
+        assert_eq!(method_of(&out), "mentionees", "an expected side of unknown type is left alone");
+        let mut typed = var("messages");
+        typed.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Untyped) });
+        let out = materialised_for_array_literal(&typed, call(var("m"), "search", None));
+        assert_eq!(method_of(&out), "to_a", "a local the typer knows holds an Array counts as the literal does");
+    }
 }
