@@ -40,7 +40,10 @@
 #                     `spinel`. The page must say: the two lanes run the
 #                     SAME emitted source through different runtimes, and
 #                     only the compiled one can report a file that never
-#                     linked (status `build`).
+#                     linked (status `build`). On `spinel` the summary
+#                     also records the COMPILER, read from the binary's
+#                     own `--version` — it is the one input to that lane
+#                     nobody here controls.
 #   --stubs FILE      the spliced ledger (default
 #                     scripts/campfire-walk-stubs.rb)
 #   --no-stubs        the run spliced nothing
@@ -285,6 +288,50 @@ rh = {
   "dirty" => !git(ROOT, "status", "--porcelain", "--untracked-files=no").to_s.empty?,
 }
 
+# ── The compiler, on the lane that has one ───────────────────────────
+# WITHOUT THIS A RED NIGHT CANNOT BE ATTRIBUTED. The other three inputs
+# are stable by construction — campfire is pinned, roundhouse is this
+# checkout, ruby is this interpreter — but the spinel lane's compiler is
+# whatever the publisher pulled and built that morning, and it moves
+# without anyone here touching it (b80f6302 -> fc866b04 -> aff3815f
+# inside one session). A number that drops overnight is either ours or
+# the compiler's, and nothing else in this summary can tell those apart.
+#
+# READ FROM THE BINARY, NOT FROM A CHECKOUT. `spinel --version` prints
+# the commit compiled INTO it (`spinel ba502fba0092 (unreleased) [...]`),
+# which is the compiler that actually built these tests. A `git -C
+# ~/spinel rev-parse HEAD` answers what the tree is NOW: after a
+# `git pull && make` whose make failed, that is a commit this run never
+# used, and it would pin the blame on an innocent one.
+#
+# `null` on the ruby lane, which has no compiler, and a record with
+# `null` fields on the spinel lane when the binary cannot be run — so
+# "this lane has no compiler" and "this lane has one and I could not
+# read it" stay distinguishable in the JSON.
+#
+# RESCUED, because `spinel` is not a dependency of this script the way
+# git and sqlite3 are: the ruby lane never needs it, so a box without it
+# on PATH is a legitimate configuration. `Open3.capture3` raises
+# Errno::ENOENT rather than reporting failure, and an unrescued raise
+# here would lose a completed sweep at the last step — the same way an
+# undecodable byte in a compile error did.
+spinel = nil
+if opts[:target] == "spinel"
+  line =
+    begin
+      out, _, st = Open3.capture3("spinel", "--version")
+      st.success? ? out.strip : nil
+    rescue SystemCallError
+      nil
+    end
+  spinel = {
+    "version" => line,
+    # The bare commit, for a page or a floor that wants to compare two
+    # runs without parsing the whole banner.
+    "sha" => line && line[/\bspinel\s+([0-9a-f]{7,40})\b/, 1],
+  }
+end
+
 files_green = by_file.count { |f| f["status"] == "pass" }
 # The compiled lane runs the same emitted Ruby as the interpreted one, so
 # every difference between two summaries with the same campfire SHA is the
@@ -301,6 +348,7 @@ out = {
   "campfire" => campfire,
   "roundhouse" => rh,
   "ruby" => { "version" => RUBY_VERSION },
+  "spinel" => spinel,
   "emit" => emit,
   "stubs" => stubs,
   "attribution" => {
