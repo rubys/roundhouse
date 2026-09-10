@@ -1478,7 +1478,13 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
          # starts nothing — main.rb requires it too, then adds the server.\n\
          # One owner for the order; a harness-local copy of the list\n\
          # drifts, and did (23 files short, read as a modeling gap).\n\
-         require_relative \"../boot\"",
+         require_relative \"../boot\"\n\
+         # The CGI/1.1 request parser. boot.rb does not carry it — the\n\
+         # tep server never parses a query string through it — but this\n\
+         # harness does (`CgiIo.parse_form_into`, below), so a `?query=`\n\
+         # test was the only thing in the tree to reach an undefined\n\
+         # constant. Test-only, like the resolver and HTTP stubs beside it.\n\
+         require_relative \"../runtime/cgi_io\"",
     );
 
     // (2)

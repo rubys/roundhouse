@@ -616,8 +616,27 @@ module ActiveRecord
     # `include?(record)` — Rails checks membership against the loaded
     # records (`load` then id-compare); materializing matches that
     # contract at our result-set sizes.
+    # Rails' `Relation#include?(record)`: a loaded relation asks its
+    # records, an unloaded one asks the database (`exists?(record.id)`).
+    # Either way the question is the RECORD's identity — class and id —
+    # never object identity, so two hydrations of one row agree.
+    # Compared by id here rather than through `==` because record
+    # equality is defined only on the CRuby overlay
+    # (`active_record_bang.rb`); a compiled target compares boxed objects
+    # by pointer, and campfire's `room.users.include?(users(:david))`
+    # read false for a user the room had just been granted.
+    #
+    # Loads rather than asking `exists?(record.id)` the way Rails does
+    # for an unloaded relation: the caller's record is untyped, and
+    # handing its `id` to the nullable `Integer?` parameter is a shape
+    # spinel refuses at the C level (`passing 'int' to parameter of
+    # incompatible type 'sp_RbVal'`). Every caller in the corpus is a
+    # test assertion on a room's users, where the load is a handful of
+    # rows.
     def include?(record)
-      to_a.include?(record)
+      return false if record.nil?
+      wanted = record.id
+      to_a.any? { |x| x.id == wanted }
     end
 
     def each
@@ -814,6 +833,29 @@ module ActiveRecord
     def any?
       r = @records
       r.nil? ? count > 0 : r.length > 0
+    end
+
+    # ActiveSupport's blank family on a relation. Rails answers `blank?`
+    # through `records.blank?`, which LOADS; spelled against `empty?`
+    # here so an unloaded relation pays the COUNT round-trip `empty?`
+    # already pays rather than materialising every row.
+    #
+    # `lower::blank` folds these away where the receiver's static type
+    # is known (a typed relation grounds to `!empty?`). These are the
+    # runtime answers for the sites it declines: campfire's has_many
+    # extension `revise(granted: [], revoked: [])` takes a relation
+    # through an untyped kwarg, and `granted.present?` reaches the
+    # object by dispatch.
+    def blank?
+      empty?
+    end
+
+    def present?
+      !empty?
+    end
+
+    def presence
+      empty? ? nil : self
     end
 
     # Rails reaches Enumerable#none? through the relation, and without a

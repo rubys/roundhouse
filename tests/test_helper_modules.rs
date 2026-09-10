@@ -37,7 +37,10 @@ fn app_with_test_helpers() -> App {
             "module SessionTestHelper\n  \
              def sign_in(user)\n    \
              user = users(user)\n    \
-             user.email_address\n  end\nend\n",
+             user.email_address\n  end\n  \
+             def parsed_cookies\n    \
+             ActionDispatch::Cookies::CookieJar.build(request, cookies.to_hash)\n  \
+             end\nend\n",
         ),
         // Included by `application_system_test_case.rb`, NOT by
         // test_helper.rb — must not be spliced.
@@ -49,7 +52,9 @@ fn app_with_test_helpers() -> App {
         (
             "test/models/user_test.rb",
             "class UserTest < ActiveSupport::TestCase\n  \
-             test \"signs in\" do\n    sign_in(:one)\n  end\nend\n",
+             test \"signs in\" do\n    sign_in(:one)\n  end\n  \
+             test \"reads a cookie\" do\n    \
+             assert parsed_cookies.signed[:session_token]\n  end\nend\n",
         ),
         ("test/fixtures/users.yml", "one:\n  email_address: a@example.com\n"),
     ];
@@ -194,5 +199,46 @@ fn a_test_classes_own_definition_wins_over_the_module() {
     assert!(
         format!("{:?}", signs[0].body).contains("from_class"),
         "the test class's own definition must win",
+    );
+}
+
+#[test]
+fn a_spliced_helper_with_no_signature_returns_what_its_body_returns() {
+    // A helper ingest attaches no signature to was typed `-> nil`, and
+    // the test registry copied that in — so campfire's
+    // `parsed_cookies.signed[:session_token]` typed nil at the receiver
+    // and `[]` behind it was left to dispatch on a boxed value, which
+    // the compiled lane refuses at runtime (five tests, four files).
+    // The body has the type once it is typed: lift it, the way an
+    // inner stand-in's return is lifted.
+    let app = app_with_test_helpers();
+    let lcs = roundhouse::lower::lower_test_modules_to_library_classes(
+        &app.test_modules,
+        &app.fixtures,
+        &app.models,
+        Vec::new(),
+        &roundhouse::lower::routes::helper_id_segments(&app),
+    );
+    let methods: Vec<_> = lcs.iter().flat_map(|lc| lc.methods.iter()).collect();
+    let sig = methods
+        .iter()
+        .find(|m| m.name.as_str() == "parsed_cookies")
+        .and_then(|m| m.signature.as_ref())
+        .map(|t| format!("{t:?}"))
+        .expect("lowered parsed_cookies with a signature");
+    assert!(
+        sig.contains("ActionController::CookieJar"),
+        "expected parsed_cookies to return the jar its body builds, got {sig}",
+    );
+    // And the reader that was the actual wall: `signed` resolves on the
+    // lifted type, so the test body's `[]` has a typed receiver.
+    let body = methods
+        .iter()
+        .find(|m| m.name.as_str() == "test_reads_a_cookie")
+        .map(|m| format!("{:?}", m.body))
+        .expect("lowered test_reads_a_cookie");
+    assert!(
+        body.contains("ActionController::SignedCookieJar"),
+        "expected the signed jar typed in the test body:\n{body}",
     );
 }

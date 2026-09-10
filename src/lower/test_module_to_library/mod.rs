@@ -237,6 +237,52 @@ pub fn lower_test_modules_with_inner(
         })
         .collect();
 
+    // A spliced helper with no declared signature was typed `-> nil` in
+    // `test_module_to_library`, and the registry above copied that in,
+    // so `self.parsed_cookies.signed[:session_token]` typed nil at the
+    // receiver and every read behind it was left to dispatch — `[]` on
+    // a boxed value, which a strict target refuses at runtime. The type
+    // is on the body once the body is typed: campfire's
+    // `SessionTestHelper#parsed_cookies` is one line,
+    // `ActionDispatch::Cookies::CookieJar.build(request, cookies.to_hash)`.
+    // Lift it the way `type_inner_class` lifts an inner stand-in's
+    // return, and BEFORE the test bodies are typed against the
+    // registry. A body the typer cannot name keeps the nil default
+    // rather than gaining `untyped`; a test method is never a helper.
+    for (idx, lc) in all_lcs.iter_mut().enumerate() {
+        let synthesized: std::collections::HashSet<Symbol> = test_modules[idx]
+            .helpers
+            .iter()
+            .filter(|h| h.signature.is_none())
+            .map(|h| h.name.clone())
+            .collect();
+        if synthesized.is_empty() {
+            continue;
+        }
+        let mut lifted: Vec<(Symbol, Ty)> = Vec::new();
+        for method in &mut lc.methods {
+            if !synthesized.contains(&method.name) {
+                continue;
+            }
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            let Some(body_ty) = method.body.ty.clone() else { continue };
+            if matches!(body_ty, Ty::Untyped | Ty::Nil) {
+                continue;
+            }
+            if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
+                *ret = Box::new(body_ty);
+            }
+            if let Some(sig) = &method.signature {
+                lifted.push((method.name.clone(), sig.clone()));
+            }
+        }
+        if let Some(info) = classes.get_mut(&lc.name) {
+            for (name, sig) in lifted {
+                info.instance_methods.insert(name, sig);
+            }
+        }
+    }
+
     // The blank-predicate grounding this registry finally makes
     // possible — see `blank::ground_body`. Built once, outside the
     // per-method loop.
@@ -836,7 +882,8 @@ fn signed_cookie_jar_ty() -> Ty {
 
 fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     use crate::lower::typing::fn_sig;
-    let str_hash = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash_arg = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash = str_hash_arg();
     let key = || (Symbol::from("key"), Ty::Untyped);
     let value = || (Symbol::from("value"), Ty::Untyped);
 
@@ -880,6 +927,23 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     // .new`) appears in the emitted harness itself.
     classes.insert(ClassId(Symbol::from("ActionController::CookieJar")), jar.clone());
     classes.insert(ClassId(Symbol::from("CookieJar")), jar);
+
+    // The builder, under the path Rails puts it at: campfire's
+    // `parsed_cookies` is `ActionDispatch::Cookies::CookieJar.build(
+    // request, cookies.to_hash)` (cookies.rb carries that alias for the
+    // runtime). Without this entry the helper's body has no type and
+    // the lift above keeps its nil default.
+    let mut builder = ClassInfo::default();
+    let build = Symbol::from("build");
+    builder.class_methods.insert(
+        build.clone(),
+        fn_sig(
+            vec![(Symbol::from("request"), Ty::Untyped), (Symbol::from("cookies"), str_hash_arg())],
+            cookie_jar_ty(),
+        ),
+    );
+    builder.class_method_kinds.insert(build, AccessorKind::Method);
+    classes.insert(ClassId(Symbol::from("ActionDispatch::Cookies::CookieJar")), builder);
     classes.insert(
         ClassId(Symbol::from("ActionController::SignedCookieJar")),
         signed.clone(),
