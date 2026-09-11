@@ -1,7 +1,8 @@
 //! ActiveSupport's `Enumerable` extensions on a plain collection,
 //! grounded to a runtime function instead of a core_ext reopen.
 //!
-//! Rails ships `index_by` and `many?` by reopening `Enumerable`, which is a shape
+//! Rails ships `index_by`, `many?` and `to_sentence` by reopening
+//! `Enumerable`/`Array`, which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
 //! reopen a builtin, and spinel AOT cannot dispatch a user-defined
 //! method on one. The runtime already answers `index_by` on
@@ -45,7 +46,7 @@ fn rewrite(expr: &mut Expr) {
     // a different question no corpus app asks.
     let wants_block = match method.as_str() {
         "index_by" => true,
-        "many?" => false,
+        "many?" | "to_sentence" => false,
         _ => return,
     };
     if !args.is_empty() || block.is_some() != wants_block {
@@ -60,7 +61,7 @@ fn rewrite(expr: &mut Expr) {
     // parameter is untyped, and an untyped receiver is the case the
     // header explains). A Hash or String receiver here stays visible
     // rather than becoming a call whose argument does not fit.
-    if method.as_str() == "many?"
+    if matches!(method.as_str(), "many?" | "to_sentence")
         && !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. }))
     {
         return;

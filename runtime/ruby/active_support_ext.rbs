@@ -25,4 +25,5 @@ module ActiveSupport
   # (5592abe8); `index_by` above already says `untyped` for the same
   # reason.
   def self.many?: (untyped list) -> bool
+  def self.to_sentence: (Array[untyped] list) -> String
 end

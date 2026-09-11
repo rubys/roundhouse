@@ -584,6 +584,39 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
         (AlwaysNil, _) => true,
         _ => false,
     };
+    // An effectful receiver of a BUILTIN grounding — campfire's
+    // `room.users.without(u).pluck(:name).to_sentence.presence`, a DB
+    // read typed Str — cannot be spelled twice, and used to be left as
+    // the dynamic dispatch the strict targets have no answer for. It
+    // takes the RUNTIME form instead: the receiver moves into argument
+    // position, read once, and `ActiveSupport.presence` branches on the
+    // value — the same answer the typed rewrite would give, one call
+    // slower, never wrong for a String, Array, Hash, number or nil.
+    //
+    // NOT for a receiver typed as a CLASS. Its `NeverBlank` is the
+    // guess that the class has no predicate of its own, made from the
+    // app's definitions alone — and a RUNTIME class can have one:
+    // `ActionText::Content#blank?` tracks the plain text, where the
+    // runtime helper's `to_s.strip.empty?` would read the markup and
+    // call `<div></div>` present. Such a receiver keeps the dispatch it
+    // always had, which on the ruby family reaches the real method.
+    let builtin_recv = !matches!(
+        recv_ty.as_ref().map(non_nil_of),
+        Some(Ty::Class { .. }) | None
+    );
+    if needs_pure && !pure_recv && builtin_recv {
+        let span = expr.span;
+        let leading_blank_line = expr.leading_blank_line;
+        let old = std::mem::replace(&mut *expr.node, ExprNode::SelfRef);
+        let ExprNode::Send { recv: Some(r), .. } = old else { unreachable!() };
+        let ret = match pred {
+            Pred::Blank | Pred::Present => Ty::Bool,
+            Pred::Presence => nullable(non_nil_ty(&r)),
+        };
+        *expr = runtime_predicate(span, r, pred, ret);
+        expr.leading_blank_line = leading_blank_line;
+        return;
+    }
     if needs_pure && !pure_recv {
         diags.push(unlowered(
             expr,
@@ -830,6 +863,18 @@ fn rewrite_bool(span: crate::span::Span, r: Expr, pred: Pred) -> Expr {
 /// `ActiveSupport.<pred>(<recv>)` — the value-branching predicate the
 /// ruby-family runtime supplies (`runtime/ruby/active_support_ext.rb`)
 /// for receivers with no static type to ground on.
+/// The type with its `nil` variant removed — `T` for `T | nil`, the
+/// type itself otherwise. What a grounding was classified from.
+fn non_nil_of(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Union { variants } => {
+            let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+            if non_nil.len() == 1 { non_nil[0].clone() } else { ty.clone() }
+        }
+        other => other.clone(),
+    }
+}
+
 fn runtime_predicate(span: crate::span::Span, r: Expr, pred: Pred, ret: Ty) -> Expr {
     let name = match pred {
         Pred::Blank => "blank?",

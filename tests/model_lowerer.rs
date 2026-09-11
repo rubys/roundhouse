@@ -644,12 +644,20 @@ end
     // A nullable column with NO default keeps the BARE lookup — its
     // unset value really is NULL, and `""` in a nullable UNIQUE column
     // collides on the second row.
+    // A string column's value sits inside Rails' String cast (a
+    // `Cast` to the column slot); the `||` is what this test pins.
+    let is_boolop = |e: &roundhouse::Expr| match &*e.node {
+        roundhouse::ExprNode::BoolOp { .. } => true,
+        roundhouse::ExprNode::Cast { value, .. } => {
+            matches!(&*value.node, roundhouse::ExprNode::BoolOp { .. })
+        }
+        _ => false,
+    };
     let arg_is_boolop = |setter: &str| {
         body_stmts(init).iter().any(|e| matches!(&*e.node,
             roundhouse::ExprNode::Send { method, args, .. }
                 if method.as_str() == setter
-                && matches!(args.first().map(|a| &*a.node),
-                            Some(roundhouse::ExprNode::BoolOp { .. }))))
+                && args.first().is_some_and(is_boolop)))
     };
     assert!(arg_is_boolop("involvement="), "defaulted column has no `||`: {rendered}");
     assert!(!arg_is_boolop("note="), "undefaulted nullable column gained a `||`: {rendered}");

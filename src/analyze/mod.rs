@@ -1006,10 +1006,7 @@ impl Analyzer {
                         let ty = if p.rest {
                             Ty::Untyped
                         } else {
-                            inferred
-                                .and_then(|v| v.get(i))
-                                .filter(|t| !matches!(t, Ty::Var { .. }))
-                                .cloned()
+                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
                                 .unwrap_or(Ty::Untyped)
                         };
                         // Kind must survive verbatim: the untyped
@@ -2363,6 +2360,16 @@ impl Analyzer {
 
             let lc_name = lc.name.clone();
             for method in &mut lc.methods {
+                // A default is an expression of the class body too, and
+                // its type is half of what an optional parameter IS:
+                // `for_user = Current.user` is a User whenever the
+                // caller leaves it out. Typed here so `seed_method_params`
+                // and the stamped signature can fold it in.
+                for p in &mut method.params {
+                    if let Some(default) = &mut p.default {
+                        self.body_typer().analyze_expr(default, &class_ctx);
+                    }
+                }
                 let mctx = self.seed_method_params(&class_ctx, &lc_name, method);
                 self.body_typer().analyze_expr(&mut method.body, &mctx);
             }
@@ -2733,13 +2740,12 @@ impl Analyzer {
         method: &crate::dialect::MethodDef,
     ) -> Ctx {
         let key = (class_id.clone(), method.name.clone());
-        let Some(types) = self.inferred_params.get(&key) else {
-            return base.clone();
-        };
+        let observed = self.inferred_params.get(&key);
         let mut ctx = base.clone();
-        for (param, ty) in method.params.iter().zip(types.iter()) {
-            if !matches!(ty, Ty::Var { .. }) {
-                ctx.local_bindings.insert(param.name.clone(), ty.clone());
+        for (i, param) in method.params.iter().enumerate() {
+            let from_sites = observed.and_then(|v| v.get(i)).cloned();
+            if let Some(ty) = param_ty_with_default(from_sites, param) {
+                ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
         ctx
@@ -3298,12 +3304,20 @@ impl Analyzer {
     /// Place a call's trailing keyword arguments on the parameter slots
     /// they bind to, replacing the single slot the kwargs hash occupies.
     ///
-    /// The gate is that EVERY key names a declared keyword parameter.
-    /// A `**attributes`-style helper — `link_to_room(room, id: …,
+    /// The gate is that EVERY key names a declared parameter — keyword
+    /// OR positional. Positional too because `ingest::library_class`
+    /// lowers a helper's optional keyword to a positional-with-default
+    /// (`room_display_name(room, for_user = Current.user)`) and
+    /// `lower::helper_kwargs` moves the call sites to match only AFTER
+    /// analysis; in between, a keyword-matching rule bound the whole
+    /// `{for_user: nil}` hash to the positional slot and the parameter
+    /// was typed `Hash[Symbol, nil]`, which made `room.users.without(
+    /// for_user)` a hash condition and the helper's chain untyped. A
+    /// `**attributes`-style helper — `link_to_room(room, id: …,
     /// class: …)` binding one Hash to a positional `attributes` — has
-    /// no such parameters, so it is untouched by construction; this is
-    /// the same names-not-types rule `lower::helper_kwargs` applies to
-    /// the call sites themselves.
+    /// no parameter named `id` or `class`, so it is untouched by
+    /// construction; this is the same names-not-types rule
+    /// `lower::helper_kwargs` applies to the call sites themselves.
     ///
     /// Keywords the site omits keep their `Var` slot: a call that does
     /// not pass an optional keyword is no evidence about its type, and
@@ -3319,7 +3333,7 @@ impl Analyzer {
         let Some(params) = shape else {
             return arg_tys;
         };
-        let slot_of = |key: &Symbol| params.iter().position(|(n, kw)| *kw && n == key);
+        let slot_of = |key: &Symbol| params.iter().position(|(n, _kw)| n == key);
         if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
             return arg_tys;
         }
@@ -4144,6 +4158,26 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
         }
     }
     out
+}
+
+/// A parameter's type from what the call sites passed AND what its
+/// default is: an optional parameter no caller passes IS its default,
+/// and one some callers pass is the union. `None` when neither says
+/// anything (an observation of `Var` is no observation — see
+/// `place_keyword_args`).
+fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) -> Option<Ty> {
+    let observed = observed.filter(|t| !matches!(t, Ty::Var { .. }));
+    let default = param
+        .default
+        .as_ref()
+        .and_then(|d| d.ty.clone())
+        .filter(|t| !matches!(t, Ty::Var { .. }));
+    match (observed, default) {
+        (Some(o), Some(d)) => Some(crate::analyze::body::union_of(o, d)),
+        (Some(o), None) => Some(o),
+        (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {

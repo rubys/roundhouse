@@ -1763,7 +1763,17 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             stmts.push(guard_unless_nil(lookup, raw_assign));
         } else {
             let value = if nullable {
-                lookup
+                // A nullable string column casts as its non-nullable
+                // sibling below does (Rails' String type), and the
+                // Cast to a `String | nil` slot keeps nil nil.
+                if matches!(col_ty, Ty::Str) {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) },
+                    )
+                } else {
+                    lookup
+                }
             } else {
                 let defaulted = Expr::new(
                     Span::synthetic(),
@@ -1797,10 +1807,21 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 // `rust_toolchain` from green to two E0599s: rust's
                 // untyped value is `serde_json::Value`, which answers
                 // no such method. Cast is what every target lowers.
-                if col.primary_key {
+                //
+                // A STRING column casts too, the way Rails' String
+                // type casts every assigned value (`999` is stored as
+                // "999"). campfire's sidebar test writes
+                // `create! client_message_id: 999`; without the cast
+                // the Integer's payload landed in the String slot on
+                // spinel and the next `strip` read it as a pointer —
+                // a SEGV under `before_create`, no message at all.
+                // The `[]=` writer beside this already casts; this is
+                // the constructor catching up. Nullable stays nullable:
+                // the Cast to a `String | nil` slot is nil-safe.
+                if col.primary_key || matches!(col_ty, Ty::Str) {
                     Expr::new(
                         Span::synthetic(),
-                        ExprNode::Cast { value: cast, target_ty: col_ty.clone() },
+                        ExprNode::Cast { value: cast, target_ty: super::ty_of_column_slot(col) },
                     )
                 } else {
                     cast

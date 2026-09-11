@@ -138,4 +138,25 @@ module ActiveSupport
   def self.many?(list)
     list.length > 1
   end
+
+  # AS `Array#to_sentence`, default :en connectors: "", "a", "a and b",
+  # "a, b, and c". Another core_ext reopen (`Array`) the transpiled
+  # runtimes cannot host — same home and same rule as `index_by`, the
+  # receiver evaluated exactly once. campfire names a direct room by
+  # its other members: `room.users.without(me).pluck(:name).to_sentence`.
+  # Elements go through `to_s`, as Rails' `join` does.
+  def self.to_sentence(list)
+    n = list.length
+    return "" if n == 0
+    return list[0].to_s if n == 1
+    return "#{list[0]} and #{list[1]}" if n == 2
+    head = +""
+    i = 0
+    while i < n - 1
+      head = head + ", " if i > 0
+      head = head + list[i].to_s
+      i = i + 1
+    end
+    "#{head}, and #{list[n - 1]}"
+  end
 end
