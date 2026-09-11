@@ -2332,9 +2332,30 @@ impl Analyzer {
             out
         };
 
+        // A concern's methods RUN ON THE INCLUDER. Typed against the
+        // module's own registry, `sessions.pluck(:ip_address)` in
+        // `User::Bannable` had no `sessions` to resolve — the module
+        // declares no association — and every send in the body came
+        // out untyped: the `compact_blank` behind it was never
+        // grounded, and on spinel the whole chain was `undefined method
+        // 'each' for unknown` (campfire's ban flow, 5 tests). When
+        // exactly one class includes the module (transitively — a
+        // concern that includes a concern is still one includer's), its
+        // bodies are typed with THAT class as `self`, which is the
+        // class Ruby gives them. Several includers keep the module's
+        // own view: a body typed against one includer would be wrong
+        // for the others, and a union `self` is a poly cliff on every
+        // send.
+        let sole_includer = app.sole_includer_of_modules();
+
         for lc in &mut app.library_classes {
+            let self_id = if lc.is_module {
+                sole_includer.get(&lc.name).cloned().unwrap_or_else(|| lc.name.clone())
+            } else {
+                lc.name.clone()
+            };
             let class_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+                self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: HashMap::new(), annotate_self_dispatch: false, in_view: false,

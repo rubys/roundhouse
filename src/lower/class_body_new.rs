@@ -111,8 +111,20 @@ pub fn apply_class_body_new_lowering(app: &mut App) -> Vec<Diagnostic> {
             }
         }
     }
+    // A concern's class-side method runs on its includer, and with one
+    // includer that class is `self`: campfire's
+    // `Opengraph::Metadata::Fetching.from_url` ends in a bare
+    // `new attributes.merge(…)` that builds a Metadata, not a Fetching.
+    // The analyzer types the body the same way (`App::
+    // sole_includer_of_modules`), so the return it declares and the
+    // receiver bound here name the same class.
+    let sole_includer = app.sole_includer_of_modules();
     for lc in &mut app.library_classes {
-        let owner = lc.name.0.as_str().to_string();
+        let owner = if lc.is_module {
+            sole_includer.get(&lc.name).unwrap_or(&lc.name).0.as_str().to_string()
+        } else {
+            lc.name.0.as_str().to_string()
+        };
         for (_, value) in &mut lc.constants {
             rewrite(value, &owner);
         }

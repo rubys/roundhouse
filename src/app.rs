@@ -454,6 +454,88 @@ pub struct ImportmapPin {
 }
 
 impl App {
+    /// Module → the one non-module class that includes it, directly or
+    /// through another module; absent when none or several do. A
+    /// concern's methods run on its includer, and with exactly one
+    /// includer that class is what `self` means in them — the analyzer
+    /// types the bodies against it and `lower::class_body_new` binds a
+    /// bare `new` to it. Read from the same `include` lines both the
+    /// registry and the emit are built from: a model's `include X`
+    /// body items, a library class's `includes`.
+    pub fn sole_includer_of_modules(
+        &self,
+    ) -> std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
+        use std::collections::{BTreeMap, BTreeSet, HashMap};
+        let modules: BTreeSet<&crate::ident::ClassId> = self
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| &lc.name)
+            .collect();
+        if modules.is_empty() {
+            return HashMap::new();
+        }
+        // Every class's DIRECT includes, modules included (for the
+        // transitive walk).
+        let mut direct: BTreeMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = BTreeMap::new();
+        for lc in &self.library_classes {
+            direct.insert(lc.name.clone(), lc.includes.clone());
+        }
+        for model in &self.models {
+            let mut ids = Vec::new();
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
+                    if let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+                        if method.as_str() == "include" {
+                            for arg in args {
+                                if let crate::expr::ExprNode::Const { path } = &*arg.node {
+                                    ids.push(crate::ident::ClassId(crate::ident::Symbol::from(
+                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            direct.entry(model.name.clone()).or_default().extend(ids);
+        }
+        // Controllers include concerns too, and a module shared between
+        // a controller and a channel (campfire's
+        // `Authentication::SessionLookup`) has TWO includers, not the
+        // one the library classes alone would show.
+        for controller in &self.controllers {
+            let ids = crate::analyze::controller_includes(controller);
+            direct.entry(controller.name.clone()).or_default().extend(ids);
+        }
+        let mut includers: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::new();
+        for (id, includes) in &direct {
+            if modules.contains(id) || includes.is_empty() {
+                continue;
+            }
+            let mut queue = includes.clone();
+            let mut seen: BTreeSet<crate::ident::ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if modules.contains(&m) {
+                    includers.entry(m.clone()).or_default().insert(id.clone());
+                }
+                if let Some(nested) = direct.get(&m) {
+                    for n in nested {
+                        if seen.insert(n.clone()) {
+                            queue.push(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        includers
+            .into_iter()
+            .filter_map(|(m, set)| (set.len() == 1).then(|| (m, set.into_iter().next().unwrap())))
+            .collect()
+    }
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
