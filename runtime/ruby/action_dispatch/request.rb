@@ -13,6 +13,58 @@
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
 module ActionDispatch
+  # `request.body` — the raw body as Rails hands it back: an IO, not the
+  # String. campfire's bot endpoints read it the way Rails documents
+  # (`request.body.rewind; request.body.read.force_encoding("UTF-8")`),
+  # and a String answers none of that. The bytes tep read are the
+  # storage; this is the cursor over them, the subset of Rack's input
+  # (`StringIO` under CRuby, whose overlay twin hands back exactly that)
+  # a controller reaches: `rewind`, `read`, `string`, `size`, `eof?`.
+  #
+  # NOT `StringIO` itself: that is a stdlib class the strict targets do
+  # not carry, and one method each is what a request body needs.
+  class RequestBody
+    def initialize(text)
+      @text = text
+      @pos = 0
+    end
+
+    # The whole body as a String, whatever the cursor says — Rack's
+    # `StringIO#string`, and what `raw_post` is built on.
+    def string
+      @text
+    end
+
+    def rewind
+      @pos = 0
+      0
+    end
+
+    # From the cursor to the end, as CRuby's `IO#read` with no length; a
+    # second read at the end is "" (not nil — that is the `read(length)`
+    # form's answer, which no caller here spells). The cursor counts
+    # characters, not bytes: only the whole-body read is served, so the
+    # two agree on everything a caller can observe, and `[i, n]` /
+    # `length` are the slicing idioms every target already carries.
+    def read
+      out = @text[@pos, @text.length - @pos].to_s
+      @pos = @text.length
+      out
+    end
+
+    def size
+      @text.bytesize
+    end
+
+    def length
+      @text.bytesize
+    end
+
+    def eof?
+      @pos >= @text.length
+    end
+  end
+
   class Request
     attr_accessor :remote_ip
     attr_accessor :path
@@ -26,7 +78,6 @@ module ActionDispatch
     attr_accessor :referer
     attr_accessor :host
     attr_reader :format
-    attr_accessor :body
     attr_accessor :env
 
     def initialize
@@ -39,6 +90,7 @@ module ActionDispatch
       @host = "localhost"
       @format = "html"
       @body = +""
+      @body_io = nil
       @env = {}
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
@@ -63,6 +115,26 @@ module ActionDispatch
     # canonical string.
     def format=(value)
       @format = value.to_s
+    end
+
+    # The body the transport (or the test harness) hands over is a
+    # String; what a controller reads back is the IO over it. A fresh
+    # write drops the old cursor, so a body assigned twice — the
+    # harness re-posting through one Request — starts at 0 again.
+    def body=(value)
+      @body = value
+      @body_io = nil
+      value
+    end
+
+    def body
+      @body_io = RequestBody.new(@body) if @body_io.nil?
+      @body_io
+    end
+
+    # Rails' `raw_post`: the body as one String, cursor untouched.
+    def raw_post
+      @body
     end
 
     def get?

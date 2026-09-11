@@ -2,6 +2,18 @@
 # beside this file). `attr_accessor` in the .rb surfaces here as
 # getter+setter def pairs, per the runtime .rbs convention.
 module ActionDispatch
+  class RequestBody
+    @text: String
+    @pos: Integer
+    def initialize: (String text) -> void
+    def string: () -> String
+    def rewind: () -> Integer
+    def read: () -> String
+    def size: () -> Integer
+    def length: () -> Integer
+    def eof?: () -> bool
+  end
+
   class Request
     @remote_ip: String
     @path: String
@@ -12,6 +24,7 @@ module ActionDispatch
     @host: String
     @format: String
     @body: String
+    @body_io: RequestBody?
     @env: Hash[String, untyped]
     @user_agent: String
     @params: Hash[String, untyped]
@@ -32,8 +45,9 @@ module ActionDispatch
     def host=: (String) -> String
     def format: () -> String
     def format=: (untyped value) -> untyped
-    def body: () -> String
+    def body: () -> RequestBody
     def body=: (String) -> String
+    def raw_post: () -> String
     def env: () -> Hash[String, untyped]
     def env=: (Hash[String, untyped]) -> Hash[String, untyped]
     def initialize: () -> void
