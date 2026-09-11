@@ -2600,6 +2600,16 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/erb_spinel.rbs".to_string(), rbs));
     }
 
+    // Nokogiri read-path sidecar — the reopen in runtime/nokogiri_spinel.rb
+    // adds `xpath`/`key?`/`load` over the façade's classes; the .rbs pins
+    // `xpath -> Array[Element]` so the app's `.map do |tag| … end` over
+    // it is typed rather than poly.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/nokogiri_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/nokogiri_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/nokogiri_spinel.rbs".to_string(), rbs));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected

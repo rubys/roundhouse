@@ -1,0 +1,16 @@
+# Typing for runtime/spinel/nokogiri_spinel.rb — the read-path reopen
+# over the façade's `Nokogiri` (whose own contract is gem_facades.rbs).
+module Nokogiri
+  class Element
+    def load: (String name, Hash[String, String] attributes) -> Element
+    def name: () -> String
+    def key?: (untyped key) -> bool
+    def attributes_hash: () -> Hash[String, String]
+  end
+
+  class Document
+    def parse: (String html) -> Document
+    def xpath: (String expression) -> Array[Element]
+    def self.starts_with_any?: (Hash[String, String] attributes, Array[String] keys, Array[String] prefixes) -> bool
+  end
+end
