@@ -23,11 +23,38 @@
     </p>
 
     <p class="status-line">
-      Status: <strong>work in progress</strong> — deep analysis and partial
-      transpilation work today, in the browser. The milestone being built
-      toward is "two tabs, one room, one live message": an emitted binary
-      serving a signed-in room, with a posted message fanning out over the
-      cable to the other tab.
+      Status: <strong>it runs</strong> — "two tabs, one room, one live
+      message" is walked: an emitted binary serves a signed-in room, and a
+      posted message fans out over the cable to the other tab. The
+      <a href="https://intertwingly.net/blog/2026/09/01/Campfire-Chats.html">write-up</a>
+      has the walk and what is not in the box; the download is below.
+    </p>
+
+    <h2>Run it</h2>
+    <p>
+      With Docker and nothing else. The archive is the program after Spinel
+      has compiled it to C — generated code, the runtime as source, a
+      Makefile — with a two-stage Dockerfile that builds the one and ships
+      the other. About 5 MB down, about a minute to compile, and a 160 MB
+      image whose only extras over <code>debian:trixie-slim</code> are the
+      SQLite and jemalloc runtime libraries.
+    </p>
+    <pre><code>curl -sL https://rubys.github.io/roundhouse/campfire/docker.tgz | tar xz
+cd campfire-docker
+docker build -t campfire .
+docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire</code></pre>
+    <p>
+      Then open <a href="http://localhost:3000/">http://localhost:3000/</a>:
+      campfire's own first-run page creates the account, the first user, and
+      the first room. The archive's README covers ports, worker counts, and
+      building without Docker.
+    </p>
+    <p class="note">
+      Prefer to read the emitted Ruby? The
+      <a href="../campfire/spinel.tgz">source archive</a> is the same program
+      before compilation — the transpiled app, its tests and browser suite —
+      and needs a <a href="https://github.com/matz/spinel">Spinel</a> checkout,
+      a C compiler and Node to build. Its README is the recipe.
     </p>
 
     <div class="cta-row">
@@ -107,6 +134,7 @@
     <ul class="reading">
       <li><a href="https://once.com/campfire">ONCE Campfire</a> — the product, and its self-hosted deployment story</li>
       <li><a href="https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html">Conformance vs Comprehension</a> — the project and its oracle</li>
+      <li><a href="https://intertwingly.net/blog/2026/09/01/Campfire-Chats.html">Campfire Chats</a> — the walked milestone, and what is not in the box</li>
     </ul>
     <p class="note" style="margin-top:1rem;">
       Source: <a href="https://github.com/basecamp/once-campfire"><code>basecamp/once-campfire</code></a>

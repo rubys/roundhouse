@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# scripts/campfire-docker-files — write the Docker archive's Dockerfile and README.
+#
+# Called by scripts/build-campfire-archive with the staged Docker context:
+#   campfire-docker-files DIR ROUNDHOUSE_SHA CAMPFIRE_SHA SPINEL_VERSION
+#
+# DIR already holds pack/ (the `spin pack` output: generated C, runtime
+# source, native package source, Makefile) and app/ (what the binary reads
+# at run time: static assets, public/, db/, config/). This writes the two
+# files a downloader reads first.
+#
+# WHY clang. The build is one 12 MB translation unit and nothing else of
+# consequence, so it is pure single-core compiler speed: on the same
+# trixie image gcc 14 takes 73 s and clang 19 takes 33 s (2026-09-10,
+# Apple silicon, arm64 native). The compiler never reaches the runtime
+# image, so its apt weight costs the download nothing.
+#
+# The source archive's README is written by scripts/campfire-archive-files;
+# a prerequisite that changes there may need to change here too.
+
+set -euo pipefail
+
+DIR="$1"; ROUNDHOUSE_SHA="$2"; CAMPFIRE_SHA="$3"; SPINEL_VERSION="$4"
+
+cat > "$DIR/Dockerfile" <<'DOCKERFILE'
+# syntax=docker/dockerfile:1
+# ONCE Campfire, transpiled by Roundhouse and compiled by Spinel.
+#
+# Two stages. The first compiles pack/ — the generated C plus the Spinel
+# runtime as source, with a Makefile that needs a C compiler and make and
+# nothing else. The second carries only the binary and what it reads at
+# run time. clang, not gcc: the build is one 12 MB translation unit, and
+# clang compiles it in under half the time.
+
+FROM debian:trixie-slim AS build
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y clang make libsqlite3-dev libjemalloc-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY pack /src
+RUN make -C /src -j"$(nproc)" CC=clang
+
+FROM debian:trixie-slim
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY app/ ./
+COPY --from=build /src/campfire ./campfire
+# The SQLite database lives here; mount a volume to keep it across runs.
+RUN mkdir -p storage
+VOLUME /app/storage
+ENV PORT=3000
+EXPOSE 3000
+CMD ["./campfire"]
+DOCKERFILE
+
+cat > "$DIR/README.md" <<README
+# ONCE Campfire → spinel, for Docker
+
+[ONCE Campfire](https://github.com/basecamp/once-campfire) — Basecamp's
+MIT-licensed chat app — transpiled from its Rails source by
+[Roundhouse](https://rubys.github.io/roundhouse/), compiled ahead-of-time
+to C by the [Spinel](https://github.com/matz/spinel) Ruby VM, and packaged
+so that building it needs Docker and nothing else.
+
+What is in the box: \`pack/\` is the generated C and the Spinel runtime as
+source with a Makefile (\`spin pack\` wrote it — a C compiler and \`make\`
+build it, no Spinel required); \`app/\` is what the binary reads at run
+time — prebuilt static assets, the error pages, the seed; the
+\`Dockerfile\` compiles the one and ships the other.
+
+## Provenance
+
+| | |
+|---|---|
+| roundhouse | \`$ROUNDHOUSE_SHA\` |
+| once-campfire | \`$CAMPFIRE_SHA\` |
+| spinel | \`$SPINEL_VERSION\` |
+
+Unlike the source archive, this one does not depend on a Spinel checkout:
+the runtime it was generated against travels with it.
+
+## Prerequisites
+
+- Docker (or anything that builds a Dockerfile — podman works)
+
+## Build
+
+Compiles the C — one whole-program translation unit, about half a minute
+on a fast machine, a few minutes on a slow one — and produces a ~180 MB
+image whose only extras over \`debian:trixie-slim\` are the SQLite and
+jemalloc runtime libraries.
+
+\`\`\`sh
+docker build -t campfire .
+\`\`\`
+
+## Run
+
+Serves campfire on http://localhost:3000. The first visit lands on
+campfire's own first-run page, which creates the account, the first user,
+and the first room. The database is created on demand in \`/app/storage\`;
+the named volume keeps it across container restarts.
+
+\`\`\`sh
+docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire
+\`\`\`
+
+\`-e PORT=n\` changes the port inside the container; \`-e SPINEL_WORKERS=n\`
+caps the OS worker threads (default: one per core).
+
+## Without Docker
+
+The Dockerfile is a recipe, not a requirement. On Linux with a C
+compiler, \`make\`, \`libsqlite3-dev\` and \`libjemalloc-dev\`:
+
+\`\`\`sh
+make -C pack -j CC=clang
+mkdir -p app/storage && cd app && ../pack/campfire
+\`\`\`
+
+On macOS with Homebrew's \`sqlite\` and \`jemalloc\`, the compiler needs
+telling where they are: append \`-I\$(brew --prefix)/include
+-L\$(brew --prefix)/lib\` to the \`CFLAGS\` line in \`pack/Makefile\`
+(the rest of that line is the program's defines — keep them).
+
+## What is not in this archive
+
+The same things the source archive leaves out: the avatar picker (file
+uploads post as their filename), web push delivery (the job logs instead
+of sending), and attachments. See the
+[project page](https://rubys.github.io/roundhouse/apps/campfire.html).
+README

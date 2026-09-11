@@ -7,6 +7,13 @@
 # README against the unpacked archive, the same docs-as-contract deal the
 # per-target blog archives get.
 #
+# Also produces `<out>/campfire/docker.tgz` when `spin` is on PATH: the
+# same program after `spin pack` — generated C + the spinel runtime as
+# SOURCE + a Makefile — beside what the binary reads at run time and a
+# two-stage Dockerfile. That archive needs Docker and nothing else, and
+# does not depend on a spinel checkout at all: the runtime it was
+# generated against travels with it. See scripts/campfire-docker-files.
+#
 # WHY THIS IS NOT `roundhouse --site`. That mode is "for every target,
 # write browse/<lang>.{json,tgz,zip}" from ONE fixture, and its archive
 # writer is text-only — every file is a `(String, String)`, so campfire's
@@ -30,10 +37,13 @@
 #   --keep-tree DIR  Also leave the emitted tree at DIR (debugging).
 #   --skip-assets    Don't run `make assets` (fast re-runs; the archive is
 #                    then NOT self-contained and every /assets/* 404s).
+#   --skip-docker    Don't build campfire/docker.tgz (also skipped, with a
+#                    warning, when `spin` is not on PATH).
 #
 # Requires: cargo, tar, and — unless --skip-assets — ruby + bundler, which
 # `make assets` uses to locate the turbo-rails / stimulus-rails / actioncable
-# / actiontext gem dirs. Downloaders need none of that: the assets ship built.
+# / actiontext gem dirs; and, for docker.tgz, `spin` (with `spinel` beside
+# it). Downloaders need none of that: the assets ship built.
 
 set -euo pipefail
 
@@ -43,12 +53,14 @@ APP="$HOME/git/once-campfire"
 OUT="$REPO_ROOT/_site"
 KEEP_TREE=""
 SKIP_ASSETS=0
+SKIP_DOCKER=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --out)         OUT="$2"; shift 2 ;;
         --keep-tree)   KEEP_TREE="$2"; shift 2 ;;
         --skip-assets) SKIP_ASSETS=1; shift ;;
+        --skip-docker) SKIP_DOCKER=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//;$d'; exit 0 ;;
         -*)            echo "unknown flag: $1" >&2; exit 2 ;;
         *)             APP="$1"; shift ;;
@@ -151,3 +163,51 @@ fi
 printf '\n\033[1;32mok\033[0m  %s (%s)\n' \
     "$OUT/campfire/spinel.tgz" \
     "$(du -h "$OUT/campfire/spinel.tgz" | cut -f1 | tr -d ' ')"
+
+# ── 7. the Docker archive ─────────────────────────────────────────────
+#
+# `spin pack` writes a directory that builds from C alone (matz/spinel
+# 32ad55a6): the generated TU, the runtime as source, every native
+# package's source, and a Makefile derived from `spinel --print-build`.
+# Beside it goes what the binary reads at run time — and only that: the
+# emitted Ruby, the tests and the e2e suite stay in spinel.tgz. The
+# result is 5 MB where the source archive is 13 MB, because none of the
+# Ruby ships and the generated C compresses 9:1.
+#
+# Tolerant of a missing `spin` ON PURPOSE: CI's spinel toolchain is an
+# advisory build of matz/spinel master, and the source archive must keep
+# publishing when it is red.
+if (( SKIP_DOCKER )); then
+    step "skipping the Docker archive (--skip-docker)"
+elif ! command -v spin >/dev/null 2>&1; then
+    step "skipping the Docker archive (no \`spin\` on PATH)"
+    echo "::warning::campfire/docker.tgz not built: spin is not on PATH"
+else
+    step "packing for Docker"
+    DOCKER="$WORK/campfire-docker"
+    mkdir -p "$DOCKER/app"
+    (cd "$TREE" && spin pack campfire --out "$DOCKER/pack" >"$WORK/pack.log" 2>&1) || {
+        tail -30 "$WORK/pack.log" >&2
+        fail "spin pack failed"
+    }
+    # A native package whose source the pack could not find is a Makefile
+    # that fails on the downloader's machine. spin says so at pack time;
+    # make it fatal here rather than there.
+    if grep -q 'pack: warning' "$WORK/pack.log"; then
+        grep 'pack: warning' "$WORK/pack.log" >&2
+        fail "spin pack left a native package behind"
+    fi
+    # What main.rb reads: static/ (serve_static), public/ (error pages),
+    # config/purchased_by.yml, db/seed.sql. storage/ is created by the
+    # Dockerfile so the volume mount has a directory to land on.
+    cp -R "$TREE/static" "$TREE/public" "$TREE/db" "$TREE/config" "$DOCKER/app/"
+    cp "$APP/MIT-LICENSE" "$DOCKER/"
+    "$REPO_ROOT/scripts/campfire-docker-files" "$DOCKER" \
+        "$ROUNDHOUSE_SHA" "$CAMPFIRE_SHA" "$SPINEL_VERSION"
+    echo "  pack: $(find "$DOCKER/pack" -type f | wc -l | tr -d ' ') files," \
+         "$(du -sh "$DOCKER/pack/src" | cut -f1 | tr -d ' ') of generated C"
+    tar czf "$OUT/campfire/docker.tgz" -C "$WORK" campfire-docker
+    printf '\033[1;32mok\033[0m  %s (%s)\n' \
+        "$OUT/campfire/docker.tgz" \
+        "$(du -h "$OUT/campfire/docker.tgz" | cut -f1 | tr -d ' ')"
+fi
