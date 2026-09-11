@@ -81,6 +81,7 @@ pub mod random_formatter;
 pub mod to_json;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
+pub mod defined_ivar_memo;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
@@ -158,6 +159,7 @@ pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
 pub use presence_in::apply_presence_in_grounding;
 pub use relation_ivar_materialize::apply_relation_ivar_materialize;
+pub use defined_ivar_memo::apply_defined_ivar_memo_lowering;
 pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
@@ -301,6 +303,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `Rooms::Open.count`-style chains this pass would otherwise wrap
     // one hop too early.
     ("relation_ivar_materialize", &["sti_scope"]),
+    // `defined?(@x)` → `@x_defined`, with the flag set beside every
+    // assignment to `@x`. Reads a `defined?` send no other pass
+    // produces and writes an ivar name no other pass reads, so no
+    // ordering constraints.
+    ("defined_ivar_memo", &[]),
     // `room.is_a?(Rooms::Open)` → the inheritance-column read it stands
     // for. Beside `sti_scope` because it asks that pass the same
     // question (which classes are STI subclasses of which base); it
@@ -644,6 +651,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("sti_scope");
     relation_ivar_materialize::apply_relation_ivar_materialize(app);
     ran!("relation_ivar_materialize");
+    defined_ivar_memo::apply_defined_ivar_memo_lowering(app);
+    ran!("defined_ivar_memo");
     sti_is_a::apply_sti_is_a_lowering(app);
     ran!("sti_is_a");
     sti_subclass_callbacks::apply_sti_subclass_callbacks(app);

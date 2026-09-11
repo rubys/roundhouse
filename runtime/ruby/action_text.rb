@@ -369,11 +369,24 @@ module ActionText
       -1
     end
 
-    # Index of the ">" closing the tag that starts at `at`.
+    # Index of the ">" closing the tag that starts at `at`. A ">" inside
+    # a quoted attribute value is part of the value, not the tag's end —
+    # `<meta content="Hey!<script>alert('hi')</script>">` is one tag
+    # whose `content` holds markup, which is exactly what an opengraph
+    # page under sanitisation looks like.
     def self.tag_end(html, at)
       i = at + 1
       n = html.length
-      while i < n && html[i, 1].to_s != ">"
+      quote = ""
+      while i < n
+        c = html[i, 1].to_s
+        if quote != ""
+          quote = "" if c == quote
+        elsif c == "\"" || c == "'"
+          quote = c
+        elsif c == ">"
+          break
+        end
         i = i + 1
       end
       i < n ? i : n - 1
@@ -961,19 +974,56 @@ module ActionText
 
     # One entity, including its "&" and ";".
     #
-    # NAMED ENTITIES ONLY, and only the ones Rails' own escaper
-    # produces (`ActionView::ViewHelpers::HTML_ESCAPES` beside this
-    # file) plus `&nbsp;` and `&apos;`. Anything else — a numeric
-    # reference, an exotic name — passes through verbatim rather than
-    # decoding, because decoding it needs a codepoint-to-character
-    # intrinsic the framework runtime does not carry. Ledgered in
+    # The named entities are only the ones Rails' own escaper produces
+    # (`ActionView::ViewHelpers::HTML_ESCAPES` beside this file) plus
+    # `&nbsp;` and `&apos;`. A NUMERIC reference (`&#60;`, `&#x3c;`)
+    # decodes when it names a printable ASCII character — the range an
+    # attacker spells markup in, which is the case campfire's opengraph
+    # sanitiser exists for (`&#x3c;&#x2f;&#x73;…` is `</script><img
+    # onerror=…>` hidden from a tag stripper). Anything else — a
+    # codepoint past ASCII, an exotic name — passes through verbatim
+    # rather than decoding: that needs a codepoint-to-character
+    # intrinsic the runtime does not carry. Ledgered in
     # docs/pipeline/runtime.md; the round-trip that matters (escape
     # then extract) is closed, since every entity `html_escape` can
     # emit is in the table.
     def self.decode_entity(entity)
       known = ENTITIES.fetch(entity, "")
       return known if known != ""
+      if entity.start_with?("&#") && entity.length > 3
+        digits = entity[2, entity.length - 3].to_s
+        hex = digits.start_with?("x") || digits.start_with?("X")
+        digits = digits[1, digits.length - 1].to_s if hex
+        code = numeric_reference(digits, hex ? 16 : 10)
+        return printable_ascii(code) if code >= 32 && code <= 126
+      end
       entity
+    end
+
+    # The character for a printable ASCII codepoint, read out of the
+    # range as a String — the runtime carries no codepoint-to-character
+    # intrinsic, and a table is the same on every target.
+    def self.printable_ascii(code)
+      table = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      table[code - 32, 1].to_s
+    end
+
+    # The digits of a numeric reference as an Integer, -1 when any
+    # digit is outside the base. Hand-rolled over `index` rather than
+    # `to_i(base)` so it prices the same on every target.
+    def self.numeric_reference(digits, base)
+      return -1 if digits == ""
+      table = base == 16 ? "0123456789abcdef" : "0123456789"
+      value = 0
+      i = 0
+      while i < digits.length
+        d = table.index(digits[i, 1].to_s.downcase)
+        return -1 if d.nil?
+        value = value * base + d
+        return -1 if value > 1114111
+        i = i + 1
+      end
+      value
     end
 
     def self.decode_entities(text)

@@ -94,6 +94,8 @@ module ActionText
     def self.space_at: (String text, Integer index) -> bool
     def self.entity_end: (String html, Integer start) -> Integer
     def self.decode_entity: (String entity) -> String
+    def self.numeric_reference: (String digits, Integer base) -> Integer
+    def self.printable_ascii: (Integer code) -> String
     def self.decode_entities: (String text) -> String
     def self.indent: (Integer list_depth) -> String
     def self.ends_with_newline: (String text) -> bool
