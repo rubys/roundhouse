@@ -146,7 +146,9 @@ cp "$REPO_ROOT"/e2e/campfire/*.spec.js "$REPO_ROOT/e2e/campfire/helpers.js" "$TR
 cp "$REPO_ROOT/e2e/campfire/package.json" "$TREE/e2e/package.json"
 
 ROUNDHOUSE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-CAMPFIRE_SHA="$(cd "$APP" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# CI fetches campfire as a tarball at the pinned SHA -- no .git to ask --
+# and carries that SHA in the environment; the README said `unknown` there.
+CAMPFIRE_SHA="$(cd "$APP" && git rev-parse --short HEAD 2>/dev/null || echo "${CAMPFIRE_SHA:-unknown}" | cut -c1-12)"
 SPINEL_VERSION="$(spinel --version 2>/dev/null | head -1 || echo 'not on PATH at build time')"
 
 "$REPO_ROOT/scripts/campfire-archive-files" "$TREE" \
