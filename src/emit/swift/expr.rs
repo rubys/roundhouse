@@ -2271,6 +2271,23 @@ pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
 fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
     let v = emit_expr(value);
+    // A NULLABLE target is a conditional cast: `attrs["body"]` off an
+    // `[String: Any?]` is `Any??`, and `as! String?` traps on an absent
+    // key ("Unexpectedly found nil") where the column simply has no
+    // value. `as? String` answers nil for absent and for nil alike,
+    // which is what a nullable column slot holds.
+    if let Ty::Union { variants } = target_ty {
+        let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
+        if non_nil.len() == 1 && variants.len() == 2 {
+            let inner = match non_nil[0] {
+                Ty::Int => "Int".to_string(),
+                Ty::Float => "Double".to_string(),
+                Ty::Str | Ty::Sym => "String".to_string(),
+                other => swift_ty(other),
+            };
+            return format!("({v} as? {inner})");
+        }
+    }
     match target_ty {
         Ty::Int => format!("({v} as! Int)"),
         Ty::Float => format!("({v} as! Double)"),
