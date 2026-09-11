@@ -569,6 +569,9 @@ impl<'a> BodyTyper<'a> {
                 None => Ty::Untyped,
             };
         }
+        // The call's arguments, under a name the `Ty::Class { id, args }`
+        // pattern below does not shadow.
+        let call_args = args;
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
@@ -661,6 +664,21 @@ impl<'a> BodyTyper<'a> {
                 // reason about (no auto-`.not_nil!` on nilable-class
                 // returns, etc.). Loop guard caps depth at 32 to match
                 // `normalize_trailing_kwargs` (same shape, same cap).
+                // `Model.first(n)` — the class-side spelling of the
+                // counted terminal. Only where the class carries the AR
+                // catalog's `first`/`last` (a model or a library class
+                // registered with the same surface); any other class's
+                // `first(x)` is its own method.
+                if counted_first_last(method, call_args)
+                    && self
+                        .classes()
+                        .get(id)
+                        .is_some_and(|c| c.class_methods.contains_key(method))
+                {
+                    return Ty::Array {
+                        elem: Box::new(Ty::Class { id: id.clone(), args: vec![] }),
+                    };
+                }
                 let mut current_id: Option<&ClassId> = Some(id);
                 let mut depth = 0usize;
                 // Set when the chain reaches a *named* superclass we don't
@@ -946,6 +964,9 @@ impl<'a> BodyTyper<'a> {
                 // disambiguate here from the argument shape — otherwise
                 // `comment.split[0..10].join(' ')` mistypes the slice as
                 // `Str | Nil` and `.join` fails to dispatch.
+                if counted_first_last(method, args) {
+                    return Ty::Array { elem: Box::new(elem.clone()) };
+                }
                 if matches!(method.as_str(), "[]" | "slice") {
                     let range_index = args.len() == 1
                         && matches!(
@@ -984,6 +1005,11 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Relation { of }) => {
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
+                }
+                if counted_first_last(method, args) {
+                    return Ty::Array {
+                        elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+                    };
                 }
                 if let Some(entry) = crate::catalog::lookup(
                     method.as_str(),
@@ -1302,6 +1328,25 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         _ => return None,
     };
     Some(ty)
+}
+
+/// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,
+/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
+/// up to n elements, where the bare form answers one element or nil.
+/// Every method table here is keyed by name alone and so typed the
+/// counted form as `elem | nil`; campfire's searches controller then
+/// carried `Message?` for `reachable_messages.search(q).last(100)`, the
+/// controller ivar joined that with the other branch's `Message.none`,
+/// and the emitted view signature — which the LOWERER got right
+/// (`last_n`, declared `Array[untyped]`) — disagreed with the analyzer
+/// about the same value. Gated on one non-block argument that is an
+/// Integer (or not yet typed): `first { … }` and `first` stay as they
+/// were. Mirrors `lower::scope_chain::counted_terminal`, which renames
+/// the call for the runtime for the same reason.
+fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
+    matches!(method.as_str(), "first" | "last")
+        && args.len() == 1
+        && matches!(args[0].ty.as_ref(), None | Some(Ty::Int) | Some(Ty::Untyped))
 }
 
 /// Is this array element type a model relation's element — a single

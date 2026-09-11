@@ -75,6 +75,10 @@ end
     @chained = Story.recent.where(user_id: 1)
     @delegated = Story.recent.for_user(1)
     @first = Story.recent.first
+    @first_n = Story.recent.first(3)
+    @last_n = Story.recent.last(100)
+    @class_last_n = Story.last(5)
+    @array_first_n = Story.recent.to_a.first(2)
     @count = Story.recent.count
     @list = Story.recent.to_a
     @classm = Story.for_user(1)
@@ -173,6 +177,21 @@ fn relation_terminals_produce_array_representation_types() {
         ivar_ty(&app, "list"),
         Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
     );
+}
+
+#[test]
+fn counted_first_and_last_type_as_arrays() {
+    // `first(n)` / `last(n)` answer an Array of up to n records on a
+    // relation, a model class and a plain Array alike; only the bare
+    // form is `elem | nil`. campfire's `reachable_messages.search(q)
+    // .last(100)` was typed as one `Message?` and the controller ivar
+    // then disagreed with the `Array[Message]` the view declares.
+    let app = analyzed_app();
+    let stories = Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) };
+    assert_eq!(ivar_ty(&app, "first_n"), stories);
+    assert_eq!(ivar_ty(&app, "last_n"), stories);
+    assert_eq!(ivar_ty(&app, "class_last_n"), stories);
+    assert_eq!(ivar_ty(&app, "array_first_n"), stories);
 }
 
 #[test]

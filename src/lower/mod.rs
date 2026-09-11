@@ -80,6 +80,7 @@ pub mod parameterize;
 pub mod random_formatter;
 pub mod to_json;
 pub mod presence_in;
+pub mod relation_ivar_materialize;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
@@ -156,6 +157,7 @@ pub use parameterize::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
 pub use presence_in::apply_presence_in_grounding;
+pub use relation_ivar_materialize::apply_relation_ivar_materialize;
 pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
@@ -292,6 +294,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // every later pass already reads; consumes nothing any pass
     // produces, so no ordering constraints.
     ("sti_scope", &[]),
+    // `@ivar = <Relation>` → `@ivar = <Relation>.to_a` where the same
+    // ivar is an Array on another branch. Reads assignment value TYPES
+    // stamped by analysis and writes a `to_a` send no other pass keys
+    // on; after `sti_scope`, which rewrites the Relation-rooted
+    // `Rooms::Open.count`-style chains this pass would otherwise wrap
+    // one hop too early.
+    ("relation_ivar_materialize", &["sti_scope"]),
     // `room.is_a?(Rooms::Open)` → the inheritance-column read it stands
     // for. Beside `sti_scope` because it asks that pass the same
     // question (which classes are STI subclasses of which base); it
@@ -633,6 +642,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("enumerable_ext");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
+    relation_ivar_materialize::apply_relation_ivar_materialize(app);
+    ran!("relation_ivar_materialize");
     sti_is_a::apply_sti_is_a_lowering(app);
     ran!("sti_is_a");
     sti_subclass_callbacks::apply_sti_subclass_callbacks(app);
