@@ -66,13 +66,17 @@ module Net
 
     # `response.read_body { |chunk| ... }` — CRuby streams the body from
     # the socket here; this package has already read it whole, so the
-    # stream is the String, sliced.
-    def read_body
-      if block_given?
+    # stream is the String, sliced. A declared `&blk`, not `yield`, for
+    # the reason `HTTP#request` below gives: the response reaches
+    # `Opengraph::Fetch#size_restricted_body` boxed, and a yielding
+    # method has no dispatch entry for a boxed receiver — the call
+    # landed on nothing and raised `no block given (yield)`.
+    def read_body(&blk)
+      unless blk.nil?
         offset = 0
         total = @body.bytesize
         while offset < total
-          yield @body.byteslice(offset, READ_BODY_CHUNK).to_s
+          blk.call(@body.byteslice(offset, READ_BODY_CHUNK).to_s)
           offset += READ_BODY_CHUNK
         end
       end
@@ -112,24 +116,29 @@ module Net
     # package's `build_response`, so a stubbed 302 IS a
     # `Net::HTTPRedirection` and a stubbed 200 a `Net::HTTPOK`.
     #
-    # NOT `yield res if block_given?`, although the block form is what
-    # `Opengraph::Fetch` is written on and the double was built to
-    # serve. A method that yields is inlined at its call sites and has
-    # no entry in spinel's dynamic dispatch — and `Webhook#http` comes
-    # back BOXED (its return is emitted `sp_box_nullable_obj`), so
-    # `http.request(post)` there dispatches dynamically and raised
+    # The block form is a declared `&blk` CALLED, not a `yield` — the
+    # spelling the package itself settled on for matz/spinel#4420. A
+    # method that yields is inlined at its call sites and has no entry
+    # in spinel's dynamic dispatch, and `Webhook#http` comes back BOXED
+    # (its return is emitted `sp_box_nullable_obj`), so a yielding
+    # `request` left `http.request(post)` there with no arm at all:
     # `undefined method 'request' for an instance of Net::HTTP` in all
-    # four delivery tests. Webhook delivery works in production through
-    # this method today; a yielding reopen would have taken that away.
-    # The block form returns when spinel gives a yielding method a
-    # block-less standalone entry (or the package grows the block form
-    # itself, matz/spinel#4420, at which point this reopen must yield
-    # too or it would drop the package's). Until then the caller's
-    # block is dropped exactly as the package drops it.
-    def request(req)
+    # four delivery tests. A `&blk` parameter keeps the standalone
+    # entry, so the block-less webhook call and `Opengraph::Fetch`'s
+    # `request(req) { |res| … }` dispatch to the same method. The
+    # response is complete before the block sees it, as the package
+    # documents; `read_body` above is what slices it for a streaming
+    # reader.
+    def request(req, &blk)
       i = HttpStub.find(req.method, stub_url(req.path))
-      return transport_request(req) if i < 0
-      build_response("1.1", HttpStub::STUB_STATUSES[i].to_s, "", HttpStub.headers_at(i), HttpStub::STUB_BODIES[i])
+      res =
+        if i < 0
+          transport_request(req)
+        else
+          build_response("1.1", HttpStub::STUB_STATUSES[i].to_s, "", HttpStub.headers_at(i), HttpStub::STUB_BODIES[i])
+        end
+      blk.call(res) unless blk.nil?
+      res
     end
 
     # The package's `#request`, re-stated: a request on an unstarted

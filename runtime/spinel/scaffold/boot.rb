@@ -119,6 +119,9 @@ require_relative "runtime/tep/tep"
 # `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes
 # to) is defined.
 require_relative "runtime/cgi_spinel"
+# Spinel-only resolver: reopens runtime/resolv's `Resolv.resolve` over
+# `Socket.getaddrinfo`. CRuby/JRuby have the stdlib's own Resolv.
+require_relative "runtime/resolv_spinel"
 # Spinel-only ERB::Util shim (html_escape) — CRuby/JRuby get it from the
 # stdlib Rails loads. After action_controller, whose require chain defines
 # the ActionView::ViewHelpers.html_escape this delegates to.

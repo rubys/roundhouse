@@ -12,14 +12,19 @@
 # `Resolv.getaddresses` with mocha, and a stub only lands on the class
 # the caller actually dispatches to.
 #
-# ON A STRICT TARGET the body fails loudly rather than answering. There
-# is no resolver to bind to, and the two quiet alternatives are both
-# worse: an empty list reads as "this host has no address", which
-# `Surfguard.resolve_public_ips` reports as `Unresolvable` and a caller
-# treats as a transient DNS miss — a silent no-op for every push
-# delivery. `GemFacade.fail!` (rather than a bare `raise`) keeps the
-# typed tail below statically live, which is what makes the return type
-# inferable under AOT; see `gem_facades.rb`'s own note.
+# ON A STRICT TARGET the lookup itself is `Resolv.resolve`, a hook this
+# file defines as a loud failure and a target with a resolver REOPENS:
+# `runtime/spinel/resolv_spinel.rb` answers it from `Socket.getaddrinfo`.
+# The stub walk stays here, above the hook, so a stubbed host never
+# reaches a socket on any target. Where nothing reopens it, the hook
+# fails rather than answering: there is no resolver to bind to, and the
+# two quiet alternatives are both worse — an empty list reads as "this
+# host has no address", which `Surfguard.resolve_public_ips` reports as
+# `Unresolvable` and a caller treats as a transient DNS miss, a silent
+# no-op for every push delivery. `GemFacade.fail!` (rather than a bare
+# `raise`) keeps the typed tail below statically live, which is what
+# makes the return type inferable under AOT; see `gem_facades.rb`'s own
+# note.
 #
 # `getaddresses`, not `getaddress`: it is what surfguard's policy is
 # written against — every address a host answers with, honouring
@@ -116,6 +121,15 @@ class Resolv
       i += 1
     end
     return STUB_ANY[0] if STUB_ANY_ON[0]
+    resolve(host)
+  end
+
+  # The unstubbed lookup — the seam a target with a resolver reopens
+  # (see the header). Every address the host answers with, in the
+  # order the resolver gave them; an unknown host is `[]`, which is what
+  # Ruby's own `getaddresses` answers too (it is `getaddress` that
+  # raises).
+  def self.resolve(host)
     GemFacade.fail!("Resolv.getaddresses")
     [ host ]
   end
