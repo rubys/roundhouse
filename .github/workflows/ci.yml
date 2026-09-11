@@ -1832,8 +1832,10 @@ jobs:
   # smoke-campfire-docker: the Docker archive's README says "Docker and
   # nothing else", so that is what this job has — no spinel, no C
   # toolchain of its own. Extract, `docker build`, run, and ask the
-  # server for the two pages a fresh install answers: `/` redirects to
-  # sign-in and `/first_run` renders. Advisory like every spinel job.
+  # server for what a fresh install answers first: `/` redirects to
+  # sign-in, `/first_run` renders, and `/account/logo` -- a source-path
+  # read the sign-in page triggers -- is found. Advisory like every
+  # spinel job.
   smoke-campfire-docker:
     needs: [build-campfire-archive]
     runs-on: ubuntu-latest
@@ -1861,10 +1863,13 @@ jobs:
           done
           root=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/)
           first=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/first_run)
-          echo "GET / -> $root; GET /first_run -> $first"
+          # the sign-in page fetches this; it is a File.binread of a
+          # source path the archive has to carry (it once did not)
+          logo=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/account/logo)
+          echo "GET / -> $root; GET /first_run -> $first; GET /account/logo -> $logo"
           docker logs campfire
           docker rm -f campfire >/dev/null
-          [ "$root" = 302 ] && [ "$first" = 200 ]
+          [ "$root" = 302 ] && [ "$first" = 200 ] && [ "$logo" = 200 ]
 
   # smoke-campfire: the campfire archive runs its own README, exactly as
   # smoke-spinel does for the blog — extract, execute every fenced ```sh

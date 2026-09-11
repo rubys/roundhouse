@@ -199,10 +199,19 @@ else
         grep 'pack: warning' "$WORK/pack.log" >&2
         fail "spin pack left a native package behind"
     fi
-    # What main.rb reads: static/ (serve_static), public/ (error pages),
-    # config/purchased_by.yml, db/seed.sql. storage/ is created by the
+    # What the binary reads at run time: static/ (serve_static), public/
+    # (error pages), db/seed.sql, and the three `Rails.root.join` reads in
+    # the app itself -- config/purchased_by.yml, app/assets/images/logos/
+    # (accounts/logos_controller send_png_file; /account/logo is fetched
+    # by the sign-in page, so a missing file is a 500 on first contact)
+    # and app/assets/images/default-bot-avatar.svg (users/avatars_controller).
+    # The web copies under static/assets/ do not serve those reads: the
+    # controllers open the SOURCE path. storage/ is created by the
     # Dockerfile so the volume mount has a directory to land on.
     cp -R "$TREE/static" "$TREE/public" "$TREE/db" "$TREE/config" "$DOCKER/app/"
+    mkdir -p "$DOCKER/app/app/assets/images"
+    cp -R "$TREE/app/assets/images/logos" "$DOCKER/app/app/assets/images/"
+    cp "$TREE/app/assets/images/default-bot-avatar.svg" "$DOCKER/app/app/assets/images/"
     cp "$APP/MIT-LICENSE" "$DOCKER/"
     "$REPO_ROOT/scripts/campfire-docker-files" "$DOCKER" \
         "$ROUNDHOUSE_SHA" "$CAMPFIRE_SHA" "$SPINEL_VERSION"
