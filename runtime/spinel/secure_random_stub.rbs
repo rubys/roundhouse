@@ -1,0 +1,9 @@
+# Typing for runtime/spinel/secure_random_stub.rb — the stub slot
+# `lower::mocha` rewrites `SecureRandom.stubs(...)` to.
+module SecureRandom
+  def self.stub_alphanumeric: (String value) -> nil
+  def self.stub_uuid: (String value) -> nil
+  def self.clear_secure_random_stubs: () -> nil
+  def self.alphanumeric: (?Integer n) -> String
+  def self.uuid: () -> String
+end

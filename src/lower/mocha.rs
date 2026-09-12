@@ -93,6 +93,18 @@ struct Stubbable {
     /// The runtime file that DEFINES the slot. The helper requires it
     /// so the clear call is unconditional — see `stub_preamble`.
     require: &'static str,
+    /// The constant the slot lives on, when it is not `konst`: the
+    /// test stubs the name the app WROTE, and the slot sits where the
+    /// app's call was grounded to (`Random.uuid` → `SecureRandom.uuid`,
+    /// `lower::random_formatter`). `None` means `konst`.
+    slot_on: Option<&'static str>,
+}
+
+impl Stubbable {
+    /// The constant the slot call and the helper's clear/verify go to.
+    fn slot_konst(&self) -> &'static str {
+        self.slot_on.unwrap_or(self.konst)
+    }
 }
 
 const STUBBABLE: &[Stubbable] = &[
@@ -106,6 +118,51 @@ const STUBBABLE: &[Stubbable] = &[
         clear: "clear_getaddresses_stubs",
         verify: None,
         require: "../runtime/resolv",
+        slot_on: None,
+    },
+    // The stdlib's CSPRNG (spinel: `packages/securerandom`). campfire's
+    // bot and user tests pin `alphanumeric` / `uuid` to a literal and
+    // assert the key or address minted from it. The slot is a reopen on
+    // both families — see `runtime/spinel/secure_random_stub.rb` and
+    // `project::SECURE_RANDOM_STUB_REOPEN`.
+    Stubbable {
+        konst: "SecureRandom",
+        method: "alphanumeric",
+        keyed: None,
+        any: Some("stub_alphanumeric"),
+        bare: None,
+        expect: None,
+        clear: "clear_secure_random_stubs",
+        verify: None,
+        require: "../runtime/secure_random_stub",
+        slot_on: None,
+    },
+    Stubbable {
+        konst: "SecureRandom",
+        method: "uuid",
+        keyed: None,
+        any: Some("stub_uuid"),
+        bare: None,
+        expect: None,
+        clear: "clear_secure_random_stubs",
+        verify: None,
+        require: "../runtime/secure_random_stub",
+        slot_on: None,
+    },
+    // `Random.uuid` is `SecureRandom.uuid` once lowered (the app's
+    // call and the test's stub have to meet at ONE method), so the
+    // slot is SecureRandom's.
+    Stubbable {
+        konst: "Random",
+        method: "uuid",
+        keyed: None,
+        any: Some("stub_uuid"),
+        bare: None,
+        expect: None,
+        clear: "clear_secure_random_stubs",
+        verify: None,
+        require: "../runtime/secure_random_stub",
+        slot_on: Some("SecureRandom"),
     },
     // The façade for the `web-push` gem. A bare `stubs` answers `""`,
     // which is what a test that only wants delivery to not happen
@@ -121,6 +178,7 @@ const STUBBABLE: &[Stubbable] = &[
         clear: "clear_payload_send_stubs",
         verify: Some("verify_payload_send_expectations"),
         require: "../runtime/gem_facades",
+        slot_on: None,
     },
     // Our own channel class (`runtime/spinel/turbo_streams.rb`, every
     // ruby-family tree carries it). campfire's messages controller
@@ -135,6 +193,7 @@ const STUBBABLE: &[Stubbable] = &[
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
+        slot_on: None,
     },
     Stubbable {
         konst: "Turbo::StreamsChannel",
@@ -146,6 +205,7 @@ const STUBBABLE: &[Stubbable] = &[
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
+        slot_on: None,
     },
 ];
 
@@ -237,11 +297,12 @@ pub fn stub_clear_lines(indent: &str) -> String {
     let mut seen: Vec<(&str, &str)> = Vec::new();
     let mut out = String::new();
     for s in STUBBABLE {
-        if seen.contains(&(s.konst, s.clear)) {
+        let konst = s.slot_konst();
+        if seen.contains(&(konst, s.clear)) {
             continue;
         }
-        seen.push((s.konst, s.clear));
-        out.push_str(&format!("{indent}{}.{}\n", s.konst, s.clear));
+        seen.push((konst, s.clear));
+        out.push_str(&format!("{indent}{}.{}\n", konst, s.clear));
     }
     out
 }
@@ -254,11 +315,12 @@ pub fn stub_verify_lines(indent: &str) -> String {
     let mut out = String::new();
     for s in STUBBABLE {
         let Some(verify) = s.verify else { continue };
-        if seen.contains(&(s.konst, verify)) {
+        let konst = s.slot_konst();
+        if seen.contains(&(konst, verify)) {
             continue;
         }
-        seen.push((s.konst, verify));
-        out.push_str(&format!("{indent}{}.{}\n", s.konst, verify));
+        seen.push((konst, verify));
+        out.push_str(&format!("{indent}{}.{}\n", konst, verify));
     }
     out
 }
@@ -408,7 +470,10 @@ fn Span_of(op: &Op) -> crate::span::Span {
 /// A chain the row can serve, as the slot call — or `None`, and the
 /// bridge takes it.
 fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Option<Expr> {
-    let konst = chain.konst.clone();
+    let konst = match row.slot_on {
+        Some(on) => Expr::new(chain.konst.span, ExprNode::Const { path: vec![Symbol::from(on)] }),
+        None => chain.konst.clone(),
+    };
     let ops = &chain.ops;
     let plain = |op: &Op, name: &str, arity: usize| op.name.as_str() == name && op.args.len() == arity && op.block.is_none();
     match chain.kind.as_str() {

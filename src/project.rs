@@ -1267,6 +1267,60 @@ class Resolv
 end
 "##;
 
+/// The ruby family's `SecureRandom` stub slot — `lower::mocha` rewrites
+/// `SecureRandom.stubs(:alphanumeric).returns(v)` (and `Random.stubs
+/// (:uuid)`, whose app-side call is grounded to `SecureRandom.uuid`) to
+/// `SecureRandom.stub_<m>(v)` on every target. Same shape as
+/// `RESOLV_STUB_REOPEN`: here the stdlib's own rendering is one
+/// `alias_method` away, so the unstubbed arm calls it; the spinel file
+/// (`runtime/spinel/secure_random_stub.rb`) has no alias to reach the
+/// package's and re-renders instead.
+const SECURE_RANDOM_STUB_REOPEN: &str = r##"require "securerandom"
+
+# Stub slot for `lower::mocha` — see `project::SECURE_RANDOM_STUB_REOPEN`.
+module SecureRandom
+  STUB_ALPHANUMERIC_ON = [ false ]
+  STUB_ALPHANUMERIC = [ "" ]
+  STUB_UUID_ON = [ false ]
+  STUB_UUID = [ "" ]
+
+  class << self
+    alias_method :alphanumeric_without_stub, :alphanumeric
+    alias_method :uuid_without_stub, :uuid
+
+    def stub_alphanumeric(value)
+      STUB_ALPHANUMERIC_ON[0] = true
+      STUB_ALPHANUMERIC[0] = value
+      nil
+    end
+
+    def stub_uuid(value)
+      STUB_UUID_ON[0] = true
+      STUB_UUID[0] = value
+      nil
+    end
+
+    def clear_secure_random_stubs
+      STUB_ALPHANUMERIC_ON[0] = false
+      STUB_ALPHANUMERIC[0] = ""
+      STUB_UUID_ON[0] = false
+      STUB_UUID[0] = ""
+      nil
+    end
+
+    def alphanumeric(n = 16, chars: nil)
+      return STUB_ALPHANUMERIC[0] if STUB_ALPHANUMERIC_ON[0]
+      chars.nil? ? alphanumeric_without_stub(n) : alphanumeric_without_stub(n, chars: chars)
+    end
+
+    def uuid
+      return STUB_UUID[0] if STUB_UUID_ON[0]
+      uuid_without_stub
+    end
+  end
+end
+"##;
+
 /// `HttpStub` for the ruby family — the same three calls
 /// `lower::webmock` rewrites every test to, delegated onto the real
 /// WebMock gem. The strict targets answer them from a table
@@ -1379,6 +1433,11 @@ fn ruby_runtime_files(
         // replayed through the real gem here; the strict file raises.
         if path == "runtime/mocha_bridge.rb" {
             *content = MOCHA_BRIDGE_REPLAY.to_string();
+        }
+        // `SecureRandom`: the stdlib's, with the stub slot aliased over
+        // it. The spinel file re-renders because it has no alias.
+        if path == "runtime/secure_random_stub.rb" {
+            *content = SECURE_RANDOM_STUB_REOPEN.to_string();
         }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
@@ -2330,6 +2389,10 @@ fn jruby_runtime_files(
         if path == "runtime/mocha_bridge.rb" {
             *content = MOCHA_BRIDGE_REPLAY.to_string();
         }
+        // …and the SecureRandom slot, aliased over the JVM's own.
+        if path == "runtime/secure_random_stub.rb" {
+            *content = SECURE_RANDOM_STUB_REOPEN.to_string();
+        }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
         }
@@ -2598,6 +2661,16 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         let rbs = fs::read_to_string("runtime/spinel/erb_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/erb_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/erb_spinel.rbs".to_string(), rbs));
+    }
+
+    // SecureRandom stub-slot sidecar — the reopen in
+    // runtime/secure_random_stub.rb replaces the package's
+    // `alphanumeric`/`uuid` with stub-first arms; the .rbs pins the
+    // slot setters the helper and the lowered tests call.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/secure_random_stub.rbs")
+            .map_err(|e| format!("read runtime/spinel/secure_random_stub.rbs: {e}"))?;
+        files.push(("sig/runtime/secure_random_stub.rbs".to_string(), rbs));
     }
 
     // Nokogiri read-path sidecar — the reopen in runtime/nokogiri_spinel.rb
