@@ -2,5 +2,5 @@ module JsonBuilder
   def self.encode_string: (String) -> String
   def self.encode_value: (untyped) -> String
   def self.encode_datetime: (String?) -> String
-  def self.encode_enum: (Array[String], Integer?) -> String
+  def self.encode_enum: (Array[String], Integer) -> String
 end

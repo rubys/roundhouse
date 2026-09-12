@@ -71,8 +71,13 @@ module JsonBuilder
   # the declaration's order, so the stored value indexes it; a value
   # outside it is `null`, which is what Rails' reader answers for a
   # stored integer no label maps to.
+  #
+  # A plain Integer, never nil: the jbuilder lowerer routes only a
+  # NOT NULL enum column here (a nullable one keeps `encode_value`), so
+  # no strict target has to narrow an `Integer?` — neither Rust's nor
+  # Swift's emit does past a `nil?` guard.
   def self.encode_enum(labels, value)
-    return "null" if value.nil? || value < 0 || value >= labels.length
+    return "null" if value < 0 || value >= labels.length
     "\"#{encode_string(labels[value])}\""
   end
 

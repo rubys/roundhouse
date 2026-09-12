@@ -1271,15 +1271,25 @@ fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
 /// arg we can't tie back to a schema row.
 /// The integer-backed enums of the model `dir` resolves to, labels in
 /// declaration order — only those whose stored values are exactly
-/// `0..n`, which is what `labels[value]` indexes. Same dir → model
-/// resolution as `columns_for_arg`.
+/// `0..n`, which is what `labels[value]` indexes, and only on a NOT
+/// NULL column: `encode_enum` takes a plain Integer, because the
+/// strict targets' emits do not narrow an `Integer?` past a `nil?`
+/// guard (framework-tests-rust and -swift both said so). Same dir →
+/// model resolution as `columns_for_arg`.
 fn enums_for_arg(dir: &str, app: &App) -> std::collections::HashMap<Symbol, Vec<String>> {
     let mut out = std::collections::HashMap::new();
     let model_class = crate::naming::singularize_camelize(dir);
     let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == model_class) else {
         return out;
     };
+    let Some(table) = app.schema.tables.get(&model.table.0) else {
+        return out;
+    };
     for (col, pairs) in &model.enums {
+        let not_null = table.columns.iter().any(|c| &c.name == col && !c.nullable);
+        if !not_null {
+            continue;
+        }
         let sequential = pairs.iter().enumerate().all(|(i, (_, lit))| {
             matches!(lit, crate::expr::Literal::Int { value } if *value == i as i64)
         });
