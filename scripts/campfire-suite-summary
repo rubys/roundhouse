@@ -327,8 +327,13 @@ if opts[:target] == "spinel"
   spinel = {
     "version" => line,
     # The bare commit, for a page or a floor that wants to compare two
-    # runs without parsing the whole banner.
-    "sha" => line && line[/\bspinel\s+([0-9a-f]{7,40})\b/, 1],
+    # runs without parsing the whole banner. The banner has had two
+    # shapes — `spinel ba502fba0092 (unreleased) [...]` and, since the
+    # dated releases, `spinel 2026.09.12+15 (8720b90f) [...]` — and the
+    # report treats a missing sha as a missing compiler, so a parse that
+    # knows only one shape raises the alarm on every clean run.
+    "sha" => line && (line[/\bspinel\s+([0-9a-f]{7,40})\b/, 1] ||
+                      line[/\(([0-9a-f]{7,40})\)/, 1]),
   }
 end
 

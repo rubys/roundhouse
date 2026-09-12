@@ -84,6 +84,15 @@ OWNER_LABEL = {
 lane    = d["lane"] || {}
 compiled = lane["target"].to_s == "spinel"
 spinel  = d["spinel"] || {}
+# The summary parses the sha out of the banner, but the banner's shape
+# has changed under it once already (the commit moved into parentheses
+# behind a dated version), and a run that recorded the full banner did
+# record its compiler. Re-derive from the banner here so an archived
+# summary whose parse missed still identifies the compiler that built it.
+if spinel["sha"].to_s.empty? && spinel["version"]
+  spinel = spinel.merge("sha" => spinel["version"][/\(([0-9a-f]{7,40})\)/, 1] ||
+                                 spinel["version"][/\bspinel\s+([0-9a-f]{7,40})\b/, 1])
+end
 
 cf      = d["campfire"] || {}
 rh      = d["roundhouse"] || {}
