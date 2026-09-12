@@ -237,3 +237,31 @@ end
     assert!(!out.contains("present?"), "hash-value read should ground:\n{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+/// `params[:attachment].blank?` — typed `String?`, and for a form field
+/// that is what it is; campfire's bot endpoint receives an
+/// UploadedFile there, and the String grounding's `strip` on one was a
+/// NoMethodError. A params read is handed to the runtime predicate,
+/// which branches on the value the way Rails' `Object#blank?` does.
+#[test]
+fn a_params_read_is_grounded_at_runtime_whatever_its_type() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Guard
+  def check(params)
+    @params = params
+    return "no" if @params["attachment"].blank?
+    return "no" if params[:body].blank?
+    "yes"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        out.matches("ActiveSupport.blank?(").count(),
+        2,
+        "both params reads should reach the runtime predicate:\n{out}"
+    );
+    assert!(!out.contains("strip"), "no String-shaped grounding on a params read:\n{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}

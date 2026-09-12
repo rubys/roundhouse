@@ -328,6 +328,7 @@ pub fn lower_test_modules_with_inner(
             // send is `undefined method 'present?' for an instance of
             // String` and takes every test behind it.
             crate::lower::blank::ground_body(&mut method.body, &blank_defs);
+            lowercase_header_reads(&mut method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             // A test's ivars are bound in its own body — the setup is
             // inlined ahead of every test — so they can be harvested
@@ -989,4 +990,30 @@ fn insert_minitest_test_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Minitest::Test under the hood); register the same surface.
     classes.insert(ClassId(Symbol::from("ActiveSupport::TestCase")), info.clone());
     classes.insert(ClassId(Symbol::from("TestCase")), info);
+}
+
+/// `response.headers["X-Total-Count"]` → `response.headers["x-total-count"]`.
+///
+/// Rails' `response.headers` is case-insensitive (Rack 3's `Headers`);
+/// the harness's is a plain Hash keyed the way Rack normalizes —
+/// lowercase — so a test reading a header by its wire spelling got
+/// nil. Lowercasing a LITERAL key at a `.headers[…]` read is exact:
+/// the lookup Rails performs is the same for every spelling. Reads
+/// only, and only in test bodies; the controller's own
+/// `headers["X-Thing"] = …` writes are the app's.
+fn lowercase_header_reads(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut lowercase_header_reads);
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "[]" || args.len() != 1 {
+        return;
+    }
+    let ExprNode::Send { method: inner, args: inner_args, .. } = &*recv.node else { return };
+    if inner.as_str() != "headers" || !inner_args.is_empty() {
+        return;
+    }
+    if let ExprNode::Lit { value: crate::expr::Literal::Str { value } } = &mut *args[0].node {
+        *value = value.to_ascii_lowercase();
+    }
 }

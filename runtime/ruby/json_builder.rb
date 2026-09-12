@@ -65,6 +65,17 @@ module JsonBuilder
     "\"#{encode_string(v.to_s)}\""
   end
 
+  # An integer-backed enum column as Rails serializes it: the LABEL,
+  # not the stored integer (`json.(user, :role)` renders `"bot"`, the
+  # reader `user.role` in Rails answers the label too). `labels` is
+  # the declaration's order, so the stored value indexes it; a value
+  # outside it is `null`, which is what Rails' reader answers for a
+  # stored integer no label maps to.
+  def self.encode_enum(labels, value)
+    return "null" if value.nil? || value < 0 || value >= labels.length
+    "\"#{encode_string(labels[value])}\""
+  end
+
   # Reformat a sqlite-shape TEXT timestamp ("YYYY-MM-DD HH:MM:SS[.f]")
   # to Rails-canonical ISO 8601 with millisecond precision and a `Z`
   # suffix ("YYYY-MM-DDTHH:MM:SS.fffZ"). Returns a JSON-quoted string.

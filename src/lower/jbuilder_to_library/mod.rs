@@ -246,12 +246,18 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     } else {
         columns_for_arg(&arg_name, dir, is_partial, stem, app)
     };
+    let arg_enums = if arg_columns.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        enums_for_arg(dir, app)
+    };
 
     let ctx = Ctx {
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         arg_name: arg_name.clone(),
         arg_columns,
+        arg_enums,
         direct_helpers: app
             .routes
             .direct_helpers
@@ -347,6 +353,14 @@ struct Ctx {
     /// datetime columns through `JsonBuilder.encode_datetime` rather
     /// than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
+    /// The integer-backed `enum` columns of that model, each with its
+    /// labels in declaration order (`role` → `["member",
+    /// "administrator", "bot"]`). Rails serializes an enum attribute as
+    /// its LABEL; the column reader here answers the stored integer, so
+    /// `json.(user, :role)` routes through `JsonBuilder.encode_enum`.
+    /// A String-backed enum (campfire's `involvement`, mapped to
+    /// itself) stores the label already and is not listed.
+    arg_enums: std::collections::HashMap<Symbol, Vec<String>>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
     /// whatever the CALLER hands it — campfire's `direct
@@ -532,6 +546,8 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     );
                     let encoded = if use_datetime {
                         json_builder_call("encode_datetime", value)
+                    } else if let Some(labels) = ctx.arg_enums.get(attr).filter(|_| obj_is_arg) {
+                        json_builder_enum(labels, value)
                     } else {
                         json_builder_encode(value)
                     };
@@ -547,11 +563,23 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
-                let rewritten_value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
-                out.push(io_append_call(
-                    &ctx.accumulator,
-                    json_builder_encode(rewritten_value),
-                ));
+                // `json.created_at message.created_at.utc` — a temporal
+                // column of the template's argument, bare or through
+                // `utc`/`getutc`/`gmtime`, takes the same
+                // `encode_datetime(<col>_raw)` route the Extract arm
+                // gives `json.(message, :created_at)`: the stored TEXT
+                // is UTC, so `utc` is the identity on it, and
+                // `encode_value` would otherwise render `Time#to_s`
+                // ("2026-09-12 13:26:25 UTC") where Rails renders
+                // `xmlschema(3)` ("2026-09-12T13:26:25.149Z").
+                let encoded = match temporal_column_read(value, ctx) {
+                    Some((obj, col)) => json_builder_call(
+                        "encode_datetime",
+                        send(Some(obj), &format!("{}_raw", col.as_str()), Vec::new(), None, false),
+                    ),
+                    None => json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx))),
+                };
+                out.push(io_append_call(&ctx.accumulator, encoded));
                 emitted += 1;
             }
             JbStmt::PairPartial { key, partial_path, arg } => {
@@ -1151,6 +1179,28 @@ fn json_builder_encode(value: Expr) -> Expr {
     json_builder_call("encode_value", value)
 }
 
+/// `JsonBuilder.encode_enum(["member", "administrator", "bot"], <value>)`.
+fn json_builder_enum(labels: &[String], value: Expr) -> Expr {
+    let elements = labels
+        .iter()
+        .map(|l| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: crate::expr::Literal::Str { value: l.clone() } },
+            )
+        })
+        .collect();
+    let labels = Expr::new(
+        Span::synthetic(),
+        ExprNode::Array { elements, style: crate::expr::ArrayStyle::default() },
+    );
+    let recv = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: vec![Symbol::from("JsonBuilder")] },
+    );
+    send(Some(recv), "encode_enum", vec![labels, value], None, true)
+}
+
 fn json_builder_call(method: &str, value: Expr) -> Expr {
     let recv = Expr::new(
         Span::synthetic(),
@@ -1164,6 +1214,39 @@ fn json_builder_call(method: &str, value: Expr) -> Expr {
 /// True when `obj` reads as the named local — either a bare `Var`
 /// or a `Send` with no receiver, no args, no block (the bareword
 /// shape Prism produces for partial-scope locals).
+/// `<arg>.<temporal col>`, optionally under `.utc` / `.getutc` /
+/// `.gmtime` — the (receiver, column) pair, when the column is one of
+/// the template argument's datetime/date/time columns.
+fn temporal_column_read(value: &Expr, ctx: &Ctx) -> Option<(Expr, Symbol)> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let (obj, col) = if matches!(method.as_str(), "utc" | "getutc" | "gmtime") {
+        let ExprNode::Send { recv: Some(obj), method: col, args, block: None, .. } = &*recv.node else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        (obj, col)
+    } else {
+        (recv, method)
+    };
+    if !obj_is_named_local(obj, &ctx.arg_name) {
+        return None;
+    }
+    let temporal = matches!(
+        ctx.arg_columns.get(col),
+        Some(crate::schema::ColumnType::DateTime)
+            | Some(crate::schema::ColumnType::Date)
+            | Some(crate::schema::ColumnType::Time)
+    );
+    temporal.then(|| (obj.clone(), col.clone()))
+}
+
 fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -1186,6 +1269,27 @@ fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
 /// backed by a schema table. Returns an empty map for layouts,
 /// index views (arg is a collection, not a single record), and any
 /// arg we can't tie back to a schema row.
+/// The integer-backed enums of the model `dir` resolves to, labels in
+/// declaration order — only those whose stored values are exactly
+/// `0..n`, which is what `labels[value]` indexes. Same dir → model
+/// resolution as `columns_for_arg`.
+fn enums_for_arg(dir: &str, app: &App) -> std::collections::HashMap<Symbol, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let model_class = crate::naming::singularize_camelize(dir);
+    let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == model_class) else {
+        return out;
+    };
+    for (col, pairs) in &model.enums {
+        let sequential = pairs.iter().enumerate().all(|(i, (_, lit))| {
+            matches!(lit, crate::expr::Literal::Int { value } if *value == i as i64)
+        });
+        if sequential && !pairs.is_empty() {
+            out.insert(col.clone(), pairs.iter().map(|(label, _)| label.clone()).collect());
+        }
+    }
+    out
+}
+
 fn columns_for_arg(
     arg_name: &str,
     dir: &str,

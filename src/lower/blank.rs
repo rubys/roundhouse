@@ -232,6 +232,24 @@ enum Grounding {
     Skip(&'static str),
 }
 
+/// `params[:x]` / `@params["x"]` — one index read off the request
+/// parameters, whatever spelling the lowering has left it in.
+fn is_params_read(r: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(inner), method, args, block: None, .. } = &*r.node else {
+        return false;
+    };
+    if method.as_str() != "[]" || args.len() != 1 {
+        return false;
+    }
+    match &*inner.node {
+        ExprNode::Ivar { name } => name.as_str() == "params",
+        ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            method.as_str() == "params" && args.is_empty()
+        }
+        _ => false,
+    }
+}
+
 fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
     use Grounding::*;
     let Some(t) = ty else { return Skip("receiver type not inferred") };
@@ -513,7 +531,14 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
         if !args.is_empty() || block.is_some() {
             return;
         }
-        (pred, classify(r.ty.as_ref(), defs), r.ty.clone(), is_effect_free_reader(r))
+        // A `params[:x]` read is typed `String?`, and for a form field
+        // that is what it is — but campfire's `params[:attachment]` is
+        // an UploadedFile when a file was posted, and the String
+        // grounding's `strip` on one is a NoMethodError. Rails'
+        // `Object#blank?` branches on the VALUE, and so does the
+        // runtime predicate: hand it the read.
+        let grounding = if is_params_read(r) { Grounding::Runtime } else { classify(r.ty.as_ref(), defs) };
+        (pred, grounding, r.ty.clone(), is_effect_free_reader(r))
     };
     // An ASSIGNMENT receiver — lobsters' login does
     // `if (rd = session[:redirect_to]).present?` — is not re-evaluable,

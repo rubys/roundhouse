@@ -2165,7 +2165,7 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
         if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
             return None;
         }
-        if !args.iter().any(arg_carries_a_model) {
+        if !args.iter().any(arg_carries_a_model) && !args.iter().any(query_carries_an_int) {
             return None;
         }
         let projected: Vec<Expr> = args.iter().map(project_arg).collect();
@@ -2196,15 +2196,28 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
 /// Only the VALUES move. A key is a Symbol by construction.
 fn project_arg(a: &Expr) -> Expr {
     if let ExprNode::Hash { entries, kwargs } = &*a.node {
-        if entries.iter().any(|(_, v)| records_a_model(v)) {
+        if entries.iter().any(|(k, v)| records_a_model(v) || int_in_query_slot(k, v)) {
             // `to_param`, not `id`: a query value is a String on the
-            // wire and the helper's option is typed `String?` from the
-            // app's own `params[:before]`. A bare `.id` reached spinel
+            // wire and the helper's option is typed `String?` (the
+            // name-based rule in `routes_to_library::param_ty` — only
+            // `id`/`*_id` keys are Integer). A bare `.id` reached spinel
             // as an Integer in a String slot — `no implicit conversion
-            // of Integer into String`.
+            // of Integer into String` — and so does a written-out
+            // Integer (`after: messages(:tenth).id`); the helper calls
+            // `to_s` on the option either way, so this is that call,
+            // one hop earlier.
             let projected = entries
                 .iter()
-                .map(|(k, v)| (k.clone(), if records_a_model(v) { to_s_of(id_of(v)) } else { v.clone() }))
+                .map(|(k, v)| {
+                    let v = if records_a_model(v) {
+                        to_s_of(id_of(v))
+                    } else if int_in_query_slot(k, v) {
+                        to_s_of(v.clone())
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), v)
+                })
                 .collect();
             return Expr::new(a.span, ExprNode::Hash { entries: projected, kwargs: *kwargs });
         }
@@ -2214,6 +2227,29 @@ fn project_arg(a: &Expr) -> Expr {
         return id_of(a);
     }
     a.clone()
+}
+
+/// An Integer-typed value under a query key the helper types
+/// `String?` — every key but `id` / `*_id` (Integer segments) and
+/// `format`.
+fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
+    let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
+        return false;
+    };
+    let key = key.as_str();
+    if key == "id" || key.ends_with("_id") || key == "format" {
+        return false;
+    }
+    matches!(v.ty, Some(crate::ty::Ty::Int))
+}
+
+/// Is there an Integer in a String-typed query slot anywhere
+/// `project_arg` would reach?
+fn query_carries_an_int(a: &Expr) -> bool {
+    match &*a.node {
+        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| int_in_query_slot(k, v)),
+        _ => false,
+    }
 }
 
 /// Is there a model instance anywhere `project_arg` would reach?
