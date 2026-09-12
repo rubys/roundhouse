@@ -34,7 +34,7 @@ require_relative "boot"
 module Main
   # Dispatch one request to a response descriptor — the single source
   # of routing / controller / flash / redirect logic. Returns the
-  # 5-tuple `[status, body, content_type, location, set_cookies]` (the
+  # 6-tuple `[status, body, content_type, location, set_cookies, extra_headers]` (the
   # exact argument shape `CgiIo.write_response` consumes), leaving
   # serialization to the caller. Two thin wrappers sit on top:
   # `run` (CGI byte stream — tests + one-shot script mode) and
@@ -56,7 +56,7 @@ module Main
   # hygiene, not a measured win. (Benign race under Puma threads: both
   # winners compute the same array.)
   def self.route_table
-    @route_table ||= [RouteTable.root] + RouteTable.table
+    @route_table ||= [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
   end
 
   def self.dispatch_core(env, stdin)
@@ -115,7 +115,7 @@ module Main
     matched = ActionDispatch::Router.match(request[:method], request_path,
                            route_table)
     if matched.nil?
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}]
     end
     # A `(.:format)` EXTENSION the router stripped off the path
     # (`/rooms/3/refresh.turbo_stream`). The `.json` sniff above runs
@@ -197,7 +197,7 @@ module Main
     begin
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to
@@ -233,10 +233,14 @@ module Main
       out_cookies[session_cookie] = session_out.empty? ? nil : session_out
     end
     is_redirect = controller.status >= 300 && controller.status < 400
+    # Headers the action set beyond Content-Type/Location — a
+    # `Content-Disposition` on a download, the Cache-Control a blob
+    # route asks for — ride as the tuple's sixth element.
+    extra_headers = controller.headers
     if is_redirect
       [controller.status,
        %(<a href="#{controller.location}">Redirecting</a>),
-       "text/html; charset=utf-8", controller.location, out_cookies]
+       "text/html; charset=utf-8", controller.location, out_cookies, extra_headers]
     else
       # The controller body IS the full page: the Ruby emit path's
       # `apply_layout_lowering` wraps each html action render in
@@ -249,16 +253,21 @@ module Main
       # render call site (`render …, content_type:`), so the controller's
       # value ships as-is. Turbo REQUIRES `text/vnd.turbo-stream.html`
       # here — it ignores a response typed text/html.
+      # An html-format action that answered with another type
+      # (`send_data … type: "image/png"` — a served avatar or logo)
+      # keeps that type: the default is only the default. Same rule
+      # the spinel dispatcher applies.
       if controller.request_format == :json ||
-         controller.request_format == :turbo_stream
+         controller.request_format == :turbo_stream ||
+         controller.content_type != "text/html; charset=utf-8"
         [controller.status, controller.body,
-         controller.content_type, controller.location, out_cookies]
+         controller.content_type, controller.location, out_cookies, extra_headers]
       elsif controller.request_format == :rss
         [controller.status, controller.body,
-         "application/rss+xml; charset=utf-8", controller.location, out_cookies]
+         "application/rss+xml; charset=utf-8", controller.location, out_cookies, extra_headers]
       else
         [controller.status, controller.body,
-         "text/html; charset=utf-8", controller.location, out_cookies]
+         "text/html; charset=utf-8", controller.location, out_cookies, extra_headers]
       end
     end
   end
@@ -269,9 +278,10 @@ module Main
   # byte-for-byte what the prior `run` produced (same `write_response`
   # call), so those tests are unaffected by the refactor.
   def self.run(env, stdin, stdout)
-    status, body, content_type, location, set_cookies = dispatch_core(env, stdin)
+    status, body, content_type, location, set_cookies, extra_headers = dispatch_core(env, stdin)
     CgiIo.write_response(stdout, status, body,
-      content_type: content_type, location: location, set_cookies: set_cookies)
+      content_type: content_type, location: location, set_cookies: set_cookies,
+      extra_headers: extra_headers)
     nil
   end
 
@@ -286,10 +296,13 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
-    status, body, content_type, location, set_cookies =
+    status, body, content_type, location, set_cookies, extra_headers =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = { "content-type" => content_type }
     headers["location"] = location unless location.nil?
+    # A nil value is a header the app unset (`X-Rev` outside a deploy
+    # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
+    extra_headers.each { |k, v| headers[k.to_s.downcase] = v unless v.nil? }
     cookies = []
     set_cookies.each do |name, val|
       cookies << if val.nil?
@@ -311,6 +324,7 @@ module Main
     case sym
     when :articles then ArticlesController.new
     when :comments then CommentsController.new
+    else ActiveStorage::Routes.instantiate_controller(sym)
     end
   end
 

@@ -1553,6 +1553,7 @@ mod tests {
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
+            multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),

@@ -106,6 +106,15 @@ pub struct ParamsSpec {
     /// surface. Exactly one spec per resource can, and a resource whose
     /// lists all come from off-resource controllers has none.
     pub is_canonical: bool,
+    /// Permitted fields the resource's model declares `has_one_attached`
+    /// for (`:avatar` on `User`). These are FILE fields: a multipart
+    /// part rather than a String, read back as an
+    /// `ActionDispatch::Http::UploadedFile?` through the ruby family's
+    /// `UploadedFile.from_params`, and handed to the model's `<attr>=`
+    /// writer as-is. Filled by [`ParamsSpecs::mark_file_fields`] once
+    /// the models are known; empty until then, which is every field a
+    /// String — the shape every emitter already compiles.
+    pub file_fields: std::collections::BTreeSet<Symbol>,
 }
 
 /// Every distinct `(resource, fields)` permit list in the app, deduped.
@@ -155,6 +164,96 @@ impl ParamsSpecs {
         self.specs
             .iter()
             .find(|s| &s.resource == resource && s.is_canonical)
+    }
+
+    /// Mark each spec's `has_one_attached` fields (see
+    /// `ParamsSpec::file_fields`). The resource names its model the way
+    /// `scan_create_demand` matches them — `snake_case(Model) ==
+    /// resource` — so `:user` finds `User` and a list permitting
+    /// `:avatar` on it types that field as a file.
+    pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
+        for spec in &mut self.specs {
+            let Some(model) = models
+                .iter()
+                .find(|m| crate::naming::snake_case(m.name.0.as_str()) == spec.resource.as_str())
+            else {
+                continue;
+            };
+            for (_span, attr) in crate::lower::attached::attached_attrs(model) {
+                if spec.fields.contains(&attr) {
+                    spec.file_fields.insert(attr);
+                }
+            }
+        }
+    }
+}
+
+/// The type a permitted field carries on the synthesized class: a
+/// String — the request's own shape — or, for a `has_one_attached`
+/// field, the uploaded file a multipart part became (nil when the
+/// request carried none).
+fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
+    if spec.file_fields.contains(field) {
+        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil] }
+    } else {
+        Ty::Str
+    }
+}
+
+pub(crate) fn uploaded_file_class() -> ClassId {
+    ClassId(Symbol::from("ActionDispatch::Http::UploadedFile"))
+}
+
+fn uploaded_file_ty() -> Ty {
+    Ty::Class { id: uploaded_file_class(), args: vec![] }
+}
+
+/// The two reads a field takes off a params hash — was it provided,
+/// and what is it — as `(provided, value)`. A String field goes through
+/// `Params` (runtime/ruby/params.rb); a file field through the ruby
+/// family's `ActionDispatch::Http::UploadedFile.provided` /
+/// `.from_params`, the one narrowing of a params value to that class,
+/// kept out of `Params` because the strict targets' `ParamValue` union
+/// has no file arm (see the class's own header in
+/// runtime/spinel/multipart.rb). `sub` is the hash to read — the
+/// resource sub-hash in `from_raw`, the raw params in a helper that
+/// permits at the top level.
+fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Expr, Expr) {
+    use crate::lower::typing::with_ty;
+    let str_lit = |v: &str| {
+        with_ty(
+            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: v.to_string() } }),
+            Ty::Str,
+        )
+    };
+    let call = |recv: Vec<Symbol>, method: &str, args: Vec<Expr>, ret: Ty| {
+        with_ty(
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(span, ExprNode::Const { path: recv })),
+                    method: Symbol::from(method),
+                    args,
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            ret,
+        )
+    };
+    if spec.file_fields.contains(field) {
+        let uploaded: Vec<Symbol> =
+            uploaded_file_class().0.as_str().split("::").map(Symbol::from).collect();
+        (
+            call(uploaded.clone(), "provided", vec![sub.clone(), str_lit(field.as_str())], Ty::Bool),
+            call(uploaded, "from_params", vec![sub, str_lit(field.as_str())], field_ty(spec, field)),
+        )
+    } else {
+        let params = vec![Symbol::from("Params")];
+        (
+            call(params.clone(), "provided", vec![sub.clone(), str_lit(field.as_str())], Ty::Bool),
+            call(params, "str", vec![sub, str_lit(field.as_str()), str_lit("")], Ty::Str),
+        )
     }
 }
 
@@ -276,6 +375,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_to_attrs: false,
                 declaring: Vec::new(),
                 is_canonical: true,
+                file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
     }
@@ -323,6 +423,7 @@ fn record(
                 wants_to_attrs: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
+                file_fields: std::collections::BTreeSet::new(),
             });
         }
     }
@@ -684,30 +785,6 @@ fn build_params_object(
             raw_ty.clone(),
         )
     };
-    let str_lit = |v: &str| {
-        with_ty(
-            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: v.to_string() } }),
-            Ty::Str,
-        )
-    };
-    let params_call = |method: &str, args: Vec<Expr>, ret: Ty| {
-        with_ty(
-            Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(Expr::new(
-                        span,
-                        ExprNode::Const { path: vec![Symbol::from("Params")] },
-                    )),
-                    method: Symbol::from(method),
-                    args,
-                    block: None,
-                    parenthesized: true,
-                },
-            ),
-            ret,
-        )
-    };
     let setter = |name: String, value: Expr| {
         Expr::new(
             span,
@@ -753,18 +830,7 @@ fn build_params_object(
                 value.clone(),
             )
         } else {
-            (
-                params_call(
-                    "provided",
-                    vec![ivar_params(), str_lit(field.as_str())],
-                    Ty::Bool,
-                ),
-                params_call(
-                    "str",
-                    vec![ivar_params(), str_lit(field.as_str()), str_lit("")],
-                    Ty::Str,
-                ),
-            )
+            field_reads(spec, field, ivar_params(), span)
         };
         stmts.push(setter(format!("{}_provided=", field.as_str()), provided));
         stmts.push(setter(format!("{}=", field.as_str()), read));
@@ -1109,17 +1175,17 @@ pub fn synthesize_params_classes(specs: &ParamsSpecs) -> Vec<LibraryClass> {
 
 fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     let mut methods: Vec<MethodDef> = Vec::new();
-    methods.push(synth_params_initialize(&spec.class_id, &spec.fields));
+    methods.push(synth_params_initialize(spec));
     for field in &spec.fields {
-        methods.push(synth_attr_reader(&spec.class_id, field, Ty::Str));
-        methods.push(synth_attr_writer(&spec.class_id, field, Ty::Str));
+        methods.push(synth_attr_reader(&spec.class_id, field, field_ty(spec, field)));
+        methods.push(synth_attr_writer(&spec.class_id, field, field_ty(spec, field)));
         let flag = provided_field(field);
         methods.push(synth_attr_reader(&spec.class_id, &flag, Ty::Bool));
         methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
     }
-    methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
-    methods.push(synth_index_read(&spec.class_id, &spec.fields));
-    methods.push(synth_to_h(&spec.class_id, &spec.fields));
+    methods.push(synth_from_raw(spec));
+    methods.push(synth_index_read(spec));
+    methods.push(synth_to_h(spec));
     if spec.wants_to_attrs {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
     }
@@ -1157,7 +1223,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
 /// Ruby/Crystal/TS auto-init-from-attr_accessor convention. All
 /// fields are `Ty::Str` (CGI string-typed) per `synth_attr_reader`'s
 /// rule, so the literal default is consistently `""`.
-fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
+    let owner = &spec.class_id;
+    let fields = &spec.fields;
     let mut stmts: Vec<Expr> = Vec::new();
     {
         for field in fields {
@@ -1180,15 +1248,11 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         }
     }
     for field in fields {
-        let rhs = Expr {
-            span: Span::synthetic(),
-            node: Box::new(ExprNode::Lit { value: Literal::Str { value: String::new() } }),
-            ty: Some(Ty::Str),
-            effects: EffectSet::default(),
-            leading_blank_line: false,
-            diagnostic: None,
-            hint: None,
-            decisions: 0,
+        // A file field's "nothing" is nil, not "" — see `field_ty`.
+        let rhs = if spec.file_fields.contains(field) {
+            expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Nil))
+        } else {
+            expr(ExprNode::Lit { value: Literal::Str { value: String::new() } }, Some(Ty::Str))
         };
         stmts.push(Expr {
             span: Span::synthetic(),
@@ -1387,8 +1451,11 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
 /// into the nested resource hash that controller params arrive under
 /// (e.g. `{"article" => {"title" => …}}`); the empty-hash default keeps
 /// the field fetches non-divergent if the resource key is absent.
-fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> MethodDef {
+fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
     use crate::lower::typing::with_ty;
+    let owner = &spec.class_id;
+    let resource = &spec.resource;
+    let fields = &spec.fields;
     let params = Symbol::from("params");
     let sub = Symbol::from("sub");
     let instance = Symbol::from("instance");
@@ -1489,22 +1556,10 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
         );
         // Presence BEFORE value, so reading the pair top-to-bottom says
         // "was it provided, and what is it".
-        stmts.push(setter(
-            Symbol::from(format!("{}=", provided_field(field).as_str())),
-            call(
-                "provided",
-                vec![var(&sub, hash_ty.clone()), str_lit(field.as_str())],
-                Ty::Bool,
-            ),
-        ));
-        stmts.push(setter(
-            Symbol::from(format!("{}=", field.as_str())),
-            call(
-                "str",
-                vec![var(&sub, hash_ty.clone()), str_lit(field.as_str()), str_lit("")],
-                Ty::Str,
-            ),
-        ));
+        let (provided, read) =
+            field_reads(spec, field, var(&sub, hash_ty.clone()), Span::synthetic());
+        stmts.push(setter(Symbol::from(format!("{}=", provided_field(field).as_str())), provided));
+        stmts.push(setter(Symbol::from(format!("{}=", field.as_str())), read));
     }
 
     stmts.push(var(&instance, owner_ty.clone()));
@@ -1671,14 +1726,16 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
 ///
 /// Modeled on `model_to_library::schema::synth_index_read` — same Case
 /// over Symbol-literal patterns, same `Ty::Sym -> Untyped` signature.
-fn synth_index_read(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
+    let owner = &spec.class_id;
     let key = Symbol::from("key");
-    let arms: Vec<Arm> = fields
+    let arms: Vec<Arm> = spec
+        .fields
         .iter()
         .map(|field| Arm {
             pattern: Pattern::Lit { value: Literal::Sym { value: field.clone() } },
             guard: None,
-            body: expr(ExprNode::Ivar { name: field.clone() }, Some(Ty::Str)),
+            body: expr(ExprNode::Ivar { name: field.clone() }, Some(field_ty(spec, field))),
         })
         .collect();
 
@@ -1727,31 +1784,42 @@ fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
     }
 }
 
-fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
-    let entries: Vec<(Expr, Expr)> = fields
+fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
+    let owner = &spec.class_id;
+    let entries: Vec<(Expr, Expr)> = spec
+        .fields
         .iter()
         .map(|field| {
-            let key = Expr {
-                span: Span::synthetic(),
-                node: Box::new(ExprNode::Lit {
-                    value: Literal::Str { value: field.as_str().to_string() },
-                }),
-                ty: Some(Ty::Str),
-                effects: EffectSet::default(),
-                leading_blank_line: false,
-                diagnostic: None,
-                hint: None,
-                decisions: 0,
-            };
-            let value = Expr {
-                span: Span::synthetic(),
-                node: Box::new(ExprNode::Ivar { name: field.clone() }),
-                ty: Some(Ty::Str),
-                effects: EffectSet::default(),
-                leading_blank_line: false,
-                diagnostic: None,
-                hint: None,
-                decisions: 0,
+            let key = expr(
+                ExprNode::Lit { value: Literal::Str { value: field.as_str().to_string() } },
+                Some(Ty::Str),
+            );
+            let ivar = expr(ExprNode::Ivar { name: field.clone() }, Some(field_ty(spec, field)));
+            // A String hash cannot hold a file: the uploaded NAME stands
+            // in, which is what Rails' own `to_s` on one gives.
+            let value = if spec.file_fields.contains(field) {
+                expr(
+                    ExprNode::Send {
+                        recv: Some(expr(
+                            ExprNode::Const {
+                                path: uploaded_file_class()
+                                    .0
+                                    .as_str()
+                                    .split("::")
+                                    .map(Symbol::from)
+                                    .collect(),
+                            },
+                            None,
+                        )),
+                        method: Symbol::from("name_of"),
+                        args: vec![ivar],
+                        block: None,
+                        parenthesized: true,
+                    },
+                    Some(Ty::Str),
+                )
+            } else {
+                ivar
             };
             (key, value)
         })
@@ -1954,14 +2022,14 @@ pub fn rewrite_typed_bracket_to_field(expr: &Expr, specs: &ParamsSpecs) -> Expr 
     // fields before rewriting.
     let mut permitted_fields: std::collections::HashMap<
         ClassId,
-        (std::collections::HashSet<String>, Ty),
+        std::collections::HashMap<String, Ty>,
     > = std::collections::HashMap::new();
     for spec in specs.iter() {
-        let mut set = std::collections::HashSet::new();
+        let mut set = std::collections::HashMap::new();
         for f in &spec.fields {
-            set.insert(f.as_str().to_string());
+            set.insert(f.as_str().to_string(), field_ty(spec, f));
         }
-        permitted_fields.insert(spec.class_id.clone(), (set, Ty::Str));
+        permitted_fields.insert(spec.class_id.clone(), set);
     }
 
     map_expr(expr, &|e| {
@@ -1975,15 +2043,13 @@ pub fn rewrite_typed_bracket_to_field(expr: &Expr, specs: &ParamsSpecs) -> Expr 
             Some(Ty::Class { id, .. }) => id,
             _ => return None,
         };
-        let (fields, slot_ty) = permitted_fields.get(recv_class_id)?;
+        let fields = permitted_fields.get(recv_class_id)?;
         let key = match &*args[0].node {
             ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
             ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
             _ => return None,
         };
-        if !fields.contains(&key) {
-            return None;
-        }
+        let slot_ty = fields.get(&key)?;
         // Synthesize `recv.<field>` — a zero-arg Send to the typed
         // attr_reader. Carries the receiver's type forward and drops
         // the bracket-key arg.

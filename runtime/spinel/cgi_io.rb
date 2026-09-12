@@ -54,6 +54,14 @@ module CgiIo
       if length > 0 && ctype.start_with?("application/x-www-form-urlencoded")
         body = stdin.read(length).to_s
         parse_form_into(body, params)
+      elsif length > 0 && ctype.start_with?("multipart/form-data")
+        # File parts land in the params tree as UploadedFile objects
+        # under their bracket-nested name, the way Rack nests them; see
+        # runtime/multipart.rb.
+        body = stdin.read(length).to_s
+        form = ActionDispatch::Http::Multipart.parse(body, ctype)
+        form.fields.each { |k, v| assign_form_pair(params, k, v) }
+        form.files.each { |k, v| assign_form_pair(params, k, v) }
       end
     end
 
@@ -84,12 +92,13 @@ module CgiIo
 
   # Write a CGI response to the given writable IO. `set_cookies` is
   # `{ name => value | nil }`; nil clears the cookie via Max-Age=0.
-  def self.write_response(io, status, body, location: nil, content_type: "text/html; charset=utf-8", set_cookies: {})
+  def self.write_response(io, status, body, location: nil, content_type: "text/html; charset=utf-8", set_cookies: {}, extra_headers: {})
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
     io.write("Content-Type: #{content_type}\r\n")
     io.write("Location: #{location}\r\n") unless location.nil?
+    extra_headers.each { |k, v| io.write("#{k}: #{v}\r\n") unless v.nil? }
     set_cookies.each do |name, val|
       if val.nil?
         io.write("Set-Cookie: #{name}=; Path=/; Max-Age=0\r\n")

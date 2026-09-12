@@ -115,66 +115,146 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         adapter_iface,
     );
 
-    // Active Storage's value type — what a `has_one_attached` reader
-    // answers. The analyzer knew NOTHING about Active Storage, so the
-    // reader `lower::attached` synthesizes (`def avatar;
+    // Active Storage — the value type a `has_one_attached` reader
+    // answers, the blob behind it, the identity variant, and the
+    // storage-service seam. The analyzer knew NOTHING about Active
+    // Storage, so the reader `lower::attached` synthesizes (`def avatar;
     // ActiveStorage::Attached.new(…); end`) had no type to answer with
     // and every `user.avatar` read was a dispatch failure — including
     // the `@bot.avatar` in a partial, which is how it stayed hidden
     // until `@bot` itself started resolving.
     //
-    // The method list is `runtime/ruby/active_storage.rbs` verbatim, so
-    // the analyzer and a strict target agree. `variant` is Untyped
-    // because the runtime raises on it (no processor, no variant
-    // records) — the honest type for a method that has no value.
+    // The method lists are `runtime/ruby/active_storage.rbs` verbatim,
+    // so the analyzer and a strict target agree.
     {
+        let attached_id = ClassId(Symbol::from("ActiveStorage::Attached"));
+        let blob_id = ClassId(Symbol::from("ActiveStorage::Blob"));
+        let metadata_id = ClassId(Symbol::from("ActiveStorage::BlobMetadata"));
+        let variant_id = ClassId(Symbol::from("ActiveStorage::VariantWithRecord"));
+        let service_id = ClassId(Symbol::from("ActiveStorage::Service"));
+        let analyzer_id = ClassId(Symbol::from("ActiveStorage::ImageAnalyzer"));
+        let class_ty = |id: &ClassId| Ty::Class { id: id.clone(), args: vec![] };
+        let nilable = |ty: Ty| Ty::Union { variants: vec![ty, Ty::Nil] };
+        let nilable_str = nilable(Ty::Str);
+
         let mut attached = ClassInfo::default();
-        let nilable_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
         for (m, ty) in [
             ("attached?", Ty::Bool),
-            ("variable?", Ty::Bool),
-            ("variant", Ty::Untyped),
-            ("url", Ty::Str),
+            ("blob", nilable(class_ty(&blob_id))),
             ("filename", nilable_str.clone()),
             ("content_type", nilable_str.clone()),
-            ("blob_column", nilable_str.clone()),
+            ("key", Ty::Str),
+            ("signed_id", Ty::Str),
+            ("byte_size", Ty::Int),
+            ("metadata", class_ty(&metadata_id)),
             ("video?", Ty::Bool),
             ("image?", Ty::Bool),
             ("audio?", Ty::Bool),
+            ("variable?", Ty::Bool),
+            ("previewable?", Ty::Bool),
             ("representable?", Ty::Bool),
             ("analyze", Ty::Nil),
+            ("variant", class_ty(&variant_id)),
+            ("representation", class_ty(&variant_id)),
+            ("preview", class_ty(&variant_id)),
+            ("url", Ty::Str),
+            ("attach_blob", Ty::Nil),
             ("attach", Ty::Nil),
-            ("blob_key", Ty::Str),
             ("purge", Ty::Nil),
             ("destroy", Ty::Nil),
         ] {
             attached.instance_methods.insert(Symbol::from(m), ty);
         }
-        classes.insert(ClassId(Symbol::from("ActiveStorage::Attached")), attached);
-    }
-
-    // The CLASS-side surface an app reaches directly:
-    // `ActiveStorage::Blob.service.path_for(key)` and
-    // `ActiveStorage::Blob.create_and_upload!`. Both RAISE in
-    // `runtime/ruby/active_storage.rb` — no storage service is modeled
-    // — but they are typed as what Rails answers, so a chain off one
-    // resolves and the gap has one named home instead of stopping the
-    // build. Method list is active_storage.rbs verbatim.
-    {
-        let service_id = ClassId(Symbol::from("ActiveStorage::Service"));
-        let blob_id = ClassId(Symbol::from("ActiveStorage::Blob"));
-        let mut service = ClassInfo::default();
-        service.instance_methods.insert(Symbol::from("path_for"), Ty::Str);
-        classes.insert(service_id.clone(), service);
+        classes.insert(attached_id, attached);
 
         let mut blob = ClassInfo::default();
-        blob.class_methods
-            .insert(Symbol::from("service"), Ty::Class { id: service_id, args: vec![] });
-        blob.class_methods.insert(
-            Symbol::from("create_and_upload!"),
-            Ty::Class { id: blob_id.clone(), args: vec![] },
+        for (m, ty) in [
+            ("id", Ty::Int),
+            ("key", Ty::Str),
+            ("filename", Ty::Str),
+            ("content_type", Ty::Str),
+            ("byte_size", Ty::Int),
+            ("metadata", class_ty(&metadata_id)),
+            ("signed_id", Ty::Str),
+            ("download", Ty::Str),
+            ("purge", Ty::Nil),
+            ("video?", Ty::Bool),
+            ("image?", Ty::Bool),
+            ("audio?", Ty::Bool),
+            ("variable?", Ty::Bool),
+            ("url", Ty::Str),
+        ] {
+            blob.instance_methods.insert(Symbol::from(m), ty);
+        }
+        for (m, ty) in [
+            ("service", class_ty(&service_id)),
+            ("find", nilable(class_ty(&blob_id))),
+            ("find_by_key", nilable(class_ty(&blob_id))),
+            ("find_signed", nilable(class_ty(&blob_id))),
+            ("create_and_upload!", class_ty(&blob_id)),
+            ("from_attachable", nilable(class_ty(&blob_id))),
+            ("generate_key", Ty::Str),
+        ] {
+            blob.class_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(blob_id.clone(), blob);
+
+        let mut metadata = ClassInfo::default();
+        metadata.instance_methods.insert(Symbol::from("[]"), nilable(Ty::Int));
+        metadata.instance_methods.insert(Symbol::from("width"), Ty::Int);
+        metadata.instance_methods.insert(Symbol::from("height"), Ty::Int);
+        metadata.instance_methods.insert(Symbol::from("to_json"), Ty::Str);
+        classes.insert(metadata_id, metadata);
+
+        let mut variant = ClassInfo::default();
+        variant.instance_methods.insert(Symbol::from("processed"), class_ty(&variant_id));
+        variant.instance_methods.insert(Symbol::from("image"), class_ty(&ClassId(Symbol::from("ActiveStorage::Attached"))));
+        variant.instance_methods.insert(Symbol::from("blob"), nilable(class_ty(&blob_id)));
+        variant.instance_methods.insert(Symbol::from("key"), Ty::Str);
+        variant.instance_methods.insert(Symbol::from("url"), Ty::Str);
+        classes.insert(variant_id, variant);
+
+        let mut service = ClassInfo::default();
+        service.instance_methods.insert(Symbol::from("path_for"), Ty::Str);
+        service.instance_methods.insert(Symbol::from("upload"), Ty::Nil);
+        service.instance_methods.insert(Symbol::from("download"), Ty::Str);
+        service.instance_methods.insert(Symbol::from("delete"), Ty::Nil);
+        service.instance_methods.insert(Symbol::from("exist?"), Ty::Bool);
+        classes.insert(service_id, service);
+
+        let mut analyzer = ClassInfo::default();
+        analyzer.class_methods.insert(
+            Symbol::from("dimensions"),
+            Ty::Array { elem: Box::new(Ty::Int) },
         );
-        classes.insert(blob_id, blob);
+        classes.insert(analyzer_id, analyzer);
+
+        // The multipart part a permitted `has_one_attached` field
+        // carries (`runtime/spinel/multipart.rbs` verbatim): what the
+        // synthesized params class types the field as, and what
+        // `Blob.from_attachable` narrows to.
+        let mut uploaded = ClassInfo::default();
+        uploaded.instance_methods.insert(Symbol::from("original_filename"), Ty::Str);
+        uploaded.instance_methods.insert(Symbol::from("content_type"), Ty::Str);
+        uploaded.instance_methods.insert(Symbol::from("read"), Ty::Str);
+        uploaded.instance_methods.insert(Symbol::from("size"), Ty::Int);
+        uploaded.instance_methods.insert(Symbol::from("to_s"), Ty::Str);
+        let uploaded_id = ClassId(Symbol::from("ActionDispatch::Http::UploadedFile"));
+        uploaded.class_methods.insert(
+            Symbol::from("from_params"),
+            nilable(class_ty(&uploaded_id)),
+        );
+        uploaded.class_methods.insert(Symbol::from("provided"), Ty::Bool);
+        uploaded.class_methods.insert(Symbol::from("name_of"), Ty::Str);
+        classes.insert(uploaded_id, uploaded);
+
+        let mut storage = ClassInfo::default();
+        for m in ["default_variable_content_types", "variable_content_types"] {
+            storage.class_methods.insert(Symbol::from(m), Ty::Array { elem: Box::new(Ty::Str) });
+        }
+        storage.class_methods.insert(Symbol::from("variable_content_type?"), Ty::Bool);
+        storage.class_methods.insert(Symbol::from("url_filename"), Ty::Str);
+        classes.insert(ClassId(Symbol::from("ActiveStorage")), storage);
     }
 
     // Arel — the low-level SQL AST that advanced scopes reach for

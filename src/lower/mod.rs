@@ -118,6 +118,7 @@ pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
+pub mod attached_url;
 pub mod send_file;
 pub mod helper_kwargs;
 pub mod kwrest_forward;
@@ -517,6 +518,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraint of its own: it matches on Rails' own keyword spelling,
     // which no earlier pass rewrites.
     ("attach", &[]),
+    // `image_tag(user.avatar)` → `image_tag(user.avatar.url)`: an
+    // attachment in a URL position asks itself for its route, so the
+    // String-typed helper gets a String. Matches the reader's NAME,
+    // which no earlier pass rewrites; no constraint.
+    ("attached_url", &[]),
     // `send_file path, content_type:` → `send_data File.binread(path),
     // type:`. Reads Rails' own keyword spelling, which no earlier pass
     // rewrites, and writes a `send_data` the runtime already answers —
@@ -777,6 +783,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("duration");
     attached::apply_attach_lowering(app);
     ran!("attach");
+    attached_url::apply_attached_url_lowering(app);
+    ran!("attached_url");
     send_file::apply_send_file_lowering(app);
     ran!("send_file");
     diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));

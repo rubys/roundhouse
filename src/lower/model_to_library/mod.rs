@@ -736,6 +736,14 @@ pub fn writable_field_set(
     for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
         writable.insert(attr);
     }
+    // `has_one_attached :avatar` synthesizes `avatar=` the same way, so
+    // a permitted `:avatar` (campfire's signup, profile, bot and account
+    // forms all permit one) reaches the record instead of being dropped
+    // at the permit filter — which is what made every avatar picker
+    // post a file nothing read.
+    for (_span, attr) in crate::lower::attached::attached_attrs(model) {
+        writable.insert(attr);
+    }
     writable
 }
 

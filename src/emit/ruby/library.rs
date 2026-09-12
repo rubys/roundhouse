@@ -6716,8 +6716,10 @@ end
             // One join for every record's attachment row; a record the
             // query did not name gets a proxy that already knows it has
             // nothing (id 0), so its `attached?` is a field read too.
-            // Three typed hashes rather than one hash of rows: every
-            // value keeps its own type.
+            // The blob columns are `ActiveStorage::Blob.columns`, so
+            // this query and the proxy's own cannot disagree about the
+            // row shape; two typed hashes (attachment id, blob) rather
+            // than one hash of rows so every value keeps its own type.
             PreloadKind::Attached { attr, owner } => {
                 let _ = write!(
                     src,
@@ -6728,23 +6730,21 @@ def self._preload_batch_{name}(records)
     ids << r.id
   end
   att_ids = {{}}
-  filenames = {{}}
-  content_types = {{}}
+  blobs = {{}}
   if ids.length > 0
-    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, b.filename AS filename, b.content_type AS content_type FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.escape_int_list(ids) + ")").each do |row|
+    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, " + ActiveStorage::Blob.columns("b") + " FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.escape_int_list(ids) + ")").each do |row|
       rid = row["record_id"].to_i
       att_ids[rid] = row["attachment_id"].to_i
-      filenames[rid] = row["filename"].to_s
-      content_types[rid] = row["content_type"].to_s
+      blobs[rid] = ActiveStorage::Blob.from_row(row)
     end
   end
   records.each do |r|
     att = ActiveStorage::Attached.new("{owner}", r.id, "{attr}")
     found = att_ids[r.id]
     if found.nil?
-      att._preload_row(0, "", "")
+      att._preload_row(0, nil)
     else
-      att._preload_row(found, filenames[r.id] || "", content_types[r.id] || "")
+      att._preload_row(found, blobs[r.id])
     end
     r._preload_{name}(att)
   end

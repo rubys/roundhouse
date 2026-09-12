@@ -1,0 +1,35 @@
+# Typing for runtime/spinel/multipart.rb.
+module ActionDispatch
+  module Http
+    class UploadedFile
+      @data: String
+      @original_filename: String
+      @content_type: String
+      attr_reader original_filename: String
+      attr_reader content_type: String
+      def initialize: (String data, String original_filename, String content_type) -> void
+      def read: () -> String
+      def size: () -> Integer
+      def to_s: () -> String
+      def self.from_params: (Hash[String, untyped] sub, String key) -> ActionDispatch::Http::UploadedFile?
+      def self.provided: (Hash[String, untyped] sub, String key) -> bool
+      def self.name_of: (ActionDispatch::Http::UploadedFile? file) -> String
+    end
+
+    module Multipart
+      class Form
+        @fields: Hash[String, String]
+        @files: Hash[String, ActionDispatch::Http::UploadedFile]
+        attr_reader fields: Hash[String, String]
+        attr_reader files: Hash[String, ActionDispatch::Http::UploadedFile]
+        def initialize: () -> void
+        def add_field: (String name, String value) -> nil
+        def add_file: (String name, ActionDispatch::Http::UploadedFile file) -> nil
+      end
+      def self.boundary: (String content_type) -> String
+      def self.disposition_param: (String header, String attr) -> String
+      def self.parse: (String body, String content_type) -> ActionDispatch::Http::Multipart::Form
+      def self.add_part: (ActionDispatch::Http::Multipart::Form form, String headers, String content) -> nil
+    end
+  end
+end

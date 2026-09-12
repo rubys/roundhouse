@@ -210,6 +210,9 @@ pub struct ViewLowerCtx<'a> {
     known_models: Vec<String>,
     closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
     dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
+    /// Partials whose body renders a `file_field` — see
+    /// `ViewCtx::multipart_partials`.
+    multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
     partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
     locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
@@ -272,6 +275,7 @@ impl<'a> ViewLowerCtx<'a> {
                 .collect(),
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
+            multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
@@ -661,6 +665,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
+        multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
         view_name: view.name.as_str().to_string(),
@@ -2431,6 +2436,31 @@ pub(super) fn partial_extras_map(
     out
 }
 
+/// The partials whose body calls `<form>.file_field` on any receiver
+/// (the builder arrives as a local of whatever name the caller chose).
+fn multipart_partials(views: &[View]) -> std::collections::HashSet<ViewKey> {
+    fn has_file_field(e: &Expr) -> bool {
+        if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "file_field") {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |child| {
+            if !found && has_file_field(child) {
+                found = true;
+            }
+        });
+        found
+    }
+    views
+        .iter()
+        .filter(|v| {
+            let (_dir, base) = split_view_name(v.name.as_str());
+            base.starts_with('_') && has_file_field(&v.body)
+        })
+        .filter_map(view_key_of)
+        .collect()
+}
+
 fn view_key_of(v: &View) -> Option<ViewKey> {
     let (dir, base) = split_view_name(v.name.as_str());
     if dir.is_empty() {
@@ -2681,7 +2711,7 @@ fn collect_render_keys(
 /// A slash form (`"stories/subnav"`) names an explicit module; a bare
 /// name (`"active"`) resolves relative to `dir` (the rendering view's
 /// directory) — matching Rails' relative-partial-path lookup.
-fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
+pub(super) fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
     match name.rsplit_once('/') {
         Some((d, n)) => (camelize_path(&snake_case(d)), n.trim_start_matches('_').to_string()),
         None => (
@@ -3781,6 +3811,13 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// Partials whose body renders a `file_field` (`multipart_partials`).
+    /// A `form_with` block that renders one of these is a multipart
+    /// form exactly as if the field were in the block itself — Rails'
+    /// builder carries the flag across the partial boundary — so
+    /// `form_with::block_has_file_field` looks the rendered partial up
+    /// here.
+    pub(super) multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
     /// Dynamic-partial pools, `(view-dir, ivar) -> [pool entries]`
     /// (`dynamic_partial_pools`): each entry is a partial-name literal a
     /// controller assigns plus its options-form `locals:`. `emit_render_

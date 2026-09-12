@@ -2249,7 +2249,11 @@ fn patch_harness_dispatch(content: &mut String, generated: &str) {
 
 fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_requires: bool) {
     use std::fmt::Write;
-    const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    end\n  end";
+    // The `else` arm is the Active Storage engine's three controllers
+    // (`runtime/active_storage_disk.rb`), mounted beside the app's
+    // table in `Main.route_table`; a symbol no app arm names is one
+    // of theirs.
+    const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end";
 
     let flat = crate::lower::flatten_routes(app);
     let mut seen = std::collections::HashSet::new();
@@ -2295,8 +2299,9 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     if arms.is_empty() {
         return;
     }
-    let generated =
-        format!("  def self.instantiate_controller(sym)\n    case sym\n{arms}    end\n  end");
+    let generated = format!(
+        "  def self.instantiate_controller(sym)\n    case sym\n{arms}    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end"
+    );
 
     // The test harness dispatches controller tests through its own copy
     // of the same table, hard-coded to the blog. campfire's spliced
@@ -2311,7 +2316,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
         .replace("app/controllers/", "../app/controllers/")
         .replace("    when ", "                 when ");
     let generated_test_case = format!(
-        "    controller = case matched.controller\n{test_arms}                 end"
+        "    controller = case matched.controller\n{test_arms}                 else ActiveStorage::Routes.instantiate_controller(matched.controller)\n                 end"
     );
 
     for (path, content) in files.iter_mut() {
@@ -2729,6 +2734,17 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         let rbs = fs::read_to_string("runtime/spinel/nokogiri_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/nokogiri_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/nokogiri_spinel.rbs".to_string(), rbs));
+    }
+
+    // Multipart + Active Storage disk sidecars — the ruby family's
+    // `ActionDispatch::Http::UploadedFile` / `Multipart` and the
+    // reopen of the shared Active Storage contract with a disk service
+    // and the engine's routes; the .rbs pin the file's bytes and the
+    // controllers' shapes.
+    for stem in ["multipart", "active_storage_disk"] {
+        let path = format!("runtime/spinel/{stem}.rbs");
+        let rbs = fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+        files.push((format!("sig/runtime/{stem}.rbs"), rbs));
     }
 
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop

@@ -1997,6 +1997,35 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         stmts.push(guard_unless_nil(lookup, assign));
     }
 
+    // `has_one_attached` attrs — `Message.create_with_attachment!
+    // (attachment: file)` — through the synthesized `<attr>=` writer,
+    // which stages the attachable for the after-save. UNCAST: the
+    // writer takes `untyped` (an uploaded file, a blob, a signed id),
+    // and it is the runtime's `Blob.from_attachable` that narrows.
+    for (_span, attr) in crate::lower::attached::attached_attrs(model) {
+        let lookup = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(attrs.clone())),
+                method: Symbol::from("[]"),
+                args: vec![lit_sym(attr.clone())],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let assign = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: Symbol::from(format!("{}=", attr.as_str())),
+                args: vec![lookup.clone()],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(guard_unless_nil(lookup, assign));
+    }
+
     // has_many eager-load cache fields (issue #27): initialize each
     // `@<assoc>_cache = [] of <Target>` + `@<assoc>_loaded = false` so
     // the cache-aware reader's `@cache` reads/returns are non-nilable in

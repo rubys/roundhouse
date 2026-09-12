@@ -166,8 +166,11 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Collect controller `permit(...)` declarations so the model lowerer
     // can synthesize `from_params(p: <Resource>Params)` factories sized
     // to the permitted-fields list. See `controller_to_library/params.rs`.
-    let params_specs =
+    let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    // A permitted `has_one_attached` field is a FILE on the params
+    // class; the model's `from_params` reads it as one.
+    params_specs.mark_file_fields(&app.models);
 
     // Bulk lower so per-resource synthesized siblings (`<Model>Row`)
     // ride alongside the model class. Each returned `LibraryClass`
@@ -522,6 +525,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             format_breadth,
             route_id_segments: Some(&route_ids),
             inferred_params: Some(&app.inferred_method_params),
+            models: &app.models,
         },
     )
 }

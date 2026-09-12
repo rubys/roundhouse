@@ -82,23 +82,9 @@ module ActionCable
   end
 end
 
+# `ActionDispatch::Http::UploadedFile` is the runtime's own
+# (sig/runtime/multipart.rbs); `fixture_file_upload` builds one.
 module ActionDispatch
-  module Http
-    class UploadedFile
-      @path: String
-
-      def initialize: (String path, String content_type) -> void
-      def original_filename: () -> String
-      def content_type: () -> String
-  # ASSEMBLED from the fields this response carries (see the .rb), and
-  # lowercase-keyed the way Rack 3 normalizes — the values are the
-  # response's own Strings, not the caller's Hash.
-  def headers: () -> Hash[String, String]
-      def read: () -> String
-      def size: () -> Integer
-      def to_s: () -> String
-    end
-  end
 
   # Where Rails keeps `fixture_file_upload` — a plain
   # `ActiveSupport::TestCase` does not get it for free, so a test that
@@ -124,6 +110,10 @@ class ActionResponse
   # `untyped` is what that is, and the second declared bag in this
   # harness for the same kind of reason as the first.
   def parsed_body: () -> untyped
+  # ASSEMBLED from the fields this response carries (see the .rb), and
+  # lowercase-keyed the way Rack 3 normalizes — the values are the
+  # response's own Strings, not the caller's Hash.
+  def headers: () -> Hash[String, String]
 
   def initialize: (
     status: Integer,

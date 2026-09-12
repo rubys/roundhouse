@@ -262,6 +262,12 @@ pub struct LowerControllerOptions<'a> {
     /// existed.
     pub inferred_params:
         Option<&'a std::collections::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
+    /// The app's models — read for `has_one_attached` declarations, so
+    /// a permitted field that is one (`:avatar`) is typed as an
+    /// uploaded file on the synthesized params class
+    /// (`ParamsSpecs::mark_file_fields`). Empty (the default) types
+    /// every field a String, which is what it was before.
+    pub models: &'a [crate::dialect::Model],
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -278,6 +284,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         format_breadth,
         route_id_segments,
         inferred_params,
+        models,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
@@ -287,7 +294,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
     // rewrite controller bodies + register the class with the typer.
-    let params_specs = self::params::collect_specs(controllers);
+    let mut params_specs = self::params::collect_specs(controllers);
+    params_specs.mark_file_fields(models);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,

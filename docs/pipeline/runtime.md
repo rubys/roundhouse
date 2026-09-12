@@ -571,25 +571,48 @@ request body a bot receives) holds strings, integers and nested hashes
 of the same; a value JSON cannot encode raises rather than rendering
 wrongly.
 
-### `ActiveStorage::Blob.service` and `create_and_upload!` raise
+### Active Storage: rows and bytes are modeled, variants are identity
 
-The last unnamed corner of Active Storage's bytes half. `runtime/ruby/
-active_storage.rb` now defines `ActiveStorage::Blob.service` (answering
-an `ActiveStorage::Service` whose `path_for` raises) and
-`ActiveStorage::Blob.create_and_upload!` (which raises), in the same
-voice and for the same reason as `Attached#url` and
-`RouteHelpers.rails_blob_path` beside them: no storage service, no
-processor, no signed ids, and the shared runtime does no file I/O
-anywhere.
+`runtime/ruby/active_storage.rb` models the attachment ROWS and the
+BLOB (`ActiveStorage::Blob`: key, filename, content type, byte size,
+the `metadata` column's width/height); `ActiveStorage::Service` is the
+bytes seam, whose methods RAISE in the shared runtime (it does no file
+I/O) and are reopened by the ruby family in
+`runtime/spinel/active_storage_disk.rb` with Rails' own
+`storage/files/<xx>/<yy>/<key>` disk layout (`tmp/storage` under
+RAILS_ENV=test). `Blob.create_and_upload!` writes the row and hands the
+bytes to the service; `Attached#attach` / `attach_blob` write the
+attachment row. A `has_one_attached` model gets an `<attr>=` writer
+(`lower::attached`) that stages an attachable — an
+`ActionDispatch::Http::UploadedFile` from a multipart part, a `Blob`, a
+signed id — and an `after_save` that attaches it once the record has
+an id, so `create!(attachment: file)`, `update!(avatar: file)` and a
+permitted `:avatar` param all reach the store.
 
-What changes is where the gap lands. campfire writes both —
-`Blob.service.path_for(variant.key)` serves the custom account logo and
-a bot's webp avatar, `create_and_upload!` stores a webhook's attachment
-reply — and until these existed each was an unresolved call that stopped
-the whole strict build, which reads like a compiler bug rather than the
-gap it is. `Service` is a class rather than a module because
-`Blob.service` is a singleton in Rails and app code chains off it, so a
-real service can land later without touching a call site.
+**Variants are IDENTITY.** No image processor exists on any target, so
+`variant`, `representation` and `.processed` answer an
+`ActiveStorage::VariantWithRecord` whose `key` is the original blob's:
+the "thumb" a view asks for is served at the upload's own size, and the
+avatar and logo controllers serve the original bytes under the content
+type they hard-code (`image/webp`, `image/png` — a JPEG upload goes out
+mislabelled; browsers sniff `<img>` sources). `variable?` is Rails'
+content-type question, answered from `variable_content_types` minus
+what the app's initializer subtracts (ingest lifts
+`config.active_storage.variable_content_types -= %w[…]` onto the
+`Rails::Application` reopen), so a bmp avatar falls back to initials
+exactly as in campfire. `preview` (a video poster, a PDF page) raises
+and `previewable?` is false — there is no still to serve, and serving
+the video's bytes in an `<img>` would be the failure that looks like
+success. The image DIMENSIONS are read from the file header at upload
+(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
+`metadata[:width]` answers what Rails' analyzer would.
+
+**The visible divergence** on campfire's own suite: the account-logo
+tests that decode the served PNG and assert 512×512 fail (the bytes are
+the upload), and `test_creating_a_message_creates_video_preview` fails
+on the `preview` raise. Both are the honest signal that a processor is
+absent; a resizing processor is a spinel package (libvips or
+stb_image) and its own change.
 
 ### `ActionCable.server` exists; the registry did not say so
 
@@ -807,31 +830,56 @@ asked for. A String or nested value needs the renderer widened — and
 that is a monomorphization decision to take deliberately, not a cast to
 sneak in.
 
-### `rails_blob_path` raises rather than returning a URL
+### Active Storage's engine routes are mounted by the dispatcher
 
-Active Storage's engine-mounted route helpers are not in the app's
-`config/routes.rb`, so the generator that reads it never emits them.
-Until now that meant a view writing `rails_blob_path(message.attachment,
-disposition: "attachment")` — campfire's download link, on every
-attachment message — emitted a call to a method NOTHING defined: a
-NoMethodError at render time on CRuby, and `unsupported call:
-(CallNode 'rails_blob_path')` on a strict target, which reads like a
-compiler bug rather than a missing feature.
+Active Storage's route helpers are not in the app's `config/routes.rb`,
+so the generator that reads it never emits them. `RouteHelpers
+.rails_blob_path` / `_url` and `rails_representation_path` / `_url`
+live on the `RouteHelpers` reopen in `runtime/ruby/active_storage.rb`
+and answer Rails' own URL shapes:
 
-They now exist, on `RouteHelpers` in `runtime/ruby/active_storage.rb`,
-and they RAISE — the same voice and the same reason as
-`ActiveStorage::Attached#url` beside them: the bytes half of Active
-Storage is a storage service, a processor and a signed-id scheme, none
-of which exist here, and a plausible-looking URL is a page that renders
-a broken image. What changed is that the gap has one named home every
-target compiles instead of a missing method.
+    /rails/active_storage/blobs/redirect/:signed_id/*filename
+    /rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename
+    /rails/active_storage/disk/:encoded_key/*filename
 
-**Still open, and visible in any campfire emit:** not every call site is
-qualified. `lower::controller_to_library::rewrites::rewrite_route_helpers`
-adds the `RouteHelpers.` receiver for controllers and tests; a library
-class (campfire's `Messages::AttachmentPresentation`) and at least one
-view interpolation context keep the bare `rails_blob_path(...)`, so the
-same helper is spelled two ways in one emitted tree.
+The three controllers behind them (`ActiveStorage::Blobs::
+RedirectController`, `Representations::RedirectController`,
+`DiskController`) are ruby-family runtime (`active_storage_disk.rb`);
+`ActiveStorage::Routes.table` is appended to `Main.route_table` by
+both dispatchers and the test harness, and their `instantiate_
+controller` falls through to `ActiveStorage::Routes.instantiate_
+controller` for a symbol no app arm names. The first two answer a 302
+to the disk route, as Rails does; the disk route serves the bytes with
+`Content-Disposition` (what makes a Download link download) and the
+hour of public caching the app's initializer asks for. The router
+gained `*glob` segments for the trailing filename.
+
+Signed ids are the `signed_id` envelope under Active Storage's own
+salt (`blob_id` for the blob, `disk_key` with a five-minute expiry
+for the disk token); `Blob.find_signed` verifies them.
+
+`url_for(attachment)` / `image_tag(attachment)` — Rails'
+`polymorphic_url` on an attachment — are grounded at the call site by
+`lower::attached_url`: an attachment-shaped argument (a `has_one_
+attached` reader by NAME, or a variant chained off one) in a URL
+position becomes `<expr>.url`, so the String-typed helper gets a
+String. A helper parameter that only HOLDS one (campfire's
+`broadcast_image_tag(image, …)`) reaches the ruby family's
+`polymorphic_url` reopen, which narrows by class at run time.
+
+**Multipart.** `runtime/spinel/multipart.rb` parses
+`multipart/form-data` on both serving paths (tep's three body drains,
+`CgiIo.parse_request`); file parts land in the params tree as
+`UploadedFile` objects under their bracket-nested name, text parts as
+Strings. `<Resource>Params` types a permitted `has_one_attached` field
+as `UploadedFile?` and reads it through `UploadedFile.from_params` —
+the one narrowing of a params value to that class, kept out of
+`Params` because the strict targets' `ParamValue` union has no file
+arm. `form_with` renders `enctype="multipart/form-data"` when its block
+(or a partial the block renders) calls `file_field`, which is what
+Rails' builder does for it. `ActionController::Base#headers` now reach
+the wire on both dispatchers (nil values dropped — campfire's `X-Rev`
+is an unset ENV outside its deploy).
 
 ### A `has_secure_token` column fills at CREATE, not at initialize
 
@@ -1176,18 +1224,20 @@ There is no job here and an orphaned blob row would make `attached?`
 answer for a file no longer attached, so `destroy` is `purge` — the same
 reasoning `attach`'s replace-first already carries.
 
-### An account logo is served STOCK, never resized
+### An account logo is served at its uploaded size, never resized
 
-`variable?` is false and `variant` raises (no blob store, no processor),
-so `Current.account&.logo_variant(size)` answers nil and campfire's logo
-endpoint falls through to its stock icon on every request — including
-the ones where a custom logo IS attached.
+`variable?` is Rails' content-type answer and `variant` is identity
+(see "Active Storage: rows and bytes are modeled, variants are
+identity"), so `Current.account&.logo_variant(size)` answers a variant
+of the ORIGINAL and campfire's logo endpoint serves the upload's own
+bytes, labelled `image/png` by the controller.
 
-Worth naming because of how it MEASURES: campfire's own tests assert the
-response's pixel dimensions, and the stock icon is 512×512 and 192×192 —
-exactly the sizes the custom-logo tests expect. They pass on the
-fallback. A dimension assertion cannot see this divergence; only the
-pixels could.
+Worth naming because of how it MEASURES: campfire's own tests decode
+the response and assert 512×512 / 192×192. Before this they passed on
+the stock-icon fallback (which is exactly those sizes) while a custom
+logo was never served at all; now they fail on the real divergence —
+the bytes are the upload. A dimension assertion could not see the old
+gap; it sees this one.
 
 ### A rich text materialized by a READ is not written through
 

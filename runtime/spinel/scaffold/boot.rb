@@ -97,6 +97,15 @@ require_relative "runtime/action_dispatch"
 # blend.
 require_relative "runtime/action_dispatch/request"
 require_relative "runtime/action_controller"
+# Active Storage: the shared rows/variants contract, then the ruby
+# family's bytes half (disk service, attachable coercion, the engine's
+# three routes) reopening it. After action_controller — the disk file
+# reopens `ActionView::ViewHelpers.polymorphic_url`, which that require
+# chain defines. `multipart` first: `Blob.from_attachable` narrows to
+# the `UploadedFile` it defines.
+require_relative "runtime/multipart"
+require_relative "runtime/active_storage"
+require_relative "runtime/active_storage_disk"
 # typed_store virtual-attribute seam (flat-YAML subset on this tree;
 # the CRuby overlay swaps in its real-YAML sibling at the same path).
 # Before app/models — the synthesized settings accessors route

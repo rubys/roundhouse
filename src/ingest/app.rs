@@ -442,6 +442,40 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
+        // `config.active_storage.variable_content_types -= %w[…]` — an
+        // initializer trimming the image types a variant may be made
+        // from (campfire drops bmp/ico/psd: loaders it does not trust).
+        // The runtime answers `variable?` from Rails' default list
+        // minus this one, so a bmp avatar falls back to initials here
+        // exactly as it does there. Synthesized as
+        // `active_storage_excluded_content_types` on the reopen, over
+        // the framework default (`[]`) in runtime/ruby/rails.rb.
+        {
+            let init_dir = dir.join("config/initializers");
+            let mut excluded: Vec<String> = Vec::new();
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        excluded.extend(extract_variable_content_type_exclusions(&bytes));
+                    }
+                }
+            }
+            if !excluded.is_empty() {
+                let literal = excluded
+                    .iter()
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def active_storage_excluded_content_types
+  [{literal}]
+end
+"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // App-defined config keys — `config.app_version = …` in
         // application.rb or an initializer, read back as
         // `Rails.application.config.app_version`. Rails' config object
@@ -3146,6 +3180,38 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
     let inner = &rest[1..];
     let end = inner.find(quote)?;
     Some(inner[..end].to_string())
+}
+
+/// The MIME types a `config.active_storage.variable_content_types -=
+/// %w[…]` line subtracts, in source order. Line-scanned like the
+/// other config reads; the `%w[` literal may start on the next line
+/// (campfire breaks after the `-=`), so the scan continues to the
+/// closing bracket. Only the subtractive form: an app REPLACING the
+/// list (`= %w[…]`) is not read, and keeps Rails' default.
+fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
+    let source = String::from_utf8_lossy(source);
+    let mut out = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("active_storage.variable_content_types") else { continue };
+        let rest = t[idx + "active_storage.variable_content_types".len()..].trim_start();
+        let Some(rest) = rest.strip_prefix("-=") else { continue };
+        let mut text = rest.to_string();
+        while !text.contains(']') {
+            let Some(next) = lines.next() else { break };
+            text.push(' ');
+            text.push_str(next.trim());
+        }
+        let Some(open) = text.find("%w[") else { continue };
+        let body = &text[open + 3..];
+        let Some(close) = body.find(']') else { continue };
+        out.extend(body[..close].split_whitespace().map(|s| s.to_string()));
+    }
+    out
 }
 
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {

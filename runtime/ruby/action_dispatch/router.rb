@@ -214,15 +214,35 @@ module ActionDispatch
     # returned hash by the caller: this is the only place the hash is a
     # freshly-built local of known shape, and a strict emitter types a
     # write into a returned-and-nil-checked hash differently.
+    #
+    # A `*name` GLOB segment — Rails' `*filename` on the Active Storage
+    # engine's routes — must be LAST in the pattern and takes every
+    # remaining path segment, slash-joined, as its value. A glob route
+    # therefore matches any path at least as long as its pattern; every
+    # other route still needs an exact segment count.
     def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"")
-      return nil if pattern_parts.length != path_parts.length
+      last = pattern_parts.length - 1
+      globbed = last >= 0 && pattern_parts[last].to_s.start_with?("*")
+      if globbed
+        return nil if path_parts.length < pattern_parts.length
+      elsif pattern_parts.length != path_parts.length
+        return nil
+      end
       params = {}
       params["format"] = format unless format.empty?
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]
         ap = path_parts[i]
-        if pp.start_with?(":")
+        if pp.start_with?("*")
+          rest = []
+          j = i
+          while j < path_parts.length
+            rest << path_parts[j].to_s
+            j += 1
+          end
+          params[pp[1..]] = rest.join("/")
+        elsif pp.start_with?(":")
           name = pp[1..]
           # `seg = ap.to_s` (not `digits_only(ap)` directly): some strict
           # emitters track a bare array-index local as nilable and coerce

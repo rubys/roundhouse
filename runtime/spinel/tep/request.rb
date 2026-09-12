@@ -38,9 +38,15 @@ module Tep
                                      # `@x = v` -> `req.ivars["x"] = (v).to_s`
                                      # in handler bodies and `@x` -> `ivars["x"]`
                                      # inside ERB chunks.
+      # File parts of a multipart body, by full field name
+      # (`message[attachment]`); the text parts join @req_params. The
+      # typed String hash cannot hold a file, so the two travel apart
+      # and `Main.nest_params` folds both into the controller's params.
+      @uploads      = {}
     end
 
     attr_accessor :passed
+    attr_accessor :uploads
     def set_passed; @passed = true; end
 
     # Sinatra-compat read aliases removed in the vendored copy.
@@ -71,9 +77,9 @@ module Tep
 
     # True when the request body is a multipart/form-data submission
     # (browsers use this for any form built via `new FormData(...)`
-    # or carrying file inputs). Tep::Multipart is not vendored — the
-    # roundhouse request surface goes through ActionDispatch params,
-    # which only emits urlencoded — so consume_body skips multipart.
+    # or carrying file inputs). Parsed by the ruby family's
+    # `ActionDispatch::Http::Multipart` (runtime/multipart.rb): text
+    # parts into @req_params, file parts into @uploads.
     def multipart?
       @req_headers["content-type"].downcase.start_with?("multipart/form-data")
     end
@@ -113,9 +119,8 @@ module Tep
     # recv buffer.
     #
     # No-op on bodyless requests. Form parsing handles
-    # `application/x-www-form-urlencoded`; multipart bodies leave
-    # @raw_body intact (Tep::Multipart isn't vendored; roundhouse
-    # callers don't reach this path).
+    # `application/x-www-form-urlencoded` and `multipart/form-data`
+    # (see `parse_body_params`); @raw_body stays intact either way.
     def consume_body(client_fd)
       cl = content_length
       # bytesize, not length: Content-Length counts bytes, and a body
@@ -127,12 +132,28 @@ module Tep
         rest = Sock.sphttp_drain_body(client_fd, cl - already)
         @raw_body = @raw_body + rest
       end
+      parse_body_params
+      0
+    end
+
+    # The body's form fields into @req_params: urlencoded pairs, or the
+    # text and file parts of a multipart body. Shared by the three
+    # drains below, which differ only in how they wait for bytes.
+    def parse_body_params
       if form?
         Url.parse_query(@raw_body).each do |k, v|
           @req_params[k] = v
         end
+      elsif multipart?
+        form = ActionDispatch::Http::Multipart.parse(@raw_body, @req_headers["content-type"])
+        form.fields.each do |k, v|
+          @req_params[k] = v
+        end
+        form.files.each do |k, v|
+          @uploads[k] = v
+        end
       end
-      0
+      nil
     end
 
     # Scheduler-friendly body drain, used by Tep::Server::Scheduled (the
@@ -141,7 +162,7 @@ module Tep
     # Sock.sphttp_recv_some + Tep::Scheduler.io_wait so other fibers keep
     # running while we wait for body bytes; a 5s per-recv timeout drops a
     # client that opened the request but never sent the body. Form parse
-    # mirrors consume_body (urlencoded only; multipart isn't vendored).
+    # mirrors consume_body.
     def consume_body_via_scheduler(client_fd)
       cl = content_length
       while @raw_body.bytesize < cl
@@ -155,11 +176,7 @@ module Tep
         end
         @raw_body = @raw_body + chunk
       end
-      if form?
-        Url.parse_query(@raw_body).each do |k, v|
-          @req_params[k] = v
-        end
-      end
+      parse_body_params
       0
     end
 
@@ -167,8 +184,7 @@ module Tep
     # non-blocking: `io` is the connection's `IO.for_fd` wrapper, and its
     # timed `wait_readable` parks this green thread until body bytes
     # arrive; a 5s per-recv timeout drops a client that opened the
-    # request but never sent the body. Form parse mirrors consume_body
-    # (urlencoded only; multipart isn't vendored).
+    # request but never sent the body. Form parse mirrors consume_body.
     def consume_body_via_io(io, client_fd)
       cl = content_length
       # bytesize throughout — same reasoning as consume_body above; on
@@ -185,11 +201,7 @@ module Tep
         end
         @raw_body = @raw_body + chunk
       end
-      if form?
-        Url.parse_query(@raw_body).each do |k, v|
-          @req_params[k] = v
-        end
-      end
+      parse_body_params
       0
     end
   end

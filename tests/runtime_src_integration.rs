@@ -1190,7 +1190,16 @@ fn every_runtime_method_body_concretely_typed() {
     // `message.boosts.ordered` under `includes(boosts: :booster)` no
     // longer re-queries per message -- 40 round trips -> 0 on the room
     // page, 14 against Rails' 13.
-    const CEILING: usize = 403;
+    //
+    // 403 -> 405: `ActiveStorage::Blob.from_row`, the one constructor
+    // every blob read (the proxy's join, the batch preloader, `find`)
+    // goes through. TWO sites, MEASURED: the row's `metadata` and
+    // `blob_key` reads, `Hash[String, untyped]` values like every other
+    // adapter row (binding the six reads to locals first was measured
+    // at SIX, so the nested form stays). What it bought: the blob is a
+    // value with a key, a size and dimensions, which is what a storage
+    // service and a variant need to serve it.
+    const CEILING: usize = 405;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

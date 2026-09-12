@@ -506,41 +506,6 @@ module ActionCable
   end
 end
 
-# `ActionDispatch::Http::UploadedFile` — what `fixture_file_upload`
-# hands back, and what a multipart request would carry in production.
-#
-# Read-only and file-backed: nothing here writes, because the only
-# producer is the test harness naming a fixture that already exists on
-# disk. A real multipart parse would construct the same shape over a
-# tempfile.
-module ActionDispatch
-  module Http
-    class UploadedFile
-      attr_reader :original_filename, :content_type
-
-      def initialize(path, content_type)
-        @path = path
-        @original_filename = File.basename(path)
-        @content_type = content_type
-      end
-
-      def read
-        File.binread(@path)
-      end
-
-      def size
-        File.size(@path)
-      end
-
-      # A params hash carrying one stringifies to the uploaded name,
-      # which is what Rails' own `to_s` gives.
-      def to_s
-        @original_filename
-      end
-    end
-  end
-end
-
 # `ActionDispatch::TestProcess` — where Rails keeps `fixture_file_upload`
 # (in its `FixtureFile` submodule, which this module includes). A plain
 # `ActiveSupport::TestCase` does NOT get it for free, which is why
@@ -550,9 +515,11 @@ end
 # writes the include still expects the method (Rails puts it on
 # `ActionController::TestCase` and `ActionDispatch::IntegrationTest`).
 #
-# Rails hands back an `ActionDispatch::Http::UploadedFile`. That object
-# above is its read surface and no more: the name it was uploaded under,
-# its declared type, and its bytes.
+# Rails hands back an `ActionDispatch::Http::UploadedFile` — the
+# runtime's own (runtime/multipart.rb), the same object a multipart
+# request produces in production: the name it was uploaded under, its
+# declared type, and its bytes. Read here rather than lazily, so the
+# harness hands a controller exactly what the server would.
 #
 # The bytes only exist here because binary passthrough carries the
 # fixture files into the emitted tree; before that this method would
@@ -561,7 +528,7 @@ module ActionDispatch
   module TestProcess
     def fixture_file_upload(name, content_type = "application/octet-stream")
       ActionDispatch::Http::UploadedFile.new(
-        File.join(__dir__, "fixtures", "files", name), content_type
+        File.binread(File.join(__dir__, "fixtures", "files", name)), name, content_type
       )
     end
   end
@@ -1070,12 +1037,13 @@ module RequestDispatch
     # its non-segment options into one.
     match_path, _, query = path.partition("?")
     matched = ActionDispatch::Router.match(
-      method, match_path, [RouteTable.root] + RouteTable.table
+      method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
     )
     raise "No route matches #{method} #{path}" if matched.nil?
     controller = case matched.controller
                  when :articles then ArticlesController.new
                  when :comments then CommentsController.new
+                 else ActiveStorage::Routes.instantiate_controller(matched.controller)
                  end
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.

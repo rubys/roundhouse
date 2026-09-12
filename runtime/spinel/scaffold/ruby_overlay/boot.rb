@@ -100,6 +100,15 @@ require_relative "runtime/active_record_relation_ext"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
+# Active Storage: the shared rows/variants contract, then the ruby
+# family's bytes half (disk service, attachable coercion, the engine's
+# three routes) reopening it. After action_controller — the disk file
+# reopens `ActionView::ViewHelpers.polymorphic_url`, which that require
+# chain defines. `multipart` first: `Blob.from_attachable` narrows to
+# the `UploadedFile` it defines.
+require_relative "runtime/multipart"
+require_relative "runtime/active_storage"
+require_relative "runtime/active_storage_disk"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win
 # that reopen (same ordering contract as action_controller_session's

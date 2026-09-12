@@ -1,23 +1,16 @@
-//! Active Storage's EXISTENCE half — `has_one_attached :logo` expanded
-//! to a reader that can answer "is anything attached?", over the real
-//! `active_storage_attachments` row.
+//! `has_one_attached :logo` — the reader, the writer, and the after-save
+//! that attaches what the writer staged.
 //!
 //! # What this is and is not
 //!
 //! Active Storage is three things: attachment ROWS (which record, which
 //! blob, under which name), BLOBS (bytes in a service), and VARIANTS
-//! (derivatives produced by an image processor). Only the first is
-//! modeled here, and that is a deliberate line rather than a stopping
-//! point:
+//! (derivatives produced by an image processor). The rows and the blob
+//! are modeled by `runtime/ruby/active_storage.rb`; the bytes go
+//! through `ActiveStorage::Service`, a per-target seam the ruby family
+//! fills with a disk service; variants are IDENTITY (no processor on any
+//! target) — see that file's header for the whole split.
 //!
-//! * The attachment ROW is read straight from
-//!   `active_storage_attachments` by the value object, composing SQL
-//!   the way `Relation` itself does. Synthesizing an
-//!   `ActiveStorage::Attachment` MODEL — the `ActionText::RichText`
-//!   treatment — was written and then backed out: nothing reads or
-//!   writes those rows as records yet, so it emitted a model file per
-//!   app to serve no caller. It becomes the right shape the moment
-//!   `attach`/`purge` land, and not before.
 //! * `has_one_attached :name` is a MACRO. It expands to a reader whose
 //!   scope is the three columns Rails scopes on (`record_id`,
 //!   `record_type`, `name`), written out rather than declared for the
@@ -25,17 +18,23 @@
 //!   FIRST attachment on the record regardless of name, which is right
 //!   for a model with one attachment and silently wrong for a model
 //!   with two.
-//! * Blobs and variants are NOT modeled, and the reader's value object
-//!   says so by raising rather than by answering something plausible.
+//! * The `name=` writer stages an ATTACHABLE (an uploaded file, a blob,
+//!   a signed id — the runtime's `Blob.from_attachable` narrows it) and
+//!   `_save_<name>_attachment`, folded into `after_save`, attaches it
+//!   once the record has an id. That is Rails' own order: the blob row
+//!   on assignment, the attachment row on save.
+//! * `attach(io:, filename:, content_type:)` and `Blob.create_and_upload!
+//!   (io:, …)` are grounded to bytes at the call site
+//!   (`apply_attach_lowering`) so the runtime never names an IO.
 //!
-//! # Why the existence half alone is worth having
+//! # Why the existence half was worth having first
 //!
 //! `ApplicationHelper.account_logo_body_class` is `"account-has-logo"
 //! if Current.account&.logo&.attached?` — it is on the layout, so it
 //! runs on EVERY rendered page, and with `logo` undefined every one of
-//! those requests raised. Measured on campfire's own suite, answering
-//! just `attached?` is +7 tests and a 7th green file; variants remain
-//! the long pole for the avatar/logo tests themselves.
+//! those requests raised. Answering just `attached?` was +7 tests and a
+//! 7th green file; the writer, the bytes and the identity variant came
+//! after, and they are what makes an upload a served image.
 //!
 //! # The reader never returns nil
 //!
@@ -44,8 +43,7 @@
 //! NoMethodError on nil. This keeps that contract: the reader always
 //! constructs an `ActiveStorage::Attached` (the value type, in
 //! `runtime/ruby/active_storage.rb` beside `ActionText::Content` for
-//! the same reason — it has no table), carrying the answer to the one
-//! question that can be answered.
+//! the same reason — it has no table).
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem};
 use crate::effect::EffectSet;
@@ -90,7 +88,12 @@ pub fn apply_attach_lowering(app: &mut crate::app::App) {
 fn rewrite_attach(e: &mut Expr) {
     e.node.for_each_child_mut(&mut rewrite_attach);
     let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
-    if method.as_str() != "attach" || args.len() != 1 {
+    // `Blob.create_and_upload!(io:, filename:, content_type:)` is the
+    // same three keywords for the same reason (campfire's webhook
+    // stores a bot's attachment reply through it), and grounds the
+    // same way.
+    if (method.as_str() != "attach" && method.as_str() != "create_and_upload!") || args.len() != 1
+    {
         return;
     }
     let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return };
@@ -115,16 +118,63 @@ fn rewrite_attach(e: &mut Expr) {
         return;
     }
     let span = io.span;
-    let mut data = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(io),
-            method: Symbol::from("read"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        },
-    );
+    // `StringIO.new(bytes).read` is `bytes`: the wrapper exists only to
+    // give Rails an io, and reading it back through StringIO would put
+    // that class on every target's plate for nothing.
+    let unwrapped = match &*io.node {
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "new"
+                && args.len() == 1
+                && matches!(&*recv.node, ExprNode::Const { path }
+                    if path.len() == 1 && path[0].as_str() == "StringIO") =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    };
+    // `file_fixture("moon.jpg").open` is a Pathname opened for reading;
+    // `File.binread(path.to_s)` is the same bytes without an IO in the
+    // middle (spinel's blockless `Pathname#open` has no value to read
+    // from — it yields).
+    let unwrapped = unwrapped.or_else(|| match &*io.node {
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "open" && args.is_empty() =>
+        {
+            Some(Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("File")] })),
+                    method: Symbol::from("binread"),
+                    args: vec![Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(recv.clone()),
+                            method: Symbol::from("to_s"),
+                            args: Vec::new(),
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ))
+        }
+        _ => None,
+    });
+    let mut data = match unwrapped {
+        Some(bytes) => bytes,
+        None => Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(io),
+                method: Symbol::from("read"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        ),
+    };
     data.ty = Some(Ty::Str);
     *args = vec![data, filename, content_type];
 }
@@ -269,6 +319,8 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         block_param: None,
     });
 
+    push_writer_and_save(methods, model, attr);
+
     // The batch loader's setter: `with_attached_<attr>` preloads one
     // proxy per record, row already known, and installs it here.
     let att = Symbol::from("att");
@@ -293,6 +345,137 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         mutates_self: true,
         block_param: None,
     });
+}
+
+/// ```ruby
+/// def avatar=(value)
+///   @avatar_pending = ActiveStorage::Blob.from_attachable(value)
+///   nil
+/// end
+///
+/// def _save_avatar_attachment       # folded into after_save
+///   pending = @avatar_pending
+///   if pending.nil?
+///     nil
+///   else
+///     @avatar_pending = nil
+///     avatar.attach_blob(pending)
+///   end
+/// end
+/// ```
+///
+/// Rails' `record.avatar = file` (and so `create!(avatar: file)`,
+/// `update!(avatar: file)`, and a permitted `:avatar` param) is an
+/// attachable the model holds until it is saved: the blob is created
+/// on assignment, the attachment ROW only when the record has an id to
+/// point it at — a create assigns before the insert. Same shape as
+/// `has_rich_text`'s `_save_rich_text_<attr>`, for the same reason.
+///
+/// `value` is `untyped` on purpose: what arrives is whatever the
+/// params tree or the caller held — an `UploadedFile`, a `Blob`, a
+/// signed id String, the bare filename a non-multipart form posts —
+/// and `Blob.from_attachable` (ruby-family runtime) is the one place
+/// that narrows it by class. A writer typed to one of those would make
+/// the honest caller the illegal one.
+fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let pending = Symbol::from(format!("{}_pending", attr.as_str()));
+    let value = Symbol::from("value");
+    let local = Symbol::from("pending");
+    let var = |name: &Symbol| syn(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let ivar = |name: &Symbol| syn(ExprNode::Ivar { name: name.clone() });
+    let nil_lit = || syn(ExprNode::Lit { value: Literal::Nil });
+
+    let coerce = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: vec![Symbol::from("ActiveStorage"), Symbol::from("Blob")],
+        })),
+        method: Symbol::from("from_attachable"),
+        args: vec![var(&value)],
+        block: None,
+        parenthesized: true,
+    });
+    super::model_to_library::push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}=", attr.as_str())),
+        vec![crate::dialect::Param::positional(value.clone())],
+        syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: pending.clone() },
+                    value: coerce,
+                }),
+                nil_lit(),
+            ],
+        }),
+        Some(super::model_to_library::fn_sig(vec![(value, Ty::Untyped)], Ty::Nil)),
+        AccessorKind::Method,
+        true,
+    );
+
+    let saver = Symbol::from(format!("_save_{}", attachment_assoc_name(attr).as_str()));
+    let attach = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Send {
+            recv: None,
+            method: attr.clone(),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })),
+        method: Symbol::from("attach_blob"),
+        args: vec![var(&local)],
+        block: None,
+        parenthesized: true,
+    });
+    super::model_to_library::push_synth_instance_method(
+        methods,
+        model,
+        saver.clone(),
+        Vec::new(),
+        syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() },
+                    value: ivar(&pending),
+                }),
+                syn(ExprNode::If {
+                    cond: syn(ExprNode::Send {
+                        recv: Some(var(&local)),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    }),
+                    then_branch: nil_lit(),
+                    else_branch: syn(ExprNode::Seq {
+                        exprs: vec![
+                            syn(ExprNode::Assign {
+                                target: crate::expr::LValue::Ivar { name: pending.clone() },
+                                value: nil_lit(),
+                            }),
+                            attach,
+                        ],
+                    }),
+                }),
+            ],
+        }),
+        Some(super::model_to_library::fn_sig(vec![], Ty::Nil)),
+        AccessorKind::Method,
+        true,
+    );
+    super::model_to_library::markers::fold_into_or_push(
+        methods,
+        model,
+        "after_save",
+        syn(ExprNode::Send {
+            recv: None,
+            method: saver,
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        }),
+    );
 }
 
 /// Rails' name for the attachment association behind `has_one_attached

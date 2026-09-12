@@ -84,7 +84,7 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
         id_prefix: String::new(),
     };
     let mut out: Vec<Expr> = Vec::new();
-    out.push(emit_open_form_tag(&comps, ctx));
+    out.push(emit_open_form_tag(&comps, ctx, false));
     out.push(accumulator_append_call(
         view_helpers_call("csrf_token_hidden_input", Vec::new()),
         ctx,
@@ -165,7 +165,7 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         id_prefix: String::new(),
     };
     Some(vec![
-        emit_open_form_tag(&comps, ctx),
+        emit_open_form_tag(&comps, ctx, false),
         accumulator_append_call(
             view_helpers_call("method_override_input", vec![method]),
             ctx,
@@ -248,7 +248,7 @@ pub(super) fn emit_form_with_inline(
     //    `method` attribute is always "post" for resource forms
     //    (PATCH/DELETE flow through `_method` override below); :get
     //    fixtures aren't exercised so we hard-code "post" here.
-    out.push(emit_open_form_tag(&comps, ctx));
+    out.push(emit_open_form_tag(&comps, ctx, block_has_file_field(body, form_param_str, ctx)));
 
     // 2. Method override: `<input type="hidden" name="_method"
     //    value="patch">` for non-get/post methods, empty string
@@ -356,7 +356,45 @@ fn form_tag_attributes(opts: &[(Expr, Expr)]) -> Vec<(Expr, Expr)> {
 /// then user opts in source order. Action value flows through
 /// `ViewHelpers.html_escape` to match runtime semantics; opts values
 /// likewise (they may carry user-supplied strings).
-fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx) -> Expr {
+/// Does the form's block call `form.file_field`? Rails' builder sets
+/// `multipart` on itself when it renders one, and `form_with` reads
+/// that flag after capturing the block — so a form with a file input
+/// is multipart without the template saying so. Same question, asked
+/// of the block before it is walked.
+///
+/// A partial the block renders (`render "accounts/bots/form", form:
+/// form`) counts when ITS body has one — the builder travels into it
+/// as a local, and Rails' flag travels back out.
+fn block_has_file_field(body: &Expr, form_param: &str, ctx: &ViewCtx) -> bool {
+    match &*body.node {
+        ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str() == "file_field"
+                && matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == form_param) =>
+        {
+            return true;
+        }
+        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "render" => {
+            if let Some(ExprNode::Lit { value: Literal::Str { value } }) =
+                args.first().map(|a| &*a.node)
+            {
+                let key = super::partial_name_to_key(value, &ctx.resource_dir);
+                if ctx.multipart_partials.contains(&key) {
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |child| {
+        if !found && block_has_file_field(child, form_param, ctx) {
+            found = true;
+        }
+    });
+    found
+}
+
+fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool) -> Expr {
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: "<form action=\"".to_string(),
@@ -367,6 +405,15 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx) -> Expr {
     parts.push(InterpPart::Text {
         value: "\" accept-charset=\"UTF-8\" method=\"post\"".to_string(),
     });
+    // `enctype`: what Rails renders for `multipart: true`, which a
+    // `file_field` in the block sets for it (`block_has_file_field`).
+    // Without it the browser posts the file INPUT's value — the bare
+    // filename — and nothing uploads.
+    if multipart {
+        parts.push(InterpPart::Text {
+            value: " enctype=\"multipart/form-data\"".to_string(),
+        });
+    }
     // The user's opts go through the SHARED attribute renderer — the
     // one link_to, button_to, the tag builder and the form builder all
     // use. This loop used to be its own copy, rendering every value as
@@ -1448,6 +1495,7 @@ mod tests {
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
+            multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),

@@ -127,10 +127,11 @@ fi
 # ── 4. drop the attachment fixtures ───────────────────────────────────
 #
 # 50 MB of the tree is binary fixtures for the attachment tests — a single
-# 46 MB earth.png, a 3.8 MB .mov, a 494 KB jpg. Attachments are out of this
-# MVP and no shipped section opens them, so they are 50 MB of download for
-# nothing. The test SOURCES stay: they cost 6 MB and make the follow-on
-# that adds a native `## Test` section a smaller change.
+# 46 MB earth.png, a 3.8 MB .mov, a 494 KB jpg. Uploads work now, but
+# nothing shipped in the archive opens these (the attachment tests are
+# the only reader and `spin test` is not wired in), so they are 50 MB of
+# download for nothing. The test SOURCES stay: they cost 6 MB and make
+# the follow-on that adds a native `## Test` section a smaller change.
 step "dropping attachment fixtures"
 rm -rf "$TREE/test/fixtures/files"
 

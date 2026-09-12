@@ -1,0 +1,65 @@
+# Typing for runtime/spinel/active_storage_disk.rb — the ruby family's
+# reopen of the shared Active Storage contract (runtime/ruby/
+# active_storage.rbs) with a disk service, plus the engine's routes.
+module ActiveStorage
+  class Service
+    def root: () -> String
+    def path_for: (String key) -> String
+    def ensure_dir: (String path) -> nil
+    def upload: (String key, String data) -> nil
+    def download: (String key) -> String
+    def delete: (String key) -> nil
+    def exist?: (String key) -> bool
+  end
+
+  class Blob
+    def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
+  end
+
+  class ImageAnalyzer
+    def self.dimensions: (String data, String content_type) -> Array[Integer]
+    def self.be16: (String data, Integer at) -> Integer
+    def self.be32: (String data, Integer at) -> Integer
+    def self.le16: (String data, Integer at) -> Integer
+    def self.le24: (String data, Integer at) -> Integer
+    def self.le32: (String data, Integer at) -> Integer
+    def self.jpeg_dimensions: (String data) -> Array[Integer]
+    def self.webp_dimensions: (String data) -> Array[Integer]
+  end
+
+  module Routes
+    def self.table: () -> Array[ActionDispatch::Router::Route]
+    def self.instantiate_controller: (Symbol sym) -> ActionController::Base
+  end
+
+  module DiskKey
+    def self.encode: (String key, String disposition) -> String
+    def self.decode: (String token) -> Array[String]
+    def self.disk_url: (ActiveStorage::Blob blob, String disposition) -> String
+  end
+
+  module Blobs
+    class RedirectController < ActionController::Base
+      def process_action: (Symbol action_name) -> nil
+      def show: () -> nil
+    end
+  end
+
+  module Representations
+    class RedirectController < ActionController::Base
+      def process_action: (Symbol action_name) -> nil
+      def show: () -> nil
+    end
+  end
+
+  class DiskController < ActionController::Base
+    def process_action: (Symbol action_name) -> nil
+    def show: () -> nil
+  end
+end
+
+module ActionView
+  module ViewHelpers
+    def self.polymorphic_url: (untyped record, ?only_path: bool) -> String
+  end
+end

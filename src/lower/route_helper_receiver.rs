@@ -76,7 +76,12 @@ use std::collections::{HashMap, HashSet};
 /// mounted engines. Kept in step with the `module RouteHelpers` reopen
 /// in `runtime/ruby/active_storage.rb`, which is the only place one
 /// exists today.
-const ENGINE_MOUNTED_HELPERS: &[&str] = &["rails_blob_path"];
+const ENGINE_MOUNTED_HELPERS: &[&str] = &[
+    "rails_blob_path",
+    "rails_blob_url",
+    "rails_representation_path",
+    "rails_representation_url",
+];
 
 fn is_helper_shaped(name: &Symbol) -> bool {
     name.as_str().ends_with("_path") || name.as_str().ends_with("_url")

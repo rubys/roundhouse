@@ -37,6 +37,7 @@ module Main
     case sym
     when :articles then ArticlesController.new
     when :comments then CommentsController.new
+    else ActiveStorage::Routes.instantiate_controller(sym)
     end
   end
 
@@ -85,6 +86,34 @@ module Main
       out[outer_name] = Main.deep_dup(sub)
     end
     out
+  end
+
+  # The file parts of a multipart body (`Tep::Request#uploads`, keyed
+  # `message[attachment]`), folded into the nested params the way
+  # `nest_params` folds text fields — after it, because the typed
+  # String hash it iterates cannot carry a file. The resource sub-hash
+  # is REBUILT with the file added rather than written into in place,
+  # for the same reason nest_params assigns whole sub-hashes: that is
+  # the shape spinel types as the poly-valued hash the controller reads.
+  def self.nest_uploads(out, uploads)
+    uploads.each do |k, file|
+      ob = k.index("[")
+      cb = ob.nil? ? nil : k.index("]", ob + 1)
+      if ob.nil? || cb.nil?
+        out[k] = file
+      else
+        outer = k[0, ob].to_s
+        inner = k[(ob + 1)...cb].to_s
+        merged = {}
+        existing = out[outer]
+        if existing.is_a?(Hash)
+          existing.each { |sk, sv| merged[sk.to_s] = sv }
+        end
+        merged[inner] = file
+        out[outer] = merged
+      end
+    end
+    nil
   end
 
   # Rebuild a string-keyed Hash, recursing into nested Hash values.
@@ -197,7 +226,7 @@ module Main
   # the profile, because /u allocates enough per request to trigger several
   # collections and every one of them re-marked the table.
   def self.route_table
-    @route_table ||= [RouteTable.root] + RouteTable.table
+    @route_table ||= [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
   end
 
   # Tep::Server callback. Routes, runs the controller, copies
@@ -349,6 +378,7 @@ module Main
     # the form body into flat bracket keys (req.req_params["article[title]"]);
     # re-nest them + merge the route's path captures (id, ...).
     controller.params = Main.nest_params(req.req_params, matched.path_params)
+    Main.nest_uploads(controller.params, req.uploads) if req.uploads.length > 0
     # Typed request object + per-request context statics. Helpers are
     # module functions with no controller in scope; the emit rewrites
     # their bare `request` reads to `ActionController::Current.request`
@@ -462,6 +492,14 @@ module Main
       res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"
     elsif controller.content_type != "text/html; charset=utf-8"
       res.headers["Content-Type"] = controller.content_type
+    end
+    # Headers the action set beyond those two — a `Content-Disposition`
+    # on a download, the Cache-Control a blob route asks for. A nil
+    # value is a header the app UNSET (campfire's `X-Rev` is
+    # `ENV["GIT_REVISION"]`, absent outside its own deploy) and is not
+    # written: the wire has no spelling for it.
+    controller.headers.each do |k, v|
+      res.headers[k] = v unless v.nil?
     end
 
     # Outbound flash: persist messages set THIS request for the NEXT one.

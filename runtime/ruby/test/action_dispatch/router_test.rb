@@ -236,4 +236,22 @@ class RouterTest < Minitest::Test
     assert_equal :manifest, m.action
     assert_equal "", m.path_params.fetch("format", "")
   end
+
+  # `*filename` — the glob Rails puts last on the Active Storage
+  # engine's routes. It takes every remaining segment, slash-joined,
+  # and the `.ext` peel still applies to the last one (Rails' `format:
+  # false` on those routes is not modeled; the segment is cosmetic).
+  def test_glob_segment_takes_the_rest_of_the_path
+    table = [
+      ActionDispatch::Router::Route.new(
+        "GET", "/rails/active_storage/disk/:encoded_key/*filename", :active_storage_disk, :show
+      ),
+    ]
+    m = ActionDispatch::Router.match("GET", "/rails/active_storage/disk/abc/dir/moon.jpg", table)
+    raise "expected match" if m.nil?
+    assert_equal "abc", m.path_params["encoded_key"]
+    assert_equal "dir/moon", m.path_params["filename"]
+    assert_equal "jpg", m.path_params["format"]
+    assert_nil ActionDispatch::Router.match("GET", "/rails/active_storage/disk/abc", table)
+  end
 end

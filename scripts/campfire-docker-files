@@ -126,8 +126,10 @@ telling where they are: append \`-I\$(brew --prefix)/include
 
 ## What is not in this archive
 
-The same things the source archive leaves out: the avatar picker (file
-uploads post as their filename), web push delivery (the job logs instead
-of sending), and attachments. See the
+The same things the source archive leaves out: image resizing (uploads
+— attachments, avatars, the account logo — work and persist under
+\`/app/storage/files\`, but are served at their uploaded size; there is
+no image processor) and web push delivery (the job logs instead of
+sending). See the
 [project page](https://rubys.github.io/roundhouse/apps/campfire.html).
 README

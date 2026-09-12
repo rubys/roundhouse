@@ -64,6 +64,7 @@ module Rails
     def domain: () -> String
     def credentials: () -> Hash[Symbol, untyped]
     def config_time_zone: () -> String
+    def active_storage_excluded_content_types: () -> Array[String]
   end
 end
 

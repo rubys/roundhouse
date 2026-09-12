@@ -422,6 +422,16 @@ module Rails
     def config_time_zone
       "UTC"
     end
+
+    # `config.active_storage.variable_content_types -= %w[…]` — the
+    # image types an app REMOVES from Rails' default variable list
+    # (campfire: bmp/ico/psd). Same framework-default shape as the two
+    # above: ingest lifts the initializer's line into an override on
+    # the app's reopen; nothing removed when the app declares none.
+    # Read by `ActiveStorage.variable_content_type?`.
+    def active_storage_excluded_content_types
+      []
+    end
   end
 end
 
