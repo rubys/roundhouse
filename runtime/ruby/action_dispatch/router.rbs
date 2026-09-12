@@ -71,6 +71,7 @@ module ActionDispatch
     # The same segment loop over already-split parts — what `Router.match`
     # calls with the route's precomputed `pattern_parts`, so a table walk
     # allocates no segment arrays per candidate.
+    def self.glob_rest: (Array[String] path_parts, Integer from) -> String
     def self.match_parts: (
       Array[String] pattern_parts,
       Array[String] path_parts,

@@ -242,14 +242,7 @@ module ActionDispatch
         pp = pattern_parts[i]
         ap = path_parts[i]
         if pp.start_with?("*")
-          rest = []
-          j = i
-          while j < path_parts.length
-            seg = path_parts[j]
-            rest << seg
-            j += 1
-          end
-          params[pp[1..]] = rest.join("/")
+          params[pp[1..]] = glob_rest(path_parts, i)
         elsif pp.start_with?(":")
           name = pp[1..]
           # `seg = ap.to_s` (not `digits_only(ap)` directly): some strict
@@ -267,6 +260,21 @@ module ActionDispatch
         i += 1
       end
       params
+    end
+
+    # The path from segment `from` on, slash-joined: a `*glob`'s value.
+    # Its own method rather than a loop inside `match_parts` because the
+    # Elixir lowering turns ONE `while` per method into a recursive
+    # `__loop`; a second, nested one is not a shape it takes.
+    def self.glob_rest(path_parts, from)
+      rest = []
+      j = from
+      while j < path_parts.length
+        seg = path_parts[j]
+        rest << seg
+        j += 1
+      end
+      rest.join("/")
     end
 
     # Is `name` one of the route's digit-constrained params?
