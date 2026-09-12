@@ -403,17 +403,53 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
         )
     };
 
-    // @updated_at_raw = now  (every save)
+    // Rails' `_create_record` stamps a timestamp column only `unless
+    // _read_attribute(column)` — a value the caller set survives the
+    // insert. campfire's message fixtures set `created_at: 36.minutes
+    // .ago` and page by it; stamping over them put every fixture in
+    // the same millisecond and the "page after" test on the luck of
+    // the microsecond. An UPDATE still restamps `updated_at`
+    // unconditionally, as Rails does.
+    let bool_op = |op: BoolOpKind, left: Expr, right: Expr| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp { op, surface: Default::default(), left, right },
+            ),
+            Ty::Bool,
+        )
+    };
+    // "Unset" is nil OR the empty String: `initialize(attrs)` seeds a
+    // temporal slot with `attrs[:col] || ""`, the non-nullable slot's
+    // stand-in for nil.
+    let col_unset = |col: &Column| {
+        bool_op(
+            BoolOpKind::Or,
+            with_ty(no_arg_send(col_ivar(col, Ty::Str), "nil?"), Ty::Bool),
+            with_ty(no_arg_send(col_ivar(col, Ty::Str), "empty?"), Ty::Bool),
+        )
+    };
+    let is_creating = || with_ty(var_ref(creating.clone()), Ty::Bool);
+    let not_creating = || with_ty(no_arg_send(is_creating(), "!"), Ty::Bool);
+
+    // @updated_at_raw = now if !creating || @updated_at_raw.nil? || @updated_at_raw.empty?
     if let Some(col) = updated_col {
-        stmts.push(assign_now(col));
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: bool_op(BoolOpKind::Or, not_creating(), col_unset(col)),
+                then_branch: assign_now(col),
+                else_branch: nil_lit(),
+            },
+        ));
     }
 
-    // @created_at_raw = now if creating  (insert only)
+    // @created_at_raw = now if creating && (@created_at_raw.nil? || @created_at_raw.empty?)  (insert only)
     if let Some(col) = created_col {
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: with_ty(var_ref(creating.clone()), Ty::Bool),
+                cond: bool_op(BoolOpKind::And, is_creating(), col_unset(col)),
                 then_branch: assign_now(col),
                 else_branch: nil_lit(),
             },

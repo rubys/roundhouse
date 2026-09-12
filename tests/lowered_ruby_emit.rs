@@ -185,9 +185,16 @@ fn article_renders_residualized_fill_timestamps() {
     // before the save. That pairs the `if` out of postfix-modifier
     // form, which is why this assertion reads as two statements rather
     // than the one line it used to.
-    assert!(src.contains("@__t_updated_at = nil\n    @updated_at_raw = now"), "{src}");
+    //
+    // And Rails' `_create_record` stamps only a column the caller left
+    // nil — a fixture's `created_at: 36.minutes.ago` survives the
+    // insert — while an UPDATE restamps `updated_at` unconditionally.
     assert!(
-        src.contains("if creating\n      @__t_created_at = nil\n      @created_at_raw = now"),
+        src.contains("if !(creating) || @updated_at_raw.nil? || (@updated_at_raw || \"\").empty?\n      @__t_updated_at = nil\n      @updated_at_raw = now"),
+        "{src}",
+    );
+    assert!(
+        src.contains("if creating && (@created_at_raw.nil? || (@created_at_raw || \"\").empty?)\n      @__t_created_at = nil\n      @created_at_raw = now"),
         "{src}",
     );
     // The runtime schema probe must be fully residualized away.

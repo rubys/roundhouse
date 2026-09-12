@@ -91,10 +91,6 @@ module ActiveSupport
   def self.parse_db_time(str)
     return nil if str.nil?
     return nil if str.length < 19
-    t = Time.utc(
-      str[0, 4].to_i, str[5, 2].to_i, str[8, 2].to_i,
-      str[11, 2].to_i, str[14, 2].to_i, str[17, 2].to_i
-    )
     # The stored TEXT carries fractional seconds — Rails' datetime(6)
     # writes ".418418" and so does our own db_now — and the CRuby
     # overlay's twin reads them (usec, via its regex). Reading whole
@@ -106,6 +102,7 @@ module ActiveSupport
     # non-digit ends the read (so a legacy "…16Z" contributes nothing).
     # Plain reassignment, not `+=` — spinel has no operator-assignment
     # node for locals (LocalVariableOperatorWriteNode is refused).
+    micros = 0
     if str.length > 20 && str[19, 1] == "."
       digits = 0
       while digits < 6
@@ -114,19 +111,27 @@ module ActiveSupport
         digits = digits + 1
       end
       if digits > 0
-        t = t + "#{str[20, digits]}000000"[0, 6].to_i / 1_000_000.0
+        micros = "#{str[20, digits]}000000"[0, 6].to_i
       end
     end
+    # The micros go in as `Time.utc`'s seventh argument, NOT as a float
+    # added afterwards. `t + 170926 / 1_000_000.0` lands at
+    # .170925999, and `format_db_time` below then truncates it back to
+    # .170925 — so a `created_at > ?` bound from a hydrated record
+    # matched the record itself, and campfire's "page after" test
+    # passed or failed on which microsecond the fixtures loaded in.
+    t = Time.utc(
+      str[0, 4].to_i, str[5, 2].to_i, str[8, 2].to_i,
+      str[11, 2].to_i, str[14, 2].to_i, str[17, 2].to_i, micros
+    )
     t.getlocal
   end
 
   def self.db_now
     t = ActiveSupport.now.utc
-    f = t.to_f
-    micros = ((f - f.to_i) * 1_000_000).to_i
     format(
       "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-      t.year, t.mon, t.mday, t.hour, t.min, t.sec, micros
+      t.year, t.mon, t.mday, t.hour, t.min, t.sec, t.usec
     )
   end
 
@@ -193,11 +198,12 @@ module ActiveSupport
     return nil if value.nil?
     if value.is_a?(Time)
       t = value.utc
-      f = t.to_f
-      micros = ((f - f.to_i) * 1_000_000).to_i
+      # `usec`, not float arithmetic on `to_f`: a double near 2e9
+      # seconds resolves to ~0.4 µs, so `((f - f.to_i) * 1e6).to_i`
+      # lands a microsecond short of what `parse_db_time` read.
       return format(
         "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-        t.year, t.mon, t.mday, t.hour, t.min, t.sec, micros
+        t.year, t.mon, t.mday, t.hour, t.min, t.sec, t.usec
       )
     end
     value
