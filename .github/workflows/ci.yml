@@ -778,7 +778,13 @@ jobs:
         # verify the seeded password digests, so sign-in 302s and the
         # walk dies at its first probe. (The spinel lane compiles its
         # own bcrypt and never noticed.)
-        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt --no-document
+        #
+        # ruby-vips, the same lesson once more: the app declares image
+        # variants, so the emit's runtime/active_storage_processor.rb
+        # is the ruby-vips reopen and `require "vips"` runs at boot —
+        # without the gem the emit never comes up. The System libvips
+        # step above is the library it binds.
+        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt ruby-vips --no-document
       - name: scripts/campfire-compare
         run: scripts/campfire-compare /tmp/campfire
 
