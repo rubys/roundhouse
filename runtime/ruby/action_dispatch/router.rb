@@ -221,8 +221,15 @@ module ActionDispatch
     # therefore matches any path at least as long as its pattern; every
     # other route still needs an exact segment count.
     def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"")
+      # The tail segment is bound to a local before it is asked anything,
+      # like `pp`/`ap` below: an array index read straight into a method
+      # call is what some strict emitters coerce as nilable.
       last = pattern_parts.length - 1
-      globbed = last >= 0 && pattern_parts[last].to_s.start_with?("*")
+      globbed = false
+      if last >= 0
+        tail = pattern_parts[last]
+        globbed = tail.start_with?("*")
+      end
       if globbed
         return nil if path_parts.length < pattern_parts.length
       elsif pattern_parts.length != path_parts.length
@@ -238,7 +245,8 @@ module ActionDispatch
           rest = []
           j = i
           while j < path_parts.length
-            rest << path_parts[j].to_s
+            seg = path_parts[j]
+            rest << seg
             j += 1
           end
           params[pp[1..]] = rest.join("/")
