@@ -41,6 +41,15 @@ pub fn apply_array_ordinal_lowering(app: &mut App) {
     }
 }
 
+/// The same rewrite over one TEST body, for `test_module_to_library`
+/// to run once that body is typed — a test's `@messages` is bound in
+/// its inlined setup and typed there, nowhere earlier. campfire's
+/// messages_controller_test pages through `@messages.third` /
+/// `.fourth` / `.fifth` over a `to_a`.
+pub(crate) fn rewrite_body(expr: &mut Expr) {
+    rewrite(expr);
+}
+
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
 

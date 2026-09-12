@@ -329,6 +329,22 @@ pub fn lower_test_modules_with_inner(
             // String` and takes every test behind it.
             crate::lower::blank::ground_body(&mut method.body, &blank_defs);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            // A test's ivars are bound in its own body — the setup is
+            // inlined ahead of every test — so they can be harvested
+            // from this one typed pass and the body re-typed with
+            // them, the way `type_inner_class` does for a stand-in
+            // class. Without it `@messages = ….to_a` binds nothing and
+            // `@messages.third` below is a read off an untyped ivar.
+            let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+            crate::analyze::extract_ivar_assignments(&method.body, &mut ivars);
+            ivars.retain(|_, ty| !ty.is_unknown());
+            if !ivars.is_empty() {
+                crate::lower::typing::type_method_body(method, &classes, &ivars);
+            }
+            // `second`…`fifth` on a typed Array — type-directed, so
+            // here and not in the pre-typing pass over `app.test_modules`.
+            crate::lower::array_ordinal::rewrite_body(&mut method.body);
+            crate::lower::typing::type_method_body(method, &classes, &ivars);
         }
         out.push(LoweredTestModule {
             test_class: lc.clone(),

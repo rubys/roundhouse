@@ -2197,9 +2197,14 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
 fn project_arg(a: &Expr) -> Expr {
     if let ExprNode::Hash { entries, kwargs } = &*a.node {
         if entries.iter().any(|(_, v)| records_a_model(v)) {
+            // `to_param`, not `id`: a query value is a String on the
+            // wire and the helper's option is typed `String?` from the
+            // app's own `params[:before]`. A bare `.id` reached spinel
+            // as an Integer in a String slot — `no implicit conversion
+            // of Integer into String`.
             let projected = entries
                 .iter()
-                .map(|(k, v)| (k.clone(), if records_a_model(v) { id_of(v) } else { v.clone() }))
+                .map(|(k, v)| (k.clone(), if records_a_model(v) { to_s_of(id_of(v)) } else { v.clone() }))
                 .collect();
             return Expr::new(a.span, ExprNode::Hash { entries: projected, kwargs: *kwargs });
         }
@@ -2217,6 +2222,19 @@ fn arg_carries_a_model(a: &Expr) -> bool {
         ExprNode::Hash { entries, .. } => entries.iter().any(|(_, v)| records_a_model(v)),
         _ => records_a_model(a),
     }
+}
+
+fn to_s_of(a: Expr) -> Expr {
+    Expr::new(
+        a.span,
+        ExprNode::Send {
+            recv: Some(a),
+            method: Symbol::from("to_s"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
 }
 
 fn id_of(a: &Expr) -> Expr {
