@@ -175,27 +175,72 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
         diags.push(residue(hash, "callee declares optional keyword parameters"));
         return;
     }
-    if !is_pure_read(hash) {
+    let Some((read, literal)) = splat_shape(hash) else {
         diags.push(residue(
             hash,
             "the splatted expression is not a local, ivar or constant read",
         ));
         return;
-    }
+    };
+    let (read, literal): (Expr, Vec<(Expr, Expr)>) = (read.clone(), literal.to_vec());
 
     let hash = args.pop().expect("checked above");
-    let value_ty = match &hash.ty {
+    let value_ty = match &read.ty {
         Some(Ty::Hash { value, .. }) => (**value).clone(),
         _ => Ty::Untyped,
     };
+    // A keyword the literal names takes the literal's value — evaluated
+    // once, as Ruby's `**` would; the rest are read off the bundle.
     let entries = splat
         .keywords
         .iter()
-        .map(|kw| (sym_key(kw, hash.span), index(&hash, kw, value_ty.clone())))
+        .map(|kw| {
+            let value = literal
+                .iter()
+                .find(|(k, _)| sym_of(k).is_some_and(|k| k == kw))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| index(&read, kw, value_ty.clone()));
+            (sym_key(kw, hash.span), value)
+        })
         .collect();
     let mut kwargs = Expr::new(hash.span, ExprNode::Hash { entries, kwargs: true });
     kwargs.ty = hash.ty.clone();
     args.push(kwargs);
+}
+
+/// The two halves of a splatted expression this pass can expand: the
+/// pure read of the bundle, and the literal pairs merged over it.
+///
+/// `f(**h)` is the bare read with no pairs. `f(**h, k: v)` — campfire's
+/// `WebPush::Notification.new(**params, badge: …, endpoint: …)` — is the
+/// merge chain the ingest desugar made of it, `h.merge({ k: v })`, and
+/// is just as expandable: every key of the literal is a Symbol the
+/// caller wrote, so the keyword it names takes that value and only the
+/// keywords it does NOT name are indexed off `h`. A key that is not a
+/// Symbol literal, or a merge whose argument is not a literal, is a
+/// bundle this pass cannot read, and declines.
+fn splat_shape(expr: &Expr) -> Option<(&Expr, &[(Expr, Expr)])> {
+    if is_pure_read(expr) {
+        return Some((expr, &[]));
+    }
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "merge" || args.len() != 1 || !is_pure_read(recv) {
+        return None;
+    }
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+    if !entries.iter().all(|(k, _)| sym_of(k).is_some()) {
+        return None;
+    }
+    Some((recv, entries.as_slice()))
+}
+
+fn sym_of(key: &Expr) -> Option<&Symbol> {
+    match &*key.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value),
+        _ => None,
+    }
 }
 
 /// Is `expr` a call whose trailing positional argument can only have

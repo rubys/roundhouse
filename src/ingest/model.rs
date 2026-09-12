@@ -842,6 +842,28 @@ pub(super) fn ingest_method(
                 ));
             }
         }
+        // `**params`: the same trailing positional-defaulting-to-`{}`
+        // that `ingest::library_class` records, MARKED `from_kwrest`
+        // for `lower::kwrest_forward`. Dropping it left campfire's
+        // `Push::Subscription#notification(**params)` as `def
+        // notification` with a body still reading `params` — every
+        // caller an ArgumentError, and the forward into
+        // `WebPush::Notification.new(**params, …)` a bare name.
+        if let Some(krest) = pn.keyword_rest() {
+            if let Some(krp) = krest.as_keyword_rest_parameter_node() {
+                if let Some(loc) = krp.name() {
+                    let mut p = crate::dialect::Param::with_default(
+                        Symbol::from(constant_id_str(&loc)),
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Hash { entries: vec![], kwargs: false },
+                        ),
+                    );
+                    p.from_kwrest = true;
+                    params.push(p);
+                }
+            }
+        }
     }
 
     let body = match def.body() {

@@ -228,3 +228,32 @@ end
     );
     assert!(diags.is_empty(), "no evidence means no ledger line either: {diags:?}");
 }
+
+#[test]
+fn splat_beside_literal_keywords_takes_the_literal_where_it_names_one() {
+    // campfire's `Push::Subscription#notification`: `**params` forwarded
+    // beside written-out keywords. Ingest made it `params.merge({ badge:
+    // … })`; the expansion takes each keyword from the literal when it
+    // names one (evaluated once, as Ruby would) and from the bundle
+    // otherwise.
+    let (out, diags) = expand_and_emit(
+        r#"
+class Notification
+  def initialize(title:, body:, badge:, endpoint:)
+    @title = title
+  end
+end
+
+class Subscription
+  def notification(**params)
+    Notification.new(**params, badge: unread, endpoint: endpoint)
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains("Notification.new(title: params[:title], body: params[:body], badge: unread, endpoint: endpoint)"),
+        "expected the literal's keywords kept and the rest indexed off the bundle:\n{out}"
+    );
+    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+}

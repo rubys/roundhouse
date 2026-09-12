@@ -2386,6 +2386,30 @@ fn model_method_keeps_optional_default_param() {
 }
 
 #[test]
+fn model_method_keeps_keyword_rest_as_a_trailing_hash_param() {
+    // `def notification(**params)` on a model: the same trailing
+    // positional-defaulting-to-`{}` `ingest::library_class` records.
+    // Dropped, campfire's `Push::Subscription#notification` emitted as
+    // `def notification` with a body still reading `params`.
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :subscriptions do |t|\n    t.string :endpoint\n  end\nend\n",
+        ),
+        (
+            "app/models/subscription.rb",
+            "class Subscription < ApplicationRecord\n  def notification(**params)\n    params\n  end\nend\n",
+        ),
+    ]);
+    let files = ruby::emit_lowered_models(&app);
+    let src = find(&files, "subscription.rb");
+    assert!(
+        src.contains("def notification(params = {})"),
+        "a model's `**params` must survive as a trailing hash param; got:\n{src}",
+    );
+}
+
+#[test]
 fn empty_app_helper_module_is_a_no_op() {
     // The blog ships empty helper modules (`module ApplicationHelper; end`).
     // They contribute no registry entries, so helper lowering stays a strict
