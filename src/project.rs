@@ -2703,6 +2703,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/erb_spinel.rbs".to_string(), rbs));
     }
 
+    // Record-equality sidecar — the reopen in
+    // runtime/active_record_equality_spinel.rb gives ActiveRecord::Base
+    // Rails' `==`; the .rbs declares it so a typed comparison binds.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/active_record_equality_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_record_equality_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
+    }
+
     // SecureRandom stub-slot sidecar — the reopen in
     // runtime/secure_random_stub.rb replaces the package's
     // `alphanumeric`/`uuid` with stub-first arms; the .rbs pins the

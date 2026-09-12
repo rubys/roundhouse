@@ -86,6 +86,9 @@ ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(
   Rails.application.config_time_zone, Rails.application.config_time_zone
 )
 require_relative "runtime/active_record"
+# Record equality (same class + same persisted id) — a reopen of
+# ActiveRecord::Base; the CRuby overlay's twin is active_record_bang.rb.
+require_relative "runtime/active_record_equality_spinel"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 # Typed Request value object (remote_ip / referer / xhr? / env bag) —
