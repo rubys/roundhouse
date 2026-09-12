@@ -1170,6 +1170,8 @@ module WebPush
   STUB_VALUE = [ "" ]
   CALLS = [ 0 ]
   EXPECTED = [ -1 ]
+  EXPECT_KEY = [ "" ]
+  EXPECT_VALUE = [ "" ]
 
   class << self
     alias_method :payload_send_without_stub, :payload_send if respond_to?(:payload_send)
@@ -1192,11 +1194,21 @@ module WebPush
       nil
     end
 
+    def expect_payload_send_with_entry(count, key, value)
+      STUB_ON[0] = true
+      EXPECTED[0] = count
+      EXPECT_KEY[0] = key.to_s
+      EXPECT_VALUE[0] = value.to_s
+      nil
+    end
+
     def clear_payload_send_stubs
       STUB_ON[0] = false
       STUB_VALUE[0] = ""
       CALLS[0] = 0
       EXPECTED[0] = -1
+      EXPECT_KEY[0] = ""
+      EXPECT_VALUE[0] = ""
       nil
     end
 
@@ -1211,6 +1223,11 @@ module WebPush
 
     def payload_send(**options)
       if STUB_ON[0]
+        key = EXPECT_KEY[0]
+        unless key.empty?
+          got = options[key.to_sym].to_s
+          raise "WebPush.payload_send was called with #{key}: #{got.inspect}, expected #{EXPECT_VALUE[0].inspect}" if got != EXPECT_VALUE[0]
+        end
         CALLS[0] += 1
         return STUB_VALUE[0]
       end
@@ -1229,6 +1246,10 @@ class Resolv
   STUB_ADDRS = [ [ "" ] ]
   STUB_ANY = [ [ "" ] ]
   STUB_ANY_ON = [ false ]
+  STUB_RAISE = [ StandardError ]
+  STUB_RAISE_ON = [ false ]
+  STUB_WHERE = [ nil ]
+  STUB_WHERE_ADDRS = [ [ "" ] ]
 
   class << self
     alias_method :getaddresses_without_stub, :getaddresses
@@ -1247,6 +1268,20 @@ class Resolv
     def stub_getaddresses_any(addrs)
       STUB_ANY[0] = addrs
       STUB_ANY_ON[0] = true
+      STUB_RAISE_ON[0] = false
+      nil
+    end
+
+    def stub_getaddresses_raises(error)
+      STUB_RAISE[0] = error
+      STUB_RAISE_ON[0] = true
+      STUB_ANY_ON[0] = false
+      nil
+    end
+
+    def stub_getaddresses_where(addrs, &blk)
+      STUB_WHERE[0] = blk
+      STUB_WHERE_ADDRS[0] = addrs
       nil
     end
 
@@ -1254,10 +1289,15 @@ class Resolv
       STUB_HOSTS.replace([ "" ])
       STUB_ADDRS.replace([ [ "" ] ])
       STUB_ANY_ON[0] = false
+      STUB_RAISE_ON[0] = false
+      STUB_WHERE[0] = nil
       nil
     end
 
     def getaddresses(host)
+      pred = STUB_WHERE[0]
+      return STUB_WHERE_ADDRS[0] if !pred.nil? && pred.call(host)
+      raise STUB_RAISE[0] if STUB_RAISE_ON[0]
       i = STUB_HOSTS.index(host)
       return STUB_ADDRS[i] unless i.nil?
       return STUB_ANY[0] if STUB_ANY_ON[0]

@@ -402,6 +402,13 @@ module WebPush
   CALLS = [ 0 ]
   EXPECTED = [ -1 ]
 
+  # `expects(:payload_send).with(has_entry(endpoint_ip: ip))` — the
+  # count is filed against calls carrying that option, and a call that
+  # does not is mocha's "unexpected invocation": it raises. Only the
+  # String-valued options are matchable; the entry travels as Strings.
+  EXPECT_KEY = [ "" ]
+  EXPECT_VALUE = [ "" ]
+
   def self.stub_payload_send
     STUB_ON[0] = true
     STUB_VALUE[0] = ""
@@ -420,11 +427,21 @@ module WebPush
     nil
   end
 
+  def self.expect_payload_send_with_entry(count, key, value)
+    STUB_ON[0] = true
+    EXPECTED[0] = count
+    EXPECT_KEY[0] = key.to_s
+    EXPECT_VALUE[0] = value.to_s
+    nil
+  end
+
   def self.clear_payload_send_stubs
     STUB_ON[0] = false
     STUB_VALUE[0] = ""
     CALLS[0] = 0
     EXPECTED[0] = -1
+    EXPECT_KEY[0] = ""
+    EXPECT_VALUE[0] = ""
     nil
   end
 
@@ -437,8 +454,18 @@ module WebPush
     nil
   end
 
-  def self.payload_send(message:, endpoint:, p256dh:, auth:, vapid:, connection: nil, urgency: nil)
+  # `endpoint_ip:` is not the gem's keyword — the gem takes `**options`
+  # and campfire's `WebPush::PersistentRequest` prepend reads it off
+  # them to pin the connection. It has to be accepted here for the
+  # same reason: the app's `Notification#deliver` passes it.
+  def self.payload_send(message:, endpoint:, p256dh:, auth:, vapid:, connection: nil, urgency: nil, endpoint_ip: nil)
     if STUB_ON[0]
+      key = EXPECT_KEY[0]
+      unless key.empty?
+        sent = { "message" => message, "endpoint" => endpoint, "p256dh" => p256dh, "auth" => auth, "urgency" => urgency.to_s, "endpoint_ip" => endpoint_ip.to_s }
+        got = sent[key].to_s
+        raise "WebPush.payload_send was called with #{key}: #{got.inspect}, expected #{EXPECT_VALUE[0].inspect}" if got != EXPECT_VALUE[0]
+      end
       CALLS[0] = CALLS[0] + 1
       return STUB_VALUE[0]
     end

@@ -81,9 +81,17 @@ struct Stubbable {
     any: Option<&'static str>,
     /// `stubs(:m)` with nothing chained — answers the row's default.
     bare: Option<&'static str>,
+    /// `stubs(:m).raises(e)` — every call raises `e`.
+    raises: Option<&'static str>,
+    /// `stubs(:m).with { |*| … }.returns(v)` — answers `v` for the
+    /// calls the block admits; the block rides on the slot call.
+    where_: Option<&'static str>,
     /// `expects(:m).times(n)` — installs the stub and files a count the
     /// row's `verify` checks at teardown.
     expect: Option<&'static str>,
+    /// `expects(:m)[.times(n)].with(has_entry(k: v))` — files the count
+    /// against calls carrying that option, as `(n, :k, v)`.
+    expect_entry: Option<&'static str>,
     /// Drops every installed stub and count; the helper runs this in
     /// setup, between tests.
     clear: &'static str,
@@ -114,7 +122,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: Some("stub_getaddresses"),
         any: Some("stub_getaddresses_any"),
         bare: None,
+        raises: Some("stub_getaddresses_raises"),
+        where_: Some("stub_getaddresses_where"),
         expect: None,
+        expect_entry: None,
         clear: "clear_getaddresses_stubs",
         verify: None,
         require: "../runtime/resolv",
@@ -131,7 +142,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: Some("stub_alphanumeric"),
         bare: None,
+        raises: None,
+        where_: None,
         expect: None,
+        expect_entry: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -143,7 +157,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: Some("stub_uuid"),
         bare: None,
+        raises: None,
+        where_: None,
         expect: None,
+        expect_entry: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -158,7 +175,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: Some("stub_uuid"),
         bare: None,
+        raises: None,
+        where_: None,
         expect: None,
+        expect_entry: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -174,7 +194,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: Some("stub_payload_send_any"),
         bare: Some("stub_payload_send"),
+        raises: None,
+        where_: None,
         expect: Some("expect_payload_send"),
+        expect_entry: Some("expect_payload_send_with_entry"),
         clear: "clear_payload_send_stubs",
         verify: Some("verify_payload_send_expectations"),
         require: "../runtime/gem_facades",
@@ -189,7 +212,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: None,
         bare: None,
+        raises: None,
+        where_: None,
         expect: Some("expect_broadcast_replace_to"),
+        expect_entry: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
@@ -201,7 +227,10 @@ const STUBBABLE: &[Stubbable] = &[
         keyed: None,
         any: None,
         bare: None,
+        raises: None,
+        where_: None,
         expect: Some("expect_broadcast_remove_to"),
+        expect_entry: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
@@ -480,22 +509,59 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
         "stubs" => match ops.as_slice() {
             [] => row.bare.map(|bare| call(span, konst, bare, vec![])),
             [ret] if plain(ret, "returns", 1) => row.any.map(|any| call(span, konst, any, vec![ret.args[0].clone()])),
+            [raises] if plain(raises, "raises", 1) => {
+                row.raises.map(|slot| call(span, konst, slot, vec![raises.args[0].clone()]))
+            }
             [with, ret] if plain(with, "with", 1) && plain(ret, "returns", 1) => {
                 row.keyed.map(|keyed| call(span, konst, keyed, vec![with.args[0].clone(), ret.args[0].clone()]))
+            }
+            // `.with { |*| … }.returns(v)`: the block is the predicate,
+            // and it rides on the slot call.
+            [with, ret] if with.name.as_str() == "with" && with.args.is_empty() && with.block.is_some() && plain(ret, "returns", 1) => {
+                let slot = row.where_?;
+                let mut e = call(span, konst, slot, vec![ret.args[0].clone()]);
+                if let ExprNode::Send { block, .. } = &mut *e.node {
+                    *block = with.block.clone();
+                }
+                Some(e)
             }
             _ => None,
         },
         "expects" => {
-            let expect = row.expect?;
-            match ops.as_slice() {
+            // A `.with(has_entry(k: v))` link beside at most one count.
+            let entries: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "with").collect();
+            let counts: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() != "with").collect();
+            let n = match counts.as_slice() {
                 // mocha reads a bare `expects` as exactly once.
-                [] => Some(call(span, konst, expect, vec![int_lit(span, 1)])),
-                [count] => count_of(count).map(|n| call(span, konst, expect, vec![n])),
+                [] => int_lit(span, 1),
+                [count] => count_of(count)?,
+                _ => return None,
+            };
+            match entries.as_slice() {
+                [] => Some(call(span, konst, row.expect?, vec![n])),
+                [with] if plain(with, "with", 1) => {
+                    let (key, value) = has_entry_pair(&with.args[0])?;
+                    Some(call(span, konst, row.expect_entry?, vec![n, sym_lit(span, key.as_str()), value]))
+                }
                 _ => None,
             }
         }
         _ => None,
     }
+}
+
+/// `has_entry(k: v)` with exactly one Symbol-keyed pair — the one
+/// matcher shape a slot can hold as `(key, value)`. Anything else
+/// (two pairs, a non-Symbol key, another matcher) goes to the bridge.
+fn has_entry_pair(arg: &Expr) -> Option<(Symbol, Expr)> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*arg.node else { return None };
+    if method.as_str() != "has_entry" || args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+    let [(k, v)] = entries.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+    Some((key.clone(), v.clone()))
 }
 
 fn array_lit(span: crate::span::Span, elems: Vec<Expr>) -> Expr {
@@ -663,10 +729,11 @@ mod tests {
 
     #[test]
     fn a_chain_the_table_cannot_serve_travels_to_the_bridge_as_data() {
-        // Resolv.stubs(:getaddresses).with { … }.returns([ip])
+        // Resolv.stubs(:getaddresses).with { … }.throws(:x) — the row
+        // has no `throws` setter.
         let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
         let with = send_blk(head, "with", lambda());
-        let mut e = send(Some(with), "returns", vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])]);
+        let mut e = send(Some(with), "throws", vec![sym("x")]);
         rewrite(&mut e);
         let (recv, m, args, block) = as_send(&e);
         assert_eq!(const_path(recv), "MochaBridge");
@@ -675,9 +742,47 @@ mod tests {
         assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Resolv"));
         assert!(matches!(&*args[1].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "stubs"));
         let ExprNode::Array { elements: elems, .. } = &*args[3].node else { panic!("{:?}", args[3].node) };
-        assert_eq!(elems.len(), 2, "with, returns — in source order");
+        assert_eq!(elems.len(), 2, "with, throws — in source order");
         let ExprNode::Array { elements: first, .. } = &*elems[0].node else { panic!() };
         assert!(matches!(&*first[0].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "with"));
+    }
+
+    #[test]
+    fn a_with_block_predicate_rides_on_the_where_slot() {
+        // Resolv.stubs(:getaddresses).with { |*| … }.returns([ip])
+        let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
+        let with = send_blk(head, "with", lambda());
+        let mut e = send(Some(with), "returns", vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])]);
+        rewrite(&mut e);
+        let (recv, m, args, block) = as_send(&e);
+        assert_eq!(const_path(recv), "Resolv");
+        assert_eq!(m, "stub_getaddresses_where");
+        assert_eq!(args.len(), 1, "the answer is the one argument");
+        assert!(block.is_some(), "the predicate is the block");
+    }
+
+    #[test]
+    fn raises_and_has_entry_are_served_where_the_row_has_a_slot() {
+        // Resolv.stubs(:getaddresses).raises(error)
+        let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
+        let mut e = send(Some(head), "raises", vec![Expr::new(sp(), ExprNode::Ivar { name: Symbol::from("error") })]);
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "Resolv");
+        assert_eq!(m, "stub_getaddresses_raises");
+        assert_eq!(args.len(), 1);
+
+        // WebPush.expects(:payload_send).with(has_entry(endpoint_ip: ip)) — bare expects is once.
+        let matcher = send(None, "has_entry", vec![Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("endpoint_ip"), str_lit(sp(), "1.2.3.4"))], kwargs: true })]);
+        let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
+        let mut e = send(Some(head), "with", vec![matcher]);
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "WebPush");
+        assert_eq!(m, "expect_payload_send_with_entry");
+        assert_eq!(int_of(&args[0]), 1);
+        assert!(matches!(&*args[1].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "endpoint_ip"));
+        assert!(matches!(&*args[2].node, ExprNode::Lit { value: Literal::Str { value } } if value == "1.2.3.4"));
     }
 
     #[test]

@@ -75,6 +75,23 @@ class Resolv
   STUB_ANY = [ [ "" ] ]
   STUB_ANY_ON = [ false ]
 
+  # `stubs(:getaddresses).raises(error)` — campfire's `stub_dns_failure`,
+  # a host that resolves to nothing. The class travels as a value (it is
+  # the helper's own parameter, `error = Resolv::ResolvError`) and is
+  # raised as one. `raises` and the catch-all are both unconditional
+  # matchers, so whichever was installed LAST shadows the other —
+  # mocha consults the newest expectation first — and each install
+  # turns the other off.
+  STUB_RAISE = [ StandardError ]
+  STUB_RAISE_ON = [ false ]
+
+  # `stubs(:getaddresses).with { |*| … }.returns(addrs)` — a predicate
+  # over the host, consulted before every other stub because it was
+  # installed inside the test where the others came from setup.
+  # campfire's counts resolver calls with it.
+  STUB_WHERE = [ nil ]
+  STUB_WHERE_ADDRS = [ [ "" ] ]
+
   # Install or REPLACE one host's answer. Replacement matters: a single
   # test re-stubs the same host with a second value
   # (`opengraph_location_test` maps `metadata.internal` to an IPv4-mapped
@@ -99,6 +116,20 @@ class Resolv
   def self.stub_getaddresses_any(addrs)
     STUB_ANY[0] = addrs
     STUB_ANY_ON[0] = true
+    STUB_RAISE_ON[0] = false
+    nil
+  end
+
+  def self.stub_getaddresses_raises(error)
+    STUB_RAISE[0] = error
+    STUB_RAISE_ON[0] = true
+    STUB_ANY_ON[0] = false
+    nil
+  end
+
+  def self.stub_getaddresses_where(addrs, &blk)
+    STUB_WHERE[0] = blk
+    STUB_WHERE_ADDRS[0] = addrs
     nil
   end
 
@@ -111,10 +142,15 @@ class Resolv
     STUB_HOSTS << ""
     STUB_ADDRS << [ "" ]
     STUB_ANY_ON[0] = false
+    STUB_RAISE_ON[0] = false
+    STUB_WHERE[0] = nil
     nil
   end
 
   def self.getaddresses(host)
+    pred = STUB_WHERE[0]
+    return STUB_WHERE_ADDRS[0] if !pred.nil? && pred.call(host)
+    raise STUB_RAISE[0] if STUB_RAISE_ON[0]
     i = 0
     while i < STUB_HOSTS.length
       return STUB_ADDRS[i] if STUB_HOSTS[i] == host
