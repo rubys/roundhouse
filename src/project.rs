@@ -1248,7 +1248,7 @@ class Resolv
   STUB_ANY_ON = [ false ]
   STUB_RAISE = [ StandardError ]
   STUB_RAISE_ON = [ false ]
-  STUB_WHERE = [ nil ]
+  STUB_WHERE = []
   STUB_WHERE_ADDRS = [ [ "" ] ]
 
   class << self
@@ -1279,8 +1279,8 @@ class Resolv
       nil
     end
 
-    def stub_getaddresses_where(addrs, &blk)
-      STUB_WHERE[0] = blk
+    def stub_getaddresses_where(addrs, pred)
+      STUB_WHERE.replace([ pred ])
       STUB_WHERE_ADDRS[0] = addrs
       nil
     end
@@ -1290,13 +1290,12 @@ class Resolv
       STUB_ADDRS.replace([ [ "" ] ])
       STUB_ANY_ON[0] = false
       STUB_RAISE_ON[0] = false
-      STUB_WHERE[0] = nil
+      STUB_WHERE.clear
       nil
     end
 
     def getaddresses(host)
-      pred = STUB_WHERE[0]
-      return STUB_WHERE_ADDRS[0] if !pred.nil? && pred.call(host)
+      return STUB_WHERE_ADDRS[0] if !STUB_WHERE.empty? && STUB_WHERE[0].call(host)
       raise STUB_RAISE[0] if STUB_RAISE_ON[0]
       i = STUB_HOSTS.index(host)
       return STUB_ADDRS[i] unless i.nil?

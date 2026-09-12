@@ -10,13 +10,12 @@ class Resolv
   STUB_ADDRS: Array[Array[String]]
   STUB_ANY: Array[Array[String]]
   STUB_ANY_ON: Array[bool]
-  STUB_RAISE: Array[untyped]
-  STUB_RAISE_ON: Array[bool]
-  STUB_WHERE: Array[Proc?]
+  STUB_RAISE_NAME: Array[String]
+  STUB_WHERE: Array[^(String) -> bool]
   STUB_WHERE_ADDRS: Array[Array[String]]
   def self.stub_getaddresses: (String host, Array[String] addrs) -> nil
   def self.stub_getaddresses_any: (Array[String] addrs) -> nil
   def self.stub_getaddresses_raises: (untyped error) -> nil
-  def self.stub_getaddresses_where: (Array[String] addrs) { (String) -> bool } -> nil
+  def self.stub_getaddresses_where: (Array[String] addrs, ^(String) -> bool pred) -> nil
   def self.clear_getaddresses_stubs: () -> nil
 end

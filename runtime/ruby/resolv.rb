@@ -76,20 +76,23 @@ class Resolv
   STUB_ANY_ON = [ false ]
 
   # `stubs(:getaddresses).raises(error)` — campfire's `stub_dns_failure`,
-  # a host that resolves to nothing. The class travels as a value (it is
-  # the helper's own parameter, `error = Resolv::ResolvError`) and is
-  # raised as one. `raises` and the catch-all are both unconditional
-  # matchers, so whichever was installed LAST shadows the other —
-  # mocha consults the newest expectation first — and each install
-  # turns the other off.
-  STUB_RAISE = [ StandardError ]
-  STUB_RAISE_ON = [ false ]
+  # a host that resolves to nothing. The class is the helper's own
+  # parameter (`error = Resolv::ResolvError`), and a class is not a
+  # value the typed runtime can hold, so its NAME is what is stored:
+  # `Resolv::ResolvError` — the one class this port defines, and the
+  # one Surfguard rescues — is raised as itself, anything else as a
+  # RuntimeError carrying the name. `raises` and the catch-all are both
+  # unconditional matchers, so whichever was installed LAST shadows the
+  # other — mocha consults the newest expectation first — and each
+  # install turns the other off.
+  STUB_RAISE_NAME = [ "" ]
 
   # `stubs(:getaddresses).with { |*| … }.returns(addrs)` — a predicate
   # over the host, consulted before every other stub because it was
   # installed inside the test where the others came from setup.
-  # campfire's counts resolver calls with it.
-  STUB_WHERE = [ nil ]
+  # campfire counts resolver calls with it. `lower::mocha` hands the
+  # block over as a one-parameter lambda; an empty list is "none".
+  STUB_WHERE = []
   STUB_WHERE_ADDRS = [ [ "" ] ]
 
   # Install or REPLACE one host's answer. Replacement matters: a single
@@ -116,19 +119,19 @@ class Resolv
   def self.stub_getaddresses_any(addrs)
     STUB_ANY[0] = addrs
     STUB_ANY_ON[0] = true
-    STUB_RAISE_ON[0] = false
+    STUB_RAISE_NAME[0] = ""
     nil
   end
 
   def self.stub_getaddresses_raises(error)
-    STUB_RAISE[0] = error
-    STUB_RAISE_ON[0] = true
+    STUB_RAISE_NAME[0] = error.to_s
     STUB_ANY_ON[0] = false
     nil
   end
 
-  def self.stub_getaddresses_where(addrs, &blk)
-    STUB_WHERE[0] = blk
+  def self.stub_getaddresses_where(addrs, pred)
+    STUB_WHERE.clear
+    STUB_WHERE << pred
     STUB_WHERE_ADDRS[0] = addrs
     nil
   end
@@ -142,15 +145,18 @@ class Resolv
     STUB_HOSTS << ""
     STUB_ADDRS << [ "" ]
     STUB_ANY_ON[0] = false
-    STUB_RAISE_ON[0] = false
-    STUB_WHERE[0] = nil
+    STUB_RAISE_NAME[0] = ""
+    STUB_WHERE.clear
     nil
   end
 
   def self.getaddresses(host)
-    pred = STUB_WHERE[0]
-    return STUB_WHERE_ADDRS[0] if !pred.nil? && pred.call(host)
-    raise STUB_RAISE[0] if STUB_RAISE_ON[0]
+    return STUB_WHERE_ADDRS[0] if STUB_WHERE.length > 0 && STUB_WHERE[0].call(host)
+    failure = STUB_RAISE_NAME[0]
+    if failure != ""
+      raise ResolvError, failure if failure == "Resolv::ResolvError"
+      raise failure
+    end
     i = 0
     while i < STUB_HOSTS.length
       return STUB_ADDRS[i] if STUB_HOSTS[i] == host

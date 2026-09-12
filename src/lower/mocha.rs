@@ -516,14 +516,13 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
                 row.keyed.map(|keyed| call(span, konst, keyed, vec![with.args[0].clone(), ret.args[0].clone()]))
             }
             // `.with { |*| … }.returns(v)`: the block is the predicate,
-            // and it rides on the slot call.
+            // handed to the slot as a one-parameter LAMBDA (the host) —
+            // a value the runtime's `Array[^(String) -> bool]` can hold,
+            // where a `&blk` could not be typed.
             [with, ret] if with.name.as_str() == "with" && with.args.is_empty() && with.block.is_some() && plain(ret, "returns", 1) => {
                 let slot = row.where_?;
-                let mut e = call(span, konst, slot, vec![ret.args[0].clone()]);
-                if let ExprNode::Send { block, .. } = &mut *e.node {
-                    *block = with.block.clone();
-                }
-                Some(e)
+                let pred = predicate_lambda(with.block.clone()?)?;
+                Some(call(span, konst, slot, vec![ret.args[0].clone(), pred]))
             }
             _ => None,
         },
@@ -548,6 +547,21 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
         }
         _ => None,
     }
+}
+
+/// A `with` block as a lambda over the ONE argument the slot passes
+/// (the host). `|*|` / no params take a placeholder so the lambda's
+/// arity matches; a block naming its own parameters is left as it is
+/// (mocha would hand it every argument, and this slot has one).
+fn predicate_lambda(block: Expr) -> Option<Expr> {
+    let ExprNode::Lambda { params, rest_param, block_param, body, block_style } = *block.node else {
+        return None;
+    };
+    let params = if params.is_empty() && rest_param.is_none() { vec![Symbol::from("_host")] } else { params };
+    Some(Expr::new(
+        block.span,
+        ExprNode::Lambda { params, rest_param, block_param, body, block_style },
+    ))
 }
 
 /// `has_entry(k: v)` with exactly one Symbol-keyed pair — the one
@@ -757,8 +771,9 @@ mod tests {
         let (recv, m, args, block) = as_send(&e);
         assert_eq!(const_path(recv), "Resolv");
         assert_eq!(m, "stub_getaddresses_where");
-        assert_eq!(args.len(), 1, "the answer is the one argument");
-        assert!(block.is_some(), "the predicate is the block");
+        assert_eq!(args.len(), 2, "the answer, then the predicate");
+        assert!(block.is_none(), "the predicate travels as an argument, not a block");
+        assert!(matches!(&*args[1].node, ExprNode::Lambda { params, .. } if params.len() == 1));
     }
 
     #[test]
