@@ -109,6 +109,11 @@ require_relative "runtime/action_controller"
 require_relative "runtime/multipart"
 require_relative "runtime/active_storage"
 require_relative "runtime/active_storage_disk"
+# The image processor behind variants: a comment-only stub unless the
+# app declares `attachable.variant …`, in which case project.rs swaps
+# in the ruby-vips reopen. After config/application — it applies the
+# app's lifted loader policy at load.
+require_relative "runtime/active_storage_processor"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win
 # that reopen (same ordering contract as action_controller_session's

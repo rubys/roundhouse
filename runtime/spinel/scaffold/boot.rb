@@ -106,6 +106,11 @@ require_relative "runtime/action_controller"
 require_relative "runtime/multipart"
 require_relative "runtime/active_storage"
 require_relative "runtime/active_storage_disk"
+# The image processor behind variants: a comment-only stub unless the
+# app declares `attachable.variant …`, in which case project.rs swaps
+# in the ruby-vips reopen. After config/application — it applies the
+# app's lifted loader policy at load.
+require_relative "runtime/active_storage_processor"
 # typed_store virtual-attribute seam (flat-YAML subset on this tree;
 # the CRuby overlay swaps in its real-YAML sibling at the same path).
 # Before app/models — the synthesized settings accessors route

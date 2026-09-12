@@ -124,7 +124,7 @@ fn the_attachment_reader_memoizes_its_proxy() {
     let body = &src[at..src[at..].find("\n  end").map(|i| at + i).unwrap_or(src.len())];
     assert!(body.contains("@attachment_cache"), "the reader keeps the proxy:\n{body}");
     assert!(
-        body.contains(r#"ActiveStorage::Attached.new("Message", @id, "attachment")"#),
+        body.contains(r#"ActiveStorage::Attached.new("Message", @id, "attachment", ["#),
         "and builds it on the first read:\n{body}"
     );
     assert!(
@@ -135,11 +135,17 @@ fn the_attachment_reader_memoizes_its_proxy() {
 
 /// The reader the concern declares lands on the INCLUDER, scoped to the
 /// includer's own record type — not on the module, which has no table.
+/// The block's `attachable.variant :thumb, resize_to_limit: [W, H]`
+/// rides into the constructor as a `Variation`, with the concern's
+/// constant spelled as the source spells it: inside `Message`, which
+/// includes the concern, the bare name resolves.
 #[test]
 fn a_concerns_has_one_attached_reaches_the_includer() {
     let src = model_src("message.rb");
     assert!(
-        src.contains(r#"ActiveStorage::Attached.new("Message", @id, "attachment")"#),
-        "the concern's has_one_attached must synthesize on Message:\n{src}"
+        src.contains(
+            r#"ActiveStorage::Attached.new("Message", @id, "attachment", [ActiveStorage::Variation.new("thumb", THUMBNAIL_MAX_WIDTH, 800, "")])"#
+        ),
+        "the concern's has_one_attached must synthesize on Message with its variant:\n{src}"
     );
 }

@@ -7,6 +7,9 @@ module ActiveStorage
   def self.default_variable_content_types: () -> Array[String]
   def self.variable_content_types: () -> Array[String]
   def self.variable_content_type?: (String content_type) -> bool
+  def self.content_type_for_format: (String format) -> String
+  def self.format_for_content_type: (String content_type) -> String
+  def self.filename_base: (String filename) -> String
   def self.url_filename: (String filename) -> String
 
   class Service
@@ -70,14 +73,44 @@ module ActiveStorage
     def self.dimensions: (String data, String content_type) -> Array[Integer]
   end
 
-  class VariantWithRecord
-    @attached: ActiveStorage::Attached
+  class Processor
+    def self.transform: (String data, String content_type, ActiveStorage::Variation variation) -> String
+  end
+
+  class Variation
     @name: String
-    def initialize: (ActiveStorage::Attached attached, String name) -> void
-    def processed: () -> ActiveStorage::VariantWithRecord
-    def image: () -> ActiveStorage::Attached
+    @width: Integer
+    @height: Integer
+    @format: String
+    def initialize: (String name, Integer width, Integer height, String format) -> void
+    def name: () -> String
+    def width: () -> Integer
+    def height: () -> Integer
+    def format: () -> String
+    def resize?: () -> bool
+    def output_format: (String source_content_type) -> String
+    def output_content_type: (String source_content_type) -> String
+    def encode: () -> String
+    def digest: () -> String
+    def self.decode: (String key) -> ActiveStorage::Variation?
+  end
+
+  class VariantWithRecord
+    @blob: ActiveStorage::Blob?
+    @variation: ActiveStorage::Variation?
+    @record_id: Integer
+    @image_blob: ActiveStorage::Blob?
+    def initialize: (ActiveStorage::Blob? blob, ActiveStorage::Variation? variation) -> void
     def blob: () -> ActiveStorage::Blob?
+    def variation: () -> ActiveStorage::Variation?
+    def processed: () -> ActiveStorage::VariantWithRecord
+    def self.record_select: (String where) -> String
+    def self.purge_records_of: (Integer blob_id) -> nil
+    def process: () -> nil
+    def image: () -> ActiveStorage::Attached?
+    def image_blob: () -> ActiveStorage::Blob?
     def key: () -> String
+    def filename: () -> String
     def url: () -> String
   end
 
@@ -89,7 +122,9 @@ module ActiveStorage
     @row_loaded: bool
     @attachment_id: Integer
     @blob: ActiveStorage::Blob?
-    def initialize: (String record_type, Integer record_id, String name) -> void
+    @variations: Array[ActiveStorage::Variation]
+    def initialize: (String record_type, Integer record_id, String name, Array[ActiveStorage::Variation] variations) -> void
+    def variations: () -> Array[ActiveStorage::Variation]
     def load_row: () -> nil
     def _preload_row: (Integer attachment_id, ActiveStorage::Blob? blob) -> nil
     def attached?: () -> bool
@@ -107,11 +142,11 @@ module ActiveStorage
     def previewable?: () -> bool
     def representable?: () -> bool
     def analyze: () -> nil
-    # The named variant (`:thumb`) or an inline transformation hash;
-    # identity either way, the name survives into the URL.
+    # The named variant (`:thumb`) — a declared variation — or an
+    # inline transformation hash, which is the identity variant.
     def variant: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
     def representation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
-    def variant_name: (Symbol | Hash[Symbol, untyped] transformations) -> String
+    def find_variation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::Variation?
     def preview: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
     def url: () -> String
     def attach_blob: (ActiveStorage::Blob blob) -> nil

@@ -476,6 +476,47 @@ end
                 }
             }
         }
+        // `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` —
+        // an initializer setting libvips' loader policy before any
+        // upload is decoded (campfire refuses every unfuzzed loader,
+        // and openslide by name). The image processor applies it at
+        // load (runtime/spinel/facades/active_storage_processor_vips
+        // .rb). Synthesized as `vips_block_untrusted` /
+        // `vips_blocked_operations` on the reopen, over the framework
+        // defaults (false / []) in runtime/ruby/rails.rb.
+        {
+            let init_dir = dir.join("config/initializers");
+            let mut untrusted = false;
+            let mut blocked: Vec<String> = Vec::new();
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        let (u, mut b) = extract_vips_loader_policy(&bytes);
+                        untrusted = untrusted || u;
+                        blocked.append(&mut b);
+                    }
+                }
+            }
+            if untrusted {
+                if let Ok(mut synth) =
+                    crate::runtime_src::parse_methods("def vips_block_untrusted\n  true\nend\n")
+                {
+                    methods.append(&mut synth);
+                }
+            }
+            if !blocked.is_empty() {
+                let literal = blocked
+                    .iter()
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def vips_blocked_operations\n  [{literal}]\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // App-defined config keys — `config.app_version = …` in
         // application.rb or an initializer, read back as
         // `Rails.application.config.app_version`. Rails' config object
@@ -3212,6 +3253,41 @@ fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
         out.extend(body[..close].split_whitespace().map(|s| s.to_string()));
     }
     out
+}
+
+/// `(Vips.block_untrusted(true) seen, operations named by Vips.block(
+/// "<name>", true))` from an initializer. Line-shaped like the
+/// content-type trim above: the two calls are one statement each, and
+/// only the `true` arms are policy (`false` is libvips' default).
+fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
+    let source = String::from_utf8_lossy(source);
+    let mut untrusted = false;
+    let mut blocked = Vec::new();
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Vips.block_untrusted") {
+            let arg = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+            if arg.starts_with("true") {
+                untrusted = true;
+            }
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Vips.block") {
+            let rest = rest.trim_start();
+            let Some(rest) = rest.strip_prefix('(') else { continue };
+            let Some(close) = rest.find(')') else { continue };
+            let mut parts = rest[..close].splitn(2, ',');
+            let name = parts.next().unwrap_or("").trim().trim_matches('"').trim_matches('\'');
+            let state = parts.next().unwrap_or("").trim();
+            if !name.is_empty() && state == "true" {
+                blocked.push(name.to_string());
+            }
+        }
+    }
+    (untrusted, blocked)
 }
 
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {

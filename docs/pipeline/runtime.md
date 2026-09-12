@@ -571,7 +571,7 @@ request body a bot receives) holds strings, integers and nested hashes
 of the same; a value JSON cannot encode raises rather than rendering
 wrongly.
 
-### Active Storage: rows and bytes are modeled, variants are identity
+### Active Storage: rows and bytes are modeled, variants are a seam
 
 `runtime/ruby/active_storage.rb` models the attachment ROWS and the
 BLOB (`ActiveStorage::Blob`: key, filename, content type, byte size,
@@ -589,30 +589,56 @@ signed id — and an `after_save` that attaches it once the record has
 an id, so `create!(attachment: file)`, `update!(avatar: file)` and a
 permitted `:avatar` param all reach the store.
 
-**Variants are IDENTITY.** No image processor exists on any target, so
-`variant`, `representation` and `.processed` answer an
-`ActiveStorage::VariantWithRecord` whose `key` is the original blob's:
-the "thumb" a view asks for is served at the upload's own size, and the
-avatar and logo controllers serve the original bytes under the content
-type they hard-code (`image/webp`, `image/png` — a JPEG upload goes out
-mislabelled; browsers sniff `<img>` sources). `variable?` is Rails'
-content-type question, answered from `variable_content_types` minus
-what the app's initializer subtracts (ingest lifts
-`config.active_storage.variable_content_types -= %w[…]` onto the
-`Rails::Application` reopen), so a bmp avatar falls back to initials
-exactly as in campfire. `preview` (a video poster, a PDF page) raises
-and `previewable?` is false — there is no still to serve, and serving
-the video's bytes in an `<img>` would be the failure that looks like
-success. The image DIMENSIONS are read from the file header at upload
-(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
-`metadata[:width]` answers what Rails' analyzer would.
+**Variants are Rails' `VariantWithRecord`; the pixels are a seam.** The
+`has_one_attached … do |attachable| attachable.variant :thumb,
+resize_to_limit: [w, h], format: :webp end` block is lowered into the
+reader's constructor as `ActiveStorage::Variation` values
+(`lower::attached`; the dimensions ride as the expressions the source
+wrote, so a concern's constant resolves inside the model that includes
+it). `variant(:thumb)` answers a `VariantWithRecord` over the blob and
+that variation; `.processed` finds the `active_storage_variant_records`
+row by `(blob_id, variation_digest)` or makes it — download,
+`ActiveStorage::Processor.transform`, `Blob.create_and_upload!`, the
+record and its `image` attachment row — exactly Rails' find-or-create.
+`Processor` RAISES in the shared runtime (decoding an image is not
+something it can do, and serving the original under a thumbnail's name
+would be the failure that looks like success); the ruby family reopens
+it over ruby-vips — `runtime/spinel/facades/active_storage_processor
+_vips.rb`, swapped in for the comment-only `runtime/active_storage
+_processor.rb` by `project.rs` when the app declares any variant, with
+`ruby-vips` added to `spin.toml` (the spinel-ruby-vips spin package, a
+subset of the gem over the system libvips) or the Gemfile (the gem).
+`resize_to_limit` / `resize_to_fit` lower (libvips `thumbnail`, fit
+within, never enlarge); `resize_to_fill`, `rotate` and saver options do
+not, and a variant carrying one is left undeclared so the runtime's
+`ArgumentError` names it. A variation with no `format:` keeps a web
+image's own format and transcodes anything else to PNG, Rails'
+`default_variant_format`. The representation route carries
+`Variation#encode` where Rails carries a signed transformation key,
+decodes it and processes on request, as Rails' controller does; the
+digest is that same encoding, so a database shared with a Rails
+process keeps one record per digest scheme. Purging a blob purges its
+variant records, their image blobs and their files first. The app's
+libvips loader policy (`Vips.block_untrusted(true)`, `Vips.block(op,
+true)` in an initializer) is lifted at ingest onto the `Rails
+::Application` reopen and applied when the processor loads. `variable?`
+is Rails' content-type question, answered from `variable_content_types`
+minus what the app's initializer subtracts (ingest lifts
+`config.active_storage.variable_content_types -= %w[…]` onto the same
+reopen), so a bmp avatar falls back to initials exactly as in campfire.
+`preview` (a video poster, a PDF page) raises and `previewable?` is
+false — there is no previewer, and serving the video's bytes in an
+`<img>` would be the failure that looks like success. The image
+DIMENSIONS are read from the file header at upload (`ImageAnalyzer`,
+ruby family: PNG/GIF/JPEG/BMP/WebP), so `metadata[:width]` answers what
+Rails' analyzer would.
 
-**The visible divergence** on campfire's own suite: the account-logo
-tests that decode the served PNG and assert 512×512 fail (the bytes are
-the upload), and `test_creating_a_message_creates_video_preview` fails
-on the `preview` raise. Both are the honest signal that a processor is
-absent; a resizing processor is a spinel package (libvips or
-stb_image) and its own change.
+**The visible divergence** on campfire's own suite:
+`test_creating_a_message_creates_video_preview` fails on `preview`
+(no previewer). The account-logo tests that decode the served PNG and
+assert 512×512 / 192×192 pass on both lanes, on the real variant's
+bytes — the numbers ruby-vips and the port answer for the same input
+are byte-identical (spinel-ruby-vips' oracle lane holds it to that).
 
 ### `ActionCable.server` exists; the registry did not say so
 
@@ -1224,20 +1250,20 @@ There is no job here and an orphaned blob row would make `attached?`
 answer for a file no longer attached, so `destroy` is `purge` — the same
 reasoning `attach`'s replace-first already carries.
 
-### An account logo is served at its uploaded size, never resized
+### An account logo is a real variant; the test that measures it sees both states
 
-`variable?` is Rails' content-type answer and `variant` is identity
-(see "Active Storage: rows and bytes are modeled, variants are
-identity"), so `Current.account&.logo_variant(size)` answers a variant
-of the ORIGINAL and campfire's logo endpoint serves the upload's own
-bytes, labelled `image/png` by the controller.
-
-Worth naming because of how it MEASURES: campfire's own tests decode
-the response and assert 512×512 / 192×192. Before this they passed on
-the stock-icon fallback (which is exactly those sizes) while a custom
-logo was never served at all; now they fail on the real divergence —
-the bytes are the upload. A dimension assertion could not see the old
-gap; it sees this one.
+`Current.account&.logo_variant(size)` is `logo.variant(:large)
+.processed` / `(:small)`, and campfire's logo endpoint `send_file`s the
+variant record's image blob — a 512×512 or 192×192 PNG made by the
+processor (see "Active Storage: rows and bytes are modeled, variants
+are a seam"). Worth keeping in the ledger because of how it MEASURES:
+campfire's own tests decode the response and assert the dimensions.
+They first passed on the stock-icon fallback (exactly those sizes)
+while a custom logo was never served at all; then, with uploads landed
+and variants identity, they failed on the real divergence (the bytes
+were the upload); now they pass on the variant's bytes. A dimension
+assertion could not see the first gap; it saw the second, and it is
+what says the third state is the right one.
 
 ### A rich text materialized by a READ is not written through
 

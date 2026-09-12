@@ -241,6 +241,9 @@ pub fn target_readme(target: BuildTarget) -> String {
              this program's allocator, and a server is the shape where that is \
              worth having. Note the DEV package: the `libjemalloc2` runtime alone \
              is what `LD_PRELOAD` uses and is not enough to link against\n\
+             - libvips (`libvips-dev` to build, `libvips42` to run; `brew install vips`) — \
+             only when `spin.toml` lists `ruby-vips`, which it does when the app \
+             declares image variants (thumbnails, avatars)\n\
              - Node.js 18+ — for the End-to-end suite\n\n\
              ## Build\n\
              ```sh\n\
@@ -1482,6 +1485,11 @@ fn ruby_runtime_files(
             *content = NET_HTTP_STDLIB.to_string();
         }
     }
+
+    // The image processor over the ruby-vips GEM when the app declares
+    // variants (`apply_image_processor_wiring`); the Gemfile line is
+    // `apply_runtime_gem_wiring`'s, off the same marker.
+    apply_image_processor_wiring(&mut files)?;
 
     // Same swap as db.rb below: the flat walk picked up BOTH halves of
     // the keyed-digest split, and the CRuby/JRuby trees want the OpenSSL
@@ -3305,7 +3313,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 11] = [
+    const RUNTIME_GEMS: [(Marker, &str); 12] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -3369,6 +3377,13 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
             ]),
             "rails-html-sanitizer",
         ),
+        // A declared variant is an image processor's demand: the
+        // reopen `apply_image_processor_wiring` swaps in requires
+        // "vips", and the marker is the constructor call every
+        // `attachable.variant …` lowers to. The gem needs libvips
+        // installed, which the app's own Gemfile (image_processing →
+        // ruby-vips) already asked of the machine.
+        (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
     ];
 
     let mut needed: Vec<&str> = Vec::new();
@@ -4098,6 +4113,45 @@ fn write_bundled_requires(files: &mut [(String, String)]) {
     }
 }
 
+/// The emitted call every declared variant lowers to (`lower::attached
+/// ::variations_expr`): the reader's constructor argument on the app
+/// side, and the one line the wiring below looks for. An app with no
+/// `attachable.variant …` block emits an empty list and never names it.
+const VARIATION_MARKER: &str = "ActiveStorage::Variation.new(";
+
+/// Whether the emitted app declares Active Storage variants — the
+/// demand for an image processor.
+fn app_declares_variants(files: &[(String, String)]) -> bool {
+    files
+        .iter()
+        .any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && c.contains(VARIATION_MARKER))
+}
+
+/// The image-processor swap, shared by the spinel and CRuby trees:
+/// when the app declares variants, `runtime/active_storage_processor
+/// .rb` — a comment-only stub in the scaffold, so a tree without
+/// variants links no image library — becomes the ruby-vips reopen of
+/// `ActiveStorage::Processor` (runtime/spinel/facades/
+/// active_storage_processor_vips.rb). `require "vips"` in that file
+/// is the spinel-ruby-vips spin package on one tree and the gem on
+/// the other; the manifest / Gemfile half is each caller's, since the
+/// dependency is spelled differently in each. Same grain as the
+/// bcrypt façade: whole-file, one require anchor either way.
+fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, String> {
+    if !app_declares_variants(files) {
+        return Ok(false);
+    }
+    let real = fs::read_to_string("runtime/spinel/facades/active_storage_processor_vips.rb")
+        .map_err(|e| format!("read runtime/spinel/facades/active_storage_processor_vips.rb: {e}"))?;
+    let stub = files
+        .iter_mut()
+        .find(|(p, _)| p == "runtime/active_storage_processor.rb")
+        .ok_or("image processor: app declares variants but runtime/active_storage_processor.rb \
+                is not in the file set")?;
+    stub.1 = real;
+    Ok(true)
+}
+
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 
@@ -4252,6 +4306,13 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/bcrypt_facade.rbs");
     }
 
+    // ruby-vips: the same swap for the image processor, when the app
+    // declares variants — see `apply_image_processor_wiring`. The
+    // package is the spinel-ruby-vips spin package; the manifest gains
+    // it below, in the same git form bcrypt uses and for the same
+    // reason (matz/spin-index#7 is the registration).
+    let needs_vips = apply_image_processor_wiring(&mut files)?;
+
     write_bundled_requires(&mut files);
     // 6. Package manifest + compile root.
     let mut manifest = String::from(
@@ -4299,6 +4360,20 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # `Remote branch ... not found`). spinel-bcrypt publishes no\n\
              # tags today, so this tracks `main`.\n\
              bcrypt = { git = \"https://github.com/rubys/spinel-bcrypt\", ref = \"main\" }\n",
+        );
+    }
+    if needs_vips {
+        if !manifest.contains("[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# Image variants (thumbnails, avatars, logos): a subset of the\n\
+             # ruby-vips gem over the SYSTEM libvips, in carried C. The\n\
+             # package needs libvips linkable at build time (`libvips-dev`\n\
+             # on Debian/Ubuntu, `brew install vips` on macOS) and loadable\n\
+             # at run time (`libvips42`). Git form for the reason bcrypt\n\
+             # gives above: matz/spin-index#7 is the registration.\n\
+             ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"main\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
@@ -5468,6 +5543,62 @@ mod tests {
         assert!(mk.contains("SPIN   ?= spin"), "{mk}");
         assert!(mk.contains("\t$(SPIN) build\n\tcp build/bin/blog $@"), "{mk}");
         assert!(!mk.contains("$(SPINEL) main.rb"), "{mk}");
+    }
+
+    /// A declared variant (`ActiveStorage::Variation.new(` in an emitted
+    /// model) swaps the image-processor stub for the ruby-vips reopen and
+    /// names the package in the manifest; an app without one keeps the
+    /// stub and links no image library.
+    #[test]
+    fn spin_shape_swaps_the_image_processor_for_ruby_vips_when_variants_are_declared() {
+        let makefile = "SPINEL ?= spinel\n\
+             RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
+             RBS_FLAG := $(if $(wildcard sig),--rbs sig)\n\
+             $(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)\n\
+             \t@mkdir -p $(BUILD)\n\
+             \t$(SPINEL) main.rb $(RBS_FLAG) -o $@\n\
+             $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
+             \t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@\n\
+             SPINEL_TESTS := \\\n\
+             \ttest/models/article_test \\\n\
+             \ttest/models/comment_test \\\n\
+             \ttest/controllers/articles_controller_test \\\n\
+             \ttest/controllers/comments_controller_test\n";
+        let base = |model: &str| {
+            vec![
+                ("Makefile".to_string(), makefile.to_string()),
+                ("main.rb".to_string(), "Main.run\n".to_string()),
+                ("app/models/user.rb".to_string(), model.to_string()),
+                (
+                    "runtime/active_storage_processor.rb".to_string(),
+                    "# stub\n".to_string(),
+                ),
+            ]
+        };
+        let with = spin_shape(base(
+            "class User\n  def avatar\n    ActiveStorage::Attached.new(\"User\", @id, \"avatar\", \
+             [ActiveStorage::Variation.new(\"square\", 512, 512, \"webp\")])\n  end\nend\n",
+        ))
+        .unwrap();
+        let get = |out: &Vec<(String, String)>, p: &str| {
+            out.iter().find(|(q, _)| q == p).unwrap().1.clone()
+        };
+        let processor = get(&with, "runtime/active_storage_processor.rb");
+        assert!(processor.contains("require \"vips\""), "{processor}");
+        assert!(processor.contains("Vips::Image.thumbnail_buffer"), "{processor}");
+        let manifest = get(&with, "spin.toml");
+        assert!(manifest.contains("[dependencies]\n"), "{manifest}");
+        assert!(
+            manifest.contains("ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\""),
+            "{manifest}"
+        );
+
+        let without = spin_shape(base(
+            "class User\n  def avatar\n    ActiveStorage::Attached.new(\"User\", @id, \"avatar\", [])\n  end\nend\n",
+        ))
+        .unwrap();
+        assert_eq!(get(&without, "runtime/active_storage_processor.rb"), "# stub\n");
+        assert!(!get(&without, "spin.toml").contains("ruby-vips"));
     }
 
     /// spinel will not resolve `Set` or `StringIO` without the require,

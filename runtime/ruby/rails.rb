@@ -432,6 +432,21 @@ module Rails
     def active_storage_excluded_content_types
       []
     end
+
+    # `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` in an
+    # initializer: libvips' loader policy, which an app that stores
+    # user uploads sets before any image is decoded. Lifted at ingest
+    # onto the reopen, the same way as the trim above; applied by the
+    # image processor (runtime/spinel/facades/active_storage_processor
+    # _vips.rb) when it loads. Nothing blocked when the app says
+    # nothing, which is libvips' own default.
+    def vips_block_untrusted
+      false
+    end
+
+    def vips_blocked_operations
+      []
+    end
   end
 end
 

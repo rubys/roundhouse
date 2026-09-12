@@ -111,6 +111,7 @@ pub fn apply_route_url_options_lowering(app: &mut App) {
 
 fn rewrite(expr: &mut Expr, helpers: &std::collections::HashSet<String>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, helpers));
+    ground_symbol_query_values(expr, helpers);
     let Some((stem, host, protocol)) = strip_host_options(expr, helpers) else {
         return;
     };
@@ -145,6 +146,29 @@ fn rewrite(expr: &mut Expr, helpers: &std::collections::HashSet<String>) {
     parts.push(InterpPart::Expr { expr: path_call });
     *expr.node = ExprNode::StringInterp { parts };
     expr.ty = Some(crate::ty::Ty::Str);
+}
+
+/// `x_path(size: :small)` → `x_path(size: "small")`. A query value
+/// reaches Rails' generator through `to_param`, and a Symbol's is its
+/// spelling, so the literal is exact. The helper's parameter is typed
+/// `String?` from the route's demand, and a strict target refuses the
+/// Symbol at the call (`no implicit conversion of Symbol into String`
+/// took two of campfire's logo tests). `format:` is not here: the
+/// suffix pass ran first and consumed it.
+fn ground_symbol_query_values(expr: &mut Expr, helpers: &std::collections::HashSet<String>) {
+    let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else { return };
+    if !helpers.contains(method.as_str()) {
+        return;
+    }
+    let Some(last) = args.last_mut() else { return };
+    let ExprNode::Hash { entries, kwargs: true } = &mut *last.node else { return };
+    for (_, v) in entries.iter_mut() {
+        if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
+            let text = value.as_str().to_string();
+            *v.node = ExprNode::Lit { value: Literal::Str { value: text } };
+            v.ty = Some(crate::ty::Ty::Str);
+        }
+    }
 }
 
 /// Remove every [`HOST_ONLY_OPTIONS`] key from one route-helper call's

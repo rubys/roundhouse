@@ -56,6 +56,9 @@ behave differently from the one this archive was generated against.
   Note the DEV package: the \`libjemalloc2\` runtime alone is what \`LD_PRELOAD\`
   uses and cannot be linked against. Without it \`spin build\` stops at
   \`cannot find -ljemalloc\` rather than quietly building something slower.
+- libvips (\`libvips-dev\` to build, \`libvips42\` to run; \`brew install vips\`)
+  — \`spin.toml\` names \`ruby-vips\`, the image processor behind attachment
+  thumbnails, avatars and the account logo.
 - Node.js 18+ — for the End-to-end suite
 
 ## Build
@@ -94,15 +97,14 @@ Turbo channel. Each spec names which of the walk's checks it stands for.
 
 ## What is not in this archive
 
-- **Image resizing.** Uploads work — attachments in messages, a custom
-  avatar, a custom account logo — and are stored under
-  \`storage/files/\` the way Rails' disk service lays them out. What is
-  missing is the image processor: every "variant" is the original, so
-  an attached image is served at its uploaded size where Rails serves a
-  1200×800 thumbnail, and an avatar or logo goes out as the bytes you
-  uploaded under the type the controller names (\`image/webp\`,
-  \`image/png\`) — browsers render it regardless. Video attachments get
-  a download link rather than a poster frame. The attachment test
+- **Video previews.** Image uploads — attachments in messages, a custom
+  avatar, a custom account logo — work, are stored under
+  \`storage/files/\` the way Rails' disk service lays them out, and are
+  served as the variants Rails serves (a 1200×800 thumbnail, a 512×512
+  avatar, the 512/192 logo), resized by libvips through the
+  spinel-ruby-vips package (\`spin.toml\` names it; \`libvips-dev\` to
+  build). What is missing is the previewer: a video attachment gets a
+  download link rather than a poster frame. The attachment test
   fixtures are stripped (they were 50 MB), so the attachment tests do
   not run from this archive (\`docs/pipeline/runtime.md\` carries the
   entry).

@@ -6479,7 +6479,10 @@ enum PreloadKind {
     /// `has_one_attached :<attr>`: one join over the attachment and blob
     /// tables for the whole record set, installing a row-bearing
     /// `ActiveStorage::Attached` on each record (`attr`, owner class).
-    Attached { attr: String, owner: String },
+    /// `variations` is the declared-variant list as Ruby source
+    /// (`lower::attached::variations_ruby_source`), the proxy's fourth
+    /// constructor argument.
+    Attached { attr: String, owner: String, variations: String },
     /// `has_rich_text :<attr>`: one `IN` over `action_text_rich_texts`,
     /// installed through the owner's load-once setter.
     RichText { attr: String, owner: String },
@@ -6576,6 +6579,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
             PreloadKind::Attached {
                 attr: attr.as_str().to_string(),
                 owner: model.name.0.as_str().to_string(),
+                variations: crate::lower::attached::variations_ruby_source(model, &attr),
             },
         ));
     }
@@ -6720,7 +6724,7 @@ end
             // this query and the proxy's own cannot disagree about the
             // row shape; two typed hashes (attachment id, blob) rather
             // than one hash of rows so every value keeps its own type.
-            PreloadKind::Attached { attr, owner } => {
+            PreloadKind::Attached { attr, owner, variations } => {
                 let _ = write!(
                     src,
                     r#"
@@ -6739,7 +6743,7 @@ def self._preload_batch_{name}(records)
     end
   end
   records.each do |r|
-    att = ActiveStorage::Attached.new("{owner}", r.id, "{attr}")
+    att = ActiveStorage::Attached.new("{owner}", r.id, "{attr}", {variations})
     found = att_ids[r.id]
     if found.nil?
       att._preload_row(0, nil)

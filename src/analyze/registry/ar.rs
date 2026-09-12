@@ -165,7 +165,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ] {
             attached.instance_methods.insert(Symbol::from(m), ty);
         }
-        classes.insert(attached_id, attached);
+        attached.instance_methods.insert(
+            Symbol::from("variations"),
+            Ty::Array { elem: Box::new(class_ty(&ClassId(Symbol::from("ActiveStorage::Variation")))) },
+        );
+        classes.insert(attached_id.clone(), attached);
 
         let mut blob = ClassInfo::default();
         for (m, ty) in [
@@ -206,13 +210,54 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         metadata.instance_methods.insert(Symbol::from("to_json"), Ty::Str);
         classes.insert(metadata_id, metadata);
 
+        // The variant is Rails' `VariantWithRecord`: `image` is the
+        // variant record's own attachment once processed (nil for the
+        // identity variant), `blob` the ORIGINAL, `image_blob` the
+        // transformed one.
+        let variation_id = ClassId(Symbol::from("ActiveStorage::Variation"));
         let mut variant = ClassInfo::default();
-        variant.instance_methods.insert(Symbol::from("processed"), class_ty(&variant_id));
-        variant.instance_methods.insert(Symbol::from("image"), class_ty(&ClassId(Symbol::from("ActiveStorage::Attached"))));
-        variant.instance_methods.insert(Symbol::from("blob"), nilable(class_ty(&blob_id)));
-        variant.instance_methods.insert(Symbol::from("key"), Ty::Str);
-        variant.instance_methods.insert(Symbol::from("url"), Ty::Str);
+        for (m, ty) in [
+            ("processed", class_ty(&variant_id)),
+            ("process", Ty::Nil),
+            ("image", nilable(class_ty(&attached_id))),
+            ("blob", nilable(class_ty(&blob_id))),
+            ("image_blob", nilable(class_ty(&blob_id))),
+            ("variation", nilable(class_ty(&variation_id))),
+            ("key", Ty::Str),
+            ("filename", Ty::Str),
+            ("url", Ty::Str),
+        ] {
+            variant.instance_methods.insert(Symbol::from(m), ty);
+        }
+        variant.class_methods.insert(Symbol::from("record_select"), Ty::Str);
+        variant.class_methods.insert(Symbol::from("purge_records_of"), Ty::Nil);
         classes.insert(variant_id, variant);
+
+        // One `attachable.variant :name, resize_to_limit: [w, h],
+        // format: :f` declaration, constructed into the reader by
+        // `lower::attached`.
+        let mut variation = ClassInfo::default();
+        for (m, ty) in [
+            ("name", Ty::Str),
+            ("width", Ty::Int),
+            ("height", Ty::Int),
+            ("format", Ty::Str),
+            ("resize?", Ty::Bool),
+            ("output_format", Ty::Str),
+            ("output_content_type", Ty::Str),
+            ("encode", Ty::Str),
+            ("digest", Ty::Str),
+        ] {
+            variation.instance_methods.insert(Symbol::from(m), ty);
+        }
+        variation.class_methods.insert(Symbol::from("decode"), nilable(class_ty(&variation_id)));
+        classes.insert(variation_id, variation);
+
+        // The pixel seam: bytes in, bytes out; raises in the shared
+        // runtime, reopened over ruby-vips by the ruby family.
+        let mut processor = ClassInfo::default();
+        processor.class_methods.insert(Symbol::from("transform"), Ty::Str);
+        classes.insert(ClassId(Symbol::from("ActiveStorage::Processor")), processor);
 
         let mut service = ClassInfo::default();
         service.instance_methods.insert(Symbol::from("path_for"), Ty::Str);

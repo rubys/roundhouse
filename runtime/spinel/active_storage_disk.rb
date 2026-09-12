@@ -273,8 +273,12 @@ module ActiveStorage
     end
   end
 
-  # The variation key is the variant's NAME here (identity variants —
-  # see the shared header), so the redirect is to the original blob.
+  # Rails' representations controller: the variation segment is the
+  # variation's own encoding (`Variation#encode`, where Rails puts a
+  # signed transformation key), decoded and PROCESSED here — the
+  # variant record is found or made on this request, as in Rails —
+  # then redirected to the variant blob's disk URL. A segment that
+  # decodes to nothing is the identity variant: the original.
   module Representations
     class RedirectController < ActionController::Base
       def process_action(action_name)
@@ -287,7 +291,9 @@ module ActiveStorage
         if blob.nil?
           head(:not_found)
         else
-          redirect_to(ActiveStorage::DiskKey.disk_url(blob, "inline"))
+          variation = ActiveStorage::Variation.decode(Params.str(@params, "variation_key", ""))
+          image = ActiveStorage::VariantWithRecord.new(blob, variation).image_blob
+          redirect_to(ActiveStorage::DiskKey.disk_url(image.nil? ? blob : image, "inline"))
         end
         nil
       end

@@ -1906,9 +1906,11 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: Install libsqlite3-dev + libjemalloc-dev
+      - name: Install libsqlite3-dev + libjemalloc-dev + libvips-dev
+        # libvips-dev: the emitted spin.toml names ruby-vips (campfire
+        # declares image variants), and the package links -lvips.
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev libvips-dev
       - uses: actions/setup-node@v5
         with:
           node-version: '20'

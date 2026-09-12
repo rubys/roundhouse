@@ -34,14 +34,14 @@ cat > "$DIR/Dockerfile" <<'DOCKERFILE'
 
 FROM debian:trixie-slim AS build
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y clang make libsqlite3-dev libjemalloc-dev && \
+    apt-get install --no-install-recommends -y clang make libsqlite3-dev libjemalloc-dev libvips-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY pack /src
 RUN make -C /src -j"$(nproc)" CC=clang
 
 FROM debian:trixie-slim
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 && \
+    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ ./
@@ -88,8 +88,9 @@ the runtime it was generated against travels with it.
 
 Compiles the C — one whole-program translation unit, about half a minute
 on a fast machine, a few minutes on a slow one — and produces a ~180 MB
-image whose only extras over \`debian:trixie-slim\` are the SQLite and
-jemalloc runtime libraries.
+image whose only extras over \`debian:trixie-slim\` are the SQLite,
+jemalloc and libvips runtime libraries (libvips resizes the uploads —
+attachments, avatars, the account logo — into the variants Rails serves).
 
 \`\`\`sh
 docker build -t campfire .
@@ -112,24 +113,24 @@ caps the OS worker threads (default: one per core).
 ## Without Docker
 
 The Dockerfile is a recipe, not a requirement. On Linux with a C
-compiler, \`make\`, \`libsqlite3-dev\` and \`libjemalloc-dev\`:
+compiler, \`make\`, \`libsqlite3-dev\`, \`libjemalloc-dev\` and \`libvips-dev\`:
 
 \`\`\`sh
 make -C pack -j CC=clang
 mkdir -p app/storage && cd app && ../pack/campfire
 \`\`\`
 
-On macOS with Homebrew's \`sqlite\` and \`jemalloc\`, the compiler needs
+On macOS with Homebrew's \`sqlite\`, \`jemalloc\` and \`vips\`, the compiler needs
 telling where they are: append \`-I\$(brew --prefix)/include
 -L\$(brew --prefix)/lib\` to the \`CFLAGS\` line in \`pack/Makefile\`
 (the rest of that line is the program's defines — keep them).
 
 ## What is not in this archive
 
-The same things the source archive leaves out: image resizing (uploads
-— attachments, avatars, the account logo — work and persist under
-\`/app/storage/files\`, but are served at their uploaded size; there is
-no image processor) and web push delivery (the job logs instead of
-sending). See the
+The same thing the source archive leaves out: web push delivery (the
+job logs instead of sending). Image uploads — attachments, avatars, the
+account logo — work, persist under \`/app/storage/files\`, and are
+served as the thumbnails Rails would serve (libvips, through the
+spinel-ruby-vips package). See the
 [project page](https://rubys.github.io/roundhouse/apps/campfire.html).
 README

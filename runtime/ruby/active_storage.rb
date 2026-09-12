@@ -25,17 +25,25 @@
 #   hand the bytes to the service, so a target that has one gets the
 #   whole feature and a target that has none fails at the one named
 #   seam.
-# * VARIANTS are IDENTITY. `variant`, `representation` and `.processed`
-#   answer an `ActiveStorage::VariantWithRecord` whose `key` is the
-#   original blob's key — no processor exists here, so the "thumb" a
-#   view asks for is served at the upload's own size. `variable?` is
-#   Rails' content-type question (can a variant be MADE from this),
-#   answered from `variable_content_types` so an image goes down the
-#   image path and a PDF down the link path exactly as in Rails. What
-#   differs is the pixels, and only the pixels: a page that renders an
-#   attachment renders the same tags around the same URLs.
-#   `preview` (a poster frame for a video, a page for a PDF) is NOT
-#   identity — there is no still to serve — so it raises, and
+# * VARIANTS are Rails' `VariantWithRecord`: the ROWS
+#   (`active_storage_variant_records` + the record's `image`
+#   attachment) are modeled here, the PIXELS are a per-target seam.
+#   `has_one_attached :logo do |attachable| attachable.variant :large,
+#   resize_to_limit: [512, 512], format: :png end` is lowered into the
+#   proxy's constructor as `Variation` values; `variant(:large)`
+#   answers a `VariantWithRecord` over the blob and that variation, and
+#   `.processed` finds the variant record or makes one — downloading
+#   the original, handing it to `Processor.transform`, uploading the
+#   result as a blob of its own. `Processor` RAISES in the shared
+#   runtime (it decodes and encodes images); the ruby family reopens it
+#   over ruby-vips (`runtime/spinel/active_storage_processor.rb`), and
+#   a tree without that reopen fails at the one named seam rather than
+#   serving the original as its own thumbnail. `variable?` is Rails'
+#   content-type question (can a variant be MADE from this), answered
+#   from `variable_content_types`, so an image goes down the image
+#   path and a PDF down the link path exactly as in Rails.
+#   `preview` (a poster frame for a video, a page for a PDF) has no
+#   previewer — there is no still to serve — so it raises, and
 #   `previewable?` is false so no view reaches it.
 #
 # # The reader never returns nil
@@ -70,6 +78,50 @@ module ActiveStorage
 
   def self.variable_content_type?(content_type)
     variable_content_types.include?(content_type)
+  end
+
+  # Marcel's answers for the formats a variation can name, so the
+  # variant blob's `content_type` column is what Rails would write.
+  def self.content_type_for_format(format)
+    f = format.downcase
+    if f == "png"
+      "image/png"
+    elsif f == "jpg" || f == "jpeg"
+      "image/jpeg"
+    elsif f == "gif"
+      "image/gif"
+    elsif f == "webp"
+      "image/webp"
+    elsif f == "avif"
+      "image/avif"
+    else
+      "application/octet-stream"
+    end
+  end
+
+  # The format a variant keeps when its variation names none: a web
+  # image's own (Rails' `web_image_content_types` — png, jpeg, gif,
+  # webp), and PNG for anything else (tiff, bmp, heic, …) — Rails'
+  # `default_variant_format`.
+  def self.format_for_content_type(content_type)
+    if content_type == "image/png"
+      "png"
+    elsif content_type == "image/jpeg"
+      "jpg"
+    elsif content_type == "image/gif"
+      "gif"
+    elsif content_type == "image/webp"
+      "webp"
+    else
+      "png"
+    end
+  end
+
+  # The filename without its extension — Rails' `Filename#base`, which
+  # names a variant "<base>.<format>".
+  def self.filename_base(filename)
+    dot = filename.rindex(".")
+    dot.nil? || dot == 0 ? filename : filename[0, dot].to_s
   end
 
   # Where the blob's file lives, keyed by the blob's `key` column.
@@ -113,6 +165,97 @@ module ActiveStorage
       raise NotImplementedError,
             "ActiveStorage::Service#exist?: no storage service on this " \
             "target — the shared runtime does no file I/O"
+    end
+  end
+
+  # The image processor behind `VariantWithRecord#processed`: the
+  # original's bytes and content type in, the variant's bytes out, under
+  # the variation's resize and format. RAISES here for the reason
+  # `Service` does — decoding an image is not something the shared
+  # runtime can do, and answering the original's bytes would serve an
+  # upload at full size under a thumbnail's name, the failure that
+  # looks like success. The ruby family reopens it over ruby-vips
+  # (`runtime/spinel/active_storage_processor.rb`), a spin package on
+  # the spinel tree and the gem on the CRuby one, with the same subset
+  # surface on both.
+  class Processor
+    def self.transform(data, content_type, variation)
+      raise NotImplementedError,
+            "ActiveStorage::Processor.transform: no image processor on this " \
+            "target — variants need ruby-vips (see spin.toml / Gemfile)"
+    end
+  end
+
+  # One `attachable.variant :name, resize_to_limit: [w, h], format: :f`
+  # declaration, as the model's `has_one_attached` block names it —
+  # Rails' `ActiveStorage::Variation`, narrowed to the transformations
+  # that lower (`resize_to_limit` / `resize_to_fit`, and `format`).
+  # `width`/`height` 0 means no resize; `format` "" means keep the
+  # original's (a web image stays what it is, anything else becomes
+  # PNG — `output_format`).
+  #
+  # `encode` is one spelling for two jobs: the `variation_digest` column
+  # a variant record is found by, and the URL segment Rails fills with
+  # a signed transformation key (`/representations/redirect/<blob>/
+  # <variation>/<filename>`). Rails digests a Marshal dump the runtime
+  # cannot reproduce, so a database shared with a Rails process keeps
+  # two records per variation — one per digest scheme — and each side
+  # serves its own. `decode` reads the URL segment back, which is how
+  # the representation route knows what to process without a record
+  # type to look the name up on.
+  class Variation
+    def initialize(name, width, height, format)
+      @name = name
+      @width = width
+      @height = height
+      @format = format
+    end
+
+    def name
+      @name
+    end
+
+    def width
+      @width
+    end
+
+    def height
+      @height
+    end
+
+    def format
+      @format
+    end
+
+    def resize?
+      @width > 0 || @height > 0
+    end
+
+    def output_format(source_content_type)
+      @format == "" ? ActiveStorage.format_for_content_type(source_content_type) : @format
+    end
+
+    def output_content_type(source_content_type)
+      ActiveStorage.content_type_for_format(output_format(source_content_type))
+    end
+
+    def encode
+      "limit-" + @width.to_s + "x" + @height.to_s + "-" + (@format == "" ? "keep" : @format)
+    end
+
+    def digest
+      encode
+    end
+
+    # The variation a URL segment names, or nil for anything that is
+    # not one — the identity variant, which the route serves as the
+    # original.
+    def self.decode(key)
+      parts = key.split("-")
+      return nil if parts.length != 3 || parts[0] != "limit"
+      dims = parts[1].to_s.split("x")
+      return nil if dims.length != 2
+      Variation.new(key, dims[0].to_s.to_i, dims[1].to_s.to_i, parts[2] == "keep" ? "" : parts[2].to_s)
     end
   end
 
@@ -344,7 +487,12 @@ module ActiveStorage
       Blob.service.download(@key)
     end
 
+    # The bytes and the row — and the blob's VARIANT RECORDS first, each
+    # with its own image blob and attachment row: the variant table has
+    # a foreign key onto this one, and a thumbnail whose original is
+    # gone is a file nothing can reach.
     def purge
+      VariantWithRecord.purge_records_of(@id)
       Blob.service.delete(@key)
       ActiveRecord.adapter.delete("active_storage_blobs", @id)
       nil
@@ -396,40 +544,143 @@ module ActiveStorage
   end
 
   # Rails' `ActiveStorage::VariantWithRecord`, the value `variant(:x)`
-  # and `representation(:x)` answer. IDENTITY: `processed` is self and
-  # `key` is the original blob's key, so `Blob.service.path_for
-  # (variant.key)` serves the upload as it was. `image` is the
-  # attachment the variant was asked of — in Rails it is the variant
-  # record's own attachment, and here the two are the same bytes.
+  # and `representation(:x)` answer: a blob and a variation, and —
+  # once `processed` — the variant RECORD that pairs them, whose
+  # `image` attachment is the transformed blob. `blob` is nil when
+  # nothing is attached (Rails' `allow_nil` delegation); `variation`
+  # is nil for the identity variant (an inline transformation hash,
+  # which nothing lowers), which is served as the original.
+  #
+  # `processed` is Rails' find-or-create: the record by
+  # `(blob_id, variation_digest)`, else download → `Processor
+  # .transform` → `Blob.create_and_upload!` → the record and its
+  # `image` attachment row, in that order. `key` and `image` process
+  # on demand, as a route that never called `processed` would expect;
+  # `url` does not — the representation route processes when it is
+  # asked, exactly as Rails' does.
   class VariantWithRecord
-    def initialize(attached, name)
-      @attached = attached
-      @name = name
-    end
-
-    def processed
-      self
-    end
-
-    def image
-      @attached
+    def initialize(blob, variation)
+      @blob = blob
+      @variation = variation
+      @record_id = 0
+      @image_blob = nil
     end
 
     def blob
-      @attached.blob
+      @blob
+    end
+
+    def variation
+      @variation
+    end
+
+    def processed
+      process
+      self
+    end
+
+    # The columns of a variant record joined to its image blob, so the
+    # lookup here and the purge cascade cannot disagree about the shape.
+    def self.record_select(where)
+      "SELECT vr.id AS variant_record_id, a.id AS attachment_id, " + Blob.columns("b") +
+        " FROM active_storage_variant_records vr" +
+        " JOIN active_storage_attachments a ON a.record_type = 'ActiveStorage::VariantRecord'" +
+        " AND a.name = 'image' AND a.record_id = vr.id" +
+        " JOIN active_storage_blobs b ON b.id = a.blob_id WHERE " + where
+    end
+
+    # Every variant of a blob, gone with it — see `Blob#purge`.
+    def self.purge_records_of(blob_id)
+      rows = ActiveRecord.adapter.select_rows(
+        record_select("vr.blob_id = " + ActiveRecord.adapter.escape_value(blob_id))
+      )
+      rows.each do |row|
+        ActiveRecord.adapter.delete("active_storage_attachments", row["attachment_id"].to_i)
+        ActiveRecord.adapter.delete("active_storage_variant_records", row["variant_record_id"].to_i)
+        Blob.from_row(row).purge
+      end
+      nil
+    end
+
+    def process
+      return nil if @record_id != 0
+      b = @blob
+      v = @variation
+      return nil if b.nil? || v.nil?
+      digest = v.digest
+      rows = ActiveRecord.adapter.select_rows(
+        VariantWithRecord.record_select(
+          "vr.blob_id = " + ActiveRecord.adapter.escape_value(b.id) +
+          " AND vr.variation_digest = " + ActiveRecord.adapter.escape_value(digest) + " LIMIT 1"
+        )
+      )
+      if rows.length > 0
+        @record_id = rows[0]["variant_record_id"].to_i
+        @image_blob = Blob.from_row(rows[0])
+        return nil
+      end
+      data = Processor.transform(Blob.service.download(b.key), b.content_type, v)
+      image = Blob.create_and_upload!(
+        data,
+        ActiveStorage.filename_base(b.filename) + "." + v.output_format(b.content_type),
+        v.output_content_type(b.content_type)
+      )
+      record_id = ActiveRecord.adapter.insert("active_storage_variant_records", {
+        "blob_id" => b.id,
+        "variation_digest" => digest,
+      })
+      ActiveRecord.adapter.insert("active_storage_attachments", {
+        "name" => "image",
+        "record_type" => "ActiveStorage::VariantRecord",
+        "record_id" => record_id,
+        "blob_id" => image.id,
+        "created_at" => ActiveSupport.db_now,
+      })
+      @record_id = record_id
+      @image_blob = image
+      nil
+    end
+
+    # Rails: the variant record's `image` attachment — an `Attached`
+    # proxy over the transformed blob, or nil before there is a record
+    # (the identity variant, or nothing attached).
+    def image
+      process
+      @record_id == 0 ? nil : Attached.new("ActiveStorage::VariantRecord", @record_id, "image", [])
+    end
+
+    # The transformed blob, once processed; the original for the
+    # identity variant. What `Blob.service.path_for(variant.key)`
+    # serves.
+    def image_blob
+      process
+      ib = @image_blob
+      ib.nil? ? @blob : ib
     end
 
     def key
-      @attached.key
+      ib = image_blob
+      ib.nil? ? "" : ib.key
+    end
+
+    # Rails: "<original base>.<format>".
+    def filename
+      b = @blob
+      return "" if b.nil?
+      v = @variation
+      v.nil? ? b.filename : ActiveStorage.filename_base(b.filename) + "." + v.output_format(b.content_type)
     end
 
     # `url_for(variant)` / `polymorphic_url(variant)`: Rails'
-    # representation route, with the variant's name where Rails puts
-    # the encoded transformation. The disk controller serves the
-    # original for any variation, which is what identity means.
+    # representation route, with the variation's own encoding where
+    # Rails puts its signed transformation key. Serving it processes
+    # (`Representations::RedirectController`), so building it does not.
     def url
-      "/rails/active_storage/representations/redirect/" + @attached.signed_id +
-        "/" + @name + "/" + ActiveStorage.url_filename(@attached.filename.to_s)
+      b = @blob
+      return "" if b.nil?
+      v = @variation
+      "/rails/active_storage/representations/redirect/" + b.signed_id +
+        "/" + (v.nil? ? "original" : v.encode) + "/" + ActiveStorage.url_filename(filename)
     end
   end
 
@@ -450,13 +701,23 @@ module ActiveStorage
     # campfire's room page (`content_type` asks `attached?` twice), and
     # it is not what Rails does. `attach` and `purge` forget the row, so
     # a write through this proxy is seen by its next read.
-    def initialize(record_type, record_id, name)
+    #
+    # `variations` are the `attachable.variant …` declarations of the
+    # `has_one_attached` block, lowered into the reader's constructor
+    # call (`lower::attached`); a declaration without a block passes
+    # none.
+    def initialize(record_type, record_id, name, variations)
       @record_type = record_type
       @record_id = record_id
       @name = name
+      @variations = variations
       @row_loaded = false
       @attachment_id = 0
       @blob = nil
+    end
+
+    def variations
+      @variations
     end
 
     # The attachment row and its blob, in one join. `attachment_id` 0
@@ -579,25 +840,33 @@ module ActiveStorage
       nil
     end
 
-    # The identity variant — see the class header and
-    # `VariantWithRecord`. `transformations` is the named variant
-    # (`:thumb`) or an inline hash; either way the answer is the
-    # original, so the name is kept for the URL and the hash is not
-    # read.
+    # Rails' `variant(:thumb)`: the declared variation by name, over
+    # this attachment's blob — see the class header and
+    # `VariantWithRecord`. A name the block never declared is Rails'
+    # own ArgumentError. An inline transformation hash is not lowered
+    # (nothing in the corpus writes one) and answers the identity
+    # variant, the original served under the variant route.
     def variant(transformations)
-      VariantWithRecord.new(self, variant_name(transformations))
+      VariantWithRecord.new(blob, find_variation(transformations))
     end
 
     def representation(transformations)
-      VariantWithRecord.new(self, variant_name(transformations))
+      VariantWithRecord.new(blob, find_variation(transformations))
     end
 
-    def variant_name(transformations)
-      if transformations.is_a?(Symbol)
-        transformations.to_s
-      else
-        "variant"
+    # An index walk, not `each`: spinel keeps a typed ivar array
+    # unboxed only while every use is one the unboxed array supports,
+    # and `each` from a block is not on that list.
+    def find_variation(transformations)
+      return nil unless transformations.is_a?(Symbol)
+      name = transformations.to_s
+      i = 0
+      while i < @variations.length
+        v = @variations[i]
+        return v if v.name == name
+        i += 1
       end
+      raise ArgumentError, "Cannot find variant :" + name + " for " + @record_type + "#" + @name
     end
 
     # A poster frame or a page image: nothing here can produce one, and

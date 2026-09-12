@@ -65,6 +65,8 @@ module Rails
     def credentials: () -> Hash[Symbol, untyped]
     def config_time_zone: () -> String
     def active_storage_excluded_content_types: () -> Array[String]
+    def vips_block_untrusted: () -> bool
+    def vips_blocked_operations: () -> Array[String]
   end
 end
 

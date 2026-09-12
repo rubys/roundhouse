@@ -194,6 +194,146 @@ pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
     out
 }
 
+/// One `attachable.variant :name, resize_to_limit: [w, h], format: :f`
+/// declaration from a `has_one_attached` block — Rails'
+/// `ActiveStorage::Variation`, narrowed to what lowers. The
+/// dimensions are EXPRESSIONS, not numbers: campfire writes
+/// `resize_to_limit: [ THUMBNAIL_MAX_WIDTH, THUMBNAIL_MAX_HEIGHT ]`,
+/// constants of the concern the block sits in, and inside the model
+/// (which includes that concern) the bare names resolve exactly as
+/// they do in the source. `format` is the symbol's spelling, or ""
+/// for "keep the original's".
+#[derive(Debug, Clone)]
+pub struct VariationDecl {
+    pub name: String,
+    pub width: Expr,
+    pub height: Expr,
+    pub format: String,
+}
+
+/// The variants a `has_one_attached :<attr>` block declares, in
+/// source order; empty for the blockless form. Only `resize_to_limit`
+/// and `resize_to_fit` lower (both are libvips' `thumbnail` with the
+/// image kept inside the box; the runtime never enlarges). A variant
+/// carrying any other transformation — `resize_to_fill` crops,
+/// `rotate`, `saver:` options — is left OUT rather than approximated:
+/// a thumbnail that is the wrong shape is worse than the
+/// `ArgumentError` the runtime raises for a name it was never given,
+/// which names the declaration.
+pub fn attached_variations(model: &Model, attr: &Symbol) -> Vec<VariationDecl> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node
+        else {
+            continue;
+        };
+        if method.as_str() != "has_one_attached" || args.len() != 1 {
+            continue;
+        }
+        let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node else { continue };
+        if value.as_str() != attr.as_str() {
+            continue;
+        }
+        let ExprNode::Lambda { params, body, .. } = &*block.node else { continue };
+        let Some(attachable) = params.first() else { continue };
+        let stmts: Vec<&Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![body],
+        };
+        for stmt in stmts {
+            if let Some(decl) = variation_decl(stmt, attachable) {
+                out.push(decl);
+            }
+        }
+    }
+    out
+}
+
+fn variation_decl(stmt: &Expr, attachable: &Symbol) -> Option<VariationDecl> {
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*stmt.node else { return None };
+    let ExprNode::Var { name, .. } = &*recv.node else { return None };
+    if name != attachable || method.as_str() != "variant" || args.len() != 2 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Sym { value: vname } } = &*args[0].node else {
+        return None;
+    };
+    let ExprNode::Hash { entries, .. } = &*args[1].node else { return None };
+    let mut width = None;
+    let mut height = None;
+    let mut format = String::new();
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+        match key.as_str() {
+            "resize_to_limit" | "resize_to_fit" => {
+                let ExprNode::Array { elements, .. } = &*v.node else { return None };
+                if elements.len() != 2 {
+                    return None;
+                }
+                width = Some(elements[0].clone());
+                height = Some(elements[1].clone());
+            }
+            "format" => {
+                let ExprNode::Lit { value: Literal::Sym { value: f } } = &*v.node else {
+                    return None;
+                };
+                format = f.as_str().to_string();
+            }
+            _ => return None,
+        }
+    }
+    let int = |n: i64| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: n } });
+    Some(VariationDecl {
+        name: vname.as_str().to_string(),
+        width: width.unwrap_or_else(|| int(0)),
+        height: height.unwrap_or_else(|| int(0)),
+        format,
+    })
+}
+
+/// `[ActiveStorage::Variation.new("thumb", W, H, "png"), …]` — the
+/// reader's fourth constructor argument.
+fn variations_expr(model: &Model, attr: &Symbol) -> Expr {
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let str_lit = |v: &str| syn(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    let elements = attached_variations(model, attr)
+        .into_iter()
+        .map(|d| {
+            syn(ExprNode::Send {
+                recv: Some(syn(ExprNode::Const {
+                    path: vec![Symbol::from("ActiveStorage"), Symbol::from("Variation")],
+                })),
+                method: Symbol::from("new"),
+                args: vec![str_lit(&d.name), d.width, d.height, str_lit(&d.format)],
+                block: None,
+                parenthesized: true,
+            })
+        })
+        .collect();
+    syn(ExprNode::Array { elements, style: Default::default() })
+}
+
+/// The same list as Ruby source, for the ruby emitter's batch-loader
+/// template (`_preload_batch_<attr>_attachment` constructs the proxy
+/// too). The dimension expressions are rendered through the ruby
+/// emitter so a constant reference spells as it did in the source.
+pub fn variations_ruby_source(model: &Model, attr: &Symbol) -> String {
+    let items: Vec<String> = attached_variations(model, attr)
+        .iter()
+        .map(|d| {
+            format!(
+                "ActiveStorage::Variation.new({:?}, {}, {}, {:?})",
+                d.name,
+                crate::emit::ruby::emit_expr(&d.width),
+                crate::emit::ruby::emit_expr(&d.height),
+                d.format
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
 
 /// Synthesize each `has_one_attached` reader onto the declaring model.
 pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model) {
@@ -266,6 +406,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
             str_lit(model.name.0.as_str()),
             syn(ExprNode::Ivar { name: Symbol::from("id") }),
             str_lit(attr.as_str()),
+            variations_expr(model, attr),
         ],
         block: None,
         parenthesized: true,
