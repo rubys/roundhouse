@@ -205,16 +205,20 @@ module ActionView
       value.nil? ? url_encode(name) : "#{url_encode(name)}=#{url_encode(value.to_s)}"
     end
 
-    # The `.to_s` on the push is for the accumulator's type, not the
-    # value's (already a String): a self-send inside a Hash `each`
-    # block is not stamped by the typer, and the decl-site emitters
-    # declare `pairs` from what is pushed into it — untyped, and their
-    # `join` refuses it.
+    # The scalar rendering is INLINED here rather than a call to
+    # `to_query_value`: a Hash `each` block's value is a borrowed
+    # reference on the rust emit, and handing it to a by-value untyped
+    # parameter does not compile there (`expected Value, found &Value`).
+    # Both arms are INTERPOLATIONS, the nil one included: a self-send
+    # inside a Hash `each` block is not stamped by the typer, and the
+    # decl-site emitters declare `pairs` from what is pushed into it —
+    # an interpolation is a String to every one of them. The reopen
+    # that renders nesting replaces this method whole.
     def self.to_query_pairs(params, namespace)
       pairs = []
       params.each do |key, value|
         name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
-        pairs << to_query_value(name, value).to_s
+        pairs << (value.nil? ? "#{url_encode(name)}" : "#{url_encode(name)}=#{url_encode(value.to_s)}")
       end
       pairs.join("&")
     end

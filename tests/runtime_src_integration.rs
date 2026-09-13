@@ -1200,19 +1200,23 @@ fn every_runtime_method_body_concretely_typed() {
     // value with a key, a size and dimensions, which is what a storage
     // service and a variant need to serve it.
     //
-    // 405 -> 408: `ViewHelpers.to_query`, `Hash#to_query` for a route
-    // helper's `params:` and splatted options. THREE sites, all the
-    // one `value` a query pair carries: the `each` handing it on, the
-    // `nil?` that renders the bare key, and the `to_s` that renders the
-    // rest. `untyped` because that is the contract — a query value is
-    // any object, the same reason the logger's `message` is — and the
-    // nested walk that would read it as a Hash or Array is the ruby
-    // family's reopen (runtime/spinel/hash_to_query.rb), off this
+    // 405 -> 409: `ViewHelpers.to_query`, `Hash#to_query` for a route
+    // helper's `params:` and splatted options. FOUR sites, all the one
+    // `value` a query pair carries: the `nil?` that renders the bare
+    // key and the `to_s` that renders the rest, TWICE — once in
+    // `to_query_pairs`, whose loop inlines the scalar rendering (a
+    // Hash `each` block's value is a borrowed reference on the rust
+    // emit and cannot cross a by-value untyped parameter), and once in
+    // `to_query_value`, the method the ruby family's reopen replaces
+    // with the nested walk. `untyped` because that is the contract — a
+    // query value is any object, the same reason the logger's
+    // `message` is — and the walk that would read it as a Hash or
+    // Array is that reopen (runtime/spinel/hash_to_query.rb), off this
     // tree. What it bought: the pairs `query_suffix` renders are
     // CGI-escaped through one function instead of an IR-built loop,
     // and campfire's `rooms_closed_url(room, params: {…})` and
     // `user_push_subscriptions_url(params: {…})` reach their actions.
-    const CEILING: usize = 408;
+    const CEILING: usize = 409;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
