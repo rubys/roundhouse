@@ -1351,6 +1351,13 @@ module RequestDispatch
       needle  = content
       matched = nodes.any? { |n| Dom.text(n).include?(needle) }
       raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless matched
+    elsif content.is_a?(Regexp)
+      # Rails' `assert_select "h1", /Upgrade…/`: the equality test is a
+      # match. Not checking it read "an h1 exists", which campfire's
+      # incompatible-browser test would pass on the sign-in page.
+      pattern = content
+      matched = nodes.any? { |n| Dom.text(n).match?(pattern) }
+      raise "expected #{selector.inspect} matching #{content.inspect} in response body" unless matched
     end
     yield if block
   end

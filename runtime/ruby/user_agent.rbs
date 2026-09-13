@@ -41,6 +41,9 @@ class UserAgent
   def webkit_os: (UserAgentToken app) -> String
   def gecko_os: (UserAgentToken app) -> String
   def comment_match: (Regexp pattern) -> String
+  def bot?: () -> bool
+  def self.version_below?: (String reported, String floor) -> bool
+  def self.version_sequence: (String str) -> Array[String]
 end
 
 class PlatformAgent

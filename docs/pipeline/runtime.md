@@ -2001,7 +2001,7 @@ has three filled cells and one empty one:
   too — so the two are one shape: `foo_path(…) + RouteHelpers.query_suffix(h)`,
   rendered at run time through `ActionView::ViewHelpers.to_query`. On
   the ruby family that is `Hash#to_query` in full (nested Hashes as
-  `a[b]`, Arrays as `a[]`, pairs sorted per level, `runtime/hash_to_query.rb`),
+  `a[b]`, Arrays as `a[]`, pairs sorted per level, `runtime/spinel/hash_to_query.rb`),
   and `CgiIo.parse_form_into` reads the brackets back; every other
   family renders a value as its `to_s`, in insertion order.
 * **`script_name:`, `original_script_name:` and `trailing_slash:` are

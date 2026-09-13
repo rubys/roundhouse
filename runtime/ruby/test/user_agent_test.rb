@@ -42,6 +42,7 @@
 # Rails, and reproducing them is the whole point of a port.
 require_relative "test_helper"
 require_relative "../user_agent"
+require_relative "../action_controller/browser_blocker"
 
 # campfire's `app/models/application_platform.rb`, verbatim — the
 # subclass is what the fixture's derived columns were generated from,
@@ -145,5 +146,33 @@ class UserAgentTest < Minitest::Test
       assert_equal "4.0", agent.version, "version for #{ua.inspect}"
     end
     assert_equal false, ApplicationPlatformFixture.new(nil).ios?
+  end
+
+  # `Browsers::Base#bot?` and `Version#<=>`, the two the gem answers
+  # for Rails' `allow_browser`; expectations are the gem's own output.
+  def test_bot_and_version_comparison_match_the_gem
+    assert_equal true, UserAgent.parse("Googlebot/2.1 (+http://www.google.com/bot.html)").bot?
+    assert_equal false, UserAgent.parse("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0").bot?
+    assert_equal true, UserAgent.version_below?("114.0", "121")
+    assert_equal false, UserAgent.version_below?("17.2", "17.2")
+    assert_equal true, UserAgent.version_below?("17.2", "17.10")
+    assert_equal true, UserAgent.version_below?("4.0b2", "4.0")
+    assert_equal false, UserAgent.version_below?("121.0.1", "121")
+    assert_equal false, UserAgent.version_below?("Unknown", "1")
+  end
+
+  # actionpack's `BrowserBlocker` over the port: campfire's floors, the
+  # two agents its sessions test sends, a bot, and a header with no
+  # version to report.
+  def test_browser_blocker_gates_on_the_floors
+    floors = { "safari" => "17.2", "chrome" => "120", "firefox" => "121", "opera" => "104", "ie" => "false" }
+    firefox114 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0"
+    safari172 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+    assert_equal true, ActionController::BrowserBlocker.blocked?(firefox114, floors)
+    assert_equal false, ActionController::BrowserBlocker.blocked?(safari172, floors)
+    assert_equal true, ActionController::BrowserBlocker.blocked?("Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko", floors)
+    assert_equal false, ActionController::BrowserBlocker.blocked?("Googlebot/2.1 (+http://www.google.com/bot.html)", floors)
+    assert_equal false, ActionController::BrowserBlocker.blocked?(nil, floors)
+    assert_equal false, ActionController::BrowserBlocker.blocked?("Roundhouse Test", floors)
   end
 end

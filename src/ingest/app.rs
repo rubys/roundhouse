@@ -1012,6 +1012,10 @@ end
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
+    // `allow_browser` becomes a filter plus the method it runs, on the
+    // concern (before the splice carries both to the includer) or on
+    // the controller that called it directly.
+    super::allow_browser::lower_allow_browser(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.

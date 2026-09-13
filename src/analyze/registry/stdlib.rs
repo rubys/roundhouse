@@ -32,6 +32,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     );
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
 
+    // `ActionController::BrowserBlocker.blocked?(user_agent, floors)` —
+    // the gate `ingest::allow_browser` synthesizes into a controller
+    // body for `allow_browser`, answered by
+    // runtime/ruby/action_controller/browser_blocker.rb. Registered
+    // here because a runtime `.rbs` does not feed app analysis, and an
+    // unresolved send in a controller body is a dispatch error, not a
+    // gradual escape.
+    let mut blocker = ClassInfo::default();
+    blocker.class_methods.insert(Symbol::from("blocked?"), Ty::Bool);
+    classes.insert(ClassId(Symbol::from("ActionController::BrowserBlocker")), blocker);
+
     // Time singleton — `Time.now` (Ruby core) / `Time.current`
     // (Rails) / `Time.at` all yield a Time *value*, and `Time.zone`
     // is a TimeZone whose `.now`/`.at`/`.local` likewise yield Time,

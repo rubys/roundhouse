@@ -414,6 +414,82 @@ class UserAgent
     ""
   end
 
+  # `Browsers::Base#bot?`, in the gem's own order: no application token
+  # at all is a bot; a `bot` anywhere in a comment is; Google's
+  # `Chrome-Lighthouse` product is; a `bot` in the application's product
+  # name is. The gem says the list is not exhaustive and declines
+  # patches to it, which is the whole rule table.
+  def bot?
+    app = application
+    return true if app.nil?
+    return true unless comment_match(/bot/i).empty?
+    return true if UserAgent.product?(@tokens, "Chrome-Lighthouse")
+    app.product.include?("bot")
+  end
+
+  # `Version#<=>` for the one question `allow_browser` asks — is the
+  # reported version below the floor — over the gem's `Version` model:
+  # a version is comparable when it starts with digits, and then it is
+  # the sequence of its `\d+` runs plus a trailing alphabetic tag
+  # (`121.0`, `17.2`, `4.0b2`); a run compares numerically, a tag
+  # sorts below any number, and a missing run is 0. A version that is
+  # not comparable — blank, or `Version/Unknown` — is below nothing:
+  # the gem's `<` on it raises, and Rails only reaches the comparison
+  # after `version.to_s.present?`, so a non-numeric report lands here
+  # and the honest answer to "below the floor?" is no.
+  def self.version_below?(reported, floor)
+    a = version_sequence(reported)
+    b = version_sequence(floor)
+    return false if a.empty? || b.empty?
+    i = 0
+    while i < a.length || i < b.length
+      x = i < a.length ? a[i] : "0"
+      y = i < b.length ? b[i] : "0"
+      x_num = x.match?(/\A\d+\z/)
+      y_num = y.match?(/\A\d+\z/)
+      if x_num && y_num
+        return true if x.to_i < y.to_i
+        return false if x.to_i > y.to_i
+      elsif x_num
+        return false
+      elsif y_num
+        return true
+      else
+        return true if x < y
+        return false if x > y
+      end
+      i += 1
+    end
+    false
+  end
+
+  # The gem's `str.scan(/\d+|[A-Za-z][0-9A-Za-z-]*$/)` for a comparable
+  # version, empty for one that is not. A hand scan rather than `scan`:
+  # the runs are digits or a single trailing tag, and a loop over the
+  # bytes is a shape every target's emit answers.
+  def self.version_sequence(str)
+    return [] unless str.match?(/\A\d+(\.|\z)/)
+    parts = []
+    run = ""
+    i = 0
+    while i < str.length
+      ch = str[i, 1]
+      if ch >= "0" && ch <= "9"
+        run = run + ch
+      else
+        parts << run unless run.empty?
+        run = ""
+        if ch.match?(/[A-Za-z]/)
+          parts << str[i..].to_s
+          return parts
+        end
+      end
+      i += 1
+    end
+    parts << run unless run.empty?
+    parts
+  end
+
   # `OperatingSystems.normalize_os` — the Windows table first, then the
   # three version-bearing families, then the string as written.
   def self.normalize_os(os)

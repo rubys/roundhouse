@@ -130,10 +130,13 @@ pub(super) fn rewrite_render_to_views(
     // `subclass_template_hook` arm below.
     inheritor_modules: &[String],
 ) -> Expr {
-    let Some(module) = module_name else {
-        return expr.clone();
-    };
-    let module_name_owned = module.to_string();
+    // A controller with no Views module of its own (ApplicationController)
+    // still renders: `allow_browser`'s fallback is `render template:
+    // "sessions/incompatible_browser"` from there, and a slashed name
+    // carries its module with it. Only an UNQUALIFIED render has nothing
+    // to resolve against, and that one is left as written below.
+    let has_own_module = module_name.is_some();
+    let module_name_owned = module_name.unwrap_or("").to_string();
     let ivars = ivars.to_vec();
     // Controller-context literals every view can read (see
     // extra_params.rs): the current action name and the controller's
@@ -289,7 +292,12 @@ pub(super) fn rewrite_render_to_views(
                             _ => "",
                         };
                         match key {
-                            "action" => name = render_target_symbol(v),
+                            // `template:` names a template the same way
+                            // `action:` does, usually slashed — Rails'
+                            // own `allow_browser` fallback is `render
+                            // template: "sessions/incompatible_browser"`
+                            // in campfire. The slash is resolved below.
+                            "action" | "template" => name = render_target_symbol(v),
                             // `render html:` / `render plain:` — a body
                             // expression, not a template name. Normalized
                             // below to the positional-body form the runtime
@@ -377,7 +385,16 @@ pub(super) fn rewrite_render_to_views(
                             ExprNode::Hash { entries: rest, kwargs: true },
                         )]
                     };
-                    (n, extra, None)
+                    // A slashed name names another module's view, as
+                    // the slashed String form below does.
+                    match n.as_str().rsplit_once('/') {
+                        Some((dir, stem)) => (
+                            Symbol::from(stem),
+                            extra,
+                            Some(crate::naming::camelize_path(&crate::naming::snake_case(dir))),
+                        ),
+                        None => (n, extra, None),
+                    }
                 }
                 _ => return None,
             };
@@ -385,6 +402,9 @@ pub(super) fn rewrite_render_to_views(
             // current controller's by default; the slashed / top-level
             // String forms override (empty string = the root `Views`
             // module).
+            if module_override.is_none() && !has_own_module {
+                return None;
+            }
             let render_module: String =
                 module_override.unwrap_or_else(|| module_name_owned.clone());
             // View-driven arg list: an action view's params are exactly the

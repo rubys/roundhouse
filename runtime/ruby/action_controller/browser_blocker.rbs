@@ -1,0 +1,6 @@
+module ActionController
+  module BrowserBlocker
+    MODERN: Hash[String, String]
+    def self.blocked?: (String? user_agent, Hash[String, String] floors) -> bool
+  end
+end

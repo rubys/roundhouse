@@ -23,3 +23,6 @@ require_relative "action_controller/parameter_missing"
 # sets — a third Base reopen kept off the strict-target tables, for the
 # reason its own header gives.
 require_relative "action_controller/pagination"
+# `allow_browser`'s gate — the parsed User-Agent against the app's
+# version floors. Called from the filter the lowering synthesizes.
+require_relative "action_controller/browser_blocker"
