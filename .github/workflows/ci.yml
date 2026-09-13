@@ -1801,7 +1801,11 @@ jobs:
   build-campfire-archive:
     needs: [build-spinel]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60, not 30: `spin pack` runs spinel's front-end over the whole
+    # campfire tree, and with the ruby-vips package in it the job took
+    # 26 of its 30 minutes on 2026-09-12 (run 34725916085). A publish
+    # that times out four minutes short is a flake waiting to happen.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
