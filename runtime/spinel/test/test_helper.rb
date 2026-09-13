@@ -1355,8 +1355,15 @@ module RequestDispatch
       # Rails' `assert_select "h1", /Upgrade…/`: the equality test is a
       # match. Not checking it read "an h1 exists", which campfire's
       # incompatible-browser test would pass on the sign-in page.
-      pattern = content
-      matched = nodes.any? { |n| Dom.text(n).match?(pattern) }
+      # `Regexp.new(content.to_s)` is the same pattern (`Regexp#to_s`
+      # is the `(?-mix:…)` form `Regexp.new` reads back) as a value the
+      # compiled lane can TYPE: `content_or_opts` receives Strings,
+      # Hashes, Regexps and nil across a suite, and the `is_a?` above
+      # does not narrow a slot that wide, so `String#match?` with the
+      # bare `content` compiled to a NoMethodError. `.to_s` on the
+      # text for the same reason on the other side of the call.
+      pattern = Regexp.new(content.to_s)
+      matched = nodes.any? { |n| Dom.text(n).to_s.match?(pattern) }
       raise "expected #{selector.inspect} matching #{content.inspect} in response body" unless matched
     end
     yield if block
