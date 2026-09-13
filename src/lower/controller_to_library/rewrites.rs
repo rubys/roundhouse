@@ -125,6 +125,10 @@ pub(super) fn rewrite_render_to_views(
     view_ivars: &super::ViewIvarMap,
     partials: &super::PartialMap,
     current_action: &str,
+    // The Views modules of every controller that INHERITS this one —
+    // where a template this controller lacks may still live. See the
+    // `subclass_template_hook` arm below.
+    inheritor_modules: &[String],
 ) -> Expr {
     let Some(module) = module_name else {
         return expr.clone();
@@ -420,7 +424,7 @@ pub(super) fn rewrite_render_to_views(
             } else {
                 view_method.as_str().to_string()
             };
-            let mut contract = view_ivars.get(&(render_module.clone(), contract_stem));
+            let mut contract = view_ivars.get(&(render_module.clone(), contract_stem.clone()));
             // A template that exists ONLY as jbuilder is still a
             // template, and an explicit `render :show` naming one
             // carries no `format:` kwarg to key on — the marker the
@@ -465,9 +469,34 @@ pub(super) fn rewrite_render_to_views(
             // reach `messages/by_bots/show.json.jbuilder` through an
             // inherited action. That is per-instance template
             // resolution, and this lowering has one body per DEFINING
-            // controller — so the honest answer here is the raise Rails
-            // gives the defining controller, not a call that resolves
-            // nowhere.
+            // controller. When an inheritor's views DO hold the
+            // template, the resolution is a virtual call: the body
+            // asks `self.__template_<stem>` for the rendered string,
+            // this controller defines that hook as the raise Rails
+            // gives it, and each inheritor that has the template
+            // overrides it with its own `Views::…` call
+            // (`subclass_template_hooks` in mod.rs). Ruby's method
+            // lookup is exactly Rails' view-prefix lookup here, and
+            // both emit families dispatch it. No inheritor has it
+            // either: the honest answer is the raise, not a call that
+            // resolves nowhere.
+            let mut subclass_hook: Option<Symbol> = None;
+            if contract.is_none() {
+                let mut stems: Vec<(String, bool)> = vec![(contract_stem.clone(), false)];
+                if !is_json && !is_turbo_stream && !is_svg {
+                    stems.push((format!("{}_json", view_method.as_str()), true));
+                }
+                'stems: for (stem, via_json_only) in stems {
+                    for m in inheritor_modules {
+                        if let Some(c) = view_ivars.get(&(m.clone(), stem.clone())) {
+                            contract = Some(c);
+                            json_only = via_json_only;
+                            subclass_hook = Some(subclass_template_hook_name(&stem));
+                            break 'stems;
+                        }
+                    }
+                }
+            }
             if contract.is_none() {
                 return Some(Expr::new(
                     e.span,
@@ -563,20 +592,32 @@ pub(super) fn rewrite_render_to_views(
             // Digit-leading stems (`about/404`) carry a `_` prefix on the
             // method — must match the def-site naming in view_to_library.
             let view_method = crate::lower::view::view_method_name(view_method.as_str());
-            let view_call = Expr::new(
-                e.span,
-                ExprNode::Send {
-                    recv: Some(if render_module.is_empty() {
-                        const_path(&["Views"], e.span)
-                    } else {
-                        const_path(&["Views", &render_module], e.span)
-                    }),
-                    method: view_method,
-                    args: view_args,
-                    block: None,
-                    parenthesized: true,
-                },
-            );
+            let view_call = match subclass_hook {
+                Some(hook) => Expr::new(
+                    e.span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: hook,
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                None => Expr::new(
+                    e.span,
+                    ExprNode::Send {
+                        recv: Some(if render_module.is_empty() {
+                            const_path(&["Views"], e.span)
+                        } else {
+                            const_path(&["Views", &render_module], e.span)
+                        }),
+                        method: view_method,
+                        args: view_args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+            };
             if to_string {
                 // `render_to_string action: "tree"` — the view call IS
                 // the string; response options don't apply.
@@ -607,6 +648,14 @@ pub(super) fn rewrite_render_to_views(
         }
         _ => None,
     })
+}
+
+/// The virtual template hook for a format-qualified view stem:
+/// `show_json` → `__template_show_json`. Named by the STEM, not the
+/// module, so an inheritor's override and the defining controller's
+/// raise are one method under Ruby's lookup.
+pub(super) fn subclass_template_hook_name(stem: &str) -> Symbol {
+    Symbol::from(format!("__template_{stem}"))
 }
 
 /// A String-literal expression (for the action_name/controller_name

@@ -212,6 +212,22 @@ struct Nesting {
 }
 
 impl Ctx {
+    /// `scope defaults: { format: :json }` — the response format every
+    /// route under the scope answers in unless the path names one.
+    /// Rails seeds `params[:format]` from it, so `respond_to` takes the
+    /// json branch on a request that sent no Accept header; here it
+    /// rides the same `req_format` slot an explicit `format:` on the
+    /// route does. campfire's bot API is one such scope, and its
+    /// inherited `update` answered the html branch (a redirect) to a
+    /// bot's PATCH.
+    fn default_format(&self) -> Option<Symbol> {
+        self.param_defaults
+            .iter()
+            .rev()
+            .find(|(n, _)| n == "format")
+            .map(|(_, v)| Symbol::from(v.as_str()))
+    }
+
     /// The innermost enclosing resource — what controller inference and
     /// the bare-verb shortcuts key off.
     fn parent_pair(&self) -> Option<(&str, &str)> {
@@ -440,7 +456,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     action: action.clone(),
                     as_name: derived_name.clone(),
                     named: named && i == 0,
-                    format: forced_format.clone(),
+                    format: forced_format.clone().or_else(|| ctx.default_format()),
                     required_params,
                     param_defaults: defaults_for(ctx, &params),
                     path_params: params,
@@ -578,7 +594,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     param_defaults: defaults_for(ctx, &params),
                     path_params: params.clone(),
                     named: true,
-                    format: None,
+                    format: ctx.default_format(),
                     int_params: vec![],
                     constraints: vec![],
                 });
@@ -604,7 +620,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         param_defaults: defaults_for(ctx, &params),
                         path_params: params,
                         named: false,
-                        format: None,
+                        format: ctx.default_format(),
                         int_params: vec![],
                         constraints: vec![],
                     });

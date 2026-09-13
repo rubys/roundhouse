@@ -34,8 +34,10 @@ use crate::dialect::{
     AccessorKind, Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass,
     MethodDef, MethodReceiver, Param,
 };
+use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
 use crate::ty::Ty;
 use crate::lower::controller::body::{
     has_toplevel_terminal, synthesize_deferred_implicit_render, synthesize_implicit_render,
@@ -319,6 +321,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params);
         all_methods.push((methods, controller));
     }
+    subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
 
     let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
         std::collections::HashMap::new();
@@ -633,6 +636,140 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
         }
     }
     out
+}
+
+/// Define the virtual template hooks `rewrite_render_to_views` called.
+///
+/// A body that met `render :show` with no `show` under its own views
+/// but one under an inheritor's now reads `self.__template_show_json`
+/// (the hook call IS the record — nothing else has to remember it).
+/// This defines the method on both sides of the inheritance: the
+/// defining controller gets the raise Rails gives it, and every
+/// inheritor whose views hold the template gets the `Views::…` call
+/// its own `render :show` would have lowered to — through the same
+/// rewrite, with the inheritor as the module, so the two never
+/// disagree about a view's arguments. An inheritor without the
+/// template inherits the raise, which is Rails' answer too.
+///
+/// Ahead of the registry that types `self` sends, so the hook call
+/// resolves to a String like the `Views::…` call it replaces.
+fn subclass_template_hooks(
+    all_methods: &mut [(Vec<MethodDef>, &Controller)],
+    controllers: &[Controller],
+    view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
+) {
+    // (defining controller, stem) for every hook any body called.
+    let mut hooks: Vec<(ClassId, String)> = Vec::new();
+    fn collect(e: &Expr, definer: &ClassId, hooks: &mut Vec<(ClassId, String)>) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+            if args.is_empty() {
+                if let Some(stem) = method.as_str().strip_prefix("__template_") {
+                    let key = (definer.clone(), stem.to_string());
+                    if !hooks.contains(&key) {
+                        hooks.push(key);
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| collect(c, definer, hooks));
+    }
+    for (methods, controller) in all_methods.iter() {
+        for m in methods {
+            collect(&m.body, &controller.name, &mut hooks);
+        }
+    }
+    for (definer, stem) in hooks {
+        let hook = rewrites::subclass_template_hook_name(&stem);
+        // `show_json` → (`show`, `format: :json`); `show` → (`show`, none).
+        let (template, format) = match stem.rsplit_once('_') {
+            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg") => (t.to_string(), Some(f.to_string())),
+            _ => (stem.clone(), None),
+        };
+        for (methods, controller) in all_methods.iter_mut() {
+            let is_definer = controller.name == definer;
+            let inherits = ancestor_chain(controller, controllers).iter().any(|p| p.name == definer);
+            if !is_definer && !inherits {
+                continue;
+            }
+            let Some(module) = views_module_name(controller) else { continue };
+            let has_template = view_ivars.contains_key(&(module.clone(), stem.clone()));
+            let body = if is_definer || !has_template {
+                if !is_definer {
+                    continue;
+                }
+                let span = Span::synthetic();
+                Expr::new(
+                    span,
+                    ExprNode::Raise {
+                        value: Expr::new(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(Expr::new(
+                                    span,
+                                    ExprNode::Const {
+                                        path: vec![Symbol::from("ActionView"), Symbol::from("MissingTemplate")],
+                                    },
+                                )),
+                                method: Symbol::from("new"),
+                                args: vec![Expr::new(
+                                    span,
+                                    ExprNode::Lit { value: Literal::Str { value: template.clone() } },
+                                )],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        ),
+                    },
+                )
+            } else {
+                // `render_to_string :show, format: :json` in the
+                // inheritor's own context — the rewrite's string-valued
+                // arm hands back the bare `Views::…` call.
+                let span = Span::synthetic();
+                let mut args = vec![Expr::new(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: Symbol::from(template.as_str()) } },
+                )];
+                if let Some(f) = &format {
+                    args.push(Expr::new(
+                        span,
+                        ExprNode::Hash {
+                            entries: vec![(
+                                Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("format") } }),
+                                Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(f.as_str()) } }),
+                            )],
+                            kwargs: true,
+                        },
+                    ));
+                }
+                let render = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("render_to_string"),
+                        args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
+            };
+            methods.push(MethodDef {
+                name: hook.clone(),
+                receiver: MethodReceiver::Instance,
+                params: vec![],
+                body,
+                signature: Some(crate::lower::typing::fn_sig(vec![], Ty::Str)),
+                effects: EffectSet::default(),
+                enclosing_class: Some(controller.name.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+                block_param: None,
+            });
+        }
+    }
 }
 
 fn build_methods(
@@ -1439,6 +1576,17 @@ fn body_calls_super(body: &Expr) -> bool {
     found
 }
 
+/// The Views modules of every controller that inherits `controller`,
+/// transitively — where a template the controller's own views lack may
+/// still live (`rewrite_render_to_views`' subclass hook).
+fn inheritor_view_modules(controller: &Controller, all: &[Controller]) -> Vec<String> {
+    all.iter()
+        .filter(|c| c.name != controller.name)
+        .filter(|c| ancestor_chain(c, all).iter().any(|p| p.name == controller.name))
+        .filter_map(views_module_name)
+        .collect()
+}
+
 fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
     let mut chain: Vec<&'a Controller> = Vec::new();
     let mut cur = controller.parent.as_ref();
@@ -1875,6 +2023,7 @@ fn action_to_method(
     } else {
         None
     };
+    let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
     let (body, deferred_tail) = lower_action_body(
         &a.body,
         controller,
@@ -1892,6 +2041,7 @@ fn action_to_method(
         deferred_renders.contains(&a.name),
         inherited_spec,
         formats_template.as_ref(),
+        &inheritor_modules,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -2034,6 +2184,7 @@ fn lower_action_body(
     defer_implicit_render: bool,
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
+    inheritor_modules: &[String],
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -2129,6 +2280,7 @@ fn lower_action_body(
             view_ivars,
             partials,
             action_name,
+            inheritor_modules,
         )
     };
 
