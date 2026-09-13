@@ -150,6 +150,10 @@ require_relative "runtime/erb_spinel"
 # ViewHelpers' scalar `to_query_value`, for the two lanes whose router
 # parses it back. The CRuby overlay's boot requires the same file.
 require_relative "runtime/hash_to_query"
+# `ActionView::RecordIdentifier.dom_id` by name — the CRuby overlay's
+# action_view_record_identifier.rb twin, a delegation to the shared
+# `ViewHelpers.dom_id`.
+require_relative "runtime/record_identifier_spinel"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
 # transport that fans Turbo Stream fragments out to subscribers. Loaded
 # after tep (uses Tep::WebSocket / Scheduler / Broadcast) and broadcasts

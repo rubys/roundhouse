@@ -807,7 +807,7 @@ fn nested_element_parts(kind: &NestedUrlElement<'_>) -> (String, Expr) {
 /// shape) and the bareword `Send { recv: None, args: [], block: None }`
 /// shape Prism produces for partial-scope locals. Anything else
 /// passes through unchanged.
-fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
+pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
     let local_name = match &*arg.node {
         ExprNode::Var { name, .. } if ctx.is_local(name.as_str()) => Some(name.clone()),
         ExprNode::Send {

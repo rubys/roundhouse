@@ -137,4 +137,27 @@ module Nokogiri
       nil
     end
   end
+
+  # `Nokogiri::HTML.fragment(html)` — the module spelled with `::`, a
+  # different name from the `Nokogiri.HTML(html)` method above (Ruby
+  # keeps a constant and a method apart, and so does spinel). The one
+  # reader in the corpus is campfire's `turbo_test_helper`, which hands
+  # the fragment straight to `assert_select(root, selector)`, and the
+  # harness reads a root through `to_s` — so a fragment is the markup
+  # it was given, and nothing else is modelled.
+  module HTML
+    class DocumentFragment
+      def initialize(html)
+        @html = html
+      end
+
+      def to_s
+        @html
+      end
+    end
+
+    def self.fragment(html)
+      DocumentFragment.new(html.to_s)
+    end
+  end
 end

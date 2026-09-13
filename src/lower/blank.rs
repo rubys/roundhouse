@@ -252,7 +252,16 @@ fn is_params_read(r: &Expr) -> bool {
 
 fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
     use Grounding::*;
-    let Some(t) = ty else { return Skip("receiver type not inferred") };
+    // An UNSTAMPED receiver is the same ignorance as an `untyped` one,
+    // and takes the same answer: the runtime predicate branches on the
+    // value. A has_many extension method's parameter is the case —
+    // campfire's `revise(granted: [], revoked: [])` reads
+    // `granted.present?`, its typer never runs over the extension's
+    // body, and a bare User handed in by the test had no `present?`
+    // arm on spinel ("undefined method 'present?' for an instance of
+    // User") where `ActiveSupport.present?` answers true, as Rails'
+    // `Object#present?` does for any record.
+    let Some(t) = ty else { return Runtime };
     match t {
         Ty::Str => Container { nilable: false, whitespace: true },
         Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } => {

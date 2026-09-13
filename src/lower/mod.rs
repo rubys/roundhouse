@@ -974,6 +974,21 @@ pub(crate) fn for_each_hook_body(
                 // friends) round-trip verbatim into the emit — their
                 // sites are just as reachable.
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                // A has_many extension's methods (`has_many :memberships
+                // do def revise(…) … end end`) are app-authored bodies
+                // that the model lowering turns into ordinary methods;
+                // every pass driven from here has to see them first.
+                // campfire's `revise` reads `granted.present?` and the
+                // blank grounding never reached it.
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension.iter_mut() {
+                        visit_param_defaults(&mut m.params, f);
+                        f(&mut m.body);
+                    }
+                }
                 _ => {}
             }
         }

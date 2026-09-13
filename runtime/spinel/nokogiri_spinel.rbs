@@ -13,4 +13,13 @@ module Nokogiri
     def xpath: (String expression) -> Array[Element]
     def self.starts_with_any?: (Hash[String, String] attributes, Array[String] keys, Array[String] prefixes) -> bool
   end
+
+  module HTML
+    class DocumentFragment
+      @html: String
+      def initialize: (String html) -> void
+      def to_s: () -> String
+    end
+    def self.fragment: (untyped html) -> DocumentFragment
+  end
 end

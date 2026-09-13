@@ -2724,6 +2724,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
     }
 
+    // RecordIdentifier sidecar — runtime/record_identifier_spinel.rb
+    // names `ActionView::RecordIdentifier.dom_id`; the .rbs carries the
+    // shared `dom_id`'s contract so the record argument stays typed.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/record_identifier_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/record_identifier_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/record_identifier_spinel.rbs".to_string(), rbs));
+    }
+
     // Hash#to_query nesting sidecar — the reopen in
     // runtime/hash_to_query.rb renders a nested Hash/Array value as
     // Rails' bracket grammar; the .rbs keeps the reopened method's

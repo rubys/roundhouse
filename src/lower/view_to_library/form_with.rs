@@ -601,14 +601,23 @@ fn emit_open_builder_tag(element: &str, opts: &[(Expr, Expr)], ctx: &ViewCtx) ->
 fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) -> Expr {
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
         let m = method.as_str();
+        // A record local in segment position projects to its id, the
+        // same `rewrite_path_arg` every other url-position helper call
+        // goes through. `form_with model: @bot, url: account_bot_path(@bot)`
+        // handed the whole record to a helper typed `(Integer id)`:
+        // CRuby interpolated its inspect into the action, spinel raised
+        // `no implicit conversion of User into Integer` — campfire's
+        // bot edit page.
+        let route_args: Vec<Expr> =
+            args.iter().map(|a| super::helpers::rewrite_path_arg(a, ctx)).collect();
         if m.ends_with("_path") {
-            return send(Some(route_helpers()), m, args.clone(), None, true);
+            return send(Some(route_helpers()), m, route_args, None, true);
         }
         // `_url` absolute variants: RouteHelpers only generates `_path`
         // functions — the shared absolute-interp grounding (lobsters'
         // keybase form posts to `keybase_proofs_url`).
         if let Some(stem) = m.strip_suffix("_url") {
-            return super::absolute_url_interp(stem, args.clone());
+            return super::absolute_url_interp(stem, route_args);
         }
     }
     // A bare local/ivar `url:` naming a KNOWN MODEL is Rails'

@@ -1,0 +1,7 @@
+# Typing for runtime/spinel/record_identifier_spinel.rb — the same
+# contract as `ViewHelpers.dom_id` (action_view/view_helpers.rbs).
+module ActionView
+  module RecordIdentifier
+    def self.dom_id: (ActiveRecord::Base record, ?Symbol? suffix) -> String
+  end
+end
