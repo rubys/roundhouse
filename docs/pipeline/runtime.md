@@ -1996,15 +1996,21 @@ has three filled cells and one empty one:
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes
   the helper rather than widening its signature.
-* **`script_name:`, `original_script_name:`, `trailing_slash:` and
-  `params:` are NOT modeled.** Each genuinely changes the path — the
-  first two prefix it, the third appends a `/`, and `params:` is a hash
-  Rails merges into the query — and each is still treated as an ordinary
-  query key, so `foo_path(trailing_slash: true)` renders
+* **`params:`** is the query itself — Rails merges its value into the
+  generated query string, which is what an erased `**splat` renders
+  too — so the two are one shape: `foo_path(…) + RouteHelpers.query_suffix(h)`,
+  rendered at run time through `ActionView::ViewHelpers.to_query`. On
+  the ruby family that is `Hash#to_query` in full (nested Hashes as
+  `a[b]`, Arrays as `a[]`, pairs sorted per level, `runtime/hash_to_query.rb`),
+  and `CgiIo.parse_form_into` reads the brackets back; every other
+  family renders a value as its `to_s`, in insertion order.
+* **`script_name:`, `original_script_name:` and `trailing_slash:` are
+  NOT modeled.** Each genuinely changes the path — the first two prefix
+  it, the third appends a `/` — and each is still treated as an
+  ordinary query key, so `foo_path(trailing_slash: true)` renders
   `?trailing_slash=true`. Left visibly wrong rather than silently
-  dropped: no corpus app writes one of them on an app route (campfire's
-  one `params:` site is an integration-test POST), and a dropped option
-  is a URL that looks right and is not.
+  dropped: no corpus app writes one of them on an app route, and a
+  dropped option is a URL that looks right and is not.
 
 A second, smaller divergence in the same place: Rails escapes a fragment
 with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and

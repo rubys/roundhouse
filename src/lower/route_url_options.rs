@@ -48,11 +48,17 @@
 //!   * `format:` — owned by [`super::route_format_suffix`], which
 //!     monomorphizes the helper instead of widening its signature.
 //!
-//! The four left over — `script_name:`, `original_script_name:`,
-//! `trailing_slash:` and `params:` — each genuinely change the path,
-//! and none is modeled. They stay query keys, which is visibly wrong
-//! rather than silently wrong, and no corpus app writes one on an app
-//! route. Ledgered in `docs/pipeline/runtime.md`.
+//!   * `params:` — the query itself. `url_for` merges its value into the
+//!     generated query string, which is what an erased `**splat` renders
+//!     too, so `rewrites::route_helper_query_splat_index` reads the two
+//!     as one shape: `x_path(…) + RouteHelpers.query_suffix(h)`. campfire's
+//!     tests write it twice, both with a nested value.
+//!
+//! The three left over — `script_name:`, `original_script_name:` and
+//! `trailing_slash:` — each genuinely change the path, and none is
+//! modeled. They stay query keys, which is visibly wrong rather than
+//! silently wrong, and no corpus app writes one on an app route.
+//! Ledgered in `docs/pipeline/runtime.md`.
 //!
 //! Scope, and ordering: bare `*_path` / `*_url` calls whose name
 //! matches a route in the app's own table, rewritten before

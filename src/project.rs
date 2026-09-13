@@ -2724,6 +2724,16 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
     }
 
+    // Hash#to_query nesting sidecar — the reopen in
+    // runtime/hash_to_query.rb renders a nested Hash/Array value as
+    // Rails' bracket grammar; the .rbs keeps the reopened method's
+    // signature the shared one's.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/hash_to_query.rbs")
+            .map_err(|e| format!("read runtime/spinel/hash_to_query.rbs: {e}"))?;
+        files.push(("sig/runtime/hash_to_query.rbs".to_string(), rbs));
+    }
+
     // SecureRandom stub-slot sidecar — the reopen in
     // runtime/secure_random_stub.rb replaces the package's
     // `alphanumeric`/`uuid` with stub-first arms; the .rbs pins the

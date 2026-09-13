@@ -94,6 +94,16 @@ class ViewHelpersTest < Minitest::Test
   # non-String) now wrap values in `.to_s` at the call site. The
   # nil-passing behavior is intentionally no longer supported.
 
+  # `Hash#to_query` on scalar values, in insertion order: keys and
+  # values through CGI.escape (space is `+`), nil as the bare key. The
+  # nested grammar and Rails' per-level sort are the ruby family's
+  # reopen (runtime/spinel/hash_to_query.rb), tested where it loads.
+  def test_to_query_renders_scalars_like_cgi_escape
+    assert_equal "auth_key=a+b&endpoint=https%3A%2F%2Fx%2Fy%3Fz%3D1",
+      ActionView::ViewHelpers.to_query({ auth_key: "a b", endpoint: "https://x/y?z=1" })
+    assert_equal "after=5&before", ActionView::ViewHelpers.to_query({ after: 5, before: nil })
+  end
+
   def test_html_escape_replaces_special_chars
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.html_escape("<b>hi</b>")
   end

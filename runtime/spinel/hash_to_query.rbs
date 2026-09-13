@@ -1,0 +1,8 @@
+# Typing for runtime/spinel/hash_to_query.rb — the nested-grammar reopen
+# of the shared pair (runtime/ruby/action_view/view_helpers.rbs).
+module ActionView
+  module ViewHelpers
+    def self.to_query_pairs: (Hash[untyped, untyped] params, String namespace) -> String
+    def self.to_query_value: (String name, untyped value) -> String
+  end
+end

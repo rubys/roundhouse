@@ -180,6 +180,15 @@ fn real_blog_spinel_tests_pass() {
         // NoMethodError several frames from the lookup. Rides in the
         // same way the others do.
         "test/relation_find_test.rb",
+        // The form/query parser behind every `params` read
+        // (`CgiIo.parse_form_into`) and the ruby family's nested
+        // `Hash#to_query` (runtime/hash_to_query.rb) — the two halves
+        // of the bracket grammar a route helper's `params:` travels
+        // through, each measured against Rack's and activesupport's
+        // own output. Rides in the same way the others do; the parser's
+        // file had shipped in every emit with nothing running it.
+        "test/cgi_io_test.rb",
+        "test/hash_to_query_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

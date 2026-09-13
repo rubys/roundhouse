@@ -179,6 +179,46 @@ module ActionView
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
     end
 
+    # `Hash#to_query` — the query string a route helper renders for its
+    # leftover options and for an explicit `params:` (activesupport's
+    # `core_ext/object/to_query.rb`, in shape): each value renders to
+    # ONE string through `to_query_value`, and `&` joins them. Every key
+    # and value goes through the SAME `url_encode` (CGI.escape) the
+    # named query keys use.
+    #
+    # THIS FILE RENDERS SCALARS, IN INSERTION ORDER. A value here is
+    # `to_s`'d, which is what every target's `query_suffix` did before
+    # this existed and what their routers can read back. The rest of
+    # Rails' rendering — a Hash as `outer[inner]`, an Array as `key[]`,
+    # the strings at each level SORTED — is the bracket grammar the ruby
+    # family's router parses (`CgiIo.parse_form_into`) and nobody else's
+    # does; `runtime/spinel/hash_to_query.rb` reopens both methods below
+    # for the two lanes that can use it. A poly walk over untyped values
+    # and an `Array#sort` are not shapes every strict target's emit
+    # answers, and this seam keeps them off those trees.
+    def self.to_query(params)
+      to_query_pairs(params, "")
+    end
+
+    # `NilClass#to_query` is the bare key, no `=`.
+    def self.to_query_value(name, value)
+      value.nil? ? url_encode(name) : "#{url_encode(name)}=#{url_encode(value.to_s)}"
+    end
+
+    # The `.to_s` on the push is for the accumulator's type, not the
+    # value's (already a String): a self-send inside a Hash `each`
+    # block is not stamped by the typer, and the decl-site emitters
+    # declare `pairs` from what is pushed into it — untyped, and their
+    # `join` refuses it.
+    def self.to_query_pairs(params, namespace)
+      pairs = []
+      params.each do |key, value|
+        name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
+        pairs << to_query_value(name, value).to_s
+      end
+      pairs.join("&")
+    end
+
     # The SECOND url encoding. `URL_ESCAPES` above is `CGI.escape` —
     # FORM encoding, what `Hash#to_query` runs, where a space is `+`. A
     # `mailto:` URI is a URI COMPONENT, which Rails encodes with

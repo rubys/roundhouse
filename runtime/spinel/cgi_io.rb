@@ -151,6 +151,14 @@ module CgiIo
 
   # `article[title]` → into["article"]["title"] = val
   # `id` → into["id"] = val
+  # `user_ids[]` → into["user_ids"] = [..., val]
+  # `a[b][c]` → into["a"]["b"]["c"] = val
+  #
+  # The bracket grammar Rack's `parse_nested_query` reads, which is what
+  # `Hash#to_query` writes on the other side (`ViewHelpers.to_query`): a
+  # head, then any number of `[segment]` steps, where an EMPTY segment
+  # means "append to the array here" and is only meaningful last. A
+  # malformed key (an unclosed bracket) is dropped, as before.
   #
   # String keys throughout: the router's path_params are already
   # string-keyed (`params["id"]`), and merging the two via main.rb
@@ -162,12 +170,28 @@ module CgiIo
       into[raw_key] = val
       return
     end
-    close_bracket = raw_key.index("]", open_bracket + 1)
-    return if close_bracket.nil?
-    outer = raw_key[0, open_bracket]
-    inner = raw_key[(open_bracket + 1)...close_bracket]
-    into[outer] = {} unless into[outer].is_a?(Hash)
-    into[outer][inner] = val
+    segments = []
+    rest = raw_key[open_bracket..]
+    while rest.start_with?("[")
+      close_bracket = rest.index("]")
+      return if close_bracket.nil?
+      segments.push(rest[1...close_bracket])
+      rest = rest[(close_bracket + 1)..]
+    end
+    return if !rest.empty?
+    current = into
+    key = raw_key[0, open_bracket]
+    segments.each do |segment|
+      if segment.empty?
+        current[key] = [] unless current[key].is_a?(Array)
+        current[key].push(val)
+        return
+      end
+      current[key] = {} unless current[key].is_a?(Hash)
+      current = current[key]
+      key = segment
+    end
+    current[key] = val
   end
 
   # Spinel-friendly URL encode: pass-through for unreserved chars

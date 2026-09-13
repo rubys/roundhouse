@@ -299,7 +299,7 @@ pub fn lower_test_modules_with_inner(
             // freshly-synthesized Sends/Hash entries get a `ty` —
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
-            method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
+            method.body = crate::lower::seeds_to_library::rewrite_assoc_create_with_models(&method.body, models);
             // A record standing where a route helper wants an id.
             // Type-directed, so it must be here and not back where the
             // `RouteHelpers.` receiver was added: at THAT point a test

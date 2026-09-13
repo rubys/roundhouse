@@ -82,6 +82,7 @@ pub mod to_json;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
+pub mod save_without_validation;
 pub mod defined_ivar_memo;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
@@ -276,6 +277,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // a typed-Array receiver, which no other pass produces or
     // consumes, so no ordering constraints.
     ("array_ordinal", &[]),
+    // `save(validate: false)` → `save_after_validation`. Keys on a
+    // literal `validate: false` kwarg no other pass produces or
+    // consumes, so no ordering constraints.
+    ("save_without_validation", &[]),
     ("assoc_pluck", &[]),
     ("try_guard", &[]),
     // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
@@ -642,6 +647,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     array_ordinal::apply_array_ordinal_lowering(app);
     ran!("array_ordinal");
+    save_without_validation::apply_save_without_validation_lowering(app);
+    ran!("save_without_validation");
     assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
     try_guard::apply_try_guard_lowering(app);

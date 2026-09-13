@@ -1199,7 +1199,20 @@ fn every_runtime_method_body_concretely_typed() {
     // at SIX, so the nested form stays). What it bought: the blob is a
     // value with a key, a size and dimensions, which is what a storage
     // service and a variant need to serve it.
-    const CEILING: usize = 405;
+    //
+    // 405 -> 408: `ViewHelpers.to_query`, `Hash#to_query` for a route
+    // helper's `params:` and splatted options. THREE sites, all the
+    // one `value` a query pair carries: the `each` handing it on, the
+    // `nil?` that renders the bare key, and the `to_s` that renders the
+    // rest. `untyped` because that is the contract — a query value is
+    // any object, the same reason the logger's `message` is — and the
+    // nested walk that would read it as a Hash or Array is the ruby
+    // family's reopen (runtime/spinel/hash_to_query.rb), off this
+    // tree. What it bought: the pairs `query_suffix` renders are
+    // CGI-escaped through one function instead of an IR-built loop,
+    // and campfire's `rooms_closed_url(room, params: {…})` and
+    // `user_push_subscriptions_url(params: {…})` reach their actions.
+    const CEILING: usize = 408;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

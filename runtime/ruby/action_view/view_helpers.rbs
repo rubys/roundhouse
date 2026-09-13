@@ -41,6 +41,12 @@ module ActionView
   def self.h: (untyped value) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
+    # `Hash#to_query`: one string per value, `&`-joined. Scalar values
+    # in insertion order here; runtime/spinel/hash_to_query.rb reopens
+    # both with the nested bracket grammar and Rails' per-level sort.
+    def self.to_query: (Hash[Symbol, untyped] params) -> String
+    def self.to_query_pairs: (Hash[Symbol, untyped] params, String namespace) -> String
+    def self.to_query_value: (String name, untyped value) -> String
     def self.url_encode_component: (String s) -> String
     def self.url_encode_mailto_address: (String s) -> String
 

@@ -146,6 +146,10 @@ require_relative "runtime/nokogiri_spinel"
 # stdlib Rails loads. After action_controller, whose require chain defines
 # the ActionView::ViewHelpers.html_escape this delegates to.
 require_relative "runtime/erb_spinel"
+# `Hash#to_query`'s nested bracket grammar — a reopen of the shared
+# ViewHelpers' scalar `to_query_value`, for the two lanes whose router
+# parses it back. The CRuby overlay's boot requires the same file.
+require_relative "runtime/hash_to_query"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
 # transport that fans Turbo Stream fragments out to subscribers. Loaded
 # after tep (uses Tep::WebSocket / Scheduler / Broadcast) and broadcasts

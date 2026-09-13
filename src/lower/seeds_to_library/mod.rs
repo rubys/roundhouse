@@ -67,12 +67,31 @@ pub fn lower_seeds_to_library_functions(app: &App) -> Vec<LibraryFunction> {
 ///     args: [Hash{ <parent_class>_id: parent_expr.id, ...original_entries }],
 ///   }
 ///
-/// `<AssocClass>` derives from singularize+camelize on the assoc
-/// method name. `<parent_class>_id` derives from the parent_expr's
-/// type (a Class type the typer set), snake_cased — e.g.
+/// `<AssocClass>` is the association's DECLARED target when the parent
+/// model is known — `has_many :push_subscriptions, class_name:
+/// "Push::Subscription"` names a class the assoc name alone never
+/// reaches (campfire's test built a `PushSubscription`, an
+/// uninitialized constant) — and singularize+camelize on the assoc
+/// method name otherwise. `<parent_class>_id` derives from the
+/// parent_expr's type (a Class type the typer set), snake_cased — e.g.
 /// `Article` → `article_id`. Falls through (returns the expr
 /// unchanged) when any of the shape preconditions don't hold.
 pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
+    rewrite_assoc_create_with_models(expr, &[])
+}
+
+pub fn rewrite_assoc_create_with_models(expr: &Expr, models: &[crate::dialect::Model]) -> Expr {
+    let declared_target = |parent: &str, assoc: &str| -> Option<String> {
+        let model = models.iter().find(|m| m.name.0.as_str() == parent)?;
+        model.associations().find_map(|a| match a {
+            crate::dialect::Association::HasMany { name, target, .. }
+                if name.as_str() == assoc =>
+            {
+                Some(target.0.as_str().to_string())
+            }
+            _ => None,
+        })
+    };
     crate::lower::controller_to_library::util::map_expr(expr, &|e| {
         let ExprNode::Send {
             recv: Some(outer_recv),
@@ -113,7 +132,8 @@ pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
             Some(Ty::Class { id, .. }) => id.0.as_str().to_string(),
             _ => return None,
         };
-        let assoc_class = crate::naming::singularize_camelize(assoc_method.as_str());
+        let assoc_class = declared_target(&parent_class, assoc_method.as_str())
+            .unwrap_or_else(|| crate::naming::singularize_camelize(assoc_method.as_str()));
         let fk = format!("{}_id", crate::naming::snake_case(&parent_class));
 
         // Build the FK-id expr: `<parent_expr>.id`.
@@ -155,7 +175,9 @@ pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
             ExprNode::Send {
                 recv: Some(Expr::new(
                     e.span,
-                    ExprNode::Const { path: vec![Symbol::from(assoc_class)] },
+                    ExprNode::Const {
+                        path: assoc_class.split("::").map(Symbol::from).collect(),
+                    },
                 )),
                 method: target_method,
                 args: vec![merged_hash],

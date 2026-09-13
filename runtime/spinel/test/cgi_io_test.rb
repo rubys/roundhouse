@@ -5,7 +5,7 @@
 # tests inherit `TestBase` and carry their own driver shim.
 require "minitest/autorun"
 require_relative "test_helper"
-require "cgi_io"
+require_relative "../runtime/cgi_io"
 require "stringio"
 
 class CgiIoTest < Minitest::Test
@@ -103,5 +103,13 @@ class CgiIoTest < Minitest::Test
     samples.each do |s|
       assert_equal s, CgiIo.url_decode(CgiIo.url_encode(s)), "round-trip: #{s.inspect}"
     end
+  end
+
+  # The bracket grammar `Hash#to_query` writes: one level, an array,
+  # two levels, and a malformed key that is dropped rather than raised.
+  def test_parse_form_into_reads_nested_and_array_keys
+    into = {}
+    CgiIo.parse_form_into("room%5Bname%5D=Designers&user_ids%5B%5D=1&user_ids%5B%5D=2&id=7&a%5Bb%5D%5Bc%5D=x&bad%5B=1", into)
+    assert_equal({ "room" => { "name" => "Designers" }, "user_ids" => ["1", "2"], "id" => "7", "a" => { "b" => { "c" => "x" } } }, into)
   end
 end

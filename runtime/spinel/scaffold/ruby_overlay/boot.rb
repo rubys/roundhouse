@@ -100,6 +100,10 @@ require_relative "runtime/active_record_relation_ext"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
+# `Hash#to_query`'s nested bracket grammar — a reopen of the shared
+# ViewHelpers' scalar `to_query_value`, so AFTER action_controller's
+# require chain has defined the shared one; the spinel boot's twin line.
+require_relative "runtime/hash_to_query"
 # Active Storage: the shared rows/variants contract, then the ruby
 # family's bytes half (disk service, attachable coercion, the engine's
 # three routes) reopening it. After action_controller — the disk file

@@ -2121,7 +2121,11 @@ pub fn rewrite_route_helpers(
                 },
             );
             let Some(i) = splat_at else { return Some(call) };
-            let splat = rewrite_route_helpers(&args_all[i], shadowed, id_segments);
+            let splat = rewrite_route_helpers(
+                route_helper_query_splat_value(&args_all[i]),
+                shadowed,
+                id_segments,
+            );
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {
@@ -2163,6 +2167,17 @@ pub fn rewrite_route_helpers(
 /// Returns None when the helper is not in the table — a miss means the
 /// call is not a route helper this app declares, and the shape test is
 /// the only signal there is.
+///
+/// THE OTHER SPELLING OF THE SAME THING: `x_path(…, params: h)`.
+/// `params:` is one of `url_for`'s reserved options, and the one that
+/// IS the query — Rails merges its value into the generated query
+/// string (`route_set.rb`, `options[:params]`), which is what `**h`
+/// renders too. So a trailing keyword hash whose only key is `params`
+/// is the splat, at whatever arity: campfire's
+/// `user_push_subscriptions_url(params: {…})` fills its one segment
+/// from the route's default and has no positional at all, so the count
+/// test above cannot see it. `route_helper_query_splat_value` is the
+/// expression to render.
 pub fn route_helper_query_splat_index(
     method: &str,
     args: &[Expr],
@@ -2176,13 +2191,32 @@ pub fn route_helper_query_splat_index(
         return None;
     }
     let shape = id_segments.get(dispatch.as_str())?;
+    let last = args.last()?;
+    if params_option_value(last).is_some() {
+        return Some(args.len() - 1);
+    }
     if args.len() != shape.len() + 1 {
         return None;
     }
-    let last = args.last()?;
     match &*last.node {
         ExprNode::Hash { kwargs: true, .. } | ExprNode::Lit { .. } => None,
         _ => Some(args.len() - 1),
+    }
+}
+
+/// The Hash a splat position renders: the argument itself, or the
+/// value under `params:` when that is how it was written.
+pub fn route_helper_query_splat_value(arg: &Expr) -> &Expr {
+    params_option_value(arg).unwrap_or(arg)
+}
+
+/// `params: h` as the ONLY entry of a keyword hash → `h`.
+fn params_option_value(arg: &Expr) -> Option<&Expr> {
+    let ExprNode::Hash { entries, kwargs: true } = &*arg.node else { return None };
+    let [(k, v)] = entries.as_slice() else { return None };
+    match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "params" => Some(v),
+        _ => None,
     }
 }
 

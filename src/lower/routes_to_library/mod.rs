@@ -998,7 +998,12 @@ fn build_helper_function(
 /// A key naming one of the route's own path segments is excluded at the
 /// call-site survey instead (it varies per route).
 fn is_non_query_option(key: &str) -> bool {
-    key == "format" || crate::lower::route_url_options::HOST_ONLY_OPTIONS.contains(&key)
+    // `params:` is the query itself, rendered at run time through
+    // `query_suffix` (`rewrites::route_helper_query_splat_index`), not
+    // a key named "params".
+    key == "format"
+        || key == "params"
+        || crate::lower::route_url_options::HOST_ONLY_OPTIONS.contains(&key)
 }
 
 /// One query key a helper must accept, and whether every call site
@@ -1767,16 +1772,18 @@ fn expr_splats_into_a_route_helper(
 
 /// ```ruby
 /// def self.query_suffix(params)
-///   parts = params.map { |key, value| "#{key}=#{url_encode(value.to_s)}" }
-///   parts.empty? ? "" : "?" + parts.join("&")
+///   query = ActionView::ViewHelpers.to_query(params)
+///   query.empty? ? "" : "?" + query
 /// end
 /// ```
 ///
-/// `map`+`join` rather than an `each` with a mutable accumulator, the
-/// same choice and the same reason as `emit_array_partial`'s. The value
-/// goes through `to_s` first and then the SAME `url_encode` the named
-/// keys use, so a splatted key and a named one render identically —
-/// Rails runs both through `Hash#to_query`.
+/// The rendering is `Hash#to_query`'s — nested Hashes as `a[b]`, Arrays
+/// as `a[]`, pairs sorted, every key and value through the same
+/// `url_encode` the named keys use — and it lives in the shared runtime
+/// (`ViewHelpers.to_query`) rather than in this IR: a recursive walk
+/// over untyped values is Ruby's to write, and this function is only
+/// the `?` in front of it. A splatted key and a named one still render
+/// identically, because Rails runs both through the same method.
 fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
     let params_ref = with_ty(
         Expr::new(
@@ -1784,14 +1791,6 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
         ),
         Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
-    );
-    let key_ref = Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: Symbol::from("key") },
-    );
-    let value_ref = Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: Symbol::from("value") },
     );
     let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(
@@ -1808,7 +1807,14 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             ty,
         )
     };
-    let encoded = call(
+    let query_var = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("query") },
+        ),
+        Ty::Str,
+    );
+    let rendered = call(
         Some(Expr::new(
             Span::synthetic(),
             ExprNode::Const {
@@ -1818,79 +1824,28 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
                 ],
             },
         )),
-        "url_encode",
-        vec![call(Some(value_ref), "to_s", vec![], Ty::Str)],
+        "to_query",
+        vec![params_ref],
         Ty::Str,
-    );
-    let pair = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::StringInterp {
-                parts: vec![
-                    InterpPart::Expr {
-                        expr: call(Some(key_ref), "to_s", vec![], Ty::Str),
-                    },
-                    InterpPart::Text { value: "=".to_string() },
-                    InterpPart::Expr { expr: encoded },
-                ],
-            },
-        ),
-        Ty::Str,
-    );
-    let block = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lambda {
-            rest_param: None,
-            params: vec![Symbol::from("key"), Symbol::from("value")],
-            block_param: None,
-            body: pair,
-            block_style: crate::expr::BlockStyle::Brace,
-        },
-    );
-    let mapped = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(params_ref),
-                method: Symbol::from("map"),
-                args: vec![],
-                block: Some(block),
-                parenthesized: false,
-            },
-        ),
-        Ty::Array { elem: Box::new(Ty::Str) },
-    );
-    let parts_var = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Var { id: VarId(0), name: Symbol::from("parts") },
-        ),
-        Ty::Array { elem: Box::new(Ty::Str) },
     );
     let assign = Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
-            target: crate::expr::LValue::Var { id: VarId(0), name: Symbol::from("parts") },
-            value: mapped,
+            target: crate::expr::LValue::Var { id: VarId(0), name: Symbol::from("query") },
+            value: rendered,
         },
-    );
-    let joined = call(
-        Some(parts_var.clone()),
-        "join",
-        vec![lit_str("&".to_string())],
-        Ty::Str,
     );
     let with_question = call(
         Some(lit_str("?".to_string())),
         "+",
-        vec![joined],
+        vec![query_var.clone()],
         Ty::Str,
     );
     let tail = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: call(Some(parts_var), "empty?", vec![], Ty::Bool),
+                cond: call(Some(query_var), "empty?", vec![], Ty::Bool),
                 then_branch: lit_str(String::new()),
                 else_branch: with_question,
             },
