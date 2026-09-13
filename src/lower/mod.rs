@@ -81,6 +81,7 @@ pub mod random_formatter;
 pub mod to_json;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
+pub mod records_to_relation_arg;
 pub mod defined_ivar_memo;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;

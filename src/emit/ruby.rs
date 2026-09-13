@@ -979,6 +979,11 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                     std::iter::once(m.test_class.clone()).chain(m.inner_classes.iter().cloned())
                 })
                 .collect();
+            // A record Array at a Relation-typed parameter, restated as
+            // the Relation over those records — BEFORE the scope
+            // lowering, which is what turns the `M.where` it writes
+            // into a seeded Relation. See the module.
+            crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
             library::apply_scope_lowering(&mut test_lcs, app);
             // A test class nests under the class it tests
             // (`class User … class BotTest`), which shadows exactly as
