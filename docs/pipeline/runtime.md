@@ -640,6 +640,22 @@ assert 512×512 / 192×192 pass on both lanes, on the real variant's
 bytes — the numbers ruby-vips and the port answer for the same input
 are byte-identical (spinel-ruby-vips' oracle lane holds it to that).
 
+### The query cache replays results of at most 16 rows
+
+Rails' per-request query cache keeps every SELECT's result and replays
+an identical SELECT from it. The three ruby-family Db shims keep the
+same discipline with one bound: a result that grows past
+`QC_CAPTURE_ROWS` (16) is not kept, and an identical SELECT later in the
+same request runs again rather than replaying. The lookups a page
+repeats — campfire's `Account.first` 22 times on a room page, a
+message's `room` 20 times — are a row each and replay exactly as before;
+what changed is that the 100-message and 100-rich-text results are no
+longer copied cell by cell for a replay nothing asks for (measured:
+~2,700 String allocations per `/rooms/1` request, a quarter of the
+total). The only observable difference from Rails is a repeated
+large SELECT within one request costing a round trip, which
+`capture_sql` would count where Rails' SQLCounter would not.
+
 ### A QR code is the gem's bytes, on every ruby-family lane
 
 `RQRCode::QRCode.new(text).as_svg(…)` — campfire's `QrCodeController`
