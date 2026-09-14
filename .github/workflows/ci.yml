@@ -985,8 +985,21 @@ jobs:
       - name: Install libvips (ruby-vips binds it through FFI)
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
+      #   concurrent-ruby, net-http-persistent, web-push — also from the
+      #             app, all three behind `WebPush::Pool`: the thread
+      #             pools it posts deliveries to, the keep-alive client
+      #             it hands them, and the gem that sends. The CRuby
+      #             tree swaps the runtime's `Concurrent` port for a
+      #             bare `require "concurrent"`, so that one is a
+      #             LOAD-time reach like platform_agent (lib/web_push/
+      #             pool.rb requires it, and app/models.rb requires
+      #             that); the other two are guarded-required and fail
+      #             as an undefined constant in `room_push_test` alone.
+      #             concurrent-ruby already arrives as sentry-ruby's
+      #             dependency; named here so removing sentry-ruby
+      #             cannot silently take the pool with it.
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail

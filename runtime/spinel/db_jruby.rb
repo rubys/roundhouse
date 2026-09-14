@@ -143,6 +143,14 @@ module Db
   # Conn under @mutex (parking on @cv while the pool is momentarily
   # exhausted), binds it to fiber-storage so `current_dbh` resolves to it
   # for the block, and returns it on completion (even on raise).
+  # Whether this thread is inside a `with_connection` lease. What
+  # `Rails::Executor#wrap` asks before taking one: Rails' executor is
+  # re-entrant, and a second lease on a thread that holds one would
+  # rebind the connection and, on release, unbind the outer lease's.
+  def self.in_lease?
+    !Fiber[:db_handle].nil?
+  end
+
   def self.with_connection
     conn = nil
     @mutex.synchronize do

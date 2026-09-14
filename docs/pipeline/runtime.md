@@ -2514,6 +2514,20 @@ concurrent-ruby (campfire's suite also wants `Concurrent::CyclicBarrier`).
 Any raising job wedges the server the same way; a missing constant is
 merely the one this app reaches first.
 
+**The trigger is gone (2026-09-14), the entry stays.** `Concurrent::
+ThreadPoolExecutor`, `FixedThreadPool` and `CyclicBarrier` are ported
+over spinel's own threads (`runtime/spinel/concurrent.rb`; the ruby
+family runs the gem), `Net::HTTP::Persistent` has a client on spinel
+(`runtime/spinel/net_http.rb` — a connection per request, since the
+package keeps none alive), and the config value that holds the pool is
+built once per process rather than per read (`config.x.<key>` readers
+memoize; see `ingest::app`). So `Room::PushMessageJob` runs, posts its
+deliveries, and each one fails INSIDE the pool's own rescue — the
+`WebPush.payload_send` façade raises, and `WebPush::Pool#deliver_later`
+logs it — rather than out of the job. What a raising job does to the
+scheduled server is untested since; the threaded server drains jobs on
+a thread of its own.
+
 ### The threaded binary dies on more than one OS worker — CLOSED (runtime fixed upstream; the declaration is lifted)
 
 The green-thread server (`runtime/spinel/tep/server_threaded.rb`) was

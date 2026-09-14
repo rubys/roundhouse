@@ -946,6 +946,14 @@ module Db
   # NOTE: no begin/ensure (not used elsewhere in spinel-compiled code), so
   # a raise inside the block leaks the lease — acceptable on the happy
   # path; revisit if the dispatch path starts raising under load.
+  # Whether this thread is inside a `with_connection` lease. What
+  # `Rails::Executor#wrap` asks before taking one: Rails' executor is
+  # re-entrant, and a second lease on a thread that holds one would
+  # rebind the connection and, on release, unbind the outer lease's.
+  def self.in_lease?
+    !Thread.current[:db_conn].nil?
+  end
+
   def self.with_connection
     pool = pool_for_thread
     idx = pool.lease

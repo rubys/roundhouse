@@ -387,6 +387,48 @@ end
 # the module-function half is the gem's, the classes under it are the
 # app's, exactly as they sit at runtime.
 module WebPush
+  # The gem's error hierarchy (lib/web_push/errors.rb), ported whole:
+  # campfire's `WebPush::Pool#deliver` rescues `ExpiredSubscription`
+  # to drop the subscription, and its suite raises one through the
+  # `payload_send` slot to prove it does. The gem's message carries
+  # the response's body as a third line; this one stops at `inspect`,
+  # because a response here is whatever the caller handed over
+  # (campfire's test passes a `Struct.new(:body)`), and a strict target
+  # will not read `body` off an untyped value.
+  class Error < RuntimeError
+  end
+
+  class ConfigurationError < Error
+  end
+
+  class ResponseError < Error
+    attr_reader :response, :host
+
+    def initialize(response, host)
+      @response = response
+      @host = host
+      super("host: #{host}, #{response.inspect}")
+    end
+  end
+
+  class InvalidSubscription < ResponseError
+  end
+
+  class ExpiredSubscription < ResponseError
+  end
+
+  class Unauthorized < ResponseError
+  end
+
+  class PayloadTooLarge < ResponseError
+  end
+
+  class TooManyRequests < ResponseError
+  end
+
+  class PushServiceError < ResponseError
+  end
+
   # The stub slot `lower::mocha` writes for `WebPush.stubs(:payload_send)`
   # and `WebPush.expects(:payload_send).never / .times(n)`. Single-element
   # Arrays as settable holders, the `Resolv` slot's idiom; `EXPECTED` is
@@ -409,6 +451,13 @@ module WebPush
   EXPECT_KEY = [ "" ]
   EXPECT_VALUE = [ "" ]
 
+  # `expects(:payload_send).times(n).raises(e)` — every counted call
+  # raises. Held as the exception's CLASS NAME (the Resolv slot's idiom)
+  # and re-raised from the hierarchy above, since the app rescues by
+  # class: campfire's `WebPush::Pool#deliver` drops the subscription on
+  # `ExpiredSubscription`, and its suite raises one to prove it.
+  EXPECT_RAISE_NAME = [ "" ]
+
   def self.stub_payload_send
     STUB_ON[0] = true
     STUB_VALUE[0] = ""
@@ -421,7 +470,16 @@ module WebPush
     nil
   end
 
+  # A SECOND expectation in one test closes the first. mocha files each
+  # `expects` as its own expectation and matches a call against the
+  # newest one still open, so `times(2)` … two calls … `times(3)` …
+  # three calls verifies. This slot holds one count, so filing a new
+  # one verifies the old against the calls so far and starts over —
+  # the same outcome for the shape campfire writes (`Room::PushTest`
+  # waits for the first batch's tasks before filing the second).
   def self.expect_payload_send(count)
+    verify_payload_send_expectations
+    CALLS[0] = 0
     STUB_ON[0] = true
     EXPECTED[0] = count
     nil
@@ -435,6 +493,12 @@ module WebPush
     nil
   end
 
+  def self.expect_payload_send_raising(count, error_name)
+    expect_payload_send(count)
+    EXPECT_RAISE_NAME[0] = error_name.to_s
+    nil
+  end
+
   def self.clear_payload_send_stubs
     STUB_ON[0] = false
     STUB_VALUE[0] = ""
@@ -442,7 +506,22 @@ module WebPush
     EXPECTED[0] = -1
     EXPECT_KEY[0] = ""
     EXPECT_VALUE[0] = ""
+    EXPECT_RAISE_NAME[0] = ""
     nil
+  end
+
+  # The raise a filed `raises(e)` makes, by name. The gem's response
+  # errors take `(response, host)`; the slot has neither, and nothing
+  # reads them off a raised one.
+  def self.raise_named(name)
+    raise ExpiredSubscription.new(nil, "") if name == "WebPush::ExpiredSubscription"
+    raise InvalidSubscription.new(nil, "") if name == "WebPush::InvalidSubscription"
+    raise Unauthorized.new(nil, "") if name == "WebPush::Unauthorized"
+    raise PayloadTooLarge.new(nil, "") if name == "WebPush::PayloadTooLarge"
+    raise TooManyRequests.new(nil, "") if name == "WebPush::TooManyRequests"
+    raise PushServiceError.new(nil, "") if name == "WebPush::PushServiceError"
+    raise ResponseError.new(nil, "") if name == "WebPush::ResponseError"
+    raise name
   end
 
   def self.verify_payload_send_expectations
@@ -467,6 +546,7 @@ module WebPush
         raise "WebPush.payload_send was called with #{key}: #{got.inspect}, expected #{EXPECT_VALUE[0].inspect}" if got != EXPECT_VALUE[0]
       end
       CALLS[0] = CALLS[0] + 1
+      raise_named(EXPECT_RAISE_NAME[0]) if EXPECT_RAISE_NAME[0] != ""
       return STUB_VALUE[0]
     end
     GemFacade.fail!("WebPush.payload_send")

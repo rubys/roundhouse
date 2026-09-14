@@ -114,6 +114,15 @@ module ActionCable
   # rebuilt through `Broadcasts.render_fragment` — the same function
   # `record` used — and encoded, which is what Rails stores.
   class Pubsub
+    # `ActionCable.server.pubsub.clear` — the test adapter's reset,
+    # which campfire's `test_helper` runs in every test's setup. The
+    # same log our own `TestBase#setup` already empties, so under the
+    # emitted harness it is a second, idempotent reset of one store.
+    def clear
+      Broadcasts.reset_log!
+      nil
+    end
+
     def broadcasts(stream)
       out = []
       Broadcasts.log.each do |entry|

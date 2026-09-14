@@ -165,3 +165,41 @@ module Net
     end
   end
 end
+
+module Net
+  class HTTP
+    # net-http-persistent's client, as far as campfire reaches it:
+    # `WebPush::Pool` builds one per process (`name:`, `pool_size:`),
+    # hands it to every delivery as `connection:`, and shuts it down at
+    # exit; the gem's own `WebPush::Request` then calls `request(uri,
+    # req)` on it. The ruby family has the real gem (`RUNTIME_GEMS`).
+    #
+    # NOTHING IS KEPT ALIVE HERE, and that is spinel's client rather
+    # than a choice of this file's: the package speaks `Connection:
+    # close` on every response (see `transport_request` above), so a
+    # "persistent" connection on this lane is a client opened per
+    # request. The pool-size and name are accepted and unused. What is
+    # honoured is the interface — a caller holding one of these can
+    # send a request through it and get the package's response back,
+    # stub table included.
+    class Persistent
+      def initialize(name: nil, pool_size: nil)
+        @name = name.to_s
+      end
+
+      def name
+        @name
+      end
+
+      def request(uri, req)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = (uri.scheme == "https")
+        http.request(req)
+      end
+
+      def shutdown
+        nil
+      end
+    end
+  end
+end

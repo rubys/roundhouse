@@ -236,6 +236,34 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("resolve_public_ips", Ty::Array { elem: Box::new(Ty::Str) }),
         ("blocked_address?", Ty::Bool),
     ], &[]);
+    // `Concurrent` — concurrent-ruby's thread pools and barrier, ported
+    // into `runtime/spinel/concurrent.rb` (the ruby family runs the gem).
+    // ONLY the surface the port implements, the IPAddr rule: campfire's
+    // `WebPush::Pool` posts, shuts down, kills and waits on its two
+    // pools, and its suite reads `completed_task_count`. `FixedThreadPool`
+    // is the same surface — it IS a `ThreadPoolExecutor` in the gem and
+    // in the port — registered under its own name because the universal
+    // `.new` yields `Class { id: <name> }` and the registry has no
+    // subclass walk for stdlib entries.
+    for pool in ["Concurrent::ThreadPoolExecutor", "Concurrent::FixedThreadPool"] {
+        register_stdlib_class(classes, pool, &[], &[
+            ("post", Ty::Bool),
+            ("shutdown", Ty::Nil),
+            ("kill", Ty::Nil),
+            ("wait_for_termination", Ty::Bool),
+            ("completed_task_count", Ty::Int),
+            ("length", Ty::Int),
+            ("queue_length", Ty::Int),
+            ("max_length", Ty::Int),
+            ("running?", Ty::Bool),
+            ("shutdown?", Ty::Bool),
+        ]);
+    }
+    register_stdlib_class(classes, "Concurrent::CyclicBarrier", &[], &[
+        ("wait", Ty::Bool),
+        ("parties", Ty::Int),
+        ("number_waiting", Ty::Int),
+    ]);
     // `Net::HTTP` — a real client on BOTH lanes: CRuby's own stdlib, and
     // spinel's `packages/net` (HTTPS included, since the openssl package
     // landed). So there is nothing to port here, unlike IPAddr — only the

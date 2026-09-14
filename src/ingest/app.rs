@@ -393,6 +393,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             };
         let mut methods = class_methods;
         methods.extend(singleton_methods);
+        // The per-key slots the lifted config readers memoize into —
+        // see the config-assignment lift below.
+        let mut constants: Vec<(crate::ident::Symbol, crate::expr::Expr)> = Vec::new();
         // `config.time_zone = "..."` — the one config-DSL assignment
         // the render layer is required to honor: Rails presents every
         // AR temporal value in this zone (lobsters runs Central).
@@ -542,6 +545,29 @@ end
             for (path, bytes) in sources {
                 assignments.extend(extract_config_assignments(&bytes, &path));
             }
+            // ONCE PER PROCESS. An initializer runs at boot, so the
+            // value an assignment writes is built one time and every
+            // read afterwards answers the same object. A reader that
+            // re-evaluated the expression per call was faithful for the
+            // `ENV.fetch` leaves that first drove this lift and wrong
+            // for an object: campfire's `config.x.web_push_pool =
+            // WebPush::Pool.new(…)` handed `Room::MessagePusher` a fresh
+            // pool — and a fresh pair of thread pools — on every push,
+            // and its suite, waiting on `completed_task_count` of the
+            // pool it could see, never saw the tasks.
+            //
+            // Three methods per leaf. `<key>__build` is the expression
+            // verbatim (app code; the analyzer types it, and
+            // `lower::config_reader` reads the reader's type off it).
+            // `<key>` builds once under the lock into a per-key slot and
+            // answers it. `<key>=` is the write a test makes
+            // (campfire's `test_helper` replaces the pool before every
+            // test). The slot is a one-element Array constant, not an
+            // ivar: `Rails.application` constructs its object per call,
+            // so instance state would not survive two reads — and the
+            // single-element-Array holder is the shape every stub slot
+            // in the runtime already uses, typed by its push on spinel.
+            let mut slots: Vec<(String, String)> = Vec::new();
             for (segments, value) in &assignments {
                 let name = segments.join("_");
                 if FRAMEWORK_CONFIG_KEYS.contains(&name.as_str())
@@ -549,13 +575,23 @@ end
                 {
                     continue;
                 }
-                // The value rides verbatim: it is app code, and
-                // campfire's reads `ENV` — which nothing here can
-                // fold and nothing needs to.
+                let slot = format!("{}_SLOT", name.to_uppercase());
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
-                    "def {name}\n  {value}\nend\n"
+                    "def {name}__build\n  {value}\nend\n\
+                     def {name}\n  slot = {slot}\n  CONFIG_LOCK.synchronize do\n    slot.push({name}__build) if slot.empty?\n  end\n  slot[0]\nend\n\
+                     def {name}=(value)\n  CONFIG_LOCK.synchronize do\n    {slot}.clear\n    {slot}.push(value)\n  end\n  value\nend\n"
                 )) {
                     methods.append(&mut synth);
+                    slots.push((name, slot));
+                }
+            }
+            if !slots.is_empty() {
+                let mut src = String::from("CONFIG_LOCK = Mutex.new\n");
+                for (_, slot) in &slots {
+                    src.push_str(&format!("{slot} = []\n"));
+                }
+                if let Ok(mut synth) = crate::runtime_src::parse_module_constant_exprs(&src) {
+                    constants.append(&mut synth);
                 }
             }
             // AN INTERMEDIATE NODE IS READ AS A WHOLE, and until now
@@ -619,7 +655,7 @@ end
                 methods,
                 nullable_columns: Vec::new(),
                 origin: None,
-                constants: Vec::new(),
+                constants,
                 unknown_calls: Vec::new(),
             });
         }
@@ -798,6 +834,21 @@ end
     // the mixin means, and it needs nothing from a target's mixin
     // semantics.
     let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
+    // The app-wide `setup` the same file declares — see
+    // `ingest_test_case_setup`. Prepended to every test module's own.
+    let test_case_setup: Option<crate::expr::Expr> = {
+        let helper_rb = dir.join("test/test_helper.rb");
+        if vfs.exists(&helper_rb) {
+            let source = vfs.read(&helper_rb)?;
+            unwrap_or_record(super::test::ingest_test_case_setup(
+                &source,
+                &helper_rb.display().to_string(),
+            ))?
+            .flatten()
+        } else {
+            None
+        }
+    };
 
     // Test files — `test/models/*_test.rb` and
     // `test/controllers/*_test.rb`. System tests under `test/system/`
@@ -815,6 +866,9 @@ end
                 {
                     if let Some(mut tm) = maybe_tm {
                         splice_test_helpers(&mut tm, &shared_test_helpers);
+                        if let Some(case_setup) = &test_case_setup {
+                            splice_test_case_setup(&mut tm, case_setup);
+                        }
                         app.test_modules.push(tm);
                     }
                 }
@@ -3391,6 +3445,26 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             .unwrap_or(usize::MAX)
     });
     Ok(out)
+}
+
+/// Run the app-wide `ActiveSupport::TestCase` setup ahead of a test
+/// module's own — the order Rails' setup callbacks fire in (a
+/// superclass's before a subclass's). The module's `setup` is inlined
+/// at the head of every test by the lowerer, so prepending here puts
+/// the app's statements first in each.
+fn splice_test_case_setup(tm: &mut TestModule, case_setup: &crate::expr::Expr) {
+    use crate::expr::{Expr, ExprNode};
+    let mut exprs = match &*case_setup.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![case_setup.clone()],
+    };
+    if let Some(own) = tm.setup.take() {
+        match *own.node {
+            ExprNode::Seq { exprs: own_exprs } => exprs.extend(own_exprs),
+            _ => exprs.push(own),
+        }
+    }
+    tm.setup = Some(Expr::new(crate::span::Span::synthetic(), ExprNode::Seq { exprs }));
 }
 
 /// Copy shared helper methods onto a test class, the test's own

@@ -127,14 +127,42 @@ module SVG
 end
 
 module WebPush
+  # The gem's error hierarchy — see the .rb. A response error's
+  # `response` is whatever the raiser handed over.
+  class Error < RuntimeError
+  end
+  class ConfigurationError < Error
+  end
+  class ResponseError < Error
+    @response: untyped
+    @host: String
+    def initialize: (untyped response, String host) -> void
+    def response: () -> untyped
+    def host: () -> String
+  end
+  class InvalidSubscription < ResponseError
+  end
+  class ExpiredSubscription < ResponseError
+  end
+  class Unauthorized < ResponseError
+  end
+  class PayloadTooLarge < ResponseError
+  end
+  class TooManyRequests < ResponseError
+  end
+  class PushServiceError < ResponseError
+  end
+
   def self.payload_send: (message: String, endpoint: String, p256dh: String, auth: String, vapid: Hash[Symbol, String], ?connection: untyped, ?urgency: String, ?endpoint_ip: String?) -> String
   # The `lower::mocha` stub slot — see the .rb.
   def self.stub_payload_send: () -> nil
   def self.stub_payload_send_any: (untyped value) -> nil
   def self.expect_payload_send: (Integer count) -> nil
   def self.expect_payload_send_with_entry: (Integer count, Symbol key, untyped value) -> nil
+  def self.expect_payload_send_raising: (Integer count, String error_name) -> nil
   def self.clear_payload_send_stubs: () -> nil
   def self.verify_payload_send_expectations: () -> nil
+  def self.raise_named: (String name) -> void
 end
 
 module Sentry

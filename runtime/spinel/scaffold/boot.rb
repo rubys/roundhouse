@@ -150,6 +150,11 @@ require_relative "runtime/erb_spinel"
 # ViewHelpers' scalar `to_query_value`, for the two lanes whose router
 # parses it back. The CRuby overlay's boot requires the same file.
 require_relative "runtime/hash_to_query"
+# `Rails.application.executor.wrap` — a DB lease for work on a thread the
+# framework did not start (campfire's web-push invalidation handler).
+# After rails and db, which it reopens and calls. The other boot requires
+# the same file.
+require_relative "runtime/rails_executor"
 # `ActionView::RecordIdentifier.dom_id` by name — the CRuby overlay's
 # action_view_record_identifier.rb twin, a delegation to the shared
 # `ViewHelpers.dom_id`.

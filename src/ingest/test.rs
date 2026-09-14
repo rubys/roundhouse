@@ -202,6 +202,55 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 /// into modules — Rails test files declare their `*Test` class at the
 /// file's top scope; helper models live alongside at the same scope.
 /// Nested module declarations are not a shape we encounter for tests.
+/// The app-wide `setup do … end` an app's `test/test_helper.rb` puts on
+/// `ActiveSupport::TestCase` (reopened there, or nested as `module
+/// ActiveSupport; class TestCase`). Rails runs it before every test
+/// case's own setup, so the caller splices it ahead of each test
+/// module's `setup` — the same move `splice_test_helpers` makes for the
+/// helper modules that file includes.
+///
+/// campfire's is three statements — clear the cable test adapter,
+/// replace the web-push pool, forbid network — and the middle one is
+/// why this exists: `Room::PushTest` waits on the pool's task counter,
+/// which is cumulative, so every test needs the fresh pool the app's
+/// own setup gives it. Without the splice the suite's first push test
+/// leaves a count the next one's wait is satisfied by before its tasks
+/// have run.
+///
+/// Only the `setup` hook is read. `fixtures :all`, `parallelize`, and
+/// the `include` list are the harness's concern (the includes are read
+/// by `ingest_test_helper_modules`), and a `teardown` there has no
+/// home yet — the emitted `TestBase#teardown` is ours.
+pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<Expr>> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
+    collect_top_level_classes(&root, &mut classes);
+    // Nested spelling: descend one module level.
+    if let Some(p) = root.as_program_node() {
+        for stmt in p.statements().body().iter() {
+            if let Some(m) = stmt.as_module_node() {
+                if let Some(body) = m.body() {
+                    collect_top_level_classes(&body, &mut classes);
+                }
+            }
+        }
+    }
+    for class in classes {
+        let Some(path) = class_name_path(&class) else { continue };
+        if path.last().map(String::as_str) != Some("TestCase") {
+            continue;
+        }
+        let Some(body) = class.body() else { continue };
+        for stmt in flatten_statements(body) {
+            if let Some(setup) = ingest_setup_declaration(&stmt, file)? {
+                return Ok(Some(setup));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn collect_top_level_classes<'pr>(
     node: &Node<'pr>,
     out: &mut Vec<ruby_prism::ClassNode<'pr>>,

@@ -70,7 +70,18 @@ require_relative "../app/models"
 # Per-test isolation comes from `SchemaSetup.reset!` calling each
 # model's `_adapter_truncate`. Each model's lowered class has its
 # own truncate primitive (per-table DELETE).
-Db.configure(":memory:")
+#
+# ONE in-memory database, SHARED by every connection in the pool. A
+# bare `:memory:` is a database PER CONNECTION, and every Db shim opens
+# a pool of them: the unleased path a test runs on used the first, and
+# any `Db.with_connection` on another thread leased a different, empty
+# one — "no such table" from the web-push pool's invalidation thread,
+# the first thing in the suite to take a lease of its own
+# (`Rails.application.executor.wrap`). SQLite's shared-cache URI is the
+# one spelling all three shims open (spinel's `OPEN_URI_RWC`, the
+# sqlite3 gem with its URI flag, xerial's JDBC URL) that means "the same
+# memory, whoever asks".
+Db.configure("file::memory:?cache=shared")
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
 
@@ -887,6 +898,28 @@ end
 module ActionDispatch
   class IntegrationTest < TestBase
     include RequestDispatch
+  end
+
+  # `ActionDispatch::Integration::Session.new(Rails.application)` — a
+  # browser of its own, apart from the test's. Rails' integration test
+  # IS one of these plus assertions; a test that wants several clients
+  # at once builds more. campfire's `FirstRunsController` race test
+  # opens five on five threads, each POSTing the first-run form after
+  # a barrier, and asserts exactly one account came out of it.
+  #
+  # The same `RequestDispatch` the test class mixes in — the cookie
+  # jar, session, host and last response are all ivars on the
+  # includer, so each Session is its own client, and the dispatch keeps
+  # per-request state in `Thread.current` (runtime/thread_state.rb), so
+  # five of them on five threads do not share a controller. The app is
+  # taken and unused: there is one dispatcher here and it is this.
+  module Integration
+    class Session
+      include RequestDispatch
+
+      def initialize(app)
+      end
+    end
   end
 end
 

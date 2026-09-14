@@ -1175,6 +1175,7 @@ module WebPush
   EXPECTED = [ -1 ]
   EXPECT_KEY = [ "" ]
   EXPECT_VALUE = [ "" ]
+  EXPECT_RAISE_NAME = [ "" ]
 
   class << self
     alias_method :payload_send_without_stub, :payload_send if respond_to?(:payload_send)
@@ -1191,7 +1192,10 @@ module WebPush
       nil
     end
 
+    # A second expectation closes the first — see the façade's copy.
     def expect_payload_send(count)
+      verify_payload_send_expectations
+      CALLS[0] = 0
       STUB_ON[0] = true
       EXPECTED[0] = count
       nil
@@ -1205,6 +1209,14 @@ module WebPush
       nil
     end
 
+    # By class NAME, like the façade's copy; the gem's classes are the
+    # ones underneath on this lane, resolved when the raise is made.
+    def expect_payload_send_raising(count, error_name)
+      expect_payload_send(count)
+      EXPECT_RAISE_NAME[0] = error_name.to_s
+      nil
+    end
+
     def clear_payload_send_stubs
       STUB_ON[0] = false
       STUB_VALUE[0] = ""
@@ -1212,6 +1224,7 @@ module WebPush
       EXPECTED[0] = -1
       EXPECT_KEY[0] = ""
       EXPECT_VALUE[0] = ""
+      EXPECT_RAISE_NAME[0] = ""
       nil
     end
 
@@ -1232,6 +1245,12 @@ module WebPush
           raise "WebPush.payload_send was called with #{key}: #{got.inspect}, expected #{EXPECT_VALUE[0].inspect}" if got != EXPECT_VALUE[0]
         end
         CALLS[0] += 1
+        unless EXPECT_RAISE_NAME[0].empty?
+          klass = Object.const_get(EXPECT_RAISE_NAME[0])
+          # The gem's response errors read `response.body` for their
+          # message; the slot has no response, so a bodiless one.
+          raise(klass <= WebPush::ResponseError ? klass.new(Struct.new(:body).new(""), "") : klass)
+        end
         return STUB_VALUE[0]
       end
       raise NotImplementedError, "web-push is not installed" unless respond_to?(:payload_send_without_stub)
@@ -1483,6 +1502,21 @@ fn ruby_runtime_files(
         }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
+        }
+        // `Concurrent`: the same swap as ipaddr, for the same two
+        // reasons. concurrent-ruby is already in this bundle (sentry-ruby
+        // depends on it) and loads part of itself under any app that
+        // reaches Sentry, so a second `ThreadPoolExecutor` beside the
+        // gem's would reopen it with a different `initialize`; and the
+        // port at runtime/spinel/concurrent.rb exists for the lane that
+        // has no gem to reach for. `RUNTIME_GEMS` declares the gem for
+        // any app whose code names the constant.
+        if path == "runtime/concurrent.rb" {
+            *content = "# concurrent-ruby's own — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/spinel/concurrent.rb exists for spinel,\n\
+                        # which has threads but no gem; this tree has the gem.\n\
+                        require \"concurrent\"\n"
+                .to_string();
         }
     }
 
@@ -3306,6 +3340,7 @@ const GEM_REQUIRES: &[&str] = &[
     "sentry-ruby",
     "rails-html-sanitizer",
     "net/http/persistent",
+    "web-push",
 ];
 
 /// The guarded-require block, minus any gem this tree provides another
@@ -3332,7 +3367,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 12] = [
+    const RUNTIME_GEMS: [(Marker, &str); 14] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -3358,6 +3393,20 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         // pusher. A gem the app depends on is not a modeling gap; it is
         // a line in the Gemfile.
         (Marker::Constant("Net::HTTP::Persistent"), "net-http-persistent"),
+        // The thread pools that same `WebPush::Pool` posts to. Ported for
+        // spinel (runtime/spinel/concurrent.rb) and swapped for the gem on
+        // this lane (`ruby_runtime_files`), so the tree must declare it —
+        // it is only ever in the lock today as sentry-ruby's dependency.
+        (Marker::Constant("Concurrent"), "concurrent-ruby"),
+        // The gem those pools deliver through. `WEB_PUSH_STUB_REOPEN`
+        // was written to sit on top of it — `alias_method
+        // :payload_send_without_stub, :payload_send if respond_to?` —
+        // and nothing had ever put the gem underneath: the app's
+        // `WebPush::Pool#deliver` rescues `WebPush::ExpiredSubscription`,
+        // a constant only the gem defines on this lane, and its suite
+        // raises one through the slot. With the gem in the tree an
+        // unstubbed `payload_send` is a real delivery.
+        (Marker::Constant("WebPush"), "web-push"),
         // campfire's message helpers rescue through
         // `Sentry.capture_exception`, and the gem was standing in
         // `scripts/campfire-walk-stubs.rb` as a hand-written module. A

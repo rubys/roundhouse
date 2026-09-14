@@ -92,6 +92,14 @@ struct Stubbable {
     /// `expects(:m)[.times(n)].with(has_entry(k: v))` — files the count
     /// against calls carrying that option, as `(n, :k, v)`.
     expect_entry: Option<&'static str>,
+    /// `expects(:m)[.times(n)].raises(e)` — files the count and makes
+    /// every call raise, as `(n, "<Class>")`: the exception travels by
+    /// CLASS NAME, whether the test wrote the class or an instance of
+    /// it (`raises(WebPush::ExpiredSubscription.new(…))`), because the
+    /// slot re-raises one of its own hierarchy by name and the app
+    /// rescues by class. An instance's constructor arguments are not
+    /// carried; nothing rescues on a message.
+    expect_raises: Option<&'static str>,
     /// Drops every installed stub and count; the helper runs this in
     /// setup, between tests.
     clear: &'static str,
@@ -126,6 +134,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: Some("stub_getaddresses_where"),
         expect: None,
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_getaddresses_stubs",
         verify: None,
         require: "../runtime/resolv",
@@ -146,6 +155,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -161,6 +171,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -179,6 +190,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
         require: "../runtime/secure_random_stub",
@@ -198,6 +210,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: Some("expect_payload_send"),
         expect_entry: Some("expect_payload_send_with_entry"),
+        expect_raises: Some("expect_payload_send_raising"),
         clear: "clear_payload_send_stubs",
         verify: Some("verify_payload_send_expectations"),
         require: "../runtime/gem_facades",
@@ -216,6 +229,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: Some("expect_broadcast_replace_to"),
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
@@ -231,6 +245,7 @@ const STUBBABLE: &[Stubbable] = &[
         where_: None,
         expect: Some("expect_broadcast_remove_to"),
         expect_entry: None,
+        expect_raises: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
@@ -527,26 +542,47 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
             _ => None,
         },
         "expects" => {
-            // A `.with(has_entry(k: v))` link beside at most one count.
+            // A `.with(has_entry(k: v))` or `.raises(e)` link beside at
+            // most one count.
             let entries: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "with").collect();
-            let counts: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() != "with").collect();
+            let raises: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "raises").collect();
+            let counts: Vec<&Op> =
+                ops.iter().filter(|op| op.name.as_str() != "with" && op.name.as_str() != "raises").collect();
             let n = match counts.as_slice() {
                 // mocha reads a bare `expects` as exactly once.
                 [] => int_lit(span, 1),
                 [count] => count_of(count)?,
                 _ => return None,
             };
-            match entries.as_slice() {
-                [] => Some(call(span, konst, row.expect?, vec![n])),
-                [with] if plain(with, "with", 1) => {
+            match (entries.as_slice(), raises.as_slice()) {
+                ([], []) => Some(call(span, konst, row.expect?, vec![n])),
+                ([with], []) if plain(with, "with", 1) => {
                     let (key, value) = has_entry_pair(&with.args[0])?;
                     Some(call(span, konst, row.expect_entry?, vec![n, sym_lit(span, key.as_str()), value]))
+                }
+                ([], [raises]) if plain(raises, "raises", 1) => {
+                    let name = exception_class_name(&raises.args[0])?;
+                    Some(call(span, konst, row.expect_raises?, vec![n, str_lit(span, &name)]))
                 }
                 _ => None,
             }
         }
         _ => None,
     }
+}
+
+/// The class a `raises(e)` link names, whether `e` is the class or a
+/// `<Class>.new(…)` of it. Anything else has no name to carry.
+fn exception_class_name(arg: &Expr) -> Option<String> {
+    let path = match &*arg.node {
+        ExprNode::Const { path } => path,
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => match &*r.node {
+            ExprNode::Const { path } => path,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"))
 }
 
 /// A `with` block as a lambda over the ONE argument the slot passes
@@ -712,6 +748,31 @@ mod tests {
         assert_eq!(const_path(recv), "WebPush");
         assert_eq!(m, "stub_payload_send");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn expects_times_raises_files_the_count_and_the_class_name() {
+        // WebPush.expects(:payload_send).times(2).raises(WebPush::ExpiredSubscription.new(x, "example.com"))
+        let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
+        let times = send(Some(head), "times", vec![Expr::new(sp(), ExprNode::Lit { value: Literal::Int { value: 2 } })]);
+        let instance = send(Some(konst(&["WebPush", "ExpiredSubscription"])), "new", vec![str_lit(sp(), "example.com")]);
+        let mut e = send(Some(times), "raises", vec![instance]);
+        rewrite(&mut e);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "WebPush");
+        assert_eq!(m, "expect_payload_send_raising");
+        assert_eq!(int_of(&args[0]), 2);
+        assert!(matches!(&*args[1].node, ExprNode::Lit { value: Literal::Str { value } } if value == "WebPush::ExpiredSubscription"));
+
+        // The class itself names the same slot; a row without the slot
+        // (Resolv's `expects` has none) goes to the bridge.
+        let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
+        let mut e = send(Some(head), "raises", vec![konst(&["WebPush", "Unauthorized"])]);
+        rewrite(&mut e);
+        let (_, m, args, _) = as_send(&e);
+        assert_eq!(m, "expect_payload_send_raising");
+        assert_eq!(int_of(&args[0]), 1);
+        assert!(matches!(&*args[1].node, ExprNode::Lit { value: Literal::Str { value } } if value == "WebPush::Unauthorized"));
     }
 
     #[test]

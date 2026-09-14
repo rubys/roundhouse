@@ -146,6 +146,15 @@ module ActionCable
   # than handing the value over raw is what makes the app's
   # `collect { JSON.parse(_1) }` mean something instead of raising.
   class Pubsub
+    # `ActionCable.server.pubsub.clear` — the test adapter's reset,
+    # which campfire's `test_helper` runs in every test's setup. The
+    # same log our own `TestBase#setup` already empties, so under the
+    # emitted harness it is a second, idempotent reset of one store.
+    def clear
+      Broadcasts.reset_log!
+      nil
+    end
+
     def broadcasts(stream)
       Broadcasts.log.select { |entry| entry[:stream] == stream }.map do |entry|
         JSON.generate(payload_of(entry))

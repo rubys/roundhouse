@@ -82,8 +82,13 @@ module Db
   # boot-time `configure` above and `adopt_after_fork` below.
   def self.open_pool
     path = @path
+    # A `file:` URI (the test harness's shared-cache `file::memory:?
+    # cache=shared`) needs the gem told to read it as one; a plain path
+    # takes the gem's defaults, which are the same flags minus URI.
+    flags = SQLite3::Constants::Open::READWRITE | SQLite3::Constants::Open::CREATE
+    flags |= SQLite3::Constants::Open::URI if path.start_with?("file:")
     ActiveRecord::ConnectionAdapters::ConnectionPool.new(@pool_size) do
-      db = SQLite3::Database.new(path)
+      db = SQLite3::Database.new(path, flags: flags)
       db.results_as_hash = false
       # PINNED, not inherited. This lane reads `synchronous = NORMAL`
       # today without asking for it, because the sqlite3 gem's bundled
@@ -157,6 +162,14 @@ module Db
   # only under @mutex, and a thread parks on @cv when the pool is
   # momentarily exhausted (size < live requests) rather than raising.
   # With pool_size == thread count, the wait loop never trips.
+  # Whether this thread is inside a `with_connection` lease. What
+  # `Rails::Executor#wrap` asks before taking one: Rails' executor is
+  # re-entrant, and a second lease on a thread that holds one would
+  # rebind the connection and, on release, unbind the outer lease's.
+  def self.in_lease?
+    !Fiber[:db_handle].nil?
+  end
+
   def self.with_connection
     h = nil
     adopt_after_fork

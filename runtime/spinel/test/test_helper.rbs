@@ -207,6 +207,14 @@ end
 module ActionDispatch
   class IntegrationTest < TestBase
   end
+
+  # A standalone client — RequestDispatch on an object that is not a
+  # test case. See the .rb.
+  module Integration
+    class Session
+      def initialize: (untyped app) -> void
+    end
+  end
 end
 
 # In-process request dispatch. The four HTTP-verb helpers route

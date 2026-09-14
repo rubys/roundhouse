@@ -104,6 +104,11 @@ require_relative "runtime/action_controller"
 # ViewHelpers' scalar `to_query_value`, so AFTER action_controller's
 # require chain has defined the shared one; the spinel boot's twin line.
 require_relative "runtime/hash_to_query"
+# `Rails.application.executor.wrap` — a DB lease for work on a thread the
+# framework did not start (campfire's web-push invalidation handler).
+# After rails and db, which it reopens and calls. The other boot requires
+# the same file.
+require_relative "runtime/rails_executor"
 # Active Storage: the shared rows/variants contract, then the ruby
 # family's bytes half (disk service, attachable coercion, the engine's
 # three routes) reopening it. After action_controller — the disk file

@@ -1216,7 +1216,21 @@ fn every_runtime_method_body_concretely_typed() {
     // CGI-escaped through one function instead of an IR-built loop,
     // and campfire's `rooms_closed_url(room, params: {…})` and
     // `user_push_subscriptions_url(params: {…})` reach their actions.
-    const CEILING: usize = 409;
+    //
+    // 409 -> 414: `WebPush::ResponseError`, the gem's error hierarchy
+    // ported into the façade so the app's `rescue
+    // WebPush::ExpiredSubscription` names a class on every lane. FIVE
+    // sites, all the one `response` the gem's constructor takes: the
+    // ivar it is stored in, the reader that answers it, and the
+    // `inspect` the message renders it with. `untyped` because that is
+    // the gem's contract — a `Net::HTTPResponse` from a real delivery,
+    // a `Struct.new(:body)` from campfire's own test — and the
+    // hierarchy is the whole point: `WebPush::Pool#deliver` drops a
+    // subscription on exactly this class. What it bought: the push
+    // pool's invalidation path runs on both lanes, and the suite's
+    // `destroys invalid subscriptions` passes through the slot's
+    // `raises` link rather than the bridge.
+    const CEILING: usize = 414;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

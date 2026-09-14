@@ -6032,6 +6032,11 @@ fn require_path_for_body_const(
         // `project::BUNDLED`, so nothing writes a bare `require "zlib"`
         // and the constant would resolve to nothing at all.
         "Zlib" => Some("runtime/zlib".to_string()),
+        // `Concurrent` — concurrent-ruby's pools and barrier, ported into
+        // `runtime/spinel/concurrent.rb` over spinel's own threads and
+        // swapped for the gem on the ruby family. Anchored for the same
+        // reason Zlib is: nothing else writes a require for it.
+        "Concurrent" => Some("runtime/concurrent".to_string()),
         // `Mime::Type` — actionpack's registry, ported into
         // `runtime/ruby/mime.rb`. Anchored for every target: the
         // constant is actionpack's, not the stdlib's, so no bare
