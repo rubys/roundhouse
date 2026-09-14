@@ -289,6 +289,12 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // that same cache and would have nothing to prepend itself to if it
     // ran first.
     library::apply_belongs_to_memoization(&mut lcs, app);
+    // A has_many cache is made on first read rather than at construction,
+    // and the constructor's `attrs = {}` default is one shared frozen Hash
+    // (`lower::lazy_model_state`) — nine Arrays and a Hash per hydrated
+    // User on campfire's room page, for records that only answer a name.
+    // LAST, after every pass that reads or writes `@<assoc>_cache` by name.
+    crate::lower::lazy_model_state::apply(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else

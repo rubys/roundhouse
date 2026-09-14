@@ -66,6 +66,18 @@ module ActiveRecord
       @errors
     end
 
+    # The one frozen empty Hash a model's `initialize(attrs = …)` defaults
+    # to on the ruby family (`lower::lazy_model_state`). A record built
+    # bare — which is every hydration path: `from_row` is `new` then the
+    # column writers — used to allocate a `{}` it never read; on
+    # campfire's room page that was one Hash per hydrated record, ~800 a
+    # request. The constructor only READS `attrs`, and FROZEN is what
+    # makes sharing safe: a write through it raises on the spot rather
+    # than leaking into every record built afterwards. The strict targets
+    # keep the per-call default the shared lowering emits (an empty map is
+    # a stack value there) and never read this.
+    EMPTY_ATTRS = {}.freeze
+
     # `attrs = {}` keeps Base's constructor signature compatible
     # with subclasses that take attrs (`def initialize(attrs = {})`).
     # TS-side, this lets `new this(attrs)` in static `create` /

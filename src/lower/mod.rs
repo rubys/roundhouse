@@ -140,6 +140,7 @@ pub mod validations;
 pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
+pub mod lazy_model_state;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;

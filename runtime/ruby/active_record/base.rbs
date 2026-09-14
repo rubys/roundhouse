@@ -58,6 +58,8 @@ module ActiveRecord
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
   class Base
+    EMPTY_ATTRS: Hash[Symbol, untyped]
+
     # `attr_accessor :id` — instance-level, lowers at ingest to a
     # getter/setter pair that the RBS must declare.
     def id: () -> Integer

@@ -114,7 +114,10 @@ fn article_renders_schema_scaffold_methods() {
         "def self.table_name",
         "def self.schema_columns",
         "def self.instantiate(row)",
-        "def initialize(attrs = {})",
+        // The default is the one frozen `EMPTY_ATTRS` on the ruby family
+        // (`lower::lazy_model_state`): a record built bare — every
+        // hydration path — no longer allocates a Hash it never reads.
+        "def initialize(attrs = ActiveRecord::Base::EMPTY_ATTRS)",
         "def attributes",
         "def [](name)",
         "def []=(name, value)",
@@ -2529,4 +2532,29 @@ fn layout_header_helpers_and_their_concat_chain_are_hoisted_once() {
     assert!(!body.contains("stylesheet_link_tag("), "{body}");
     assert!(!body.contains("javascript_importmap_tags("), "{body}");
     assert!(body.contains("HOISTED_JAVASCRIPT_IMPORTMAP_TAGS"), "{body}");
+}
+
+// ── lazy per-record state ───────────────────────────────────────
+
+/// A has_many cache starts `nil` and is made on first read through a
+/// synthesized `__<assoc>_cache` getter; the constructor's default is
+/// the shared `EMPTY_ATTRS` (`lower::lazy_model_state`). The reader,
+/// the preload seed and the target reader all read through the getter;
+/// the preload writer still assigns the ivar.
+#[test]
+fn has_many_cache_is_made_on_first_read_and_the_attrs_default_is_shared() {
+    let files = lowered_real_blog();
+    let src = find(&files, "app/models/article.rb");
+    assert!(src.contains("@comments_cache = nil"), "{src}");
+    assert!(!src.contains("@comments_cache = []"), "{src}");
+    assert!(src.contains("def __comments_cache"), "{src}");
+    assert!(src.contains("return __comments_cache if @comments_loaded"), "{src}");
+    assert!(src.contains("@comments_cache = list"), "the preload writer assigns the ivar:\n{src}");
+    assert!(src.contains("def initialize(attrs = ActiveRecord::Base::EMPTY_ATTRS)"), "{src}");
+    // No raw read of the ivar survives outside its own getter and the
+    // initialize/writer assignments.
+    let raw_reads = src.matches("@comments_cache").count();
+    let getter_body = src.split("def __comments_cache").nth(1).unwrap();
+    let in_getter = getter_body.split("\n  end").next().unwrap().matches("@comments_cache").count();
+    assert_eq!(raw_reads - in_getter, 2, "init + preload writer only:\n{src}");
 }
