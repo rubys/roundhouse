@@ -102,7 +102,8 @@
 #   --socket-per-room N     subscribers per room (default 50, which is
 #                     the shape the runtime ledger's tiers were measured
 #                     at; the sweep derives the room count from it)
-#   --skip-prepare    reuse the oracle tree and emit already on disk
+#   --skip-prepare    reuse the oracle tree, emit and spinel binary
+#                     already on disk
 #   --keep            leave servers running on exit
 #
 # WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
@@ -474,7 +475,11 @@ build_spinel_binary() {
 
 WANT_SPINEL=0
 for _l in "${LANES[@]}"; do [[ "$_l" == spinel* ]] && WANT_SPINEL=1; done
-if (( WANT_SPINEL )); then
+# `--skip-prepare` keeps the binary too, when there is one: the flag's
+# promise is "reuse what is on disk", and an A/B that rebuilds the emit
+# with a different `spin.toml` (an allocator, say) has to be able to run
+# the harness against THAT binary rather than a fresh emit's.
+if (( WANT_SPINEL )) && { (( SKIP_PREPARE == 0 )) || [[ ! -x "$SP_EMIT/build/bin/blog" ]]; }; then
     if ! build_spinel_binary; then
         fail "dropping the spinel lanes"
         NEW_LANES=()
