@@ -2368,7 +2368,34 @@ fn is_view_helpers_const(e: &Expr) -> bool {
 /// `image_path("/already/absolute")` RETURNS ITS ARGUMENT, so hoisting it
 /// would put a literal's own String object in a constant where a caller
 /// could mutate it; the three below all interpolate into a new String.
-const HOISTABLE_TAG_HELPERS: &[&str] = &["image_tag", "content_tag", "hidden_field_tag"];
+///
+/// `stylesheet_link_tag` / `javascript_include_tag` map a literal name to
+/// an undigested `/assets/` path (the `image_path` note explains why no
+/// digests), so they are pure over their literals the way `image_tag`
+/// is; `javascript_importmap_tags` is pure over the importmap table,
+/// which is the one non-literal argument this list admits (see
+/// `HOISTABLE_CONST_READERS`). campfire's layout pays all three on every
+/// page — 27 stylesheet links, and the importmap's 92 pins rebuilt as
+/// Hashes and rendered to JSON — for a header that never changes
+/// between one boot and the next: about 360 allocations per request
+/// that the room page's profile put beside the message loop's.
+const HOISTABLE_TAG_HELPERS: &[&str] = &[
+    "image_tag",
+    "content_tag",
+    "hidden_field_tag",
+    "stylesheet_link_tag",
+    "javascript_include_tag",
+    "javascript_importmap_tags",
+];
+
+/// Argument-less reads of emitted TABLES that a hoistable call may take
+/// as an argument and still be a per-process constant: `Importmap.pins`
+/// and `Importmap.entry` are `config/importmap.rb` rendered as methods
+/// answering literals (see `emit_importmap`), so a call over them is as
+/// constant as a call over the literals themselves. Declared, like the
+/// helpers: a reader is on this list because its body was read, not
+/// because it takes no arguments.
+const HOISTABLE_CONST_READERS: &[(&str, &str)] = &[("Importmap", "pins"), ("Importmap", "entry")];
 
 /// A canonical spelling of an all-literal expression — `None` the moment
 /// any part of it is not a literal. Doubles as the dedupe key, so two call
@@ -2405,8 +2432,48 @@ fn literal_key(e: &Expr) -> Option<String> {
             out.push(']');
             Some(out)
         }
+        // An already-hoisted constant is a literal for the purposes of
+        // the call that takes it (a `+` chain over hoisted tags, below).
+        ExprNode::Const { path } if path.len() == 1 && path[0].as_str().starts_with("HOISTED_") => {
+            Some(format!("c:{}", path[0].as_str()))
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
+            let ExprNode::Const { path } = &*r.node else { return None };
+            let [konst] = path.as_slice() else { return None };
+            HOISTABLE_CONST_READERS
+                .iter()
+                .any(|(k, m)| *k == konst.as_str() && *m == method.as_str())
+                .then(|| format!("{}.{}", konst.as_str(), method.as_str()))
+        }
         _ => None,
     }
+}
+
+/// A `+` chain whose every leaf is a hoisted constant or a String
+/// literal — the layout's `stylesheet_link_tag(…) + "\n" +
+/// stylesheet_link_tag(…) + …` once each call is a constant. String `+`
+/// is pure and answers a fresh String, so the WHOLE chain is one more
+/// constant (its key is the chain's spelling); without this the tags
+/// would be hoisted and the 27 concatenations still run per request.
+/// Answers the key for a chain, `None` for anything else — including a
+/// bare leaf, which is not a chain.
+fn hoistable_concat_key(e: &Expr) -> Option<String> {
+    fn leaf_or_chain(x: &Expr) -> Option<String> {
+        match &*x.node {
+            ExprNode::Lit { value: Literal::Str { .. } } => literal_key(x),
+            ExprNode::Const { path } if path.len() == 1 && path[0].as_str().starts_with("HOISTED_") => {
+                literal_key(x)
+            }
+            _ => hoistable_concat_key(x),
+        }
+    }
+    let ExprNode::Send { recv: Some(l), method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "+" || args.len() != 1 {
+        return None;
+    }
+    Some(format!("plus({},{})", leaf_or_chain(l)?, leaf_or_chain(&args[0])?))
 }
 
 /// The dedupe key for a hoistable call, or `None` if this expression is
@@ -2470,13 +2537,43 @@ fn hoist_in_expr(
     order: &mut Vec<(Symbol, Expr)>,
     used: &mut std::collections::HashSet<String>,
 ) {
-    e.node.for_each_child_mut(&mut |c| hoist_in_expr(c, minted, order, used));
-    let Some(key) = hoistable_call_key(e) else { return };
+    hoist_in_expr_at(e, false, minted, order, used)
+}
+
+/// `in_concat`: this node is an operand of a `+` the parent will fold
+/// if the whole chain qualifies — so a qualifying `+` here is left for
+/// the parent, and only the outermost `+` of a chain mints a constant.
+fn hoist_in_expr_at(
+    e: &mut Expr,
+    in_concat: bool,
+    minted: &mut std::collections::HashMap<String, Symbol>,
+    order: &mut Vec<(Symbol, Expr)>,
+    used: &mut std::collections::HashSet<String>,
+) {
+    let child_in_concat = matches!(&*e.node, ExprNode::Send { method, args, block: None, .. }
+        if method.as_str() == "+" && args.len() == 1);
+    e.node.for_each_child_mut(&mut |c| hoist_in_expr_at(c, child_in_concat, minted, order, used));
+    let (key, label) = match hoistable_call_key(e) {
+        Some(key) => (key, None),
+        None => match hoistable_concat_key(e) {
+            Some(key) => (key, Some("concat")),
+            None => return,
+        },
+    };
+    // A chain is hoisted at its TOP: a `+` whose parent is also a `+`
+    // over the same kind of leaves is folded by the parent, so the
+    // whole chain becomes one constant rather than one per operator.
+    if label.is_some() && in_concat {
+        return;
+    }
     let name = match minted.get(&key) {
         Some(name) => name.clone(),
         None => {
             let ExprNode::Send { method, args, .. } = &*e.node else { unreachable!() };
-            let name = hoisted_const_name(method.as_str(), args, used);
+            let name = match label {
+                Some(label) => hoisted_const_name(label, &[], used),
+                None => hoisted_const_name(method.as_str(), args, used),
+            };
             minted.insert(key, name.clone());
             order.push((name.clone(), e.clone()));
             name

@@ -2486,3 +2486,47 @@ fn block_tag_helper_appends_through_an_open_half_and_an_inline_close() {
     let after = view_src.find("<p>after</p>").unwrap();
     assert!(open < body && body < close && close < after, "{view_src}");
 }
+
+/// The layout's header is a per-process constant: every stylesheet link
+/// and the importmap script are hoisted (`HOISTABLE_TAG_HELPERS`,
+/// `HOISTABLE_CONST_READERS`), and the `+ "\n" +` chain joining the
+/// links is hoisted as ONE constant rather than one per operator.
+#[test]
+fn layout_header_helpers_and_their_concat_chain_are_hoisted_once() {
+    let mut app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        ("config/importmap.rb", "pin \"application\"\n"),
+        // `:app` expands to one link per stylesheet, joined by `+ "\n" +`.
+        ("app/assets/stylesheets/base.css", "body {}\n"),
+        ("app/assets/stylesheets/nav.css", "nav {}\n"),
+        (
+            "app/views/layouts/application.html.erb",
+            "<head>\n<%= stylesheet_link_tag :app, \"data-turbo-track\": \"reload\" %>\n\
+             <%= javascript_importmap_tags %>\n</head>\n<body><%= yield %></body>\n",
+        ),
+    ]);
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let files = ruby::emit_lowered_views(&app);
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("HOISTED_STYLESHEET_LINK_TAG_BASE = ActionView::ViewHelpers.stylesheet_link_tag(\"base\""),
+        "{src}"
+    );
+    assert!(
+        src.contains("HOISTED_JAVASCRIPT_IMPORTMAP_TAGS = ActionView::ViewHelpers.javascript_importmap_tags(Importmap.pins, Importmap.entry)"),
+        "{src}"
+    );
+    // Two names lower to `tag + "\n" + tag`; the chain is one constant.
+    assert!(
+        src.contains("HOISTED_CONCAT = HOISTED_STYLESHEET_LINK_TAG_BASE + \"\\n") && src.contains("+ HOISTED_STYLESHEET_LINK_TAG_NAV"),
+        "{src}"
+    );
+    assert!(!src.contains("HOISTED_CONCAT_2"), "one constant for the whole chain:\n{src}");
+    // The body reads the constants, not the calls.
+    let body = src.split("def self.application_into").nth(1).unwrap_or(src);
+    assert!(!body.contains("stylesheet_link_tag("), "{body}");
+    assert!(!body.contains("javascript_importmap_tags("), "{body}");
+    assert!(body.contains("HOISTED_JAVASCRIPT_IMPORTMAP_TAGS"), "{body}");
+}
