@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# scripts/alloc-window — what ONE request allocates, by type and by site,
+# on a spinel-compiled tree. Two SIGUSR1 dumps of spinel's allocation
+# report (SPINEL_ALLOC_REPORT + SPINEL_ALLOC_SITES; matz/spinel#4388) N
+# warm requests apart, subtracted and divided by N — so the server's boot
+# and the first-touch paths (fragment cache fill, lazy loads) are in both
+# dumps and cancel out.
+#
+# DIFFERENTIAL BY DESIGN. Run it on two trees and read the two tables
+# side by side: the blog's article page is the shape a well-compiled
+# page allocates, and whatever campfire's room page allocates IN EXCESS
+# of it is the candidate list — sized in KB/request, which is what the
+# collector's stop-the-world cost is proportional to. The published
+# numbers say the compiled lane's per-request cost is ~80x the blog's on
+# campfire against ~1x for Rails, so the excess is ours to find.
+#
+# Usage:  scripts/alloc-window --tree DIR --path /rooms/1 [options]
+#
+#   --tree DIR     an emitted spinel tree with build/bin/blog built
+#                  (`spin build`) and storage/development.sqlite3 staged
+#   --path P       the request to measure (repeat the same page N times)
+#   --login        sign in first as the bench seed's user1 (campfire)
+#   --n N          requests in the window (default 100)
+#   --workers W    SPINEL_WORKERS (default 1 — the per-CPU number)
+#   --port N       (default 4407)
+#   --top N        rows to print (default 25)
+#   --out DIR      keep the dumps here (default: a temp dir)
+#
+# Sites are symbolised from the binary's own symbol table (`nm`), so the
+# tree must not be stripped; a row that stays an address is one nm does
+# not carry. The site is the allocator's CALLER — a runtime helper that
+# allocates on an app's behalf attributes to the helper, not the app
+# line (see docs/profiling.md in spinel).
+
+set -euo pipefail
+
+TREE=""; URL_PATH=""; LOGIN=0; N=100; WORKERS=1; PORT=4407; TOP=25; OUT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tree) TREE="$2"; shift 2 ;;
+        --path) URL_PATH="$2"; shift 2 ;;
+        --login) LOGIN=1; shift ;;
+        --n) N="$2"; shift 2 ;;
+        --workers) WORKERS="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
+        --top) TOP="$2"; shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        *) echo "alloc-window: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+[[ -n "$TREE" && -n "$URL_PATH" ]] || { echo "alloc-window: --tree and --path are required" >&2; exit 2; }
+BIN="$TREE/build/bin/blog"
+[[ -x "$BIN" ]] || { echo "alloc-window: no binary at $BIN (spin build first)" >&2; exit 2; }
+[[ -f "$TREE/storage/development.sqlite3" ]] || { echo "alloc-window: no storage/development.sqlite3 under $TREE" >&2; exit 2; }
+[[ -n "$OUT" ]] || OUT="$(mktemp -d -t alloc-window.XXXXXX)"
+mkdir -p "$OUT"
+
+pid=""
+cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null; sleep 0.3; kill -9 "$pid" 2>/dev/null; fi; wait 2>/dev/null || true; }
+trap cleanup EXIT
+
+# A fresh copy of the rows, as the bench stages them: a stale -wal beside
+# the file is a different database.
+rm -f "$TREE/storage/development.sqlite3-wal" "$TREE/storage/development.sqlite3-shm"
+
+( cd "$TREE" && exec env SPINEL_ALLOC_REPORT="$OUT/live.folded" SPINEL_ALLOC_SITES=1 \
+    SPINEL_WORKERS="$WORKERS" DATABASE_POOL_SIZE=16 \
+    BLOG_DB=storage/development.sqlite3 PORT="$PORT" \
+    SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}" \
+    ./build/bin/blog ) > "$OUT/server.log" 2>&1 &
+pid=$!
+for _ in $(seq 1 60); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.5; done
+curl -s -o /dev/null "http://127.0.0.1:$PORT/" || { echo "alloc-window: server never answered; see $OUT/server.log" >&2; exit 1; }
+
+cookie=""
+if (( LOGIN )); then
+    jar="$OUT/jar.txt"
+    curl -sS -c "$jar" -o /dev/null -X POST "http://127.0.0.1:$PORT/session" \
+        --data-urlencode "email_address=user1@example.com" \
+        --data-urlencode "password=secret123456"
+    cookie="$(awk '/session_token|_campfire_session/ {printf "%s=%s; ", $6, $7}' "$jar")"
+    [[ -n "$cookie" ]] || { echo "alloc-window: sign-in minted no cookie" >&2; exit 1; }
+fi
+get() { curl -sS -o "$1" -w '%{http_code}' -H "Cookie: $cookie" "http://127.0.0.1:$PORT$URL_PATH"; }
+status="$(get "$OUT/page.html")"
+[[ "$status" == "200" ]] || { echo "alloc-window: $URL_PATH answered $status" >&2; exit 1; }
+echo "page: $(wc -c < "$OUT/page.html" | tr -d ' ') bytes; warming"
+for _ in $(seq 1 20); do get /dev/null >/dev/null; done
+
+kill -USR1 "$pid"; sleep 1.5; cp -f "$OUT/live.folded" "$OUT/before.folded"
+for _ in $(seq 1 "$N"); do get /dev/null >/dev/null; done
+kill -USR1 "$pid"; sleep 1.5; cp -f "$OUT/live.folded" "$OUT/after.folded"
+cleanup; pid=""
+
+echo "requests in window: $N   (dumps in $OUT)"
+ruby - "$BIN" "$OUT/before.folded" "$OUT/after.folded" "$N" "$TOP" <<'RUBY'
+bin, before, after, n, top = ARGV[0], ARGV[1], ARGV[2], ARGV[3].to_i, ARGV[4].to_i
+
+# The binary's own symbols, sorted, so an offset maps to the function
+# containing it. `nm -n` on macOS and Linux both print `addr T name`.
+syms = `nm -n "#{bin}" 2>/dev/null`.lines.filter_map do |l|
+  a, t, name = l.split
+  next unless name && t =~ /[tT]/
+  [a.to_i(16), name.sub(/^_/, "")]
+end
+base = syms.first&.first || 0
+def bsearch(syms, off)
+  lo, hi = 0, syms.length - 1
+  best = nil
+  while lo <= hi
+    mid = (lo + hi) / 2
+    if syms[mid][0] <= off then best = syms[mid][1]; lo = mid + 1 else hi = mid - 1 end
+  end
+  best
+end
+# Offsets in the report are relative to the image; nm addresses on macOS
+# carry the 0x100000000 image base, on Linux (PIE) they start near 0.
+image_base = syms.any? { |a, _| a >= 0x100000000 } ? 0x100000000 : 0
+# Linux reports `./app(+0x2bc5) [0x...]`; macOS reports backtrace_symbols'
+# `N  image  0x...  symbol + off`. Both become `symbol + off`.
+symbolise = lambda do |site|
+  if site =~ /\(\+0x([0-9a-f]+)\)/
+    off = $1.to_i(16) + image_base
+    return bsearch(syms, off) || site
+  end
+  if site =~ /0x[0-9a-f]+\s+(\S+ \+ \d+)$/
+    return $1
+  end
+  site
+end
+
+def read(path)
+  counts = Hash.new(0); bytes = Hash.new(0)
+  File.foreach(path) do |l|
+    if l.start_with?("alloc;")
+      key, v = l.chomp.rpartition(" ").values_at(0, 2)
+      counts[key.sub(/^alloc;/, "")] += v.to_i
+    elsif l.start_with?("# bytes ")
+      key, v = l.chomp.sub(/^# bytes /, "").rpartition(" ").values_at(0, 2)
+      bytes[key] += v.to_i
+    end
+  end
+  [counts, bytes]
+end
+bc, bb = read(before); ac, ab = read(after)
+dc = ac.map { |k, v| [k, v - bc[k]] }.to_h
+db = ab.map { |k, v| [k, v - bb[k]] }.to_h
+
+# `# bytes` lines are per (site;type) when sites are on, per type otherwise.
+total_bytes = db.values.sum; total_allocs = dc.values.sum
+printf "TOTAL per request: %7.1f KB in %6.1f allocations\n", total_bytes / 1024.0 / n, total_allocs.to_f / n
+
+by_site = Hash.new { |h, k| h[k] = [0, 0] }
+by_type = Hash.new { |h, k| h[k] = [0, 0] }
+db.each do |key, b|
+  parts = key.split(";")
+  type = parts.last; site = parts.length > 1 ? symbolise.call(parts[0]) : "(no site)"
+  c = dc[key] || 0
+  by_site[site][0] += b; by_site[site][1] += c
+  by_type[type][0] += b; by_type[type][1] += c
+end
+puts "\n  KB/req  allocs/req  share  site"
+by_site.sort_by { |_, (b, _)| -b }.first(top).each do |site, (b, c)|
+  printf "%8.1f  %10.1f  %4.1f%%  %s\n", b / 1024.0 / n, c.to_f / n, 100.0 * b / [total_bytes, 1].max, site
+end
+by_fn = Hash.new { |h, k| h[k] = [0, 0] }
+by_site.each { |site, (b, c)| f = by_fn[site.sub(/ \+ \d+$/, "")]; f[0] += b; f[1] += c }
+puts "\n  KB/req  allocs/req  share  function (sites summed)"
+by_fn.sort_by { |_, (b, _)| -b }.first(top).each do |fn, (b, c)|
+  printf "%8.1f  %10.1f  %4.1f%%  %s\n", b / 1024.0 / n, c.to_f / n, 100.0 * b / [total_bytes, 1].max, fn
+end
+puts "\n  KB/req  allocs/req  share  type"
+by_type.sort_by { |_, (b, _)| -b }.first(12).each do |type, (b, c)|
+  printf "%8.1f  %10.1f  %4.1f%%  %s\n", b / 1024.0 / n, c.to_f / n, 100.0 * b / [total_bytes, 1].max, type
+end
+RUBY
