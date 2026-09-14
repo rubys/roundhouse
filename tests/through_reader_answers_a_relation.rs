@@ -129,8 +129,10 @@ fn the_through_reader_has_no_array_returning_guard() {
 fn the_cache_reaches_the_relation_instead() {
     let src = emitted("user.rb");
     let body = method_body(&src, "upvoted_stories");
+    // Through the lazy getter (`lower::lazy_model_state`): the cache is
+    // made on first read, and this read is one.
     assert!(
-        body.contains(".preloaded(@upvoted_stories_cache, @upvoted_stories_loaded)"),
+        body.contains(".preloaded(__upvoted_stories_cache, @upvoted_stories_loaded)"),
         "the eager-load cache must reach the relation:\n{body}"
     );
     // The seam that fills it is untouched — `includes(:upvoted_stories)`
@@ -154,7 +156,7 @@ fn a_direct_has_many_keeps_its_array_guard() {
     // Unchanged: that reader materializes rows and is declared
     // `Array[Story]`, so the cache guard agrees with it.
     let body = method_body(&emitted("user.rb"), "stories");
-    assert!(body.contains("return @stories_cache if @stories_loaded"), "{body}");
+    assert!(body.contains("return __stories_cache if @stories_loaded"), "{body}");
     assert!(!body.contains("preloaded("), "{body}");
 }
 
