@@ -784,7 +784,15 @@ jobs:
         # is the ruby-vips reopen and `require "vips"` runs at boot —
         # without the gem the emit never comes up. The System libvips
         # step above is the library it binds.
-        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt ruby-vips --no-document
+        #
+        # concurrent-ruby, the lesson a third time: campfire's
+        # `WebPush::Pool` (lib/) builds its thread pools from it, the
+        # CRuby tree swaps the runtime's port for a bare
+        # `require "concurrent"`, and app/models.rb requires the pool —
+        # so it is a LOAD-time reach, and without it the emit never
+        # comes up either. This job took the run red on the commit that
+        # added the require (a73d7ccd) exactly as the two above did.
+        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt ruby-vips concurrent-ruby --no-document
       - name: scripts/campfire-compare
         run: scripts/campfire-compare /tmp/campfire
 
