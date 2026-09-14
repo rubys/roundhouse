@@ -1,4 +1,7 @@
 # Primitive Db surface — JRuby variant. Same `module Db` contract as
+  # The query cache keeps results up to this many rows — see db.rb.
+  QC_CAPTURE_ROWS = 16
+
 # `db_cruby.rb` (the CRuby/`sqlite3`-gem shim) and `db.rb` (the spinel
 # FFI shim), but backed by JDBC: the `sqlite3` gem is a C extension with
 # no JRuby build, so JRuby talks to SQLite through the Xerial
@@ -293,7 +296,10 @@ module Db
     ensure_executed(stmt)
     ok = stmt.rs.next
     if (c = stmt.capture)
-      if ok
+      if ok && c[:rows].length >= QC_CAPTURE_ROWS
+        # Bounded like the other two shims (db.rb `QC_CAPTURE_ROWS`).
+        stmt.capture = nil
+      elsif ok
         c[:names] = column_names_of(stmt) if c[:names].nil?
         n = c[:names].length
         row = Array.new(n)

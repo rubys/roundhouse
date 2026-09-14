@@ -277,7 +277,7 @@ class QcEntry
         @ints.push(0)
         @floats.push(0.0)
         v = SQL.sqlite3_column_text(stmt, i)
-        @texts.push(v.nil? ? "" : v + "")
+        @texts.push(v.nil? ? "" : v)
       end
       i += 1
     end
@@ -499,19 +499,35 @@ class DbConn
     i = 0
     while i < ncols
       n = SQL.sqlite3_column_name(ptr, i)
-      names.push(n.nil? ? "" : n + "")
+      names.push(n.nil? ? "" : n)
       i += 1
     end
     @qc_recording[ptr] = QcEntry.new(sql, ncols, names)
     nil
   end
 
-  # Called after every real step. Appends the row (or marks eof).
+  # A capture is BOUNDED at this many rows; a result that grows past it
+  # is abandoned and the statement runs again if asked again. What the
+  # cache exists for is the point lookup a page repeats — campfire's
+  # `Account.first` 22 times, a message's `room` 20 times — and every
+  # one of those is a row or two. Capturing an unbounded result costs a
+  # copy of every text cell of every row (sqlite's cell is only valid
+  # until the next step), and on the room page that was ~2,700 String
+  # allocations per request — a quarter of all it makes — recording 100
+  # messages and 100 rich-text bodies that nothing ever replayed.
+  QC_CAPTURE_ROWS = 16
+
+  # Called after every real step. Appends the row (or marks eof) — or,
+  # past the bound, drops the capture.
   def qc_record_step(ptr, has_row)
     return nil if !@qc_on
     e = @qc_recording[ptr]
     return nil if e.nil?
     if has_row
+      if e.nrows >= QC_CAPTURE_ROWS
+        @qc_recording.delete(ptr)
+        return nil
+      end
       e.record_row(ptr)
     else
       e.mark_eof
@@ -1125,11 +1141,7 @@ module Db
       stmt = p
     end
     s = SQL.sqlite3_column_text(stmt, i)
-    if s.nil?
-      ""
-    else
-      s + ""
-    end
+    s.nil? ? "" : s
   end
 
   # Raw typed column read — the driver's native value, the same contract
@@ -1178,14 +1190,12 @@ module Db
     elsif t == SQL::FLOAT_TYPE
       SQL.sqlite3_column_double(stmt, i)
     else
-      # Same copy-out as column_text — the libsqlite3 buffer is
-      # invalidated by the next step or finalize on this stmt.
-      s = SQL.sqlite3_column_text(stmt, i)
-      if s.nil?
-        nil
-      else
-        s + ""
-      end
+      # The FFI's `:str` return is already a GC string of its own
+      # (`sp_str_dup_external` at the boundary — spinel's docs/FFI.md:
+      # "builds the result String by strlen"), so nothing here reaches
+      # sqlite's buffer after the call. The `+ ""` this used to carry
+      # was a second copy of every text cell of every row.
+      SQL.sqlite3_column_text(stmt, i)
     end
   end
 
@@ -1237,12 +1247,7 @@ module Db
       end
       stmt = p
     end
-    s = SQL.sqlite3_column_text(stmt, i)
-    if s.nil?
-      nil
-    else
-      s + ""
-    end
+    SQL.sqlite3_column_text(stmt, i)
   end
 
   def self.column_bool_opt(stmt, i)
@@ -1281,11 +1286,7 @@ module Db
       stmt = p
     end
     s = SQL.sqlite3_column_name(stmt, i)
-    if s.nil?
-      ""
-    else
-      s + ""
-    end
+    s.nil? ? "" : s
   end
 
   # roundhouse#12 Path A.1: with caching on, "finalize" means rewind the

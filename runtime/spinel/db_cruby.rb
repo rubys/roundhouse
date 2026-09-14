@@ -261,6 +261,8 @@ module Db
   # consumer wanting more rows promotes to a real re-executed
   # statement (rare). Enabled per-request by the dispatch; nil ⇒ off
   # (tests, scripts) with a single fiber-storage read of overhead.
+  QC_CAPTURE_ROWS = 16
+
   def self.query_cache_begin
     Fiber[:rh_qcache] = {}
   end
@@ -362,6 +364,12 @@ module Db
     if (c = entry[:capture])
       if row.nil?
         c[:eof] = true
+      elsif c[:rows].length >= QC_CAPTURE_ROWS
+        # Bounded like the spinel shim's (db.rb, `QC_CAPTURE_ROWS`): the
+        # cache is for the point lookups a page repeats, and a result
+        # past the bound is not kept — the same rows come back from a
+        # re-execution rather than a replay.
+        entry[:capture] = nil
       else
         c[:rows] << row
       end
