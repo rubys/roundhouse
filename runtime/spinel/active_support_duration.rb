@@ -136,5 +136,13 @@ module ActiveSupport
     def seconds
       @seconds
     end
+
+    # Rails parity, the overlay's rule: a Duration IS its seconds count
+    # for equality, so `assert_equal 1.year, response.cache_control
+    # [:max_age].to_i` (campfire's QR code test) holds against an
+    # Integer. Ruby's `!=` is the negation of this.
+    def ==(other)
+      other.is_a?(Duration) ? @seconds == other.seconds : @seconds == other
+    end
   end
 end

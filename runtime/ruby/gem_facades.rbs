@@ -101,15 +101,6 @@ module ROTP
   end
 end
 
-module RQRCode
-  class QRCode
-    @data: String
-
-    def initialize: (String _data) -> void
-    def as_svg: (?offset: Integer, ?fill: String?, ?color: String?, ?module_size: Integer?, ?shape_rendering: String?) -> String
-  end
-end
-
 module SVG
   module Graph
     class TimeSeries

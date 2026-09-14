@@ -2857,6 +2857,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "active_job",
         "gem_facades",
         "bcrypt_facade",
+        "rqrcode_facade",
         "inflector",
         "inflector_ext",
         "json_builder",
@@ -4374,6 +4375,31 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/bcrypt_facade.rbs");
     }
 
+    // rqrcode: the same swap, for the QR code an app renders as SVG
+    // (campfire's `QrCodeController`, lobsters' 2FA enrollment). The
+    // package is spinel-rqrcode — the gem's matrix and SVG exporter over
+    // Nayuki's qrcodegen in carried C, byte-identical to the gem — and it
+    // carries its encoder, so unlike ruby-vips it asks nothing of the
+    // machine. Manifest below, git form (matz/spin-index#8).
+    let needs_rqrcode = files
+        .iter()
+        .any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && c.contains("RQRCode::"));
+    if needs_rqrcode {
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/rqrcode_facade.rb")
+            .ok_or("spin_shape: app references RQRCode but runtime/rqrcode_facade.rb \
+                    is not in the spinel file set")?;
+        facade.1 = "# Real rqrcode — the spinel-rqrcode spin package (Nayuki's qrcodegen\n\
+                    # in carried C, the gem's version and mask choice; see spin.toml\n\
+                    # [dependencies]). This file is the swap point: the scaffold base\n\
+                    # ships a raising façade here for targets without the package.\n\
+                    # Same require anchor either way.\n\
+                    require \"rqrcode\"\n"
+            .to_string();
+        files.retain(|(p, _)| p != "runtime/rqrcode_facade.rbs");
+    }
+
     // ruby-vips: the same swap for the image processor, when the app
     // declares variants — see `apply_image_processor_wiring`. The
     // package is the spinel-ruby-vips spin package; the manifest gains
@@ -4442,6 +4468,18 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # at run time (`libvips42`). Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#7 is the registration.\n\
              ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"main\" }\n",
+        );
+    }
+    if needs_rqrcode {
+        if !manifest.contains("[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# QR codes as SVG (a join link, 2FA enrollment): the rqrcode gem's\n\
+             # matrix and exporter over Nayuki's qrcodegen, carried in the\n\
+             # package — no system library. Git form for the reason bcrypt\n\
+             # gives above: matz/spin-index#8 is the registration.\n\
+             rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\", ref = \"main\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
@@ -4569,7 +4607,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             for (from, to) in dep_patches {
                 makefile.1 = makefile.1.replacen(from, to, 1);
             }
-        } else if needs_bcrypt {
+        } else if needs_bcrypt || needs_vips || needs_rqrcode {
             return Err(
                 "spin_shape: Makefile dep-patch anchors not found (scaffold \
                  Makefile changed?) and this tree carries a package"
@@ -5611,6 +5649,54 @@ mod tests {
         assert!(mk.contains("SPIN   ?= spin"), "{mk}");
         assert!(mk.contains("\t$(SPIN) build\n\tcp build/bin/blog $@"), "{mk}");
         assert!(!mk.contains("$(SPINEL) main.rb"), "{mk}");
+    }
+
+    /// An app that names RQRCode (a QR code rendered as SVG) gets the
+    /// spinel-rqrcode package the same way bcrypt does: façade file
+    /// swapped to `require "rqrcode"`, sidecar dropped, manifest
+    /// dependency declared. An app that does not keeps the façade.
+    #[test]
+    fn spin_shape_swaps_rqrcode_facade_for_the_package() {
+        let makefile = "SPINEL ?= spinel\n\
+             RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
+             RBS_FLAG := $(if $(wildcard sig),--rbs sig)\n\
+             $(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)\n\
+             \t@mkdir -p $(BUILD)\n\
+             \t$(SPINEL) main.rb $(RBS_FLAG) -o $@\n\
+             $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
+             \t$(SPINEL) --rbs sig $(SPINEL_TEST_FLAGS) $< -o $@\n\
+             SPINEL_TESTS := \\\n\
+             \ttest/models/article_test \\\n\
+             \ttest/models/comment_test \\\n\
+             \ttest/controllers/articles_controller_test \\\n\
+             \ttest/controllers/comments_controller_test\n";
+        let tree = |controller: &str| {
+            vec![
+                ("Makefile".to_string(), makefile.to_string()),
+                ("main.rb".to_string(), "Main.run\n".to_string()),
+                ("app/controllers/qr_code_controller.rb".to_string(), controller.to_string()),
+                ("runtime/rqrcode_facade.rb".to_string(), "module RQRCode\nend\n".to_string()),
+                ("sig/runtime/rqrcode_facade.rbs".to_string(), "module RQRCode\nend\n".to_string()),
+            ]
+        };
+        let with = spin_shape(tree(
+            "class QrCodeController\n  def show\n    RQRCode::QRCode.new(url).as_svg(viewbox: true)\n  end\nend\n",
+        ))
+        .unwrap();
+        let get = |out: &Vec<(String, String)>, p: &str| out.iter().find(|(q, _)| q == p).unwrap().1.clone();
+        let facade = get(&with, "runtime/rqrcode_facade.rb");
+        assert!(facade.contains("require \"rqrcode\""), "{facade}");
+        assert!(!facade.contains("module RQRCode"), "{facade}");
+        assert!(!with.iter().any(|(p, _)| p == "sig/runtime/rqrcode_facade.rbs"), "sidecar must drop");
+        let manifest = get(&with, "spin.toml");
+        assert!(
+            manifest.contains("rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\""),
+            "{manifest}"
+        );
+
+        let without = spin_shape(tree("class QrCodeController\nend\n")).unwrap();
+        assert!(get(&without, "runtime/rqrcode_facade.rb").contains("module RQRCode"));
+        assert!(!get(&without, "spin.toml").contains("rqrcode"));
     }
 
     /// A declared variant (`ActiveStorage::Variation.new(` in an emitted

@@ -311,20 +311,10 @@ end
 # app consumes BCrypt; whole-file grain, same as every other swap.
 require_relative "bcrypt_facade"
 
-# RQRCode — QR-code rendering for 2FA enrollment. Off the read benchmark.
-module RQRCode
-  class QRCode
-    def initialize(_data)
-      GemFacade.fail!("RQRCode::QRCode.new")
-      @data = _data
-    end
-
-    def as_svg(offset: 0, fill: nil, color: nil, module_size: nil, shape_rendering: nil)
-      GemFacade.fail!("RQRCode::QRCode#as_svg")
-      ""
-    end
-  end
-end
+# RQRCode façade lives in its own file for the same reason: the
+# spin-shaped spinel tree swaps that FILE for `require "rqrcode"` (the
+# spinel-rqrcode spin package) when the app names RQRCode.
+require_relative "rqrcode_facade"
 
 # SVG::Graph::TimeSeries — SVG statistics graphs. lib/time_series.rb
 # subclasses it and the stats controller instantiates it; off the read

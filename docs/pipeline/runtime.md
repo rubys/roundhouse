@@ -640,6 +640,36 @@ assert 512×512 / 192×192 pass on both lanes, on the real variant's
 bytes — the numbers ruby-vips and the port answer for the same input
 are byte-identical (spinel-ruby-vips' oracle lane holds it to that).
 
+### A QR code is the gem's bytes, on every ruby-family lane
+
+`RQRCode::QRCode.new(text).as_svg(…)` — campfire's `QrCodeController`
+renders a room's join link this way, lobsters its 2FA enrollment — was a
+raising façade on spinel (`runtime/ruby/rqrcode_facade.rb`, the
+write-path rule every gem façade follows) and the real gem on CRuby and
+JRuby. It is now real on spinel too: when an app names `RQRCode`,
+`spin_shape` swaps the façade file for `require "rqrcode"` and declares
+the spinel-rqrcode spin package (github.com/rubys/spinel-rqrcode;
+matz/spin-index#8 is the registration, so the manifest uses the git form
+until it merges), the same seam bcrypt and ruby-vips use.
+
+The package carries its encoder — Project Nayuki's QR-Code-generator,
+the single MIT-licensed C file Debian ships as libqrcodegen — so unlike
+ruby-vips it asks nothing of the machine. **Its output is byte-identical
+to the gem's**, and that took two rules, not a library swap: Nayuki's
+encoder and rqrcode_core agree on the modules for a given text, level,
+version and mask, but the gem picks its VERSION with a strict-less-than
+against capacity (an exact fit goes up a version) and its MASK with its
+own penalty scoring on a matrix whose format/version modules are blank.
+The package's glue reproduces both, and its oracle lane holds the
+compiled port to the gem across three modes, four levels and versions
+1–35 (a randomised 800-pair sweep across 1–40 agreed while it was
+built). Measured on the compiled campfire binary: `GET /qr_code/:id`
+serves the same 24,518 bytes the gem renders for the same link.
+
+What is still not on the wire from that endpoint is the `Cache-Control`
+header — `expires_in` records it and emits nothing, the entry below —
+which the suite's test reads through the harness rather than the wire.
+
 ### `ActionCable.server` exists; the registry did not say so
 
 `runtime/spinel/action_cable.rb` has had `ActionCable.server`,
