@@ -20,6 +20,13 @@ use crate::span::Span;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
+    // A block-taking tag helper gains a `<name>_into(io, …)` variant
+    // that writes around a yield into the caller's buffer; the view
+    // emit points its appends at it (`lower::tag_block_passing`).
+    // FIRST, on the App's shape of the body: the passes below qualify
+    // the `capture` the variant is recognised by, and the variant's
+    // own body wants every one of them applied.
+    crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);

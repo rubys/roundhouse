@@ -2437,3 +2437,52 @@ fn empty_app_helper_module_is_a_no_op() {
         "no helper namespacing should appear; got:\n{view_src}",
     );
 }
+
+// ── block-taking tag helpers write into the view's buffer ───────
+
+/// `<%= panel_tag(x) do %>…<% end %>` where `panel_tag` is `tag.div(…, &)`:
+/// the helper gains a `panel_tag_open_into(io, x)` that writes the open
+/// tag into the caller's buffer, and the view calls it, appends the
+/// block body into its own buffer, then the close tag — instead of
+/// building the body in a capture, copying it into the tag's
+/// interpolation and copying that into `io` (`lower::tag_block_passing`).
+/// The original helper stays for callers that want a string.
+#[test]
+fn block_tag_helper_appends_through_an_open_half_and_an_inline_close() {
+    let mut app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        (
+            "app/helpers/panels_helper.rb",
+            "module PanelsHelper\n  def panel_tag(kind, &)\n    tag.div class: \"panel panel--#{kind}\", &\n  end\nend\n",
+        ),
+        (
+            "app/views/articles/index.html.erb",
+            "<h1>Articles</h1>\n<%= panel_tag(\"wide\") do %>\n  <p>inside</p>\n<% end %>\n<p>after</p>\n",
+        ),
+    ]);
+    // The tag builder lowering that turns `tag.div(…, &)` into the
+    // interpolation the pass recognises runs in the post-analyze
+    // pipeline, as the CLI runs it.
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let helper_files = ruby::emit_library(&app);
+    let helper_src = find(&helper_files, "panels_helper.rb");
+    assert!(helper_src.contains("def self.panel_tag(kind, &__blk)"), "original kept:\n{helper_src}");
+    assert!(helper_src.contains("def self.panel_tag_open_into(io, kind)"), "{helper_src}");
+    assert!(helper_src.contains("io << \"<div class=\\\""), "open half appends the open tag:\n{helper_src}");
+    assert!(!helper_src.contains("panel_tag_close_into"), "a literal close is the view's to append:\n{helper_src}");
+
+    let view_files = ruby::emit_lowered_views(&app);
+    let view_src = find(&view_files, "app/views/articles/index.rb");
+    assert!(view_src.contains("PanelsHelper.panel_tag_open_into(io, \"wide\")"), "{view_src}");
+    assert!(view_src.contains("io << \"</div>\""), "the close tag, appended by the view:\n{view_src}");
+    assert!(!view_src.contains("_cap = String.new"), "no capture buffer remains:\n{view_src}");
+    assert!(!view_src.contains("io << PanelsHelper.panel_tag("), "no materialised append remains:\n{view_src}");
+    // Order: open, body, close, then the text after the block.
+    let open = view_src.find("panel_tag_open_into").unwrap();
+    let body = view_src.find("<p>inside</p>").unwrap();
+    let close = view_src.find("io << \"</div>\"").unwrap();
+    let after = view_src.find("<p>after</p>").unwrap();
+    assert!(open < body && body < close && close < after, "{view_src}");
+}

@@ -671,6 +671,11 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // that the caller then appends. Ruby-family only: the construct
     // needs a mutable buffer a callee can write through.
     crate::lower::view_buffer_passing::apply(&mut lcs);
+    // And the same for a block-taking tag helper: `io << Helper.tag(a)
+    // do … end` becomes `Helper.tag_into(io, a) do … end`, the block
+    // appending into the view's own buffer. The variants are added on
+    // the helper side (`emit_library_class_decls`) from the same table.
+    crate::lower::tag_block_passing::apply_views(&mut lcs, &crate::lower::tag_block_passing::variants(app));
     html_views
         .iter()
         .zip(lcs.iter())
