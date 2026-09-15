@@ -12,6 +12,11 @@
 //      coverage footer (grouped hops, gap report), and N+1 findings
 //      annotate the hop containing the access site (#63 phase 5).
 //   6. coverage: gaps list is non-empty (the ledger is on).
+//   8. open folder: a checkout fed through the webkitdirectory input
+//      (fixtures/real-blog, a real directory upload) analyzes as a local
+//      app — same file set as bundle-src.mjs, junk paths filtered, the
+//      summary line names the build, and switching back to a shipped app
+//      drops the local entry.
 //
 // Serve the PARENT (wasm/) as the web root (the page imports ../lib/):
 //   python3 -m http.server 8099    # run from wasm/
@@ -23,6 +28,46 @@ const { chromium } = require("playwright");
 
 const BASE = process.env.IDE_URL || "http://localhost:8099/ide/";
 const MASTODON = !process.env.IDE_GENERIC;
+
+// 0. The directory-picker loader (fromDirectoryHandle) needs a user gesture
+// in a browser, so it is exercised here under Node with a minimal
+// FileSystemDirectoryHandle stand-in over the same fixture the browser path
+// uploads below — and must read exactly the file set bundle-src.mjs reads.
+{
+  const { readdir, readFile } = await import("node:fs/promises");
+  const { join, basename } = await import("node:path");
+  const { fromDirectoryHandle } = await import("../lib/local-bundle.mjs");
+  const dirHandle = (dir) => ({
+    kind: "directory", name: basename(dir),
+    async getDirectoryHandle(n) {
+      const ents = await readdir(dir, { withFileTypes: true });
+      if (!ents.some((e) => e.name === n && e.isDirectory())) throw new Error("NotFound");
+      return dirHandle(join(dir, n));
+    },
+    async getFileHandle(n) {
+      const ents = await readdir(dir, { withFileTypes: true });
+      if (!ents.some((e) => e.name === n && e.isFile())) throw new Error("NotFound");
+      return { kind: "file", name: n, getFile: async () => ({ text: () => readFile(join(dir, n), "utf8") }) };
+    },
+    async *entries() {
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        yield [e.name, e.isDirectory() ? dirHandle(join(dir, e.name))
+          : { kind: "file", name: e.name, getFile: async () => ({ text: () => readFile(join(dir, e.name), "utf8") }) }];
+      }
+    },
+  });
+  const blogDir = new URL("../../fixtures/real-blog", import.meta.url).pathname;
+  const viaHandle = await fromDirectoryHandle(dirHandle(blogDir));
+  const { execFileSync } = await import("node:child_process");
+  const out = join(process.env.TMPDIR || "/tmp", `rh-verify-blog-${process.pid}.json`);
+  execFileSync("node", [new URL("./bundle-src.mjs", import.meta.url).pathname, blogDir, out], { stdio: "ignore" });
+  const viaNode = JSON.parse(await readFile(out, "utf8"));
+  const a = Object.keys(viaHandle.src).sort().join(","), b = Object.keys(viaNode.src).sort().join(",");
+  check("directory handle reads the same files as bundle-src.mjs", a === b && viaHandle.name === "real-blog",
+    `${Object.keys(viaHandle.src).length} vs ${Object.keys(viaNode.src).length} files`);
+  const same = Object.keys(viaNode.src).every((k) => viaHandle.src[k] === viaNode.src[k]);
+  check("directory handle reads identical text", same);
+}
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
@@ -167,6 +212,70 @@ if (appNames.length >= 2) {
   await page.waitForFunction(() => window.__ide?.analysis, null, { timeout: 120_000 });
   const booted = await page.evaluate(() => document.getElementById("app").value);
   check("?app=blog boots straight into blog", booted === "blog", booted);
+}
+
+// 8. Open folder. The real path first: Playwright feeds a directory to the
+// hidden webkitdirectory input exactly as a visitor's file dialog would.
+const BLOG_DIR = new URL("../../fixtures/real-blog", import.meta.url).pathname;
+await page.setInputFiles("#folderInput", BLOG_DIR);
+await page.waitForFunction(() => window.__ide.current?.local && window.__ide.analysis, null, { timeout: 120_000 });
+const local = await page.evaluate(() => ({
+  current: window.__ide.current,
+  paths: Object.keys(window.__ide.srcMap).sort(),
+  files: window.__ide.analysis.files.length,
+  title: document.title,
+  sel: document.getElementById("app").value,
+  status: document.getElementById("status").textContent,
+  summary: window.__ide.summaryLine(),
+  version: window.__ide.version,
+  url: location.search,
+}));
+check("open folder: real-blog analyzes as a local app",
+  local.current?.local && local.current.name === "real-blog" && local.files > 10 && /real-blog/.test(local.title),
+  `${local.files} files, title ${local.title}`);
+check("open folder: selector shows the local app, no ?app= deep-link",
+  local.sel === "__local" && !/app=/.test(local.url), `${local.sel} ${local.url}`);
+check("open folder: status says nothing was uploaded", /nothing uploaded/.test(local.status), local.status);
+// Same inclusion rules as the Node bundler: the walk dirs, the single
+// files, nothing else (real-blog has test/, bin/, public/… on disk).
+check("open folder: only analyzable sources were read",
+  local.paths.every((p) => /^(app|extras|lib|config\/routes|models|views|db\/migrate)\//.test(p)
+    || ["db/schema.rb", "config/routes.rb", "config.ru", "app.rb", "db.rb", "seeds.rb"].includes(p))
+  && local.paths.includes("config/routes.rb") && local.paths.includes("db/schema.rb")
+  && local.paths.some((p) => p.startsWith("app/models/")),
+  `${local.paths.length} paths`);
+check("open folder: summary line names app, ledger and build",
+  /^real-blog · \d+ files · \d+ errors · \d+ warnings · \d+ coverage notes · \d+ ingest gaps · roundhouse \d/.test(local.summary)
+  && local.version?.version,
+  local.summary);
+
+// The entries seam (what both loaders feed): junk that a whole-tree
+// enumeration would include is dropped before analysis.
+const synth = await page.evaluate(async () => {
+  await window.__ide.openLocalEntries("synthetic", [
+    { path: "app/models/thing.rb", text: "class Thing < ApplicationRecord\nend\n" },
+    { path: "config/routes.rb", text: "Rails.application.routes.draw do\n  resources :things\nend\n" },
+    { path: "db/schema.rb", text: "ActiveRecord::Schema[8.0].define(version: 1) do\n  create_table \"things\" do |t|\n    t.string \"name\"\n  end\nend\n" },
+    { path: "node_modules/x/index.rb", text: "puts 1\n" },
+    { path: "tmp/cache/foo.rb", text: "puts 1\n" },
+    { path: "app/assets/logo.png", text: "\x89PNG" },
+  ]);
+  return { paths: Object.keys(window.__ide.srcMap).sort(), name: window.__ide.current.name };
+});
+check("open folder: entries outside the rules are filtered",
+  synth.paths.join(",") === "app/models/thing.rb,config/routes.rb,db/schema.rb" && synth.name === "synthetic",
+  synth.paths.join(","));
+
+// Back to a shipped app: the local row leaves the picker.
+if (appNames.length >= 2) {
+  await page.evaluate(() => window.__ide.loadApp(window.__ide.apps.find((a) => a.name === "blog")));
+  await page.waitForFunction(() => window.__ide.analysis && !window.__ide.current.local, null, { timeout: 120_000 });
+  const back = await page.evaluate(() => ({
+    hasLocal: !!document.querySelector('#app option[value="__local"]'),
+    hasOpen: !!document.querySelector('#app option[value="__open"]'),
+  }));
+  check("open folder: switching back drops the local entry, keeps open folder…",
+    !back.hasLocal && back.hasOpen, JSON.stringify(back));
 }
 
 await browser.close();

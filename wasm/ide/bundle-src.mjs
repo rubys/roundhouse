@@ -13,6 +13,7 @@
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { relative, join } from "node:path";
+import { SOURCE_EXT, WALK_DIRS, SINGLE_FILES } from "../lib/bundle-rules.mjs";
 
 const args = process.argv.slice(2);
 const root = args[0];
@@ -33,26 +34,17 @@ async function walk(dir, rootDir) {
   for (const e of entries) {
     const full = join(dir, e.name);
     if (e.isDirectory()) await walk(full, rootDir);
-    else if (/\.(rb|erb|haml|jbuilder|ruby|rabl|slim)$/.test(e.name)) {
+    else if (SOURCE_EXT.test(e.name)) {
       src[relative(rootDir, full)] = await readFile(full, "utf8");
     }
   }
 }
-// Rails-convention dirs, plus the Roda + Sequel layout (models/, views/,
-// db/migrate/, and the root-level app.rb / db.rb / seeds.rb / config.ru —
-// config.ru is what the roda front-end dispatches on). Each walk/read is a
-// no-op when the dir/file doesn't exist, so one list serves both shapes.
-for (const sub of ["app", "extras", "lib", "config/routes", "models", "views", "db/migrate"]) {
+// The dir walk + single-file list live in lib/bundle-rules.mjs, shared with
+// the in-browser folder loader so the two can't drift.
+for (const sub of WALK_DIRS) {
   await walk(join(root, sub), root);
 }
-for (const single of [
-  "db/schema.rb",
-  "config/routes.rb",
-  "config.ru",
-  "app.rb",
-  "db.rb",
-  "seeds.rb",
-]) {
+for (const single of SINGLE_FILES) {
   try { src[single] = await readFile(join(root, single), "utf8"); } catch {}
 }
 

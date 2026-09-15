@@ -17,6 +17,20 @@ no server, no app boot, no annotations:
 - **coverage** button — the ingest-gap punch list
 - **app** selector — switch the analyzed Rails app in place (the published
   site offers blog · Lobsters · Campfire · Mastodon)
+- **open folder…** (last row of the app selector) — analyze a checkout from
+  your own disk. Chromium gets the directory picker and keeps the handle,
+  so **↻** re-reads the tree after you edit in your real editor; other
+  browsers get a folder-upload dialog. Same inclusion rules as the shipped
+  bundles (`../lib/bundle-rules.mjs`), read through the File API in the
+  tab and handed to the analyzer worker — nothing is uploaded, and the
+  status line says so. Apps with a `node_modules/` beside `app/` open
+  fastest through the picker (it walks only the rule dirs); the upload
+  dialog enumerates the whole tree before we filter it.
+- **copy summary** — one pasteable line: app · files · errors · warnings ·
+  coverage notes · ingest gaps · `roundhouse <version>@<commit>`. The
+  commit comes from the wasm's `version` export (CI stamps
+  `ROUNDHOUSE_COMMIT`; a local `build.sh` build reports the version alone),
+  so a number posted from a local-folder run names the analyzer it came from.
 
 Edits re-analyze in the worker (~2.5s for Mastodon, debounced); queries
 answer from the previous snapshot meanwhile.
@@ -50,7 +64,9 @@ python3 -m http.server 8099                      # from wasm/ (the page imports 
 open http://localhost:8099/ide/
 ```
 
-Any Rails app works as the bundle; the published site ships Mastodon at
+Any Rails app works as the bundle — and visitors can skip the bundling
+step entirely with **open folder…**, which builds the same `{path → text}`
+map in the browser (`../lib/local-bundle.mjs`). The published site ships Mastodon at
 the SHA pinned in `.github/workflows/ci.yml` (`MASTODON_SHA`), plus the
 Lobsters benchmark app (`RUBY_BENCH_SHA`), ONCE Campfire (`CAMPFIRE_SHA`),
 and the blog fixture, with each app's LICENSE and commit embedded in its
@@ -64,7 +80,11 @@ the tab.
 
 `verify-ide.mjs` drives the page in headless chromium (Playwright, the
 `tests/browser_smoke` install) and asserts the demo beats: typed hover
-(incl. in HAML), typed completion, related files, coverage ledger. CI
+(incl. in HAML), typed completion, related files, coverage ledger, and
+the open-folder path (a real directory upload of `fixtures/real-blog`
+through the `webkitdirectory` input; the directory-picker loader, which
+needs a user gesture, runs under Node against the same fixture and must
+match `bundle-src.mjs` file for file). CI
 runs it as `browser-smoke-ide` against the same pinned bundle it
 publishes, so the demo can't silently regress.
 

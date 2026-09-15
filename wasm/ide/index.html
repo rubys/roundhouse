@@ -21,7 +21,7 @@
     header .sub { color: #888; }
     header button {
       background: #333; color: #ccc; border: 1px solid #444; border-radius: 4px;
-      padding: 3px 10px; font: inherit; cursor: pointer;
+      padding: 3px 10px; font: inherit; cursor: pointer; white-space: nowrap;
     }
     header button:hover { background: #3c3c3c; }
     header select {
@@ -138,11 +138,14 @@
     <h1>roundhouse ide</h1>
     <span class="sub">whole-program Rails inference, in your browser — nothing runs on a server</span>
     <label id="appLabel" for="app">app</label>
-    <select id="app" title="switch Rails app"></select>
+    <select id="app" title="switch Rails app, or open a checkout from your disk"></select>
+    <input id="folderInput" type="file" webkitdirectory multiple hidden />
+    <button id="btnReload" title="re-read the folder from disk and re-analyze" style="display:none">↻</button>
     <button id="btnOpen" title="⌘P">open…</button>
     <button id="btnRelated" title="⌘⇧R">related</button>
     <button id="btnTrace" title="⌘⇧T">trace</button>
     <button id="btnGaps">coverage</button>
+    <button id="btnSummary" title="copy a one-line summary: app · files · ledger counts · analyzer build">copy summary</button>
     <span id="status">booting…</span>
     <span id="counts"></span>
   </header>

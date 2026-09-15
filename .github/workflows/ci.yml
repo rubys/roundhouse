@@ -108,6 +108,9 @@ jobs:
       - name: Build roundhouse_wasm.wasm
         env:
           WASI_SDK_PATH: /opt/wasi-sdk
+          # Stamped into the wasm's `version` export, which /ide/ puts on
+          # its copyable summary line.
+          ROUNDHOUSE_COMMIT: ${{ github.sha }}
         run: cargo build --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml
       - name: Upload wasm artifact
         uses: actions/upload-artifact@v7

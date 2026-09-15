@@ -13,6 +13,9 @@
 //   ⌘⇧T          → traceroute: pick a route/action, pin its request
 //                  chain in the right panel (hops jump; footer is the
 //                  priced gap report with copyable candidate RBS)
+//   open folder… → analyze a checkout from the visitor's own disk
+//                  (lib/local-bundle.mjs): same ingest as the shipped
+//                  bundles, read through the File API, never uploaded
 //
 // Edits re-analyze in the worker (debounced); queries answer from the
 // previous snapshot meanwhile — stale-by-one-edit, the standard
@@ -21,12 +24,16 @@
 import { loadMonaco, registerTypedCompletion } from "../lib/editor.js";
 import { buildTree, allDirPaths, renderTree } from "../lib/tree.js";
 import { createClient } from "../lib/wasm-client.mjs";
+import { fromFileList, fromDirectoryHandle, fromEntries, hasDirectoryPicker } from "../lib/local-bundle.mjs";
 
 const els = {
   status: document.getElementById("status"),
   counts: document.getElementById("counts"),
   app: document.getElementById("app"),
   appLabel: document.getElementById("appLabel"),
+  folderInput: document.getElementById("folderInput"),
+  reload: document.getElementById("btnReload"),
+  summary: document.getElementById("btnSummary"),
   tree: document.getElementById("tree"),
   editor: document.getElementById("editor"),
   editorHead: document.getElementById("editorHead"),
@@ -67,6 +74,9 @@ let activePath = null;
 const openDirs = new Set(["app", "app/models", "app/controllers", "app/views"]);
 const mru = [];
 let apps = [];               // app-picker manifest entries ({name,label,src})
+let current = null;          // the loaded bundle's {name, local}
+let localHandle = null;      // FileSystemDirectoryHandle when opened via the picker (re-readable)
+let version = null;          // analyzer build, from the wasm's `version` export
 
 function status(text) { els.status.textContent = text; }
 
@@ -94,7 +104,8 @@ async function reanalyze() {
       els.counts.textContent =
         `${sev.error} errors · ${sev.warning} warnings · ${sev.info} coverage notes · ` +
         `${analysis.gaps.length} ingest gaps`;
-      status(`analyzed ${analysis.files.length} files in ${(result.elapsed_ms / 1000).toFixed(1)}s`);
+      const where = current?.local ? " — read from your disk, nothing uploaded" : "";
+      status(`analyzed ${analysis.files.length} files in ${(result.elapsed_ms / 1000).toFixed(1)}s${where}`);
       refreshAllMarkers();
     }
   } catch (err) {
@@ -564,6 +575,12 @@ async function loadApp(entry) {
     status(`could not load ${entry.src} (${e.message}) — generate it with bundle-src.mjs`);
     return;
   }
+  localHandle = null;
+  await installBundle(bundle);
+}
+
+// Swap the loaded app for `bundle` (a shipped one or a local folder).
+async function installBundle(bundle) {
   // Tear down the outgoing app: MRU, pinned trace, and the stale analysis
   // snapshot all belong to the app we're leaving. The outgoing models stay
   // attached until the new file's model replaces the active one — disposing
@@ -579,12 +596,103 @@ async function loadApp(entry) {
   els.counts.textContent = "";
 
   srcMap = bundle.src;
-  document.title = `roundhouse ide — ${bundle.name || "rails app"}`;
+  current = { name: bundle.name || "rails app", local: !!bundle.local };
+  document.title = `roundhouse ide — ${current.name}`;
+  syncLocalControls();
   redrawTree();
   await reanalyze();
   const first = bundle.open || Object.keys(srcMap).find((p) => p.includes("controller")) || Object.keys(srcMap)[0];
   if (first) openFile(first);
   for (const m of stale) m.dispose(); // safe now: the editor holds a fresh model
+}
+
+// ── Local folders ────────────────────────────────────────────────────
+// The picker's "open folder…" row. Chromium gets the directory picker (we
+// keep the handle, so ↻ re-reads the tree after edits in a real editor);
+// everything else gets the webkitdirectory input. Either way the text
+// goes File API → worker and no further: the status line says so.
+const LOCAL_OPT = "__local";
+const OPEN_OPT = "__open";
+
+function syncLocalControls() {
+  const local = !!current?.local;
+  els.reload.style.display = local && localHandle ? "" : "none";
+  let opt = els.app.querySelector(`option[value="${LOCAL_OPT}"]`);
+  if (local) {
+    if (!opt) {
+      opt = document.createElement("option");
+      opt.value = LOCAL_OPT;
+      els.app.insertBefore(opt, els.app.querySelector(`option[value="${OPEN_OPT}"]`));
+    }
+    opt.textContent = `${current.name} (local)`;
+    els.app.value = LOCAL_OPT;
+    // A local app has no shareable deep-link; drop a stale ?app=.
+    const u = new URL(location.href);
+    if (u.searchParams.has("app")) { u.searchParams.delete("app"); history.replaceState(null, "", u); }
+  } else if (opt) {
+    opt.remove();
+  }
+}
+
+async function openLocalFolder() {
+  if (hasDirectoryPicker) {
+    let handle;
+    try { handle = await showDirectoryPicker({ mode: "read" }); }
+    catch { return false; } // cancelled
+    return openLocalHandle(handle);
+  }
+  els.folderInput.value = "";
+  els.folderInput.click();
+  return true; // the input's change handler takes it from here
+}
+
+async function openLocalHandle(handle) {
+  status(`reading ${handle.name}…`);
+  const bundle = await fromDirectoryHandle(handle);
+  if (!Object.keys(bundle.src).length) {
+    status(`${handle.name} has no Rails sources (no app/, config/routes.rb, db/schema.rb)`);
+    return false;
+  }
+  localHandle = handle;
+  await installBundle(bundle);
+  return true;
+}
+
+async function openLocalFiles(files) {
+  const bundle = await fromFileList(files);
+  if (!bundle) return false;
+  if (!Object.keys(bundle.src).length) {
+    status(`${bundle.name} has no Rails sources (no app/, config/routes.rb, db/schema.rb)`);
+    return false;
+  }
+  localHandle = null;
+  await installBundle(bundle);
+  return true;
+}
+
+// The verifier's seam: root-relative {path, text} pairs, no File objects.
+async function openLocalEntries(name, entries) {
+  localHandle = null;
+  await installBundle(fromEntries(name, entries));
+}
+
+// Re-read the folder from disk (directory-picker path only) — the visitor
+// edits in their own editor and the tab re-analyzes. Unsaved Monaco edits
+// are discarded on purpose: disk is the source of truth for a local app.
+async function reloadLocal() {
+  if (!localHandle) return;
+  await openLocalHandle(localHandle);
+}
+
+// One pasteable line naming the app, its ledger, and the analyzer build —
+// the number to post somewhere and compare against a later run.
+function summaryLine() {
+  if (!analysis) return "";
+  const sev = { error: 0, warning: 0, info: 0 };
+  for (const d of analysis.diagnostics) sev[d.severity] = (sev[d.severity] || 0) + 1;
+  const build = version ? `roundhouse ${version.version}${version.commit ? `@${version.commit.slice(0, 12)}` : ""}` : "roundhouse";
+  return `${current?.name || "app"} · ${analysis.files.length} files · ${sev.error} errors · ` +
+    `${sev.warning} warnings · ${sev.info} coverage notes · ${analysis.gaps.length} ingest gaps · ${build}`;
 }
 
 async function boot() {
@@ -632,6 +740,7 @@ async function boot() {
   // verify-ide harness, which drives that default).
   let manifest = null;
   try { manifest = await loadBundle(new URL("./apps.json", import.meta.url)); } catch { /* single-app dev */ }
+  try { version = await rpc("version", {}); } catch { version = null; }
   if (manifest && manifest.apps && manifest.apps.length) {
     apps = manifest.apps;
     for (const a of apps) {
@@ -640,6 +749,36 @@ async function boot() {
       opt.textContent = a.label || a.name;
       els.app.appendChild(opt);
     }
+  }
+  // The picker always ends with "open folder…" — a checkout on the
+  // visitor's disk is an app like any other, just not one the site ships.
+  const openOpt = document.createElement("option");
+  openOpt.value = OPEN_OPT;
+  openOpt.textContent = "open folder…";
+  els.app.appendChild(openOpt);
+  els.app.onchange = async () => {
+    const v = els.app.value;
+    if (v === OPEN_OPT) {
+      const before = current;
+      const ok = await openLocalFolder();
+      // Cancelled (picker path): put the selector back where it was.
+      if (!ok) els.app.value = before?.local ? LOCAL_OPT : (apps.find((a) => a.name === before?.name)?.name ?? els.app.value);
+      return;
+    }
+    if (v === LOCAL_OPT) return;
+    const a = apps.find((x) => x.name === v);
+    if (a) { syncAppUrl(a.name); loadApp(a); }
+  };
+  els.folderInput.onchange = () => openLocalFiles(els.folderInput.files);
+  els.reload.onclick = reloadLocal;
+  els.summary.onclick = async () => {
+    const line = summaryLine();
+    if (!line) return;
+    try { await navigator.clipboard.writeText(line); status("summary copied"); }
+    catch { status(line); }
+  };
+
+  if (apps.length) {
     // Deep-link: ?app=<name> wins over the manifest default (falls back to it,
     // then to the first app, if the param is absent or unknown).
     const want = new URLSearchParams(location.search).get("app");
@@ -647,13 +786,16 @@ async function boot() {
       || (manifest.default && apps.find((a) => a.name === manifest.default))
       || apps[0];
     els.app.value = def.name;
-    els.app.onchange = () => {
-      const a = apps.find((x) => x.name === els.app.value);
-      if (a) { syncAppUrl(a.name); loadApp(a); }
-    };
     await loadApp(def);
   } else {
-    els.appLabel.style.display = els.app.style.display = "none";
+    // Single-app dev (no apps.json): the lone hand-bundled app-src.json,
+    // listed so the selector still reads sensibly beside "open folder…".
+    const opt = document.createElement("option");
+    opt.value = "app";
+    opt.textContent = "app";
+    els.app.insertBefore(opt, openOpt);
+    els.app.value = "app";
+    apps = [];
     await loadApp({ name: "app", src: "app-src.json" });
   }
 }
@@ -694,6 +836,11 @@ window.__ide = {
   openFile,
   runTrace,
   loadApp,
+  openLocalEntries,
+  openLocalFiles,
+  summaryLine,
+  get current() { return current; },
+  get version() { return version; },
   get analysis() { return analysis; },
   get activePath() { return activePath; },
   get srcMap() { return srcMap; },

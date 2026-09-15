@@ -18,6 +18,7 @@ const OP_EXPORT = {
   related: "related_files",
   traceroute: "traceroute",
   traceTargets: "trace_targets",
+  version: "version",
 };
 
 // Assigned synchronously by the `init` handler so an op that arrives before

@@ -646,6 +646,20 @@ pub unsafe extern "C" fn trace_targets(_input_ptr: *const u8, _input_len: u32) -
     pack(trace_targets_inner())
 }
 
+/// Which analyzer answered. The /ide/ summary line carries this so a
+/// number someone pastes from a local-folder analysis names the build it
+/// came from: the crate version always, the commit when the build set
+/// `ROUNDHOUSE_COMMIT` (CI does; a local `build.sh` leaves it null).
+/// Input is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn version(_input_ptr: *const u8, _input_len: u32) -> u64 {
+    let out = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("ROUNDHOUSE_COMMIT"),
+    });
+    pack(out.to_string())
+}
+
 // ── C ABI exports ────────────────────────────────────────────────────
 
 /// Allocate a buffer of the given size in wasm linear memory and return
