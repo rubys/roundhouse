@@ -2135,21 +2135,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site/lib _site/playground _site/studio
-          # Shared lib: code modules + the freshly-built compiler wasm (from the
-          # build-wasm artifact — not committed; see that job + wasm/vendor/).
-          cp wasm/lib/transpile.mjs \
-             wasm/lib/analyzer.mjs \
-             wasm/lib/engine.mjs \
-             wasm/lib/worker.mjs \
-             wasm/lib/wasm-client.mjs \
-             wasm/lib/wasi-shim.mjs \
-             wasm/lib/editor.js \
-             wasm/lib/tree.js \
-             wasm/lib/bundle.mjs \
-             wasm/lib/test-runtime.mjs \
-             wasm/lib/sourcemap.mjs \
-             wasm/lib/app-host.mjs \
-             _site/lib/
+          # Shared lib: every code module + the freshly-built compiler wasm (from
+          # the build-wasm artifact — not committed; see that job + wasm/vendor/).
+          # A glob, not a list: browser-smoke-ide serves wasm/ directly, so a
+          # module missing from a hand-kept list only fails on the live site
+          # (local-bundle.mjs, 2026-09-15).
+          cp wasm/lib/*.mjs wasm/lib/*.js _site/lib/
           cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
