@@ -1354,11 +1354,21 @@ pack_spinel_tree() {
     local rh sp build_status
     rh="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     sp="$(command -v spinel >/dev/null 2>&1 && spinel --version 2>/dev/null || echo 'not on PATH')"
+    # The run's own name and where the publisher puts it. A tree in hand
+    # has to say which published run it belongs to: the roundhouse SHA
+    # dated one (spinel#4503, a box measuring a 09-11 emit on 09-15), but
+    # only for someone who could map a SHA to a publish. The stamp and
+    # the URL make it one line.
+    run="$(basename "$OUT_DIR")"
+    archive_url="${CAMPFIRE_ARCHIVE_URL:-https://roundbench.showcase.party/archive/campfire}"
 
     # One plain front-end run. Non-fatal either way: this records the
     # state, it does not gate on it.
+    # Not `-o /dev/null`: spinel refuses to write over a file it did not
+    # write, and /dev/null is one, so every archive since that refusal
+    # landed said "front end: REFUSED" about a tree that compiled.
     if command -v spinel >/dev/null 2>&1; then
-        if (cd "$SP_EMIT" && spinel -c --rbs . main.rb -o /dev/null) \
+        if (cd "$SP_EMIT" && spinel -c --rbs . main.rb -o "$LOG_DIR/spinel-front-end.c") \
                 > "$LOG_DIR/spinel-front-end.log" 2>&1; then
             build_status="front end: OK (emitted C)"
         else
@@ -1387,6 +1397,9 @@ Emitted by roundhouse \`$rh\` from once-campfire. Strict emit, no
     roundhouse : $rh
     spinel     : $sp
     packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    run        : $run
+    published  : $archive_url/$run/
+    latest     : $archive_url/latest/spinel-tree.tgz
     $build_status
 
 ## What this is
