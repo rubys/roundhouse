@@ -34,5 +34,10 @@ module ActiveSupport
     def to_s: () -> String
     def seconds: () -> Integer
     def ==: (untyped other) -> bool
+    def <=>: (untyped other) -> Integer
+    def <: (untyped other) -> bool
+    def <=: (untyped other) -> bool
+    def >: (untyped other) -> bool
+    def >=: (untyped other) -> bool
   end
 end

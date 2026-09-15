@@ -144,5 +144,32 @@ module ActiveSupport
     def ==(other)
       other.is_a?(Duration) ? @seconds == other.seconds : @seconds == other
     end
+
+    # Ordering, the same rule: Rails' Duration compares as its seconds
+    # against a Numeric or another Duration. spinel's net/http reads a
+    # campfire webhook's `open_timeout = 7.seconds` as `limit <= 0`
+    # before it connects, which raised "comparison of Duration with 0
+    # failed" the moment #4492 let that path be reached. Spelled out
+    # rather than through `Comparable` so every operator is a plain
+    # method on this lane.
+    def <=>(other)
+      @seconds <=> (other.is_a?(Duration) ? other.seconds : other)
+    end
+
+    def <(other)
+      (self <=> other) < 0
+    end
+
+    def <=(other)
+      (self <=> other) <= 0
+    end
+
+    def >(other)
+      (self <=> other) > 0
+    end
+
+    def >=(other)
+      (self <=> other) >= 0
+    end
   end
 end
