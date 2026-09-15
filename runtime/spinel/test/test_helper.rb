@@ -1179,7 +1179,25 @@ module RequestDispatch
     ActionController::Current.request = controller.request
     ActionController::Current.controller = controller
     @__request = controller.request
-    controller.process_action(matched.action)
+    # The action runs inside a connection lease, as it does under every
+    # production dispatcher and under Rails' own integration session
+    # (the executor wraps each request). Without one, a request on a
+    # thread the test started ran on `Db.current_conn`'s unleased
+    # fallback — pool connection 0 — and campfire's first-run race test
+    # (five `Integration::Session`s on five threads) stepped one sqlite
+    # connection from several OS workers at once: a cursor fault in
+    # sqlite3VdbeExec, not the race it was written to catch. Re-entrant,
+    # as the executor is, so a test already inside a lease (the job
+    # drain, a nested dispatch) keeps its connection — spelled out here
+    # rather than through `Rails.application.executor.wrap` because a
+    # yielder forwarded through a second yielder types its block value
+    # once for every site (matz/spinel#4495), and campfire's web-push
+    # handler already wraps with a block of another type.
+    if Db.in_lease?
+      controller.process_action(matched.action)
+    else
+      Db.with_connection { controller.process_action(matched.action) }
+    end
     @__flash = controller.flash
     # Fold this response's Set-Cookie writes back into the browser.
     @__cookies = ActionController::CookieJar.new(
