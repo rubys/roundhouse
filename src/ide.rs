@@ -3285,6 +3285,53 @@ end
         assert_eq!(audit.condition.as_deref(), Some("if: :audited?"));
     }
 
+    /// Two templates with one view name — `_message.html.erb` and
+    /// `_message.json.jbuilder` are both `messages/_message` — union
+    /// their render edges. campfire's jbuilder (no renders) was walked
+    /// after the ERB and erased its three partials from the graph.
+    #[test]
+    fn same_named_templates_union_their_render_edges() {
+        let app = tree_app(&[
+            (
+                "app/controllers/messages_controller.rb",
+                "class MessagesController < ApplicationController
+  def index
+    @messages = Message.all
+  end
+end
+",
+            ),
+            ("app/models/message.rb", "class Message < ApplicationRecord
+end
+"),
+            ("db/schema.rb", "ActiveRecord::Schema[8.0].define(version: 1) do
+  create_table \"messages\" do |t|
+    t.string \"body\"
+  end
+end
+"),
+            ("config/routes.rb", "Rails.application.routes.draw do
+  resources :messages, only: :index
+end
+"),
+            ("app/views/messages/index.html.erb", "<%= render partial: \"messages/message\", collection: @messages %>\n"),
+            ("app/views/messages/_message.html.erb", "<%= render \"messages/actions\", message: message %>\n"),
+            ("app/views/messages/_message.json.jbuilder", "json.id message.id\n"),
+            ("app/views/messages/_actions.html.erb", "<p><%= message.body %></p>\n"),
+        ]);
+        let edges = app.render_edges.get(&Symbol::from("messages/_message")).cloned().unwrap_or_default();
+        assert!(
+            edges.contains(&Symbol::from("messages/_actions")),
+            "the ERB's edge survives the jbuilder twin: {edges:?}"
+        );
+        let rel = related_files(&app, "app/views/messages/_actions.html.erb");
+        assert!(
+            rel.iter().any(|r| r.kind == RelatedKind::Renderer && r.label == "messages/_message"),
+            "the partial knows its renderer; got {:?}",
+            rel.iter().map(|r| (&r.label, r.kind)).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn gap_report_complete_when_every_hop_resolves() {
         let app = real_blog();

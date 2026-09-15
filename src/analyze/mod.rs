@@ -2581,7 +2581,7 @@ impl Analyzer {
                 &mut partial_locals_by_name,
                 &mut targets,
             );
-            render_edges.insert(view.name.clone(), targets);
+            record_render_edges(&mut render_edges, &view.name, targets);
         }
 
         // Harvest partial→partial render edges too (comment trees etc.).
@@ -2596,7 +2596,7 @@ impl Analyzer {
             let mut throwaway = HashMap::new();
             let mut targets = Vec::new();
             extract_partial_render_sites(&view.body, &view.name, &mut throwaway, &mut targets);
-            render_edges.insert(view.name.clone(), targets);
+            record_render_edges(&mut render_edges, &view.name, targets);
         }
 
         // Propagate each renderer's ivar context onto the partials it
@@ -3792,6 +3792,27 @@ fn body_tail_terminal_kind(
         return Some(crate::catalog::ReturnKind::ArrayOfSelf);
     }
     entry.return_kind
+}
+
+/// Record a template's renderer→partial edges under its view name,
+/// UNIONED with any already there. A view name is format-blind —
+/// campfire's `messages/_message.html.erb` and
+/// `messages/_message.json.jbuilder` are both `messages/_message` —
+/// and a plain insert let whichever template was walked last win: the
+/// jbuilder's empty list erased the ERB's three partials, so
+/// `_actions` and `_presentation` had no renderer, no ivar context,
+/// and no feeder, and the dead-view walk called them dead.
+fn record_render_edges(
+    render_edges: &mut HashMap<Symbol, Vec<Symbol>>,
+    view: &Symbol,
+    targets: Vec<Symbol>,
+) {
+    let entry = render_edges.entry(view.clone()).or_default();
+    for t in targets {
+        if !entry.contains(&t) {
+            entry.push(t);
+        }
+    }
 }
 
 /// A scope body whose tail is a call to a MATERIALIZING sibling scope
