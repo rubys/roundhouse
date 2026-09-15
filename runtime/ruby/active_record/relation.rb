@@ -525,11 +525,24 @@ module ActiveRecord
     def to_a
       cached = @records
       return cached.dup unless cached.nil?
-      rows = ActiveRecord.adapter.select_rows(to_sql)
-      records = rows.map { |row| @model.instantiate(row) }
+      records = load_records
       @model.preload_associations(records, @includes) if @includes.length > 0
       @records = records
       records.dup
+    end
+
+    # The rows, hydrated. With no explicit `select`, the projection is
+    # the model's own column list and the model hydrates typed records
+    # straight from the statement (`_hydrate_all`) — the positions are
+    # fixed at compile time, so no String-keyed Hash per row. An
+    # explicit `select` can project anything, and keeps the Hash path.
+    def load_records
+      if @select_sql.nil?
+        @model._hydrate_all(select_sql_with(@model._columns_sql))
+      else
+        rows = ActiveRecord.adapter.select_rows(to_sql)
+        rows.map { |row| @model.instantiate(row) }
+      end
     end
 
     # Implicit array conversion — Rails delegates `to_ary` to the

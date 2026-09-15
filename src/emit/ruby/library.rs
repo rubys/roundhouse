@@ -6746,8 +6746,7 @@ def self._preload_batch_{name}(records)
   ids.uniq!
   by_id = {{}}
   if ids.length > 0
-    ActiveRecord.adapter.select_rows("SELECT {table}.* FROM {table} WHERE {table}.id IN (" + Db.escape_int_list(ids) + ")").each do |row|
-      rec = {target}.instantiate(row)
+    {target}._hydrate_all("SELECT " + {target}._columns_sql + " FROM {table} WHERE {table}.id IN (" + Db.escape_int_list(ids) + ")").each do |rec|
       by_id[rec.id] = rec
     end
   end

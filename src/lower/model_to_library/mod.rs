@@ -1514,6 +1514,19 @@ fn build_class_info(
         "delete_all",
         fn_sig(vec![], Ty::Nil),
     );
+    // The Relation load path (`Relation#to_a`): the model's qualified
+    // column list, and a typed multi-hydrate over a caller-composed
+    // SELECT that projects exactly that list. Base carries Hash-path
+    // defaults; the per-model emit overrides both.
+    insert_default(&mut info.class_methods, "_columns_sql", fn_sig(vec![], Ty::Str));
+    insert_default(
+        &mut info.class_methods,
+        "_hydrate_all",
+        fn_sig(
+            vec![(Symbol::from("sql"), Ty::Str)],
+            Ty::Array { elem: Box::new(owner_ty.clone()) },
+        ),
+    );
 
     // Typed factory taking the synthesized `<Model>Row` (one typed slot
     // per schema column). The body-typer needs this signature to resolve

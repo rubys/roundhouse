@@ -31,6 +31,8 @@
 //!   `_adapter_count` — SELECT COUNT(*), returns Integer
 //!   `_adapter_exists_by_id?(id)` — SELECT 1 LIMIT 1, returns Bool
 //!   `_adapter_truncate` — DELETE FROM table (test setup)
+//!   `_columns_sql` — the schema columns as a qualified SELECT list
+//!   `_hydrate_all(sql)` — run a SELECT over `_columns_sql`, typed rows
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
@@ -63,6 +65,8 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_truncate(owner, table, schema));
     methods.push(synth_delete_all(owner, table));
     methods.push(synth_adapter_reload(owner, table));
+    methods.push(synth_columns_sql(owner, table));
+    methods.push(synth_hydrate_all(owner));
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +569,126 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         params: vec![],
         body,
         signature: Some(fn_sig(vec![], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+            block_param: None,
+    }
+}
+
+/// `def self._columns_sql; "<table>.<col> AS <col>, …"; end`
+///
+/// The schema columns, table-qualified, in the order `from_stmt` reads
+/// them. `Relation#to_a` projects this instead of `<table>.*` so a
+/// run-time composed SELECT (joins and all) still yields rows whose
+/// positions the emit fixed at compile time — the precondition for
+/// hydrating through `from_stmt` rather than a String-keyed Hash. The
+/// qualification is what keeps `id` unambiguous under a JOIN; the
+/// alias is what keeps `ORDER BY created_at` unambiguous under one:
+/// sqlite resolves an ORDER BY name against the output columns' ALIASES
+/// before the FROM tables, and `<table>.*` names its outputs, while a
+/// bare `<table>.<col>` does not (campfire's `user.rooms.order(:created_at)`
+/// joins memberships, which has its own).
+fn synth_columns_sql(owner: &ClassId, table: &Table) -> MethodDef {
+    let cols_csv: String = table
+        .columns
+        .iter()
+        .map(|c| format!("{t}.{c} AS {c}", t = table.name.as_str(), c = c.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    MethodDef {
+        name: Symbol::from("_columns_sql"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body: arel_lit_str(cols_csv),
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+            block_param: None,
+    }
+}
+
+/// `def self._hydrate_all(sql); stmt = Db.prepare(sql); results = [];
+/// while Db.step?(stmt); results << from_stmt(stmt); end;
+/// Db.finalize(stmt); results; end`
+///
+/// The `_adapter_all` loop with the SELECT supplied by the caller.
+/// The contract is that `sql` projects exactly `_columns_sql` — which
+/// is what `Relation#to_a` composes when the app never said
+/// `select(...)`. One typed record per row and no Hash in between:
+/// no per-cell key hashing on the write or the read, no boxing, and
+/// nothing for the collector to finalise but the record itself.
+fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
+    let sql = Symbol::from("sql");
+    let stmt = Symbol::from("stmt");
+    let results = Symbol::from("results");
+    let db = ClassId(Symbol::from("Db"));
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_array_ty = Ty::Array { elem: Box::new(owner_ty) };
+
+    let stmt_assign = arel_assign(&stmt, arel_db_call(&db, "prepare", vec![var_ref(&sql)]));
+    // Typed empty literal — same reason as the visitor's multi hydrate
+    // (Crystal's `[] of Owner`).
+    let results_init = arel_assign(
+        &results,
+        crate::lower::typing::with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array { elements: vec![], style: crate::expr::ArrayStyle::Brackets },
+            ),
+            owner_array_ty.clone(),
+        ),
+    );
+    let from_stmt = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![owner.0.clone()] },
+            )),
+            method: Symbol::from("from_stmt"),
+            args: vec![var_ref(&stmt)],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let push = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(&results)),
+            method: Symbol::from("<<"),
+            args: vec![from_stmt],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let while_loop = Expr::new(
+        Span::synthetic(),
+        ExprNode::While {
+            cond: arel_db_call(&db, "step?", vec![var_ref(&stmt)]),
+            body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![push] }),
+            until_form: false,
+        },
+    );
+    let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq {
+            exprs: vec![stmt_assign, results_init, while_loop, finalize, var_ref(&results)],
+        },
+    );
+
+    MethodDef {
+        name: Symbol::from("_hydrate_all"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(sql.clone())],
+        body,
+        signature: Some(fn_sig(vec![(sql, Ty::Str)], owner_array_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

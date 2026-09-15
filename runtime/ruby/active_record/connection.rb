@@ -312,6 +312,17 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).first
     end
 
+    # The Relation load path's Hash fallback for a hand-written model
+    # (one with its own `instantiate` and no lowerer-emitted
+    # `_hydrate_all`): the adapter's rows through `instantiate`, which
+    # is what `Relation#to_a` did for every model before the typed
+    # path. Ruby-family-only because `select_rows` is — the strict
+    # targets' adapter contract stops at `all`/`find`/`count`, and
+    # their models always carry the emitted override.
+    def self._hydrate_all(sql)
+      ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
+    end
+
     # Rails' `update_attribute`: one writer, then save WITHOUT
     # validations (validation callbacks skipped too) — save callbacks
     # still run. Specs use it to construct records a validation would

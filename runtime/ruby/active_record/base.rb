@@ -194,6 +194,26 @@ module ActiveRecord
       records.empty? ? nil : records[-1]
     end
 
+    # The Relation load path. `Relation#to_a` composes its SELECT over
+    # `_columns_sql` and hands it to `_hydrate_all`, so the two are one
+    # contract: whatever the first projects, the second reads. The
+    # lowerer-emitted per-model overrides project the schema columns in
+    # `from_stmt` order and hydrate typed records straight from the
+    # statement (synth_columns_sql / synth_hydrate_all) — no String-keyed
+    # Hash per row, which on a 600-row page was the largest single
+    # allocation the request made. This default is the compile surface
+    # only, like `instantiate` above: the Hash-path fallback for
+    # hand-written models (`<table>.*` + `select_rows` + `instantiate`)
+    # lives in the ruby-family connection.rb reopen, because the
+    # strict targets' `AdapterInterface` has no `select_rows`.
+    def self._columns_sql
+      "#{table_name}.*"
+    end
+
+    def self._hydrate_all(_sql)
+      raise NotImplementedError, "#{name}._hydrate_all must be overridden"
+    end
+
     # _adapter_insert / _adapter_update / _adapter_delete are
     # instance methods (not class methods) so Base#save / Base#destroy
     # call them via implicit-self dispatch — bypassing the

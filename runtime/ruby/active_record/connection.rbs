@@ -37,6 +37,7 @@ module ActiveRecord
     def _note_hydrated: () -> void
     def attribute_previously_was: (String name) -> untyped
     def self.first: () -> untyped
+    def self._hydrate_all: (String sql) -> Array[Base]
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void

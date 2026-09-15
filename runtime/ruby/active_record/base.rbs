@@ -165,6 +165,8 @@ module ActiveRecord
     def self._adapter_find_by_id: (Integer id) -> Base?
     def self._adapter_all: () -> Array[Base]
     def self._adapter_last: () -> Base?
+    def self._columns_sql: () -> String
+    def self._hydrate_all: (String sql) -> Array[Base]
     def _adapter_insert: () -> Integer
     def _adapter_update: () -> void
     def _adapter_delete: () -> void

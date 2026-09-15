@@ -766,3 +766,38 @@ Three things the shape taught:
 Scope stays at `count`: `sum` / `average` / `minimum` / `maximum` take the same
 grouped-Hash return in Rails, and each needs its own lowering and runtime method
 before typing it would accept anything a target can emit.
+
+### The dynamic path hydrates through `from_stmt` now (2026-09-14)
+
+The dichotomy priced above — folded chains read `Db.column_*` positionally into one
+object per row, dynamic Relations built a `Hash[String, untyped]` per row and widened it
+through `<Model>Row.from_raw` — is closed for the common case without a plan, a header
+read, or a new adapter method. The only reason `Relation#to_a` could not use the
+positional reader was that `to_sql` projected `<table>.*`, so the emit did not own the
+column order. It projects the model's own list now: every schema-backed model carries a
+synthesized `_columns_sql` (`<table>.<col> AS <col>, …`, in `from_stmt`'s order) and
+`_hydrate_all(sql)` (the `_adapter_all` loop over a caller-composed SELECT), and
+`Relation#load_records` composes the one over the other whenever the app never said
+`select(...)`. The belongs_to preload batch uses the same pair; has_many preloads
+already went through `to_a`. An explicit `select`, `pluck`, the through-preload's
+`__src` column and Active Storage's joins keep the Hash path — none is where the rows are.
+
+Two things the shape insisted on. The qualification keeps `id` unambiguous under a JOIN,
+and the `AS <col>` alias is not decoration: sqlite resolves an `ORDER BY created_at`
+against the output columns' aliases before the FROM tables, `<table>.*` names its
+outputs, and a bare `<table>.<col>` does not — campfire's `user.rooms.order(:created_at)`
+joins memberships, which has its own `created_at`, and the unaliased form failed five of
+its controller tests with "ambiguous column name". And the Base default for
+`_hydrate_all` is a compile stub, like `instantiate`'s: the Hash fallback for a
+hand-written model lives in the ruby-family `connection.rb` reopen, because the strict
+targets' `AdapterInterface` has no `select_rows` and the rust and go lanes said so.
+
+Measured on the Mac with `scripts/alloc-window` (compare seed, `/rooms/1`, 100-request
+window): main 2,342 KB / 6,091 allocations a request; this change 2,311 KB / 5,355 — the
+row Hashes and their cells (`select_rows` 1,544), `from_raw` (105), `instantiate` (209) and
+the `to_a` map (151) gone, the cell Strings (`column_text` 1,118) and one record per row
+(`from_stmt` 263) in their place. That number needs spinel PR #4487: without it the class-tag
+dispatch on `@model` rendered `select_sql_with(...)` once per candidate class — 17 models,
+so 1,071 SQL compositions a request where 63 were asked for, and the page read 2,623 KB /
+6,529 (worse than main). The site counts were exactly 17× the pre-change counts, which is
+what named the mechanism; the repro is the PR's test.

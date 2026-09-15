@@ -1230,7 +1230,19 @@ fn every_runtime_method_body_concretely_typed() {
     // pool's invalidation path runs on both lanes, and the suite's
     // `destroys invalid subscriptions` passes through the slot's
     // `raises` link rather than the bridge.
-    const CEILING: usize = 414;
+    //
+    // 414 -> 416: `Relation#load_records`, the typed load path. TWO
+    // sites, both reads of the one `@model` the Relation already held
+    // untyped: `_columns_sql` (the projection) and `_hydrate_all` (the
+    // hydrate), beside the `instantiate` the explicit-`select` branch
+    // keeps. `untyped` for the reason `@model` always was — the
+    // Relation is one class over every model, and the class object it
+    // carries has no type on any lane. What it bought: a Relation
+    // without `select(...)` hydrates typed records straight from the
+    // statement through the model's `from_stmt`, and the String-keyed
+    // Hash per row — the largest single allocation on campfire's
+    // 600-row room page — is gone from that path.
+    const CEILING: usize = 416;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

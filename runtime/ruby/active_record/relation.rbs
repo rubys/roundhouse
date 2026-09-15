@@ -74,6 +74,7 @@ module ActiveRecord
     def klass: () -> Class
 
     def to_a: () -> Array[untyped]
+    def load_records: () -> Array[untyped]
     def to_ary: () -> Array[untyped]
     def ==: (untyped other) -> bool
     def filter: () { (untyped) -> bool } -> Array[untyped]

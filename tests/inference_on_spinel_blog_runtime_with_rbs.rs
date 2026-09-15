@@ -778,7 +778,18 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // extension `revise(granted: [])` and `room.users.include?(user)` on
     // the compiled lane — record `==` exists only on the CRuby overlay,
     // so a compiled target compared pointers.
-    const CEILING: usize = 922;
+    // 2026-09-14 922 -> 931, +9, MEASURED by diffing the dump: the
+    // Relation load path. `Base._columns_sql`, the `_hydrate_all`
+    // compile stub, and connection.rb's Hash fallback (+6: the
+    // `table_name`/`name`/`instantiate` self-sends and the adapter
+    // chain, the same shapes `_adapter_all` already carries) and
+    // `Relation#load_records` (+3 net: `to_sql`/`select_sql_with`/
+    // `load_records` self-sends, the `rows` map moved out of `to_a`).
+    // Every one is the self-send shape; none is a new declared
+    // `untyped`. What it buys: a Relation without `select(...)`
+    // hydrates through the model's positional `from_stmt` and no
+    // String-keyed Hash is built per row.
+    const CEILING: usize = 931;
 
     assert!(
         all_untyped.len() <= CEILING,
