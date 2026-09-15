@@ -1,10 +1,12 @@
 {
   "name": "roundhouse-lsp-client",
-  "displayName": "Roundhouse LSP (dev)",
-  "description": "F5 dev client for roundhouse-lsp.",
+  "displayName": "Roundhouse LSP",
+  "description": "Whole-app inferred types, nil-safety, and request traces for Rails, from the roundhouse analyzer.",
   "version": "0.0.1",
   "private": true,
-  "engines": { "vscode": "^1.82.0" },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
   "activationEvents": [
     "onLanguage:ruby",
     "onLanguage:erb",
@@ -14,5 +16,17 @@
   "main": "./extension.js",
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Roundhouse",
+      "properties": {
+        "roundhouse.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the roundhouse binary (run as `roundhouse lsp`) or to roundhouse-lsp. Empty: use `roundhouse` on PATH, else the repo's target/release/roundhouse-lsp."
+        }
+      }
+    }
   }
 }

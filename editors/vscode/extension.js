@@ -1,23 +1,57 @@
-// Minimal F5 dev loop. Spawns the locally-built LSP binary from the repo's
-// target/release, resolved relative to this extension folder (extensionPath
-// is <repo>/editors/vscode, so ../../target/release). Rebuild the binary
-// (cargo build --release --bin roundhouse-lsp), reload the Extension
-// Development Host, and you're testing the fresh build. No copy, no symlink,
-// no discovery — this is for local F5 use only.
+// Client for the roundhouse Language Server. The server is found, in
+// order: the `roundhouse.serverPath` setting; a `roundhouse` binary on
+// PATH (run as `roundhouse lsp` — the multi-call binary the release
+// tarball installs); the repo's own target/release/roundhouse-lsp,
+// resolved relative to this extension folder (extensionPath is
+// <repo>/editors/vscode, so ../../target/release) for the F5 dev loop.
+// Rebuild the binary (cargo build --release --bin roundhouse-lsp), reload
+// the Extension Development Host, and you're testing the fresh build.
 
+const fs = require('fs');
 const path = require('path');
+const vscode = require('vscode');
 const { LanguageClient } = require('vscode-languageclient/node');
 
 let client;
 
-function activate(context) {
-  const server = path.join(
+// The first directory on PATH holding an executable `roundhouse`
+// (`roundhouse.exe` on Windows), or null.
+function onPath(name) {
+  const exts = process.platform === 'win32' ? ['.exe', ''] : [''];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = path.join(dir, name + ext);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch (_) { /* not here */ }
+    }
+  }
+  return null;
+}
+
+function serverOptions(context) {
+  const configured = vscode.workspace.getConfiguration('roundhouse').get('serverPath');
+  if (configured) {
+    // A bare `roundhouse` (or anything not ending in -lsp) is the
+    // multi-call binary and needs the subcommand.
+    const args = path.basename(configured).startsWith('roundhouse-lsp') ? [] : ['lsp'];
+    return { command: configured, args };
+  }
+  const installed = onPath('roundhouse');
+  if (installed) return { command: installed, args: ['lsp'] };
+  const dev = path.join(
     context.extensionPath, '..', '..', 'target', 'release', 'roundhouse-lsp'
   );
+  return { command: dev, args: [] };
+}
+
+function activate(context) {
   client = new LanguageClient(
     'roundhouse',
     'Roundhouse LSP',
-    { command: server, args: [] },
+    serverOptions(context),
     {
       // Templates too: the analyzer's view spans point into the
       // template files, so hover/completion/diagnostics work inside

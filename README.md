@@ -46,8 +46,8 @@ database.
 That inference is a product in its own right, not just the compiler's
 enabler. The same engine that emits Rust answers an editor's or an
 agent's questions — *what's the type here? can this be nil?* — through
-an LSP server, an MCP server (the `roundhouse-lsp` and
-`roundhouse-mcp` binaries), and an
+an LSP server and an MCP server (`roundhouse lsp` and `roundhouse
+mcp`, subcommands of the one binary), and an
 [in-browser IDE](https://rubys.github.io/roundhouse/ide/): no
 annotations, no app boot, no database, no warm server to babysit. A
 whole-application pass over Mastodon — 1,173 files, all 337
@@ -211,8 +211,13 @@ see what the analyzer can type today — no annotations, no `bundle
 install`, no booting, no database:
 
 ```sh
-cargo run --release --bin roundhouse-check -- --continue /path/to/your/rails/app
+cargo run --release --bin roundhouse -- check --continue /path/to/your/rails/app
 ```
+
+(`roundhouse check`, `roundhouse lsp` and `roundhouse mcp` are the
+subcommands the release tarball ships as one binary; `roundhouse-check`,
+`roundhouse-lsp` and `roundhouse-mcp` remain as cargo-only aliases.
+`roundhouse --version` names the commit the build came from.)
 
 `--continue` is the mode you want on a real app: constructs the
 ingester doesn't recognize yet are recorded and skipped instead of

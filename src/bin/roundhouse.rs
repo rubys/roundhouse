@@ -18,6 +18,13 @@
 //!
 //! `--target` and `--site` are mutually exclusive; exactly one must
 //! be specified. See `--help` for the full flag list.
+//!
+//! It is also the multi-call binary the release tarball ships: a first
+//! argument of `check`, `lsp` or `mcp` hands the rest of the line to
+//! that tool (`roundhouse::cli`), so one file on PATH is the compiler,
+//! the checker, the Language Server and the MCP server. The per-tool
+//! bins (`roundhouse-check`, `roundhouse-lsp`, `roundhouse-mcp`) remain
+//! as aliases for the cargo dev loop.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,10 +37,20 @@ fn usage() -> &'static str {
     "\
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
+       roundhouse check [--continue] [APP]
+       roundhouse lsp
+       roundhouse mcp [APP]
        roundhouse --help | --version
 
 Transpile a Rails source application to a target language, or build
 the multi-target Pages site.
+
+Subcommands (each takes --help):
+  check                Analyze APP (default .) and print the diagnostics;
+                       exit 1 on errors. --continue keeps going past
+                       unsupported constructs and prints a punch list.
+  lsp                  Serve the Language Server over stdio.
+  mcp                  Serve the MCP tools over stdio for APP (default .).
 
 Options:
   -t, --target LANG    Transpile target. One of:
@@ -65,6 +82,8 @@ Examples:
   roundhouse --site                                   # → ./_site/
   roundhouse -t ruby --survey --allow-unsupported ~/git/mastodon
                                                       # partly-covered app
+  roundhouse check --continue ~/git/mastodon          # diagnostics + punch list
+  roundhouse mcp ~/git/campfire                       # an agent's MCP server
 "
 }
 
@@ -73,13 +92,23 @@ fn main() -> ExitCode {
 }
 
 fn cli() -> ExitCode {
-    match parse_args(std::env::args().skip(1).collect()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Multi-call dispatch: the subcommand is only ever the first word,
+    // so an INPUT directory that happens to be named `check` still
+    // works as `roundhouse --target rust check`.
+    match args.first().map(String::as_str) {
+        Some("check") => return roundhouse::cli::check(&args[1..], "."),
+        Some("lsp") => return roundhouse::cli::lsp(&args[1..]),
+        Some("mcp") => return roundhouse::cli::mcp(&args[1..]),
+        _ => {}
+    }
+    match parse_args(args) {
         Ok(Action::Help) => {
             print!("{}", usage());
             ExitCode::SUCCESS
         }
         Ok(Action::Version) => {
-            println!("roundhouse {}", env!("CARGO_PKG_VERSION"));
+            println!("roundhouse {}", roundhouse::version::describe());
             ExitCode::SUCCESS
         }
         Ok(Action::Transpile { target, input, out, allow_unsupported, survey }) => {

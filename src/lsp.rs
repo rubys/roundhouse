@@ -80,7 +80,16 @@ pub fn run() -> LspResult<()> {
 /// then runs the message loop to completion.
 pub fn run_connection(connection: Connection) -> LspResult<()> {
     let capabilities = serde_json::to_value(server_capabilities())?;
-    let init_params = connection.initialize(capabilities)?;
+    let (id, init_params) = connection.initialize_start()?;
+    // `serverInfo` names the build the way `roundhouse --version` does,
+    // so an editor's LSP log says which analyzer answered.
+    connection.initialize_finish(
+        id,
+        serde_json::json!({
+            "capabilities": capabilities,
+            "serverInfo": { "name": "roundhouse", "version": crate::version::describe() },
+        }),
+    )?;
     let init: InitializeParams = serde_json::from_value(init_params)?;
     let root = workspace_root(&init);
     Server::new(connection, root).main_loop()
@@ -896,7 +905,11 @@ mod tests {
                 }),
             }))
             .unwrap();
-        let _ = recv_response(&client, 1);
+        // The handshake names the build so an editor's LSP log says
+        // which analyzer answered.
+        let init = recv_response(&client, 1).result.expect("initialize result");
+        assert_eq!(init["serverInfo"]["name"], "roundhouse");
+        assert_eq!(init["serverInfo"]["version"], crate::version::describe());
         client
             .sender
             .send(Message::Notification(Notification {

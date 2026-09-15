@@ -1,5 +1,5 @@
-//! `roundhouse-lsp` — read-only Language Server over the whole-app type
-//! analysis (roundhouse#57, Rung 1).
+//! `roundhouse-lsp` — alias for `roundhouse lsp`: read-only Language
+//! Server over the whole-app type analysis (roundhouse#57, Rung 1).
 //!
 //! Speaks LSP over stdio: publishes diagnostics and answers `hover` /
 //! `inlayHint` with inferred types, nil-safety, and "won't-lower"
@@ -11,15 +11,8 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    roundhouse::stack::run(serve)
-}
-
-fn serve() -> ExitCode {
-    match roundhouse::lsp::run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("roundhouse-lsp: fatal: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    roundhouse::stack::run(|| {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        roundhouse::cli::lsp(&args)
+    })
 }

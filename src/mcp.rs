@@ -37,9 +37,15 @@ type McpResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// the client's requested version when present, for forward-compatibility.
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// Entry point for the `roundhouse-mcp` binary: serve over stdio until EOF.
+/// Entry point for the `roundhouse-mcp` alias binary: the app root is
+/// `argv[1]` when given; serve over stdio until EOF.
 pub fn run() -> McpResult<()> {
-    let server = Server { root: workspace_root() };
+    run_at(workspace_root(std::env::args().nth(1)))
+}
+
+/// Serve the tools for the Rails app at `root` over stdio until EOF.
+pub fn run_at(root: PathBuf) -> McpResult<()> {
+    let server = Server { root };
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
@@ -70,8 +76,10 @@ pub fn run() -> McpResult<()> {
     Ok(())
 }
 
-fn workspace_root() -> PathBuf {
-    if let Some(arg) = std::env::args().nth(1) {
+/// The app root: `explicit` when the caller was given one, else
+/// `$ROUNDHOUSE_APP_ROOT`, else the working directory.
+pub fn workspace_root(explicit: Option<String>) -> PathBuf {
+    if let Some(arg) = explicit {
         return PathBuf::from(arg);
     }
     if let Ok(env) = std::env::var("ROUNDHOUSE_APP_ROOT") {
@@ -113,7 +121,7 @@ impl Server {
         json!({
             "protocolVersion": version,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "roundhouse", "version": env!("CARGO_PKG_VERSION") }
+            "serverInfo": { "name": "roundhouse", "version": crate::version::describe() }
         })
     }
 

@@ -5,11 +5,12 @@ under VS Code's F5 dev loop. It spawns the locally-built binary and attaches
 it to Ruby files, so you get inferred-type hovers, inlay hints, nil-safety
 diagnostics, find-references, and go-to-definition over a whole Rails app.
 
-This is **for local development only** — there is no packaging, no binary
-discovery, and no cross-platform support here. It points straight at
-`../../target/release/roundhouse-lsp`. Distributing the LSP to other people
-(a packaged `.vsix` bundling a native binary, or a WASM build) is a separate
-concern and deliberately out of scope for this folder.
+The server is found in this order: the `roundhouse.serverPath` setting;
+a `roundhouse` binary on PATH (run as `roundhouse lsp` — the multi-call
+binary a release tarball installs); and, for the F5 dev loop, the repo's
+own `../../target/release/roundhouse-lsp`. There is no packaging here yet:
+a published `.vsix` is the natural next step once a release exists, and
+needs nothing more than `vsce package` on this folder.
 
 ## One-time setup
 

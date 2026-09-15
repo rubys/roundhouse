@@ -21,6 +21,10 @@ pub mod ide;
 pub mod ident;
 pub mod ingest;
 pub mod lower;
+/// The `roundhouse` subcommands (`check`, `lsp`, `mcp`) and the alias
+/// bins that delegate to them. Host-only (stdio, real directories).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
 /// Standalone read-only LSP server over the [`ide`] query layer. Host-only
 /// (uses stdio + the synchronous `lsp-server` transport); excluded from the
 /// wasm build.
@@ -43,6 +47,7 @@ pub mod runtime_loader;
 pub mod runtime_src;
 pub mod session;
 pub mod treeshake;
+pub mod version;
 pub mod schema;
 pub mod span;
 pub mod ty;

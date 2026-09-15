@@ -10,6 +10,18 @@ homepage = "https://rubys.github.io/roundhouse/"
 repository = "https://github.com/rubys/roundhouse"
 publish = false
 
+# Not on crates.io (publish = false), but its binary is released:
+# cargo-dist needs the opt-in to see the package.
+[package.metadata.dist]
+dist = true
+# One file on PATH: the multi-call binary. The alias bins and the IR dev
+# tools stay cargo-only. dist only takes this per target.
+[package.metadata.dist.binaries]
+aarch64-apple-darwin = ["roundhouse"]
+x86_64-apple-darwin = ["roundhouse"]
+x86_64-unknown-linux-musl = ["roundhouse"]
+x86_64-pc-windows-msvc = ["roundhouse"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -70,3 +82,8 @@ debug = 1
 
 [profile.test.package."*"]
 debug = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

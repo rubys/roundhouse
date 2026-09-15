@@ -648,14 +648,15 @@ pub unsafe extern "C" fn trace_targets(_input_ptr: *const u8, _input_len: u32) -
 
 /// Which analyzer answered. The /ide/ summary line carries this so a
 /// number someone pastes from a local-folder analysis names the build it
-/// came from: the crate version always, the commit when the build set
-/// `ROUNDHOUSE_COMMIT` (CI does; a local `build.sh` leaves it null).
-/// Input is ignored.
+/// came from: the crate version always, and the commit the library's
+/// build script stamped (`ROUNDHOUSE_COMMIT` from the environment — CI
+/// sets `github.sha` — else `git rev-parse` on the checkout; a tarball
+/// build has none). Input is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn version(_input_ptr: *const u8, _input_len: u32) -> u64 {
     let out = serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "commit": option_env!("ROUNDHOUSE_COMMIT"),
+        "version": roundhouse::version::VERSION,
+        "commit": roundhouse::version::COMMIT,
     });
     pack(out.to_string())
 }
