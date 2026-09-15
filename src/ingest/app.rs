@@ -1465,10 +1465,24 @@ fn splice_concerns_into_controllers(app: &mut App) {
     > = HashMap::new();
 
     for controller in &mut app.controllers {
-        let includes = crate::analyze::controller_includes(controller);
+        let include_groups = crate::analyze::controller_include_groups(controller);
+        let includes: Vec<crate::ident::ClassId> = include_groups.iter().flatten().cloned().collect();
         if includes.is_empty() {
             continue;
         }
+        // Two orders, because Ruby has two. METHOD precedence follows
+        // the ancestor chain — `include A, B` puts A ahead of B, and a
+        // module ahead of what it includes — so the transitive closure
+        // below walks the list as written, dependencies after, and the
+        // first definition of a name wins. FILTER registration is the
+        // order the `included` hooks fire, which is the reverse: Ruby
+        // processes a multi-argument `include` last-argument-first, and
+        // ActiveSupport::Concern includes a concern's dependencies
+        // before running its own block. campfire's
+        // `include AllowBrowser, Authentication, …, VersionHeaders`
+        // therefore runs `set_version_headers` first and `allow_browser`
+        // last; the chain used to list them the other way round.
+        let filter_order = filter_registration_order(&include_groups, &module_includes);
         // Transitive closure, in include order.
         let mut queue = includes;
         let mut seen: std::collections::BTreeSet<crate::ident::ClassId> =
@@ -1495,8 +1509,35 @@ fn splice_concerns_into_controllers(app: &mut App) {
 
         let mut filters: Vec<ControllerBodyItem> = Vec::new();
         let mut methods: Vec<ControllerBodyItem> = Vec::new();
-        for module in &queue {
+        for module in &filter_order {
             for filter in app.concern_filters.get(module).into_iter().flatten() {
+                if let Some(call) = &filter.block {
+                    // A block-form filter goes back to being what a
+                    // controller's own is: an `Unknown` item holding the
+                    // call, which `block_form_filter` lowers and
+                    // `build_sourced_filter_chain` chains. Provenance
+                    // rides in the same map the spliced methods use,
+                    // under the sentinel name the chain builder derives
+                    // from the item's body index — these spliced items
+                    // occupy the head of the body, so the index is the
+                    // position here.
+                    let crate::expr::ExprNode::Send { method, .. } = &*call.node else { continue };
+                    let sentinel = crate::ident::Symbol::from(format!(
+                        "__{}_block_{}__",
+                        method.as_str(),
+                        filters.len()
+                    ));
+                    spliced_origin
+                        .entry(controller.name.clone())
+                        .or_default()
+                        .insert(sentinel, module.clone());
+                    filters.push(ControllerBodyItem::Unknown {
+                        expr: call.clone(),
+                        leading_comments: Vec::new(),
+                        leading_blank_line: false,
+                    });
+                    continue;
+                }
                 let mut filter = filter.clone();
                 // Provenance for the chain view: `defined_in` is the
                 // module, not the controller that included it.
@@ -1507,6 +1548,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     leading_blank_line: false,
                 });
             }
+        }
+        for module in &queue {
             for method in module_methods.get(module).into_iter().flatten() {
                 if !defined.insert(method.name.clone()) {
                     continue;
@@ -1566,6 +1609,48 @@ fn splice_concerns_into_controllers(app: &mut App) {
         controller.body = filters;
     }
     app.concern_spliced_actions = spliced_origin;
+}
+
+/// The order a controller's concern filters REGISTER in — the order
+/// their `included` hooks fire — from its `include` statements as
+/// grouped in the source. Ruby's `Module#include` invokes
+/// `append_features` on its arguments last-first, so within one
+/// statement the last-listed concern registers first; statements run
+/// in source order. `ActiveSupport::Concern#append_features` includes
+/// a concern's own concern dependencies before evaluating its
+/// `included` block, so a dependency's filters land ahead of the
+/// dependent's. A module already registered (Ruby `include` is
+/// idempotent) is not registered again.
+///
+/// The dependency list is a module's `includes` as ingested — a flat
+/// list, so a multi-argument `include` INSIDE a concern is walked as
+/// written rather than reversed; the grouping isn't kept at that level.
+fn filter_registration_order(
+    include_groups: &[Vec<crate::ident::ClassId>],
+    module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> Vec<crate::ident::ClassId> {
+    fn visit(
+        m: &crate::ident::ClassId,
+        module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+        seen: &mut std::collections::BTreeSet<crate::ident::ClassId>,
+        out: &mut Vec<crate::ident::ClassId>,
+    ) {
+        if !seen.insert(m.clone()) {
+            return;
+        }
+        for dep in module_includes.get(m).into_iter().flatten() {
+            visit(dep, module_includes, seen, out);
+        }
+        out.push(m.clone());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for group in include_groups {
+        for m in group.iter().rev() {
+            visit(m, module_includes, &mut seen, &mut out);
+        }
+    }
+    out
 }
 
 /// Rails' `remove_duplicates`: declaring `before_action :set_room` a
@@ -2021,6 +2106,7 @@ fn filter_from_send(
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                block: None,
             })
             .collect(),
     )

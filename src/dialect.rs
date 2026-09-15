@@ -1082,6 +1082,15 @@ pub struct Filter {
     /// Lambda/proc-form `unless:` guard body, negated at the call site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond_expr: Option<Expr>,
+    /// The whole call for a block-form filter — `before_action do … end`
+    /// as one `Send` with its block — so a chain entry synthesized for
+    /// it can be located (the trace's `file:line`) and named. Never set
+    /// on a body item: block-form filters stay `Unknown` in controller
+    /// bodies (lowered by `block_form_filter`); this rides only on the
+    /// entries `build_sourced_filter_chain` synthesizes from them and on
+    /// the concern-side capture the splice turns back into `Unknown`s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

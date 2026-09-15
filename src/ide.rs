@@ -1566,15 +1566,33 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         let skipped_by = (matches!(rf.filter.kind, FilterKind::Before) && gated_in)
             .then(|| skips.get(&rf.filter.target).cloned())
             .flatten();
-        let target_body = method_body(app, &rf.defined_in, &rf.filter.target).or_else(|| {
-            target_search
-                .iter()
-                .find_map(|c| method_body(app, c, &rf.filter.target))
+        // A block-form filter has no method to find: its body is the
+        // block on the call the chain entry carries, and it resolves by
+        // construction (the code is right there). Named under its own
+        // source text so the panel reads `before_action { Current.request
+        // = request }` rather than the chain's sentinel.
+        let block_body: Option<&Expr> = rf.filter.block.as_ref().map(|call| match &*call.node {
+            ExprNode::Send { block: Some(b), .. } => match &*b.node {
+                ExprNode::Lambda { body, .. } => body,
+                _ => b,
+            },
+            _ => call,
+        });
+        let target_body = block_body.or_else(|| {
+            method_body(app, &rf.defined_in, &rf.filter.target).or_else(|| {
+                target_search
+                    .iter()
+                    .find_map(|c| method_body(app, c, &rf.filter.target))
+            })
         });
         let resolved = target_body.is_some();
         let (file, line) = match target_body {
             Some(body) => expr_location(app, body),
             None => (None, None),
+        };
+        let name = match block_body {
+            Some(body) => format!("{} {{ {} }}", kind_word(&rf.filter.kind), block_summary(app, body)),
+            None => rf.filter.target.as_str().to_string(),
         };
         let condition = match (&rf.filter.if_cond, &rf.filter.unless_cond) {
             (None, None) => None,
@@ -1595,7 +1613,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             _ => Vec::new(),
         };
         hops.push(TraceHop::Filter(FilterHop {
-            name: rf.filter.target.as_str().to_string(),
+            name,
             filter_kind: kind,
             defined_in: rf.defined_in.0.as_str().to_string(),
             included_via: rf.included_via.0.as_str().to_string(),
@@ -1930,6 +1948,34 @@ fn span_site(app: &App, span: Span) -> Option<String> {
     }
     let src = source(app, span.file)?;
     Some(format!("{}:{}", src.path, src.line_col(span.start).0))
+}
+
+/// `before_action` / `around_action` / `after_action`, for naming a
+/// block-form hop by its call.
+fn kind_word(kind: &crate::dialect::FilterKind) -> &'static str {
+    use crate::dialect::FilterKind;
+    match kind {
+        FilterKind::Before => "before_action",
+        FilterKind::Around => "around_action",
+        FilterKind::After => "after_action",
+        FilterKind::Skip => "skip_before_action",
+    }
+}
+
+/// The block body's first source line, whitespace-collapsed and
+/// clipped, for a block-form hop's label. Falls back to `…` when the
+/// span is synthetic.
+fn block_summary(app: &App, body: &Expr) -> String {
+    let Some(span) = first_expr_span(body) else { return "…".to_string() };
+    let Some(src) = source(app, span.file) else { return "…".to_string() };
+    let text = &src.text[span.start as usize..(span.end as usize).min(src.text.len())];
+    let first = text.lines().next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+    let more = text.lines().nth(1).is_some();
+    let mut out: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 || more {
+        out.push('…');
+    }
+    out
 }
 
 fn expr_location(app: &App, body: &Expr) -> (Option<String>, Option<u32>) {
@@ -2935,6 +2981,130 @@ mod tests {
         let mut app = ir.expect("tree ingest");
         Analyzer::new(&app).analyze(&mut app);
         app
+    }
+
+    /// The filter chain runs in REGISTRATION order, which for
+    /// `include A, B, C` is C, B, A (Ruby's `Module#include` takes its
+    /// arguments last-first), with a concern's own concern dependencies
+    /// ahead of it (ActiveSupport::Concern includes them before running
+    /// the `included` block). And a block-form filter in a concern's
+    /// `included do` is a hop like any other — placed, attributed to the
+    /// concern, resolved to its own line, named by its code. campfire's
+    /// ApplicationController is the shape: `include AllowBrowser,
+    /// Authentication, …, SetCurrentRequest, …, VersionHeaders` ran
+    /// `allow_browser` first in the trace and never listed
+    /// `Current.request = request` at all.
+    #[test]
+    fn traceroute_orders_concern_filters_by_registration_and_keeps_block_filters() {
+        let app = tree_app(&[
+            (
+                "app/controllers/concerns/alpha.rb",
+                "module Alpha
+  extend ActiveSupport::Concern
+  include AlphaDep
+  included do
+    before_action :from_alpha
+  end
+  private
+    def from_alpha
+      @alpha = 1
+    end
+end
+",
+            ),
+            (
+                "app/controllers/concerns/alpha_dep.rb",
+                "module AlphaDep
+  extend ActiveSupport::Concern
+  included do
+    before_action :from_alpha_dep
+  end
+  private
+    def from_alpha_dep
+      @dep = 1
+    end
+end
+",
+            ),
+            (
+                "app/controllers/concerns/set_current_request.rb",
+                "module SetCurrentRequest
+  extend ActiveSupport::Concern
+  included do
+    before_action do
+      Current.request = request
+    end
+  end
+end
+",
+            ),
+            (
+                "app/controllers/concerns/omega.rb",
+                "module Omega
+  extend ActiveSupport::Concern
+  included do
+    before_action :from_omega
+  end
+  private
+    def from_omega
+      @omega = 1
+    end
+end
+",
+            ),
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base
+  include Alpha, SetCurrentRequest, Omega
+end
+",
+            ),
+            (
+                "app/controllers/widgets_controller.rb",
+                "class WidgetsController < ApplicationController
+  before_action :own
+  def index
+  end
+  private
+    def own
+      @own = 1
+    end
+end
+",
+            ),
+            ("app/views/widgets/index.html.erb", "<p>hi</p>\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :widgets, only: :index\nend\n"),
+        ]);
+        let trace = traceroute(&app, "WidgetsController#index").expect("trace");
+        let filters: Vec<&FilterHop> = trace
+            .hops
+            .iter()
+            .filter_map(|h| match h {
+                TraceHop::Filter(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let names: Vec<&str> = filters.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "from_omega",
+                "before_action { Current.request = request }",
+                "from_alpha_dep",
+                "from_alpha",
+                "own",
+            ],
+            "registration order: last include argument first, dependency before dependent, own last"
+        );
+        let block = filters[1];
+        assert_eq!(block.defined_in, "SetCurrentRequest");
+        assert_eq!(block.included_via, "ApplicationController");
+        assert!(block.resolved, "a block-form hop resolves to its own code");
+        assert!(block.applies);
+        assert!(block.file.as_deref().is_some_and(|f| f.ends_with("set_current_request.rb")), "{:?}", block.file);
+        assert_eq!(block.line, Some(5), "the block body, not the `before_action do` line");
+        let report = trace_gap_report(&app, &trace, &[], None);
+        assert!(report.complete(), "gaps = {:?}", report.gaps);
     }
 
     #[test]

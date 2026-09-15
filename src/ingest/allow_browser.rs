@@ -170,6 +170,7 @@ fn filter(gate: &Gate) -> Filter {
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        block: None,
     }
 }
 

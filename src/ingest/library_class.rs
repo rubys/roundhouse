@@ -1257,6 +1257,8 @@ pub fn ingest_concern_filters(
             for inner in flatten_statements(block_body) {
                 if let Some(fs) = super::controller::parse_filter_call(&inner, file) {
                     filters.extend(fs);
+                } else if let Some(f) = block_form_concern_filter(&inner, file) {
+                    filters.push(f);
                 }
             }
         }
@@ -1265,6 +1267,45 @@ pub fn ingest_concern_filters(
         }
     }
     out
+}
+
+/// A block-form filter in a concern's `included do` — campfire's
+/// `SetCurrentRequest` is nothing but `before_action do Current.request =
+/// request end`. `parse_filter_call` returns `None` for it (no symbol
+/// target), so it fell off the chain entirely: the splice never carried
+/// it into any controller, the trace never listed it, and the emitted
+/// controllers never set `Current.request`. Captured here as a `Filter`
+/// whose `block` is the whole call, kept IN ORDER among the named
+/// filters; the splice turns it back into the `Unknown` body item a
+/// controller's own block-form filter is, so one lowering serves both.
+/// The `__block__` target is a placeholder the splice never emits.
+fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<crate::dialect::Filter> {
+    use crate::dialect::{Filter, FilterKind};
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() || call.block().is_none() {
+        return None;
+    }
+    let kind = match constant_id_str(&call.name()) {
+        "before_action" => FilterKind::Before,
+        "around_action" => FilterKind::Around,
+        "after_action" => FilterKind::After,
+        _ => return None,
+    };
+    let expr = ingest_expr(stmt, file).ok()?;
+    Some(Filter {
+        kind,
+        target: Symbol::from("__block__"),
+        from_concern: None,
+        only: Vec::new(),
+        except: Vec::new(),
+        only_style: crate::expr::ArrayStyle::default(),
+        except_style: crate::expr::ArrayStyle::default(),
+        if_cond: None,
+        unless_cond: None,
+        if_cond_expr: None,
+        unless_cond_expr: None,
+        block: Some(expr),
+    })
 }
 
 /// Model DSL declared inside a concern module's `included do` block —

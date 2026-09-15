@@ -1328,30 +1328,34 @@ fn build_filter_preamble(
         });
     };
 
-    for anc in &chain {
-        for f in anc.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-            push_call(f, &mut preamble);
-        }
-    }
+    // Ancestors and the controller itself walk the same way, in body
+    // order, so a block-form filter on a parent — one written there, or
+    // a concern's `before_action do … end` the splice carried in —
+    // lands in the preamble at its registered position. Walking only
+    // `anc.filters()` here dropped every ancestor block: campfire's
+    // `Current.request = request` never ran in any emitted controller.
     let own_priv_targets: std::collections::HashSet<&Symbol> =
         own_privs.iter().map(|a| &a.name).collect();
-    for item in &controller.body {
-        match item {
-            ControllerBodyItem::Filter { filter, .. }
-                if matches!(filter.kind, FilterKind::Before) =>
-            {
-                if own_privs_inlined && own_priv_targets.contains(&filter.target) {
-                    continue; // inlined into action bodies upstream
+    let bodies = chain.iter().map(|c| (*c, false)).chain(std::iter::once((controller, true)));
+    for (c, is_own) in bodies {
+        for item in &c.body {
+            match item {
+                ControllerBodyItem::Filter { filter, .. }
+                    if matches!(filter.kind, FilterKind::Before) =>
+                {
+                    if is_own && own_privs_inlined && own_priv_targets.contains(&filter.target) {
+                        continue; // inlined into action bodies upstream
+                    }
+                    push_call(filter, &mut preamble);
                 }
-                push_call(filter, &mut preamble);
-            }
-            ControllerBodyItem::Unknown { expr, .. } => {
-                if let Some((body, only, except)) = block_form_filter(expr) {
-                    let halt_check = can_respond(&body);
-                    preamble.push(PreambleStmt::Block { body, only, except, halt_check });
+                ControllerBodyItem::Unknown { expr, .. } => {
+                    if let Some((body, only, except)) = block_form_filter(expr) {
+                        let halt_check = can_respond(&body);
+                        preamble.push(PreambleStmt::Block { body, only, except, halt_check });
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     preamble

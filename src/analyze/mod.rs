@@ -1292,8 +1292,10 @@ impl Analyzer {
             // both contribute ivars the action and its view see, while
             // `after_action` runs after rendering. Block-form filters'
             // bodies were already typed by the Phase 0 pass above.
-            let (sourced_filters, block_filter_bindings) =
-                build_sourced_filter_chain(controller);
+            let (sourced_filters, block_filter_bindings) = build_sourced_filter_chain(
+                controller,
+                app.concern_spliced_actions.get(&controller.name),
+            );
 
             // Pass A: analyze every action body once. Helper-method
             // params (`period(query)`) are seeded from the inferred-
@@ -3868,13 +3870,19 @@ fn merged_before_seed(
 /// method, so they survive ingest as `Unknown` body items (preserving
 /// round-trip) rather than `Filter`s. Each is synthesized in place with
 /// a sentinel target that can't collide with a real method (so it never
-/// resolves a view); the second return value carries its harvested ivar
-/// bindings — the bodies were already typed by the Phase 0
-/// `Unknown`-item pass — for registration alongside real targets.
-/// `only:`/`except:` scoping on a block filter is not modelled — the
-/// form is rare and a missing guard only over-seeds an unread ivar.
+/// resolves a view) and carries the call itself in `Filter::block`, so
+/// the trace can place and name it; the second return value carries its
+/// harvested ivar bindings — the bodies were already typed by the Phase
+/// 0 `Unknown`-item pass — for registration alongside real targets. A
+/// block that assigns nothing still gets its chain entry: campfire's
+/// `before_action do Current.request = request end` runs whether or not
+/// it touches an ivar, and a trace that omits it is wrong. A block the
+/// splice carried in from a concern is attributed to that concern
+/// through `spliced_origin` (keyed by the same sentinel).
+/// `only:`/`except:` on a block filter gate it like a named one.
 fn build_sourced_filter_chain(
     controller: &Controller,
+    spliced_origin: Option<&HashMap<Symbol, ClassId>>,
 ) -> (Vec<(Filter, ClassId)>, Vec<(Symbol, HashMap<Symbol, Ty>)>) {
     let own_id = controller.name.clone();
     let mut chain: Vec<(Filter, ClassId)> = Vec::new();
@@ -3897,12 +3905,12 @@ fn build_sourced_filter_chain(
                     // module's `included do` filters into this body, each
                     // tagged with `from_concern` for provenance. Splicing
                     // again here would double every concern filter.
-                    "before_action" | "around_action" => {
+                    "before_action" | "around_action" | "after_action" => {
                         let Some(block) = block else { continue };
-                        let kind = if method.as_str() == "before_action" {
-                            FilterKind::Before
-                        } else {
-                            FilterKind::Around
+                        let kind = match method.as_str() {
+                            "before_action" => FilterKind::Before,
+                            "around_action" => FilterKind::Around,
+                            _ => FilterKind::After,
                         };
                         // The attached block is a Lambda whose body is
                         // the filter code.
@@ -3912,26 +3920,28 @@ fn build_sourced_filter_chain(
                         };
                         let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
                         extract_ivar_assignments(body, &mut ivars);
-                        if ivars.is_empty() {
-                            continue;
-                        }
                         let target =
                             Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
+                        let (only, except) = block_filter_gates(expr);
+                        let from_concern =
+                            spliced_origin.and_then(|m| m.get(&target)).cloned();
+                        let source = from_concern.clone().unwrap_or_else(|| own_id.clone());
                         chain.push((
                             Filter {
                                 kind,
                                 target: target.clone(),
-                                from_concern: None,
-                                only: Vec::new(),
-                                except: Vec::new(),
+                                from_concern,
+                                only,
+                                except,
                                 only_style: crate::expr::ArrayStyle::default(),
                                 except_style: crate::expr::ArrayStyle::default(),
                                 if_cond: None,
                                 unless_cond: None,
                                 if_cond_expr: None,
                                 unless_cond_expr: None,
+                                block: Some(expr.clone()),
                             },
-                            own_id.clone(),
+                            source,
                         ));
                         block_bindings.push((target, ivars));
                     }
@@ -3942,6 +3952,40 @@ fn build_sourced_filter_chain(
         }
     }
     (chain, block_bindings)
+}
+
+/// `only:` / `except:` of a block-form filter call, from its keyword
+/// hash: `before_action only: :show do … end`. Symbols or a symbol
+/// array; anything else contributes nothing.
+fn block_filter_gates(call: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
+    let mut only = Vec::new();
+    let mut except = Vec::new();
+    let ExprNode::Send { args, .. } = &*call.node else { return (only, except) };
+    let syms = |e: &Expr| -> Vec<Symbol> {
+        let one = |e: &Expr| match &*e.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.clone()),
+            _ => None,
+        };
+        match &*e.node {
+            ExprNode::Array { elements, .. } => elements.iter().filter_map(one).collect(),
+            _ => one(e).into_iter().collect(),
+        }
+    };
+    for a in args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node
+            else {
+                continue;
+            };
+            match key.as_str() {
+                "only" => only = syms(v),
+                "except" => except = syms(v),
+                _ => {}
+            }
+        }
+    }
+    (only, except)
 }
 
 /// Unify a stored param type with a freshly observed argument type.
@@ -4181,6 +4225,14 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
 }
 
 pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
+    controller_include_groups(controller).into_iter().flatten().collect()
+}
+
+/// The controller's `include` statements, one inner list per statement
+/// in source order, each in the order its arguments were written. The
+/// grouping is what the filter-registration order needs: Ruby processes
+/// one statement's arguments last-first, but statements first-to-last.
+pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<ClassId>> {
     let mut out = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
@@ -4188,12 +4240,16 @@ pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
         if method.as_str() != "include" {
             continue;
         }
+        let mut group = Vec::new();
         for arg in args {
             if let ExprNode::Const { path } = &*arg.node {
                 let joined =
                     path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                out.push(ClassId(Symbol::from(joined)));
+                group.push(ClassId(Symbol::from(joined)));
             }
+        }
+        if !group.is_empty() {
+            out.push(group);
         }
     }
     out

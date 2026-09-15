@@ -438,6 +438,7 @@ pub(super) fn parse_filter_call(
                 unless_cond: unless_cond.clone(),
                 if_cond_expr: if_cond_expr.clone(),
                 unless_cond_expr: unless_cond_expr.clone(),
+                block: None,
             })
             .collect(),
     )

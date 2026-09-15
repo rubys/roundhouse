@@ -886,6 +886,7 @@ impl<'f> RouteWalker<'f> {
                         unless_cond: None,
                         if_cond_expr: None,
                         unless_cond_expr: None,
+                        block: None,
                     },
                     leading_comments: Vec::new(),
                     leading_blank_line: false,
