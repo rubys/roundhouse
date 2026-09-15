@@ -49,8 +49,32 @@ end
 "#,
         ),
         (
+            "app/models/story/pagination.rb",
+            r#"module Story::Pagination
+  extend ActiveSupport::Concern
+
+  PAGE_SIZE = 40
+
+  included do
+    scope :ordered, -> { order(:score) }
+    scope :last_page, -> { ordered.last(PAGE_SIZE) }
+    scope :first_page, -> { ordered.first(PAGE_SIZE) }
+    scope :before, ->(story) { where("score < ?", story.score) }
+    scope :page_before, ->(story) { before(story).last_page }
+  end
+
+  class_methods do
+    def page_around(story)
+      page_before(story) + [ story ] + first_page
+    end
+  end
+end
+"#,
+        ),
+        (
             "app/models/story.rb",
             r#"class Story < ApplicationRecord
+  include Pagination
   has_many :comments
   scope :recent, -> { order(score: :desc).limit(10) }
   scope :top, -> { recent.where("score > 0") }
@@ -85,6 +109,9 @@ end
     @scope_on_scope = Story.top
     @terminal_scope = Story.titles_only
     @mixed = Story.filtered(1).recent
+    @last_page = Story.recent.last_page
+    @page_before = Story.recent.page_before(Story.first)
+    @page_around = Story.page_around(Story.first)
   end
 
   def build_probe
@@ -192,6 +219,23 @@ fn counted_first_and_last_type_as_arrays() {
     assert_eq!(ivar_ty(&app, "last_n"), stories);
     assert_eq!(ivar_ty(&app, "class_last_n"), stories);
     assert_eq!(ivar_ty(&app, "array_first_n"), stories);
+}
+
+#[test]
+fn counted_last_with_a_constant_count_types_as_array_through_a_scope() {
+    // campfire's `Message::Pagination`: `scope :last_page, -> {
+    // ordered.last(PAGE_SIZE) }` with `PAGE_SIZE` a concern constant,
+    // and `page_around` concatenating two pages with `[ message ]`.
+    // Every `@messages` in the app is one of these, and the union the
+    // analyzer carried — `Array[Message] | Message | nil` — left the
+    // `collection:` render of the message partial with an untyped
+    // local, N+1 chains through it opaque, and the room page's own
+    // partial unreachable to the dead-view walk.
+    let app = analyzed_app();
+    let stories = Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) };
+    assert_eq!(ivar_ty(&app, "last_page"), stories);
+    assert_eq!(ivar_ty(&app, "page_before"), stories);
+    assert_eq!(ivar_ty(&app, "page_around"), stories);
 }
 
 #[test]

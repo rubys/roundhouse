@@ -1041,7 +1041,16 @@ impl<'a> BodyTyper<'a> {
                         // lobsters' `merged_comments.arrange_for_user(
                         // nil)` came to resolve on an Array receiver
                         // and fail to dispatch on a Relation one.
-                        Some(Ty::Array { elem }) => {
+                        //
+                        // Unless the classifier READ the body as a
+                        // materializing terminal: campfire's
+                        // `scope :last_page, -> { ordered.last(PAGE_SIZE) }`
+                        // carries the same `Array[Message]` seed as an
+                        // unreadable scope would, and re-wrapping it made
+                        // `@room.messages.last_page` a relation — then
+                        // `Message | nil` one hop later. Its Array is the
+                        // answer, same as the terminal arm below.
+                        Some(Ty::Array { elem }) if !cls.materializing_scopes.contains(method) => {
                             return match &**elem {
                                 Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
@@ -1346,7 +1355,10 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
 fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
     matches!(method.as_str(), "first" | "last")
         && args.len() == 1
-        && matches!(args[0].ty.as_ref(), None | Some(Ty::Int) | Some(Ty::Untyped))
+        && matches!(
+            args[0].ty.as_ref(),
+            None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
+        )
 }
 
 /// Is this array element type a model relation's element — a single

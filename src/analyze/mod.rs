@@ -382,10 +382,48 @@ impl Analyzer {
             // still wins.
             let scope_names: std::collections::HashSet<Symbol> =
                 model.scopes().map(|s| s.name.clone()).collect();
+            // Materializing scopes propagate through sibling chains:
+            // `scope :page_before, ->(m) { before(m).last_page }` ends in
+            // a sibling that ends in `last(PAGE_SIZE)`, and answers that
+            // sibling's Array, not a relation. Classify the terminal
+            // scopes first, then let each scope whose tail is a
+            // materializing sibling (on a relation chain rooted here)
+            // inherit that sibling's seed — to a fixpoint, so a chain of
+            // such scopes resolves whatever order the file declares them.
+            let mut materializing: HashMap<Symbol, Ty> = HashMap::new();
             for scope in model.scopes() {
-                let seed = scope_return_seed(&scope.body, &model.name, &scope_names);
+                if body_tail_terminal_kind(&scope.body, &model.name, &scope_names).is_some() {
+                    let seed = scope_return_seed(&scope.body, &model.name, &scope_names);
+                    materializing.insert(scope.name.clone(), seed);
+                }
+            }
+            loop {
+                let mut changed = false;
+                for scope in model.scopes() {
+                    if materializing.contains_key(&scope.name) {
+                        continue;
+                    }
+                    if let Some(seed) =
+                        scope_tail_materializing_sibling(&scope.body, &model.name, &scope_names, &materializing)
+                    {
+                        materializing.insert(scope.name.clone(), seed);
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            for scope in model.scopes() {
+                let seed = match materializing.get(&scope.name) {
+                    Some(seed) => seed.clone(),
+                    None => scope_return_seed(&scope.body, &model.name, &scope_names),
+                };
                 cls.class_methods.entry(scope.name.clone()).or_insert(seed);
                 cls.relation_derived.insert(scope.name.clone());
+                if materializing.contains_key(&scope.name) {
+                    cls.materializing_scopes.insert(scope.name.clone());
+                }
             }
             // `has_rich_text :body` declares two preload scopes beside
             // the association (`with_rich_text_body`,
@@ -3731,7 +3769,7 @@ fn body_tail_terminal_kind(
         ExprNode::Seq { exprs } => exprs.last()?,
         _ => body,
     };
-    let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*tail.node else {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*tail.node else {
         return None;
     };
     let entry = crate::catalog::lookup(method.as_str(), crate::catalog::ReceiverContext::Relation)?;
@@ -3741,7 +3779,45 @@ fn body_tail_terminal_kind(
     if !body_tail_yields_relation(recv, model_id, scope_names) {
         return None;
     }
+    // The COUNTED form: `first(n)` / `last(n)` answer an Array of up to
+    // n records, where the bare form the catalog names answers one or
+    // nil. The count is any single positional argument — campfire's
+    // `scope :last_page, -> { ordered.last(PAGE_SIZE) }` passes a
+    // concern constant, and the scope seeded `Message | nil`, which
+    // every `@messages` in the app then carried into its views. Same
+    // rule as `body::send::counted_first_last`, which types the call
+    // where it can see the argument's type; here only its presence is
+    // needed.
+    if matches!(method.as_str(), "first" | "last") && args.len() == 1 {
+        return Some(crate::catalog::ReturnKind::ArrayOfSelf);
+    }
     entry.return_kind
+}
+
+/// A scope body whose tail is a call to a MATERIALIZING sibling scope
+/// on a relation chain rooted at this model — `before(m).last_page` —
+/// answers that sibling's seed. The receiver check is the same
+/// `body_tail_yields_relation` the other classifiers use.
+fn scope_tail_materializing_sibling(
+    body: &Expr,
+    model_id: &ClassId,
+    scope_names: &std::collections::HashSet<Symbol>,
+    materializing: &HashMap<Symbol, Ty>,
+) -> Option<Ty> {
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => body,
+    };
+    let ExprNode::Send { recv, method, block: None, .. } = &*tail.node else {
+        return None;
+    };
+    let seed = materializing.get(method)?;
+    let rooted_here = match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef)
+            || body_tail_yields_relation(r, model_id, scope_names),
+    };
+    rooted_here.then(|| seed.clone())
 }
 
 /// Does `start` descend from `ActiveRecord::Base`?

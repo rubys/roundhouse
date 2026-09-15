@@ -144,10 +144,25 @@ impl Ty {
     /// one place that equivalence is written down; a consumer matching
     /// `Ty::Array` directly to find an element is a site that will go
     /// quietly blind the next time a producer flips representation.
+    ///
+    /// A NILABLE collection — `Array[T] | nil`, the shape a `find_by`
+    /// branch or an unassigned-path ivar leaves behind — still has that
+    /// element: `render collection: nil` renders nothing, and iterating
+    /// nil is a nil-safety question, not an element-type one. Any other
+    /// union (two different collections, a record beside an array) is
+    /// still `None`.
     pub fn collection_elem(&self) -> Option<Ty> {
         match self {
             Ty::Array { elem } => Some((**elem).clone()),
             Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+            Ty::Union { variants } => {
+                let mut non_nil = variants.iter().filter(|v| !matches!(v, Ty::Nil));
+                let first = non_nil.next()?;
+                if non_nil.next().is_some() {
+                    return None;
+                }
+                first.collection_elem()
+            }
             _ => None,
         }
     }

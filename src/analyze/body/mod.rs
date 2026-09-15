@@ -97,6 +97,15 @@ pub struct ClassInfo {
     /// the chain typed to nothing and `room_url(…)` rendered
     /// `/rooms/#<Room:0x…>`.
     pub relation_derived: std::collections::HashSet<Symbol>,
+    /// Scopes whose body the seed classifier read as ending in a
+    /// MATERIALIZING terminal — `ordered.last(PAGE_SIZE)` — as opposed
+    /// to the ones it could not read at all. Both kinds may carry the
+    /// `Array[Self]` seed (the counted terminal by classification, the
+    /// unreadable body as the conservative stand-in), and only this set
+    /// tells them apart at a Relation receiver: a materializing scope
+    /// answers its Array, an unclassified one is assumed to still be a
+    /// query and re-wraps as the relation.
+    pub materializing_scopes: std::collections::HashSet<Symbol>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
     /// AccessorKind per method — lets the body-typer flag Method
