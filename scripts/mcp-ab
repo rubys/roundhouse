@@ -1,0 +1,257 @@
+#!/usr/bin/env ruby
+# scripts/mcp-ab — does an agent answer a maintainer's questions better WITH
+# the roundhouse MCP server than without, and does it reach for the tools
+# unprompted?
+#
+# The same questions (scripts/mcp-ab-questions.json) are put to headless
+# Claude Code over a Rails checkout in two arms:
+#
+#   without  — file tools only (Read, Grep, Glob): "the expensive way".
+#   with     — the same, plus the roundhouse MCP server attached. The prompt
+#              never mentions the server, so a tool call is the agent's own
+#              choice — that is the thing being measured.
+#
+# Each run's stream-json transcript is kept, then scored against the
+# question's answer key: facts matched (regexes a correct answer contains),
+# hallucination tells hit, which roundhouse tools were called, how many
+# files were read, turns, wall time, cost. The key is derived from the
+# SOURCE, not the analyzer — a run the tool misleads scores as wrong.
+#
+#   scripts/mcp-ab --app ~/git/once-campfire                  # both arms, 1 run
+#   scripts/mcp-ab --app ~/git/once-campfire --runs 5 --model opus
+#   scripts/mcp-ab --app … --only filters,nil --arm with
+#   scripts/mcp-ab --report build/mcp-ab/<stamp>              # re-score a kept run
+#
+# Needs `claude` on PATH (logged in) and target/release/roundhouse-mcp
+# (cargo build --release --bin roundhouse-mcp). Output lands in
+# build/mcp-ab/<stamp>/: one .jsonl per (question, arm, run), summary.json,
+# report.md. Nothing is written into the app checkout.
+
+require "json"
+require "open3"
+require "optparse"
+require "fileutils"
+require "time"
+require "shellwords"
+
+ROOT = File.expand_path("..", __dir__)
+
+opts = {
+  app: ENV["MCP_AB_APP"],
+  runs: 1,
+  model: "sonnet",
+  arm: "both",
+  questions: File.join(ROOT, "scripts/mcp-ab-questions.json"),
+  only: nil,
+  out: nil,
+  mcp: File.join(ROOT, "target/release/roundhouse-mcp"),
+  max_turns: 40,
+  dry_run: false,
+  report: nil,
+}
+OptionParser.new do |o|
+  o.banner = "usage: scripts/mcp-ab --app DIR [options]"
+  o.on("--app DIR", "Rails checkout to ask about (or $MCP_AB_APP)") { |v| opts[:app] = v }
+  o.on("--runs N", Integer, "repetitions per (question, arm); default 1") { |v| opts[:runs] = v }
+  o.on("--model M", "claude model alias; default sonnet") { |v| opts[:model] = v }
+  o.on("--arm A", %w[with without both], "with | without | both (default)") { |v| opts[:arm] = v }
+  o.on("--questions FILE", "question set; default scripts/mcp-ab-questions.json") { |v| opts[:questions] = v }
+  o.on("--only IDS", "comma-separated question ids") { |v| opts[:only] = v.split(",") }
+  o.on("--out DIR", "output dir; default build/mcp-ab/<stamp>") { |v| opts[:out] = v }
+  o.on("--mcp BIN", "roundhouse-mcp binary; default target/release/roundhouse-mcp") { |v| opts[:mcp] = v }
+  o.on("--max-turns N", Integer, "agent turn cap per run; default 40") { |v| opts[:max_turns] = v }
+  o.on("--dry-run", "print the claude invocations, run nothing") { opts[:dry_run] = true }
+  o.on("--report DIR", "re-score an existing output dir and exit") { |v| opts[:report] = v }
+end.parse!
+
+# ── Scoring ──────────────────────────────────────────────────────────
+# A transcript is the stream-json claude -p emits: `assistant` messages
+# whose content blocks include tool_use, then one `result`. Roundhouse
+# tools arrive as mcp__roundhouse__<tool>.
+def score(question, jsonl_path)
+  tools = Hash.new(0)
+  reads = 0
+  result = nil
+  File.foreach(jsonl_path) do |line|
+    line.strip!
+    next if line.empty?
+    m = JSON.parse(line) rescue next
+    case m["type"]
+    when "assistant"
+      Array(m.dig("message", "content")).each do |block|
+        next unless block["type"] == "tool_use"
+        name = block["name"].to_s
+        if name.start_with?("mcp__roundhouse__")
+          tools[name.sub("mcp__roundhouse__", "")] += 1
+        elsif %w[Read Grep Glob].include?(name)
+          reads += 1
+        end
+      end
+    when "result"
+      result = m
+    end
+  end
+  text = result ? result["result"].to_s : ""
+  facts = question["expect"].map { |re| [re, !!(text =~ Regexp.new(re, Regexp::IGNORECASE))] }
+  tells = question["absent"].map { |re| [re, !!(text =~ Regexp.new(re, Regexp::IGNORECASE))] }
+  # Order: the first match of each regex must come after the previous
+  # one's. A missing item breaks the sequence (nil); an answer that names
+  # them all in the wrong order also fails. Empty list ⇒ not scored (nil).
+  order = question.fetch("order", [])
+  ordered = if order.empty?
+    nil
+  else
+    idx = order.map { |re| text =~ Regexp.new(re, Regexp::IGNORECASE) }
+    idx.none?(&:nil?) && idx.each_cons(2).all? { |a, b| a < b }
+  end
+  {
+    ok: result && result["subtype"] == "success",
+    facts: facts.count { |_, hit| hit },
+    facts_total: facts.size,
+    missed: facts.reject { |_, hit| hit }.map(&:first),
+    tells: tells.count { |_, hit| hit },
+    ordered: ordered,
+    tools: tools,
+    used_tool: !tools.empty?,
+    reads: reads,
+    turns: result && result["num_turns"],
+    ms: result && result["duration_ms"],
+    cost: result && result["total_cost_usd"],
+    answer: text,
+  }
+end
+
+def load_questions(path, only)
+  qs = JSON.parse(File.read(path))["questions"]
+  only ? qs.select { |q| only.include?(q["id"]) } : qs
+end
+
+# ── Report ───────────────────────────────────────────────────────────
+def report(out_dir, questions)
+  rows = Dir[File.join(out_dir, "*.jsonl")].sort.map do |path|
+    id, arm, n = File.basename(path, ".jsonl").split("--")
+    q = questions.find { |x| x["id"] == id } or next
+    { id: id, arm: arm, run: n.to_i, path: path }.merge(score(q, path))
+  end.compact
+
+  summary = questions.map do |q|
+    %w[without with].map do |arm|
+      rs = rows.select { |r| r[:id] == q["id"] && r[:arm] == arm }
+      next if rs.empty?
+      tool_names = rs.flat_map { |r| r[:tools].keys }.tally.sort_by { |_, c| -c }.map { |t, c| "#{t}×#{c}" }
+      {
+        id: q["id"], arm: arm, runs: rs.size,
+        facts: rs.sum { |r| r[:facts] } / rs.size.to_f, facts_total: q["expect"].size,
+        full: rs.count { |r| r[:facts] == q["expect"].size },
+        tells: rs.sum { |r| r[:tells] },
+        ordered: q.fetch("order", []).empty? ? nil : rs.count { |r| r[:ordered] },
+        used_tool: rs.count { |r| r[:used_tool] },
+        tools: tool_names,
+        reads: rs.sum { |r| r[:reads] } / rs.size.to_f,
+        turns: rs.sum { |r| r[:turns].to_i } / rs.size.to_f,
+        secs: rs.sum { |r| r[:ms].to_i } / rs.size.to_f / 1000,
+        cost: rs.sum { |r| r[:cost].to_f } / rs.size.to_f,
+        missed: rs.flat_map { |r| r[:missed] }.tally.sort_by { |_, c| -c },
+      }
+    end
+  end.flatten.compact
+
+  md = +"# mcp-ab — #{File.basename(out_dir)}\n\n"
+  md << "| question | arm | runs | facts (mean) | all facts | in order | tells | used tool | tools | file reads | turns | secs | $ |\n"
+  md << "|---|---|--:|--:|--:|--:|--:|--:|---|--:|--:|--:|--:|\n"
+  summary.each do |s|
+    ord = s[:ordered].nil? ? "–" : "#{s[:ordered]}/#{s[:runs]}"
+    md << "| #{s[:id]} | #{s[:arm]} | #{s[:runs]} | #{format('%.1f', s[:facts])}/#{s[:facts_total]} | #{s[:full]}/#{s[:runs]} | #{ord} | #{s[:tells]} | #{s[:used_tool]}/#{s[:runs]} | #{s[:tools].join(' ')} | #{format('%.1f', s[:reads])} | #{format('%.1f', s[:turns])} | #{format('%.0f', s[:secs])} | #{format('%.2f', s[:cost])} |\n"
+  end
+  md << "\n## Most-missed facts\n\n"
+  summary.each do |s|
+    next if s[:missed].empty?
+    md << "- **#{s[:id]} / #{s[:arm]}**: #{s[:missed].map { |re, c| "`#{re}` (#{c})" }.join(', ')}\n"
+  end
+  md << "\n## Answers\n\n"
+  rows.each do |r|
+    md << "### #{r[:id]} / #{r[:arm]} / run #{r[:run]} — #{r[:facts]}/#{r[:facts_total]} facts"
+    md << ", tools: #{r[:tools].map { |t, c| "#{t}×#{c}" }.join(' ')}" unless r[:tools].empty?
+    md << "\n\n#{r[:answer].strip}\n\n"
+  end
+  File.write(File.join(out_dir, "report.md"), md)
+  File.write(File.join(out_dir, "summary.json"), JSON.pretty_generate(summary: summary, runs: rows.map { |r| r.reject { |k, _| k == :answer } }))
+  puts md.lines.take_while { |l| !l.start_with?("## Answers") }.join
+  puts "→ #{File.join(out_dir, 'report.md')}"
+end
+
+questions = load_questions(opts[:questions], opts[:only])
+
+if opts[:report]
+  report(opts[:report], questions)
+  exit
+end
+
+abort "--app DIR is required (a Rails checkout)" unless opts[:app] && File.directory?(opts[:app])
+app = File.expand_path(opts[:app])
+abort "#{opts[:mcp]} not found — cargo build --release --bin roundhouse-mcp" unless opts[:dry_run] || File.executable?(opts[:mcp])
+
+out_dir = File.expand_path(opts[:out] || File.join(ROOT, "build/mcp-ab", Time.now.utc.strftime("%Y%m%d-%H%M%S")))
+FileUtils.mkdir_p(out_dir)
+
+# The MCP config claude loads for the `with` arm: the server over the app.
+mcp_config = File.join(out_dir, "mcp.json")
+File.write(mcp_config, JSON.pretty_generate(
+  mcpServers: { roundhouse: { command: File.expand_path(opts[:mcp]), args: [app] } },
+))
+
+# Identical in both arms; says nothing about roundhouse.
+system_prompt = "You are answering questions about the Rails application in the current " \
+  "directory. Be concrete: name methods, files and line numbers. If something cannot be " \
+  "determined, say so rather than guessing. Finish with a clear, complete answer."
+
+ROUNDHOUSE_TOOLS = %w[type_at can_be_nil references diagnostics traceroute wont_lower].freeze
+
+def claude_cmd(arm, prompt, opts, mcp_config, system_prompt)
+  allowed = %w[Read Grep Glob]
+  allowed += ROUNDHOUSE_TOOLS.map { |t| "mcp__roundhouse__#{t}" } if arm == "with"
+  cmd = %w[claude -p] + [prompt] + [
+    "--output-format", "stream-json", "--verbose",
+    "--no-session-persistence",
+    "--model", opts[:model],
+    "--max-turns", opts[:max_turns].to_s,
+    "--tools", "Read,Grep,Glob",
+    "--allowedTools", allowed.join(","),
+    "--append-system-prompt", system_prompt,
+    "--strict-mcp-config",
+  ]
+  cmd += ["--mcp-config", mcp_config] if arm == "with"
+  cmd
+end
+
+arms = opts[:arm] == "both" ? %w[without with] : [opts[:arm]]
+File.write(File.join(out_dir, "config.json"), JSON.pretty_generate(
+  app: app, model: opts[:model], runs: opts[:runs], arms: arms, max_turns: opts[:max_turns],
+  questions: questions.map { |q| q["id"] }, started: Time.now.utc.iso8601,
+  roundhouse: `git -C #{ROOT.shellescape} rev-parse --short HEAD`.strip,
+  app_commit: `git -C #{app.shellescape} rev-parse --short HEAD 2>/dev/null`.strip,
+))
+
+questions.each do |q|
+  arms.each do |arm|
+    1.upto(opts[:runs]) do |n|
+      cmd = claude_cmd(arm, q["prompt"], opts, mcp_config, system_prompt)
+      path = File.join(out_dir, "#{q['id']}--#{arm}--#{n}.jsonl")
+      if opts[:dry_run]
+        puts "(cd #{app.shellescape} && #{cmd.shelljoin} > #{path})"
+        next
+      end
+      $stderr.print "#{q['id']} / #{arm} / #{n} … "
+      t0 = Time.now
+      stdout, stderr, status = Open3.capture3(*cmd, chdir: app)
+      File.write(path, stdout)
+      File.write(path.sub(".jsonl", ".stderr"), stderr) unless stderr.empty?
+      s = score(q, path)
+      $stderr.puts "#{s[:ok] ? 'ok' : "exit #{status.exitstatus}"} · #{s[:facts]}/#{s[:facts_total]} facts · " \
+        "#{s[:tools].empty? ? 'no roundhouse tool' : s[:tools].map { |t, c| "#{t}×#{c}" }.join(' ')} · " \
+        "#{s[:reads]} reads · #{(Time.now - t0).round}s"
+    end
+  end
+end
+
+report(out_dir, questions) unless opts[:dry_run]

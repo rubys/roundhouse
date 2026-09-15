@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "The A/B question set for scripts/mcp-ab: the same maintainer questions",
+    "asked of an agent over a Campfire checkout with and without the",
+    "roundhouse MCP server attached. Each question carries an answer key",
+    "derived from the SOURCE (not from the analyzer), so a run where the tool",
+    "misleads the agent scores as wrong, same as a run where grep does.",
+    "`expect` are case-insensitive regexes a correct answer contains;",
+    "`order` is a list of regexes whose first matches must appear in that sequence (execution order);",
+    "`absent` are hallucination tells; `tool` is the roundhouse tool a",
+    "well-chosen call would use (measured, never suggested to the agent)."
+  ],
+  "questions": [
+    {
+      "id": "filters",
+      "prompt": "For the request GET /rooms/:id (RoomsController#show), list every before_action that actually runs, in execution order, naming the file that defines each. Then say which registered filter(s) do NOT run for this action and why. Finally: where does Current.user get assigned during this request?",
+      "expect": [
+        "allow_browser",
+        "require_authentication",
+        "deny_bots",
+        "reject_banned_ip",
+        "safe_request\\?",
+        "Current\\.request",
+        "set_version_headers",
+        "set_room",
+        "remember_last_room_visited",
+        "ensure_can_administer",
+        "session=|current\\.rb"
+      ],
+      "absent": [],
+      "tool": "traceroute",
+      "why": "Ruby processes a multi-argument `include` in REVERSE, so ApplicationController's `include AllowBrowser, Authentication, Authorization, BlockBannedRequests, SetCurrentRequest, SetPlatform, TrackedRoomVisit, VersionHeaders` registers VersionHeaders' filter first and AllowBrowser's last. Execution order on GET /rooms/:id: set_version_headers (VersionHeaders), the `Current.request = request` block (SetCurrentRequest), [reject_banned_ip — registered by BlockBannedRequests but `unless: :safe_request?` and a GET is safe, so it does NOT run], require_authentication, deny_bots (Authentication), allow_browser (AllowBrowser), set_room (RoomsController, only: show destroy), [ensure_can_administer — only: destroy, does NOT run], remember_last_room_visited (RoomsController, defined in TrackedRoomVisit). Current.user is set by Current#session= (app/models/current.rb) via require_authentication → restore_authentication → resume_session → authenticated_as. Authorization, SetPlatform, TrackedRoomVisit register no filters themselves.",
+      "order": [
+        "set_version_headers",
+        "Current\\.request",
+        "require_authentication",
+        "deny_bots",
+        "allow_browser",
+        "set_room",
+        "remember_last_room_visited"
+      ]
+    },
+    {
+      "id": "nil",
+      "prompt": "In RoomsController#show, can @room be nil at the point app/views/rooms/show.html.erb renders? Explain from how @room is assigned and what happens when the lookup fails.",
+      "expect": [
+        "set_room",
+        "find_by",
+        "redirect",
+        "(cannot|can't|can not|never|will not|won't|is not|isn't|not) (be )?nil|non-nil|always (be )?(set|present|assigned)"
+      ],
+      "absent": [],
+      "tool": "can_be_nil|type_at|traceroute",
+      "why": "set_room does room_scope.find_by(id: …); on a miss it redirect_to root_url, which halts the filter chain, so show and its view never run with @room nil. A static type of Room? for the ivar is true across the filter body but not at the view.",
+      "order": []
+    },
+    {
+      "id": "type",
+      "prompt": "In app/views/messages/_message.html.erb, what is the type of `message`, and what is the type of `message.creator`? Can `message.creator` be nil? Say how you determined each.",
+      "expect": [
+        "\\bMessage\\b",
+        "\\bUser\\b",
+        "belongs_to|class_name"
+      ],
+      "absent": [],
+      "tool": "type_at|can_be_nil",
+      "why": "The partial is rendered with a Message; `belongs_to :creator, class_name: \"User\", default: -> { Current.user }` — required by default, so a persisted Message has a User creator.",
+      "order": []
+    },
+    {
+      "id": "nplus1",
+      "prompt": "For the paginated messages feed — MessagesController#index rendering the messages/_message partial (and what it renders) — which associations are preloaded for the messages, and which association reads in the rendered partials would issue a query per message? Name the scopes and the partials involved.",
+      "expect": [
+        "with_creator",
+        "avatar_attachment",
+        "rich_text|body|with_attachment_details",
+        "boosts",
+        "cache"
+      ],
+      "absent": [],
+      "tool": "traceroute|diagnostics",
+      "why": "find_paged_messages uses only Message.with_creator (preload(creator: :avatar_attachment)). rooms#show adds with_attachment_details and with_boosts; index does not, so the rich-text body / attachment reads and boosts in the partials are per-message reads there — largely masked by the fragment cache in _message.html.erb.",
+      "order": []
+    },
+    {
+      "id": "eject",
+      "prompt": "Suppose this app were compiled to Go with roundhouse. Which declarations in app/models/message.rb would not survive that compilation (are unsupported), as reported by the compiler? List them with line numbers.",
+      "expect": [
+        "before_create",
+        "after_create_commit",
+        "include",
+        "has_rich_text"
+      ],
+      "absent": [],
+      "tool": "wont_lower",
+      "why": "Only the compiler can answer this; wont_lower(go) reports message.rb:2 include, :9 has_rich_text (as an unsupported assign-target, listed repeatedly), :11 before_create, :12 after_create_commit. (has_one_attached is in message/attachment.rb, outside the file asked about.) Without the tool the honest answer is 'cannot determine' — this question measures a capability the grep arm does not have, not a head-to-head.",
+      "order": []
+    }
+  ]
+}
