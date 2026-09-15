@@ -367,6 +367,9 @@ impl Analyzer {
             // `has_secure_password` generates `password=`/
             // `password_confirmation=` writers + `authenticate`.
             register_has_secure_password(&model.body, &mut cls.instance_methods, &self_ty);
+            // `has_rich_text :body` generates the reader/predicate/
+            // writer and the scoped has_one behind them.
+            register_has_rich_text(model, &mut cls.instance_methods);
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
@@ -4882,6 +4885,49 @@ fn register_has_secure_password(
             format!("authenticate_{attr}")
         };
         methods.entry(Symbol::from(auth)).or_insert(self_ty.clone());
+    }
+}
+
+/// Register the methods `has_rich_text :body` generates, method for
+/// method as `lower::rich_text::push_owner_methods` expands them:
+/// `rich_text_body` / `build_rich_text_body` (the scoped has_one and
+/// its builder) and `body` answer the `ActionText::RichText` record;
+/// `body?` a Bool; `body=` takes a String or a Content and answers what
+/// it was given. The expansion happens at LOWERING; without this
+/// registration a typed read of `message.body` — which the
+/// `collection:` render of the message partial now produces — failed
+/// dispatch on `Message`, where before the local was untyped and the
+/// read a silent gradual escape. `or_insert`, so a real `def` wins.
+fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<Symbol, Ty>) {
+    use crate::lower::rich_text;
+    // The synthesized record class itself: its `body` reads back as a
+    // Content (`serialize :body, coder: ActionText::Content`) and it
+    // delegates the Content surface — `push_record_methods`' list.
+    if rich_text::is_record_model(model) {
+        let content = Ty::Class { id: rich_text::content_class(), args: vec![] };
+        methods.insert(Symbol::from("body"), content);
+        methods.entry(Symbol::from("body=")).or_insert(Ty::Str);
+        for (name, ret) in [
+            ("to_s", Ty::Str),
+            ("to_plain_text", Ty::Str),
+            ("to_html", Ty::Str),
+            ("to_trix_html", Ty::Str),
+            ("blank?", Ty::Bool),
+            ("empty?", Ty::Bool),
+            ("present?", Ty::Bool),
+        ] {
+            methods.entry(Symbol::from(name)).or_insert(ret);
+        }
+        return;
+    }
+    let record = Ty::Class { id: rich_text::record_class(), args: vec![] };
+    for (_, attr) in rich_text::rich_text_attrs(model) {
+        let a = attr.as_str();
+        for name in [format!("rich_text_{a}"), format!("build_rich_text_{a}"), a.to_string()] {
+            methods.entry(Symbol::from(name)).or_insert(record.clone());
+        }
+        methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
     }
 }
 
