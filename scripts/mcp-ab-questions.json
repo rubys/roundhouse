@@ -19,6 +19,7 @@
         "require_authentication",
         "deny_bots",
         "reject_banned_ip",
+        "reject_banned_ip.{0,120}(not run|doesn't run|does not run|won't run|skipped|never runs|is skipped)|(skipped|does not run|not run|doesn't run).{0,120}reject_banned_ip",
         "safe_request\\?",
         "Current\\.request",
         "set_version_headers",

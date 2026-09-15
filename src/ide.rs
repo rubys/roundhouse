@@ -1419,9 +1419,16 @@ pub struct FilterHop {
     pub resolved: bool,
     /// Guard as written: `if: :account_required?` /
     /// `unless: :limited_federation_mode?` (both, comma-joined, when
-    /// both present). Runtime predicates the static chain can't
-    /// evaluate — carried verbatim.
+    /// both present). Carried verbatim; see `decided` for the case the
+    /// static chain CAN evaluate.
     pub condition: Option<String>,
+    /// When the guard is a predicate over the request's verb
+    /// (`request.get? || request.head?`) and the trace has a matched
+    /// route, the guard is decided for that verb: `(verb, runs)`.
+    /// `runs == false` folds into `applies`. None when there is no
+    /// guard, no route, or the predicate reads anything but the verb —
+    /// an undecidable guard leaves the hop applying, as before.
+    pub decided: Option<(String, bool)>,
     pub only: Vec<String>,
     pub except: Vec<String>,
     pub applies: bool,
@@ -1607,7 +1614,17 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 .join(", "),
             ),
         };
-        let applies = gated_in && skipped_by.is_none();
+        // The route's verb decides verb-only guards. campfire's
+        // `reject_banned_ip unless: :safe_request?` with `safe_request?
+        // = request.get? || request.head?` does not run on GET; the
+        // chain used to list it as applying, condition shown as text,
+        // and an agent reading the trace said it ran.
+        let verb = matched.map(|r| verb_str(&r.method)).filter(|v| *v != "ANY");
+        let decided = verb.and_then(|v| {
+            let runs = guard_verdict(app, &rf.filter, &rf.defined_in, &target_search, v)?;
+            Some((v.to_string(), runs))
+        });
+        let applies = gated_in && skipped_by.is_none() && !matches!(decided, Some((_, false)));
         let n_plus_one = match (applies, target_body) {
             (true, Some(body)) => preloads_in_body(app, &preload_diags, body),
             _ => Vec::new(),
@@ -1621,6 +1638,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             line,
             resolved,
             condition,
+            decided,
             only: rf.filter.only.iter().map(|s| s.as_str().to_string()).collect(),
             except: rf.filter.except.iter().map(|s| s.as_str().to_string()).collect(),
             applies,
@@ -1948,6 +1966,83 @@ fn span_site(app: &App, span: Span) -> Option<String> {
     }
     let src = source(app, span.file)?;
     Some(format!("{}:{}", src.path, src.line_col(span.start).0))
+}
+
+/// Decide a filter's `if:` / `unless:` guard for a request verb, when
+/// the guard is a predicate over nothing but the verb. Symbol guards
+/// resolve to their method body (the filter's own class first, then the
+/// chain); lambda guards evaluate their body directly. Both guards
+/// present ⇒ both must decide. None = no guard, or not decidable.
+fn guard_verdict(
+    app: &App,
+    filter: &crate::dialect::Filter,
+    defined_in: &ClassId,
+    search: &[ClassId],
+    verb: &str,
+) -> Option<bool> {
+    let body_of = |sym: &Symbol| -> Option<&Expr> {
+        method_body(app, defined_in, sym).or_else(|| search.iter().find_map(|c| method_body(app, c, sym)))
+    };
+    let decide = |sym: &Option<Symbol>, expr: &Option<Expr>| -> Option<Option<bool>> {
+        match (expr, sym) {
+            (Some(e), _) => Some(verb_predicate(e, verb)),
+            (None, Some(s)) => Some(body_of(s).and_then(|b| verb_predicate(b, verb))),
+            (None, None) => None,
+        }
+    };
+    let if_v = decide(&filter.if_cond, &filter.if_cond_expr);
+    let unless_v = decide(&filter.unless_cond, &filter.unless_cond_expr);
+    if if_v.is_none() && unless_v.is_none() {
+        return None;
+    }
+    // An undecidable guard is None inside Some: no verdict at all.
+    let if_ok = match if_v {
+        Some(v) => v?,
+        None => true,
+    };
+    let unless_hit = match unless_v {
+        Some(v) => v?,
+        None => false,
+    };
+    Some(if_ok && !unless_hit)
+}
+
+/// Evaluate a verb predicate: `request.get?` / `.head?` / `.post?` /
+/// `.put?` / `.patch?` / `.delete?` / `.options?`, combined with `&&`,
+/// `||`, `!`, possibly as a one-statement method body. Anything else —
+/// a param read, a model call, a second statement — is not a verb
+/// predicate and yields None.
+fn verb_predicate(e: &Expr, verb: &str) -> Option<bool> {
+    const VERBS: &[&str] = &["get?", "head?", "post?", "put?", "patch?", "delete?", "options?"];
+    match &*e.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => verb_predicate(&exprs[0], verb),
+        ExprNode::BoolOp { op, left, right, .. } => {
+            let l = verb_predicate(left, verb)?;
+            let r = verb_predicate(right, verb)?;
+            Some(match op {
+                crate::expr::BoolOpKind::And => l && r,
+                crate::expr::BoolOpKind::Or => l || r,
+            })
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "!" && args.is_empty() =>
+        {
+            verb_predicate(r, verb).map(|v| !v)
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && VERBS.contains(&method.as_str()) =>
+        {
+            let ExprNode::Send { recv: None, method: rm, args: ra, block: None, .. } = &*r.node
+            else {
+                return None;
+            };
+            if rm.as_str() != "request" || !ra.is_empty() {
+                return None;
+            }
+            Some(method.as_str().trim_end_matches('?').eq_ignore_ascii_case(verb))
+        }
+        _ => None,
+    }
 }
 
 /// `before_action` / `around_action` / `after_action`, for naming a
@@ -2440,6 +2535,9 @@ fn hop_json(hop: &TraceHop) -> serde_json::Value {
             set_loc(&mut o, &f.file, f.line);
             if let Some(c) = &f.condition {
                 set(&mut o, "condition", json!(c));
+            }
+            if let Some((verb, runs)) = &f.decided {
+                set(&mut o, "decided", json!({ "verb": verb, "runs": runs }));
             }
             if !f.only.is_empty() {
                 set(&mut o, "only", json!(f.only));
@@ -3105,6 +3203,86 @@ end
         assert_eq!(block.line, Some(5), "the block body, not the `before_action do` line");
         let report = trace_gap_report(&app, &trace, &[], None);
         assert!(report.complete(), "gaps = {:?}", report.gaps);
+    }
+
+    /// A guard that reads only the request verb is decided by the
+    /// route: campfire's `reject_banned_ip unless: :safe_request?` with
+    /// `safe_request? = request.get? || request.head?` does not run on
+    /// GET and does on POST. A guard reading anything else stays
+    /// undecided (hop applies, condition carried as text).
+    #[test]
+    fn traceroute_decides_verb_only_guards_from_the_route() {
+        let app = tree_app(&[
+            (
+                "app/controllers/concerns/block_banned_requests.rb",
+                "module BlockBannedRequests
+  extend ActiveSupport::Concern
+  included do
+    before_action :reject_banned_ip, unless: :safe_request?
+    before_action :audit, if: :audited?
+  end
+  private
+    def safe_request?
+      request.get? || request.head?
+    end
+    def audited?
+      params[:audit].present?
+    end
+    def reject_banned_ip
+      head :forbidden
+    end
+    def audit
+    end
+end
+",
+            ),
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base
+  include BlockBannedRequests
+end
+",
+            ),
+            (
+                "app/controllers/widgets_controller.rb",
+                "class WidgetsController < ApplicationController
+  def index
+  end
+  def create
+    head :created
+  end
+end
+",
+            ),
+            ("app/views/widgets/index.html.erb", "<p>hi</p>\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :widgets, only: [:index, :create]\nend\n"),
+        ]);
+        let hop = |query: &str, name: &str| -> FilterHop {
+            let trace = traceroute(&app, query).expect("trace");
+            trace
+                .hops
+                .iter()
+                .find_map(|h| match h {
+                    TraceHop::Filter(f) if f.name == name => Some(f.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} hop in {query}"))
+        };
+        let on_get = hop("GET /widgets", "reject_banned_ip");
+        assert_eq!(on_get.decided, Some(("GET".to_string(), false)));
+        assert!(!on_get.applies, "a GET is a safe request: the filter does not run");
+        assert_eq!(on_get.condition.as_deref(), Some("unless: :safe_request?"));
+        assert!(on_get.skipped_by.is_none(), "decided by the guard, not a skip");
+
+        let on_post = hop("POST /widgets", "reject_banned_ip");
+        assert_eq!(on_post.decided, Some(("POST".to_string(), true)));
+        assert!(on_post.applies);
+
+        // Not a verb predicate: no verdict, hop applies as before.
+        let audit = hop("GET /widgets", "audit");
+        assert_eq!(audit.decided, None);
+        assert!(audit.applies);
+        assert_eq!(audit.condition.as_deref(), Some("if: :audited?"));
     }
 
     #[test]

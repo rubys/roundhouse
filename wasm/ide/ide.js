@@ -343,8 +343,10 @@ function hopRow(hop) {
   el.appendChild(span("kind", hop.filter_kind || hop.kind));
   el.appendChild(span("name", hop.name || hop.detail || ""));
   if (hop.condition) el.appendChild(span("meta", hop.condition));
+  // A verb-only guard decided by the route: say which way, for which verb.
+  if (hop.decided) el.appendChild(span("meta", `${hop.decided.runs ? "runs" : "skipped"} for ${hop.decided.verb}`));
   if (hop.skipped_by) el.appendChild(span("meta", `skipped by ${hop.skipped_by}`));
-  else if (hop.applies === false) {
+  else if (hop.applies === false && !hop.decided) {
     const gate = hop.only?.length ? `only: ${hop.only.join(", ")}` : hop.except?.length ? `except: ${hop.except.join(", ")}` : "";
     if (gate) el.appendChild(span("meta", gate));
   }
