@@ -177,7 +177,7 @@ class ActionTextContentTest < Minitest::Test
     assert_equal "SGID", a.sgid
     assert_equal "image/jpeg", a.content_type
     assert_equal "Cap", a.caption
-    assert_equal "racecar.jpg", a.filename
+    assert_equal "racecar.jpg", a.filename.to_s
     assert_equal "http://x/1", a.url
   end
 

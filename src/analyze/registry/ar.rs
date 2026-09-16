@@ -445,9 +445,34 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     let attachment_ty = Ty::Class { id: attachment_id.clone(), args: vec![] };
 
     let mut attachment = ClassInfo::default();
-    for m in ["sgid", "content_type", "caption", "filename", "url", "to_plain_text", "[]"] {
+    for m in ["sgid", "content_type", "url", "to_plain_text", "to_html", "to_s", "[]"] {
         attachment.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
+    // `filename` is the blob's `ActiveStorage::Filename` (Rails
+    // delegates it; the runtime wraps the node's text the same way).
+    attachment.instance_methods.insert(
+        Symbol::from("filename"),
+        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::Filename")), args: vec![] },
+    );
+    // `node_attributes["caption"].presence` — the caption typed in the
+    // editor, stored on the `<action-text-attachment>` node; nil when
+    // there is none.
+    attachment.instance_methods.insert(
+        Symbol::from("caption"),
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+    );
+    for m in ["node_attributes", "full_attributes"] {
+        attachment.instance_methods.insert(
+            Symbol::from(m),
+            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        );
+    }
+    // `delegate_missing_to :attachable`: an attachment wrapping a blob
+    // answers everything the blob does (`representable?`, `filename`,
+    // `byte_size`), which is how Action Text's `_blob` partial reads
+    // its `blob` local — an Attachment, not a Blob — as if it were one.
+    // The parent walk is that delegation for the Blob attachable.
+    attachment.parent = Some(ClassId(Symbol::from("ActiveStorage::Blob")));
     attachment.instance_methods.insert(
         Symbol::from("attributes"),
         Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },

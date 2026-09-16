@@ -2803,11 +2803,15 @@ impl Analyzer {
             // Partials the FRAMEWORK renders, so no site in the app seeds
             // them: `action_text:install` copies `active_storage/blobs/
             // _blob.html.erb` into every app and Action Text renders it
-            // with `blob:` for each attachment. The convention is the
-            // render site.
+            // for each attachment node. The local is named `blob` after
+            // the attachable's partial path, but what Action Text passes
+            // is the `ActionText::Attachment` wrapping it — the node's
+            // `caption` lives there, everything else delegates to the
+            // Blob (`delegate_missing_to :attachable`). The convention is
+            // the render site.
             if view.name.as_str() == "active_storage/blobs/_blob" {
                 view_ctx.local_bindings.entry(Symbol::from("blob")).or_insert(Ty::Class {
-                    id: ClassId(Symbol::from("ActiveStorage::Blob")),
+                    id: ClassId(Symbol::from("ActionText::Attachment")),
                     args: vec![],
                 });
             }

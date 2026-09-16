@@ -28,6 +28,10 @@
 # attribute the markup carried), and `attachables` returns `[]` with
 # the divergence stated at its definition and ledgered in
 # docs/pipeline/runtime.md.
+# Attachments wrap Active Storage blobs (a filename is an
+# `ActiveStorage::Filename`), as in Rails.
+require_relative "active_storage"
+
 module ActionText
   # The marker a model mixes in to say "I can be attached to rich text"
   # (campfire's `User::Mentionable` is one). EMPTY, and that is the
@@ -146,12 +150,21 @@ module ActionText
       self["content-type"]
     end
 
+    # Rails: `node_attributes["caption"].presence` — nil when the node
+    # carries no caption (or an empty one), which is what
+    # `active_storage/blobs/_blob.html.erb`'s `if caption =
+    # blob.try(:caption)` tests before falling back to the filename.
+    # An empty String here rendered an empty caption instead.
     def caption
-      self["caption"]
+      v = self["caption"]
+      v.empty? ? nil : v
     end
 
+    # Rails delegates this to the blob, whose `filename` is an
+    # `ActiveStorage::Filename` (extension, base, …); the node carries
+    # the same name as text, so wrap it the same way.
     def filename
-      self["filename"]
+      ActiveStorage::Filename.new(self["filename"])
     end
 
     def url
@@ -162,9 +175,7 @@ module ActionText
     # falls back to the filename when there is none
     # (`Attachment#to_plain_text`).
     def to_plain_text
-      text = caption
-      text = filename if text == ""
-      text
+      caption || filename.to_s
     end
   end
 

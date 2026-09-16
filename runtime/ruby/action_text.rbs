@@ -25,8 +25,8 @@ module ActionText
     def []: (String name) -> String
     def sgid: () -> String
     def content_type: () -> String
-    def caption: () -> String
-    def filename: () -> String
+    def caption: () -> String?
+    def filename: () -> ActiveStorage::Filename
     def url: () -> String
     def to_plain_text: () -> String
   end
