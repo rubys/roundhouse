@@ -83,6 +83,27 @@ module Rails
       value
     end
 
+    # The counter behind `rate_limit` (`ActionController::RateLimiter`),
+    # the third method of the typed seam: the first increment in a
+    # window writes the entry with `ttl` to live and every later one
+    # keeps that expiry, as MemoryStore#increment does. Under the one
+    # Mutex, read-modify-write, so two Puma threads counting the same
+    # key do not both see the old value.
+    def increment_str(key, ttl)
+      k = key.to_s
+      @mutex.synchronize do
+        entry = @data[k]
+        if entry && !expired?(entry) && entry[0].is_a?(String)
+          n = entry[0].to_i + 1
+          @data[k] = [n.to_s, entry[1]]
+          n
+        else
+          @data[k] = ["1", ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
+          1
+        end
+      end
+    end
+
     def read(key)
       @mutex.synchronize do
         entry = @data[key.to_s]

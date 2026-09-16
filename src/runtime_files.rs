@@ -132,6 +132,38 @@ mod tests {
         assert!(!exists("runtime/ruby/.hidden"));
     }
 
+    /// Three stores answer `Rails.cache` — the shared runtime's, the
+    /// CRuby overlay's MemoryStore, and Spinel's sharded twin — and
+    /// every method the compiler emits a call to has to exist on all of
+    /// them. `read_str`/`write_str` once landed on one and 500'd every
+    /// Campfire page on CRuby; `increment_str` landed on two and broke
+    /// sign-in on the CRuby compare lane the same way.
+    #[test]
+    fn every_typed_cache_seam_method_exists_on_all_three_stores() {
+        const SEAM: &[&str] = &["fetch_str", "read_str", "write_str", "increment_str"];
+        // The overlay is its own class: the whole seam, by itself.
+        for path in ["runtime/ruby/rails.rb", "runtime/spinel/scaffold/ruby_overlay/runtime/rails_cache.rb"] {
+            let src = read(path).unwrap_or_else(|| panic!("{path} is embedded"));
+            for m in SEAM {
+                assert!(
+                    src.contains(&format!("def {m}(")),
+                    "{path} does not define `{m}` — every store behind Rails.cache must"
+                );
+            }
+        }
+        // The Spinel twin is a REOPEN of the shared class: it inherits
+        // `fetch_str`, but every method that reads or writes the shared
+        // `@entries`/`@expires_at` directly must be redefined over the
+        // shards, or it silently uses the empty unsharded hashes.
+        let twin = read("runtime/spinel/fragment_cache.rb").unwrap();
+        for m in ["read_str", "write_str", "increment_str", "forget"] {
+            assert!(
+                twin.contains(&format!("def {m}(")),
+                "runtime/spinel/fragment_cache.rb does not shard `{m}`"
+            );
+        }
+    }
+
     #[test]
     fn walks_mirror_the_disk_rules() {
         let mut base = Vec::new();
