@@ -11,9 +11,12 @@
 //! rules). `Blog` is a special target — the source fixture walked
 //! verbatim, only used by the `--site` archive matrix.
 //!
-//! The emit dispatch is host-only because the scaffold/runtime walks
-//! read from disk (`runtime/spinel/scaffold/`, `runtime/ruby/`); WASM
-//! builds use a different entry point and don't pull this module.
+//! The scaffold/runtime trees (`runtime/spinel/scaffold/`,
+//! `runtime/ruby/`) come from [`crate::runtime_files`], embedded at
+//! build time, so the binary emits every target from any working
+//! directory; the app's own directories are still walked on disk. The
+//! emit dispatch is host-only; WASM builds use a different entry point
+//! and don't pull this module.
 
 use std::fs;
 use std::io::Write;
@@ -1585,7 +1588,7 @@ fn ruby_runtime_files(
     // it (an app's `delegate` is lowered at ingest).
     files.push((
         "runtime/module_delegate.rb".to_string(),
-        fs::read_to_string("runtime/spinel/module_delegate.rb")
+        crate::runtime_files::read_to_string("runtime/spinel/module_delegate.rb")
             .map_err(|e| format!("read runtime/spinel/module_delegate.rb: {e}"))?,
     ));
 
@@ -1638,8 +1641,7 @@ fn ruby_runtime_files(
     // scaffold base's raising façade.
     emit::ruby::restore_extras_facades(&mut files, app);
 
-    walk_dir_into(
-        Path::new("runtime/spinel/scaffold/ruby_overlay"),
+    crate::runtime_files::walk_into("runtime/spinel/scaffold/ruby_overlay",
         "",
         &mut files,
     )?;
@@ -2490,7 +2492,7 @@ fn jruby_runtime_files(
     // it from disk and inject it here (mirrors the gem swap the CRuby
     // target does to `db_cruby.rb`).
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/db_cruby.rb");
-    let db_jruby = fs::read_to_string("runtime/spinel/db_jruby.rb")
+    let db_jruby = crate::runtime_files::read_to_string("runtime/spinel/db_jruby.rb")
         .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
     // Chain the temporal-intrinsics module off db.rb, same as the
     // CRuby swap above (the emitted test bootstrap doesn't require it;
@@ -2560,11 +2562,11 @@ fn jruby_runtime_files(
     // it (an app's `delegate` is lowered at ingest).
     files.push((
         "runtime/module_delegate.rb".to_string(),
-        fs::read_to_string("runtime/spinel/module_delegate.rb")
+        crate::runtime_files::read_to_string("runtime/spinel/module_delegate.rb")
             .map_err(|e| format!("read runtime/spinel/module_delegate.rb: {e}"))?,
     ));
 
-    let markly_shim = fs::read_to_string("runtime/spinel/markly_jruby.rb")
+    let markly_shim = crate::runtime_files::read_to_string("runtime/spinel/markly_jruby.rb")
         .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
     files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
 
@@ -2632,8 +2634,7 @@ fn jruby_runtime_files(
         }
     }
 
-    walk_dir_into(
-        Path::new("runtime/spinel/scaffold/ruby_overlay"),
+    crate::runtime_files::walk_into("runtime/spinel/scaffold/ruby_overlay",
         "",
         &mut files,
     )?;
@@ -2699,22 +2700,21 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
 fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
-    walk_dir_into(Path::new("runtime/spinel/scaffold"), "", &mut files)?;
+    crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
 
-    walk_dir_partitioned(
-        Path::new("runtime/spinel/test"),
+    crate::runtime_files::walk_partitioned("runtime/spinel/test",
         "test/",
         "sig/test/",
         &mut files,
     )?;
 
-    walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
+    crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
 
     // Temporal-intrinsics sidecar — the flat walk above picks only .rb,
     // and spinel's strict unresolved-call gate needs `parse_db_time`'s
     // `String?` param typed to compile the nil-guard narrow.
     {
-        let rbs = fs::read_to_string("runtime/spinel/active_support_time_parsing.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_support_time_parsing.rbs")
             .map_err(|e| format!("read runtime/spinel/active_support_time_parsing.rbs: {e}"))?;
         files.push((
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
@@ -2726,7 +2726,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).
     {
-        let rbs = fs::read_to_string("runtime/spinel/active_support_duration.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_support_duration.rbs")
             .map_err(|e| format!("read runtime/spinel/active_support_duration.rbs: {e}"))?;
         files.push(("sig/runtime/active_support_duration.rbs".to_string(), rbs));
     }
@@ -2735,7 +2735,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // runtime/cgi_spinel.rb but only .rb, so pair its typing contract (escape ->
     // String, parse -> Hash[String, Array[String]]) here.
     {
-        let rbs = fs::read_to_string("runtime/spinel/cgi_spinel.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/cgi_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/cgi_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/cgi_spinel.rbs".to_string(), rbs));
     }
@@ -2744,7 +2744,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // ERB, the flat walk emits runtime/erb_spinel.rb, and the .rbs pins
     // html_escape's String return so callers concatenating it stay typed.
     {
-        let rbs = fs::read_to_string("runtime/spinel/erb_spinel.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/erb_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/erb_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/erb_spinel.rbs".to_string(), rbs));
     }
@@ -2753,7 +2753,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // runtime/active_record_equality_spinel.rb gives ActiveRecord::Base
     // Rails' `==`; the .rbs declares it so a typed comparison binds.
     {
-        let rbs = fs::read_to_string("runtime/spinel/active_record_equality_spinel.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_record_equality_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/active_record_equality_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
     }
@@ -2762,7 +2762,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // names `ActionView::RecordIdentifier.dom_id`; the .rbs carries the
     // shared `dom_id`'s contract so the record argument stays typed.
     {
-        let rbs = fs::read_to_string("runtime/spinel/record_identifier_spinel.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/record_identifier_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/record_identifier_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/record_identifier_spinel.rbs".to_string(), rbs));
     }
@@ -2772,7 +2772,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // Rails' bracket grammar; the .rbs keeps the reopened method's
     // signature the shared one's.
     {
-        let rbs = fs::read_to_string("runtime/spinel/hash_to_query.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/hash_to_query.rbs")
             .map_err(|e| format!("read runtime/spinel/hash_to_query.rbs: {e}"))?;
         files.push(("sig/runtime/hash_to_query.rbs".to_string(), rbs));
     }
@@ -2782,7 +2782,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // `alphanumeric`/`uuid` with stub-first arms; the .rbs pins the
     // slot setters the helper and the lowered tests call.
     {
-        let rbs = fs::read_to_string("runtime/spinel/secure_random_stub.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/secure_random_stub.rbs")
             .map_err(|e| format!("read runtime/spinel/secure_random_stub.rbs: {e}"))?;
         files.push(("sig/runtime/secure_random_stub.rbs".to_string(), rbs));
     }
@@ -2792,7 +2792,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // `xpath -> Array[Element]` so the app's `.map do |tag| … end` over
     // it is typed rather than poly.
     {
-        let rbs = fs::read_to_string("runtime/spinel/nokogiri_spinel.rbs")
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/nokogiri_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/nokogiri_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/nokogiri_spinel.rbs".to_string(), rbs));
     }
@@ -2804,7 +2804,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // controllers' shapes.
     for stem in ["multipart", "active_storage_disk"] {
         let path = format!("runtime/spinel/{stem}.rbs");
-        let rbs = fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+        let rbs = crate::runtime_files::read_to_string(&path)?;
         files.push((format!("sig/runtime/{stem}.rbs"), rbs));
     }
 
@@ -2832,7 +2832,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // The HTTP/WebSocket server (runtime/spinel/tep, over spinel's
     // sp_net; no C of its own) plus its NOTICE. Recursive walk picks
     // the whole subtree.
-    walk_dir_into(Path::new("runtime/spinel/tep"), "runtime/tep/", &mut files)?;
+    crate::runtime_files::walk_into("runtime/spinel/tep", "runtime/tep/", &mut files)?;
 
     for sub in [
         "active_record",
@@ -2840,8 +2840,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "action_controller",
         "action_dispatch",
     ] {
-        walk_dir_partitioned(
-            &Path::new("runtime/ruby").join(sub),
+        crate::runtime_files::walk_partitioned(
+            &format!("runtime/ruby/{sub}"),
             &format!("runtime/{sub}/"),
             &format!("sig/runtime/{sub}/"),
             &mut files,
@@ -2896,15 +2896,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // the CRuby/JRuby trees below.
         "zlib",
     ] {
-        let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
-        let content = fs::read_to_string(&rb)
-            .map_err(|e| format!("read {}: {e}", rb.display()))?;
+        let rb = format!("runtime/ruby/{stem}.rb");
+        let content = crate::runtime_files::read_to_string(&rb)?;
         files.push((format!("runtime/{stem}.rb"), content));
-        let rbs = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
-        if rbs.exists() {
-            let rbs_content = fs::read_to_string(&rbs)
-                .map_err(|e| format!("read {}: {e}", rbs.display()))?;
-            files.push((format!("sig/runtime/{stem}.rbs"), rbs_content));
+        let rbs = format!("runtime/ruby/{stem}.rbs");
+        if crate::runtime_files::exists(&rbs) {
+            files.push((
+                format!("sig/runtime/{stem}.rbs"),
+                crate::runtime_files::read_to_string(&rbs)?,
+            ));
         }
     }
 
@@ -4210,7 +4210,7 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
     if !app_declares_variants(files) {
         return Ok(false);
     }
-    let real = fs::read_to_string("runtime/spinel/facades/active_storage_processor_vips.rb")
+    let real = crate::runtime_files::read_to_string("runtime/spinel/facades/active_storage_processor_vips.rb")
         .map_err(|e| format!("read runtime/spinel/facades/active_storage_processor_vips.rb: {e}"))?;
     let stub = files
         .iter_mut()
@@ -5212,7 +5212,7 @@ mod tests {
 
     #[test]
     fn trim_gemfile_drops_assets_and_websocket_blocks() {
-        let gemfile = fs::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
+        let gemfile = crate::runtime_files::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
         let out = trim_gemfile(&gemfile, false, false);
         assert!(!out.contains("turbo-rails"), "assets group should be gone");
         assert!(!out.contains("stimulus-rails"));
@@ -5241,8 +5241,8 @@ mod tests {
     /// to an app that has none of them.
     #[test]
     fn asset_list_gem_rules_and_bundle_agree() {
-        let makefile = fs::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
-        let gemfile = fs::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
+        let makefile = crate::runtime_files::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
+        let gemfile = crate::runtime_files::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
 
         // campfire's shape: an app-side entry, a vendored module three
         // levels down, and two gem bundles the blog never pins.
@@ -5305,7 +5305,7 @@ mod tests {
     /// Tailwind file its layout never links.
     #[test]
     fn stylesheet_list_tracks_the_app_and_tailwind_is_conditional() {
-        let makefile = fs::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
+        let makefile = crate::runtime_files::read_to_string("runtime/spinel/scaffold/Makefile").unwrap();
 
         let mut plain = App::new();
         plain.stylesheets = vec!["base".into(), "messages".into()];
@@ -5356,11 +5356,11 @@ mod tests {
         let mut files = vec![
             (
                 "main.rb".to_string(),
-                fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
+                crate::runtime_files::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
             ),
             (
                 "test/test_helper.rb".to_string(),
-                fs::read_to_string("runtime/spinel/test/test_helper.rb").unwrap(),
+                crate::runtime_files::read_to_string("runtime/spinel/test/test_helper.rb").unwrap(),
             ),
         ];
         apply_controller_dispatch(&mut files, &app, false);
@@ -5380,7 +5380,7 @@ mod tests {
         app.current_attribute_classes.clear();
         let mut plain = vec![(
             "main.rb".to_string(),
-            fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
+            crate::runtime_files::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
         )];
         apply_controller_dispatch(&mut plain, &app, false);
         assert!(!plain[0].1.contains("Current.reset"));
@@ -5389,7 +5389,7 @@ mod tests {
     #[test]
     fn strip_cable_from_config_ru_removes_all_three_seams() {
         let config_ru =
-            fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/config.ru").unwrap();
+            crate::runtime_files::read_to_string("runtime/spinel/scaffold/ruby_overlay/config.ru").unwrap();
         let out = strip_cable_from_config_ru(&config_ru).unwrap();
         assert!(!out.contains("require_relative \"cable\""));
         assert!(!out.contains("Cable"), "no Cable constant may survive");
@@ -5852,7 +5852,7 @@ mod tests {
         use crate::dialect::LibraryClass;
         use crate::ident::{ClassId, Symbol};
 
-        let cable = fs::read_to_string("runtime/spinel/cable.rb").unwrap();
+        let cable = crate::runtime_files::read_to_string("runtime/spinel/cable.rb").unwrap();
         let connection_class = |name: &str| LibraryClass {
             name: ClassId(Symbol::from(name)),
             is_module: false,
@@ -5902,7 +5902,7 @@ mod tests {
         // markers; the suffix test must not claim it.
         let mut app2 = App::new();
         app2.library_classes.push(connection_class("ApplicationCable::Connection"));
-        let action_cable = fs::read_to_string("runtime/spinel/action_cable.rb").unwrap();
+        let action_cable = crate::runtime_files::read_to_string("runtime/spinel/action_cable.rb").unwrap();
         let mut files = vec![("runtime/action_cable.rb".to_string(), action_cable.clone())];
         apply_cable_connection(&mut files, &app2);
         assert_eq!(files[0].1, action_cable, "action_cable.rb was rewritten");
@@ -5916,7 +5916,7 @@ mod tests {
     /// guard no static target can spell.
     #[test]
     fn content_layout_dispatch_is_generated_when_the_app_ships_one() {
-        let runtime = fs::read_to_string("runtime/ruby/action_text.rb").unwrap();
+        let runtime = crate::runtime_files::read_to_string("runtime/ruby/action_text.rb").unwrap();
         let layout_path =
             "app/views/layouts/action_text/contents/_content.rb".to_string();
 

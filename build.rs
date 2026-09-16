@@ -7,10 +7,11 @@
 //! sets `github.sha`), else `git rev-parse --short HEAD` on the source
 //! tree, else nothing — a tarball build simply has no commit.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    embed_runtime_files();
     println!("cargo:rerun-if-env-changed=ROUNDHOUSE_COMMIT");
     let commit = std::env::var("ROUNDHOUSE_COMMIT")
         .ok()
@@ -50,4 +51,52 @@ fn git_head() -> Option<String> {
         .filter(|o| o.status.success())?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!sha.is_empty()).then_some(sha)
+}
+
+/// The `runtime/ruby/` and `runtime/spinel/` trees the ruby and spinel
+/// targets compose their output from, as a generated table of
+/// `include_str!`s (`$OUT_DIR/runtime_files.rs`, read by
+/// `src/runtime_files.rs`). The emit used to read these from disk
+/// relative to the working directory, which meant the shipped binary
+/// could emit Go from anywhere but ruby/spinel only from inside the
+/// repo. `include_str!` keeps the table cheap to compile, and cargo
+/// re-runs this script when anything under either directory changes.
+///
+/// Same admission rule as the disk walkers this replaces: dotfiles
+/// skipped, non-UTF-8 files skipped. Directory filtering (`SKIP_DIRS`)
+/// stays with the walkers, which apply it per query.
+fn embed_runtime_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    for top in ["runtime/ruby", "runtime/spinel"] {
+        let dir = root.join(top);
+        println!("cargo:rerun-if-changed={}", dir.display());
+        collect(&dir, top, &mut entries);
+    }
+    entries.sort();
+    let mut out = String::from("&[\n");
+    for (rel, abs) in &entries {
+        out.push_str(&format!("    ({rel:?}, include_str!({:?})),\n", abs.display().to_string()));
+    }
+    out.push_str("]\n");
+    let dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("runtime_files.rs");
+    std::fs::write(&dest, out).expect("write runtime_files.rs");
+}
+
+fn collect(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let nested = format!("{rel}/{name}");
+        if path.is_dir() {
+            collect(&path, &nested, out);
+        } else if std::fs::read_to_string(&path).is_ok() {
+            out.push((nested, path));
+        }
+    }
 }

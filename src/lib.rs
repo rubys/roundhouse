@@ -38,6 +38,10 @@ pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
+/// The embedded `runtime/ruby` + `runtime/spinel` trees the ruby and
+/// spinel targets compose from. Host-only, like `project`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod runtime_files;
 /// The thread budget every CLI runs the pipeline on. Host-only: wasm has
 /// no threads and its stack is fixed at link time.
 #[cfg(not(target_arch = "wasm32"))]
