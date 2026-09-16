@@ -757,6 +757,32 @@ impl<'a> BodyTyper<'a> {
                 // gem parent has a genuinely-unknown inherited surface, so an
                 // unresolved method is a gradual escape (`Untyped`), not an
                 // error. A wholly-unregistered receiver keeps erroring.
+                // Jbuilder: `json.title "x"` writes a key and answers the
+                // value; `json.author do … end` builds a nested object;
+                // `json.array!` the array; the builder mutations
+                // (`extract!`, `partial!`, `cache!`, `merge!`, `call`) nil.
+                // The compiler interprets every one of these in
+                // `lower::jbuilder_to_library`; the analyzer's answer is
+                // the value Jbuilder itself returns.
+                if id.0.as_str() == "Jbuilder" {
+                    return match method.as_str() {
+                        "array!" => Ty::Array { elem: Box::new(Ty::Untyped) },
+                        "target!" => Ty::Str,
+                        "attributes!" => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                        "cache!" | "cache_if!" | "cache_root!" => block_ret.cloned().unwrap_or(Ty::Nil),
+                        "extract!" | "partial!" | "merge!" | "ignore_nil!" | "key_format!"
+                        | "deep_format_keys!" | "nil!" | "null!" | "call" | "child!" => Ty::Nil,
+                        // `json.set! :key, value` / `json.key value [, partial:, as:]`
+                        // — the value written. An argument the typer could
+                        // not resolve is reported at the argument; the
+                        // write's own value is then simply unknown.
+                        "set!" => jbuilder_value(call_args.get(1)),
+                        _ if block_ret.is_some() => {
+                            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) }
+                        }
+                        _ => jbuilder_value(call_args.first()),
+                    };
+                }
                 // `form.object` is the record the form was built for —
                 // `block_ctx_for` parameterizes the builder from
                 // `form_with model: product` (`FormBuilder[Product]`), and
@@ -1939,6 +1965,18 @@ pub(super) fn hash_method(
         // nests hashes three deep.
         "to_json" | "to_s" | "inspect" => Ty::Str,
         _ => unknown(),
+    }
+}
+
+/// The value a Jbuilder field write answers: its argument's type, or
+/// `nil` for a bare `json.key` with nothing to write. A Var argument
+/// (unresolved, reported at the argument itself) makes the value
+/// gradual rather than a second "no known method" about the builder.
+fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
+    match arg.and_then(|a| a.ty.clone()) {
+        None => Ty::Nil,
+        Some(Ty::Var { .. }) => Ty::Untyped,
+        Some(t) => t,
     }
 }
 

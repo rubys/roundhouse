@@ -27,6 +27,24 @@ fn ingests_without_errors() {
     assert!(!app.views.is_empty(), "expected at least one view");
 }
 
+/// The blog is the first app the site shows; its ledger is empty. Every
+/// diagnostic here is the analyzer's gap, not the blog's — the last
+/// four were jbuilder's `json` builder typed `untyped`.
+#[test]
+fn analyzes_with_an_empty_ledger() {
+    roundhouse::ingest::survey::activate();
+    let mut app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(gaps.is_empty(), "ingest gaps: {gaps:?}");
+    Analyzer::new(&app).analyze(&mut app);
+    let noisy: Vec<String> = diagnose(&app)
+        .into_iter()
+        .filter(|d| !matches!(d.kind, DiagnosticKind::MissingPreload { .. }))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(noisy, Vec::<String>::new());
+}
+
 #[test]
 fn ingests_without_parse_diagnostics() {
     // A clean fixture must produce ZERO Prism parse diagnostics. Guards

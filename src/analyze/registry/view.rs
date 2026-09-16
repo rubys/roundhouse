@@ -183,11 +183,16 @@ pub(in crate::analyze) fn register(
     action_view
         .instance_methods
         .insert(Symbol::from("flash"), flash_ty.clone());
-    // jbuilder `json` builder (in `*.json.jbuilder` views) is dynamic —
-    // `json.<field>`/`json.array!`/`json.partial!` build from the method
-    // name, so Untyped (gradual) is the honest type and chains through
-    // it without erroring.
-    action_view.instance_methods.insert(Symbol::from("json"), Ty::Untyped);
+    // jbuilder's `json` builder (in `*.json.jbuilder` views): every
+    // `json.<field>` is a key write by METHOD NAME, so no fixed table
+    // fits. Typed as the builder class, whose dispatch rule (send.rs,
+    // beside TagBuilder's) mirrors Jbuilder's own semantics — a field
+    // write answers its value, a block form the object it built, the
+    // builder mutations (`extract!`, `partial!`, …) nil.
+    action_view.instance_methods.insert(
+        Symbol::from("json"),
+        Ty::Class { id: ClassId(Symbol::from("Jbuilder")), args: vec![] },
+    );
     // Route URL helpers (view side).
     for name in route_helper_names {
         action_view
