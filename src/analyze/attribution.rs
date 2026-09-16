@@ -262,6 +262,156 @@ impl<'a> AttributionCtx<'a> {
     }
 }
 
+// ── Unknown-gem attribution ──────────────────────────────────────────
+//
+// The second root cause a real app's error list hides: a gem the
+// analyzer does not model. `@microposts = @user.microposts.paginate(…)`
+// fails dispatch on `paginate`, the ivar never types, and every view
+// that reads it reports `ivar_unresolved` — 23 errors for one gem. The
+// census ([`crate::gems`]) says which gems are unknown; this pass
+// labels the diagnostics that land on their surface and the ivars
+// that flow from those sites, so the list reads "will_paginate is not
+// modeled" instead of "your views are broken".
+
+/// Downgrade diagnostics attributable to an unknown gem in the app's
+/// `Gemfile.lock` (see the section comment). No-op when the app carries
+/// no lockfile or the census has no unknown gem.
+pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
+    let Some(lock) = &app.gem_lock else { return };
+    let census = crate::gems::GemCensus::of(lock);
+    if census.unknown().next().is_none() || diags.is_empty() {
+        return;
+    }
+
+    // Pass 1: sites on a gem's surface — a dispatch on the gem's
+    // constant namespace (`Redcarpet::Markdown#render`) or on a DSL /
+    // helper name the gem is known to add (`policy_scope`).
+    let gem_for = |d: &Diagnostic| -> Option<&str> {
+        match &d.kind {
+            DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
+                if let Some(path) = recv_root_path(recv_ty) {
+                    if let Some(g) = crate::gems::gem_owning_constant(&census, &path) {
+                        return Some(g);
+                    }
+                }
+                crate::gems::gem_claiming_method(lock, method.as_str())
+            }
+            DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
+                crate::gems::gem_claiming_method(lock, n.as_str())
+            }
+            _ => None,
+        }
+    };
+    let mut sites: Vec<(FileId, u32, String)> = Vec::new();
+    for d in diags.iter_mut() {
+        // Already a coverage note (an ingest gap claimed it first).
+        if !eligible(&d.kind) || d.severity == Severity::Info {
+            continue;
+        }
+        if let Some(gem) = gem_for(d) {
+            sites.push((d.span.file, d.span.start, gem.to_string()));
+            mark(d, gem, None);
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+
+    // Pass 2: ivars assigned from an attributed site, per controller
+    // (its own actions and filters), then the reads of those ivars in
+    // the controller's views and its own file.
+    let mut ivar_gem: HashMap<(ClassId, crate::ident::Symbol), String> = HashMap::new();
+    for c in &app.controllers {
+        for a in c.actions() {
+            collect_gem_ivars(&a.body, &sites, |name, gem| {
+                ivar_gem.entry((c.name.clone(), name)).or_insert_with(|| gem.to_string());
+            });
+        }
+    }
+    if ivar_gem.is_empty() {
+        return;
+    }
+    let mut view_by_file: HashMap<FileId, &crate::ident::Symbol> = HashMap::new();
+    for v in &app.views {
+        if let Some(f) = first_real_file(&[&v.body]) {
+            view_by_file.entry(f).or_insert(&v.name);
+        }
+    }
+    let mut controller_file: HashMap<FileId, &ClassId> = HashMap::new();
+    for c in &app.controllers {
+        let bodies: Vec<&Expr> = c.actions().map(|a| &a.body).collect();
+        if let Some(f) = first_real_file(&bodies) {
+            controller_file.entry(f).or_insert(&c.name);
+        }
+    }
+    for d in diags.iter_mut() {
+        let DiagnosticKind::IvarUnresolved { name } = &d.kind else { continue };
+        if d.severity == Severity::Info {
+            continue;
+        }
+        let feeders: Vec<&ClassId> = match view_by_file.get(&d.span.file) {
+            Some(view) => app.view_feeders.get(*view).into_iter().flatten().collect(),
+            None => controller_file.get(&d.span.file).into_iter().copied().collect(),
+        };
+        if let Some(gem) = feeders.iter().find_map(|c| ivar_gem.get(&((*c).clone(), name.clone()))) {
+            let ivar = name.as_str().to_string();
+            mark(d, gem, Some(&ivar));
+        }
+    }
+}
+
+fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
+    d.severity = Severity::Info;
+    match via_ivar {
+        Some(ivar) => d.message.push_str(&format!(
+            " — likely roundhouse coverage, not an app error (@{ivar} is assigned from the `{gem}` gem, which roundhouse does not model)"
+        )),
+        None => d.message.push_str(&format!(
+            " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
+        )),
+    }
+}
+
+/// The constant path of a dispatch receiver's class, unions by first
+/// class arm.
+fn recv_root_path(ty: &Ty) -> Option<String> {
+    match ty {
+        Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
+        Ty::Union { variants } => variants.iter().find_map(recv_root_path),
+        _ => None,
+    }
+}
+
+/// Every `@ivar = value` in `body` whose `value` subtree contains one
+/// of `sites` (an attributed diagnostic's file + offset) → `f(ivar, gem)`.
+fn collect_gem_ivars(
+    body: &Expr,
+    sites: &[(FileId, u32, String)],
+    mut f: impl FnMut(crate::ident::Symbol, &str),
+) {
+    fn contains(e: &Expr, file: FileId, offset: u32) -> bool {
+        if !e.span.is_synthetic() && e.span.file == file && e.span.start <= offset && offset < e.span.end.max(e.span.start + 1) {
+            return true;
+        }
+        let mut hit = false;
+        e.node.for_each_child(&mut |c| {
+            if !hit {
+                hit = contains(c, file, offset);
+            }
+        });
+        hit
+    }
+    fn walk(e: &Expr, sites: &[(FileId, u32, String)], f: &mut impl FnMut(crate::ident::Symbol, &str)) {
+        if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node {
+            if let Some((_, _, gem)) = sites.iter().find(|(file, off, _)| contains(value, *file, *off)) {
+                f(name.clone(), gem);
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, sites, f));
+    }
+    walk(body, sites, &mut f);
+}
+
 /// The first non-synthetic file any of these bodies' subtrees touches.
 fn first_real_file(bodies: &[&Expr]) -> Option<FileId> {
     fn find(e: &Expr) -> Option<FileId> {

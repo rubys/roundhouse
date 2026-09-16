@@ -74,6 +74,12 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// The app's `Gemfile.lock`, parsed, when the tree carries one.
+    /// Read at ingest for the gem census ([`crate::gems`]) and the
+    /// unknown-gem attribution of diagnostics; nothing in analysis or
+    /// emit keys off it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gem_lock: Option<crate::gems::Lockfile>,
     /// Call-site-unified parameter types, written by the analyzer's
     /// fixpoint (`unify_params_from_call_sites`) as its last act and
     /// read by lowerings that build method signatures — the controller
@@ -554,6 +560,7 @@ impl App {
             importmap: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
+            gem_lock: None,
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),

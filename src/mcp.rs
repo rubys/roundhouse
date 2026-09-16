@@ -140,6 +140,7 @@ impl Server {
             "traceroute" => self.tool_traceroute(&args),
             "trace_targets" => self.tool_trace_targets(&args),
             "related_files" => self.tool_related_files(&args),
+            "gems" => self.tool_gems(&args),
             "wont_lower" => self.tool_wont_lower(&args),
             other => Err(format!("unknown tool: {other}")),
         };
@@ -263,6 +264,7 @@ impl Server {
         // to tell "your code has a problem" from "roundhouse didn't
         // analyze the construct responsible".
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+        crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
         diags.extend(parse_diags);
 
         let matching: Vec<&Diagnostic> = diags
@@ -432,6 +434,51 @@ impl Server {
         Ok(format!("{} related file(s):\n{}", related.len(), lines.join("\n")))
     }
 
+    /// The gem census: every direct dependency with its fate, unknown
+    /// gems first (they are the ones whose surface the analysis cannot
+    /// see), and how many of the current diagnostics are attributed to
+    /// each.
+    fn tool_gems(&self, _args: &Value) -> Result<String, String> {
+        let (app, _, gaps, _) = self.analyze()?;
+        let Some(lock) = &app.gem_lock else {
+            return Ok("No Gemfile.lock in the app root — no gem census.".to_string());
+        };
+        let census = crate::gems::GemCensus::of(lock);
+        let mut diags = crate::analyze::diagnose(&app);
+        crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+        crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
+        let attributed = |gem: &str| {
+            let needle = format!("`{gem}` gem");
+            diags.iter().filter(|d| d.message.contains(&needle)).count()
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for fate in [
+            crate::gems::GemFate::Unknown,
+            crate::gems::GemFate::Modeled,
+            crate::gems::GemFate::Framework,
+            crate::gems::GemFate::Stdlib,
+            crate::gems::GemFate::Infrastructure,
+        ] {
+            for g in census.gems.iter().filter(|g| g.fate == fate) {
+                let version = g.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+                let mut line = format!("{} — {}{version}", g.name, fate.label());
+                if fate == crate::gems::GemFate::Unknown {
+                    let n = attributed(&g.name);
+                    if n > 0 {
+                        line.push_str(&format!(" — {n} diagnostic(s) attributed to it"));
+                    }
+                }
+                lines.push(line);
+            }
+        }
+        Ok(format!(
+            "{} (+{} transitive)\n\nunknown = the analyzer does not model the gem; anything it adds to the app's classes fails dispatch, and those diagnostics are labeled coverage notes rather than errors. modeled = its app-facing surface resolves. infrastructure = never enters the analysis.\n\n{}",
+            census.summary(),
+            census.transitive,
+            lines.join("\n")
+        ))
+    }
+
     fn tool_wont_lower(&self, args: &Value) -> Result<String, String> {
         let target_str = args.get("target").and_then(|v| v.as_str()).ok_or("missing `target`")?;
         let target = BuildTarget::from_str(target_str)
@@ -598,6 +645,11 @@ fn tools_list() -> Value {
                 },
             },
             {
+                "name": "gems",
+                "description": "The app's gem census from Gemfile.lock: each direct dependency classified as framework (Rails and its plumbing), stdlib, modeled (roundhouse resolves its app-facing surface), infrastructure (never enters the analysis: servers, linters, test drivers, DB adapters), or unknown (not modeled — a dispatch on its DSL or classes fails, and `diagnostics` labels those as coverage notes naming the gem). Unknown gems first, with how many current diagnostics each accounts for.",
+                "inputSchema": { "type": "object", "properties": {} },
+            },
+            {
                 "name": "wont_lower",
                 "description": "Which constructs in the app won't compile to a given eject target (rust, go, typescript, …) — the 'will this survive ejection?' check no other Rails tool offers.",
                 "inputSchema": {
@@ -725,6 +777,48 @@ mod tests {
         assert_eq!(last["detail"], "redirect · render show · render new · render json");
     }
 
+    /// An unknown gem's surface, used from an action and read in the
+    /// view: the dispatch failure and the ivar it feeds are labeled
+    /// coverage notes naming the gem, not errors; `gems` lists the gem
+    /// with its count. Witnessed on a copy of real-blog with `pundit`
+    /// added to the lock and `policy_scope` used.
+    #[test]
+    fn unknown_gem_surface_is_attributed_not_accused() {
+        let dir = std::env::temp_dir().join(format!("rh-mcp-gems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        let lock = dir.join("Gemfile.lock");
+        let text = std::fs::read_to_string(Path::new("fixtures/real-blog/Gemfile.lock")).unwrap();
+        let text = text
+            .replacen("  specs:\n", "  specs:\n    pundit (2.4.0)\n", 1)
+            .replacen("DEPENDENCIES\n", "DEPENDENCIES\n  pundit\n", 1);
+        std::fs::write(&lock, text).unwrap();
+        let ctl = dir.join("app/controllers/articles_controller.rb");
+        let src = std::fs::read_to_string(&ctl).unwrap();
+        let src = src.replace(
+            "  def index\n",
+            "  def index\n    @scoped = policy_scope(Article)\n",
+        );
+        std::fs::write(&ctl, src).unwrap();
+        let view = dir.join("app/views/articles/index.html.erb");
+        let mut v = std::fs::read_to_string(&view).unwrap();
+        v.push_str("<%= @scoped.size %>\n");
+        std::fs::write(&view, v).unwrap();
+        let s = Server { root: dir.clone() };
+
+        let gems = text_of(&call(&s, "gems", json!({})));
+        let errors = text_of(&call(&s, "diagnostics", json!({ "severity": "error" })));
+        let all = text_of(&call(&s, "diagnostics", json!({})));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(gems.contains("1 unknown (pundit)"), "{gems}");
+        assert!(gems.contains("pundit — unknown 2.4.0 — 2 diagnostic(s) attributed to it"), "{gems}");
+        assert!(errors.starts_with("No errors."), "{errors}");
+        assert!(all.contains("method call `policy_scope` has unresolved type"), "{all}");
+        assert!(all.contains("the `pundit` gem is in the Gemfile and roundhouse does not model it"), "{all}");
+        assert!(all.contains("@scoped is assigned from the `pundit` gem"), "{all}");
+    }
+
     #[test]
     fn traceroute_misses_politely() {
         let resp = call(&server(), "traceroute", json!({ "query": "NopeController#zap" }));
@@ -749,6 +843,7 @@ mod tests {
             "traceroute",
             "trace_targets",
             "related_files",
+            "gems",
             "wont_lower",
         ] {
             assert!(names.contains(&tool), "missing tool {tool}");

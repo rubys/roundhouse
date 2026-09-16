@@ -14,7 +14,10 @@ export const SOURCE_EXT = /\.(rb|erb|haml|jbuilder|ruby|rabl|slim)$/;
 // config.ru is what the roda front-end dispatches on). Each walk/read is a
 // no-op when the dir/file doesn't exist, so one list serves both shapes.
 export const WALK_DIRS = ["app", "extras", "lib", "config/routes", "models", "views", "db/migrate"];
-export const SINGLE_FILES = ["db/schema.rb", "config/routes.rb", "config.ru", "app.rb", "db.rb", "seeds.rb"];
+// Gemfile.lock is not a source — nothing in it is analyzed — but the
+// gem census reads it beside the diagnostics (which gems the analyzer
+// models, which it does not know), so it rides along when present.
+export const SINGLE_FILES = ["db/schema.rb", "config/routes.rb", "config.ru", "app.rb", "db.rb", "seeds.rb", "Gemfile.lock"];
 
 // Does a root-relative path belong in the bundle? Used by loaders that
 // enumerate the whole tree (a `webkitdirectory` file input) rather than

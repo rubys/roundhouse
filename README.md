@@ -225,7 +225,12 @@ aborting, and a deduplicated punch list of them is printed at the end.
 Read the output accordingly — `error`/`warning` diagnostics are sites
 the analyzer understood but couldn't type (or typed gradually), while
 the punch list and any gap-attributed notes are roundhouse's own
-coverage gaps, not problems in your app. Expect a real app to produce
+coverage gaps, not problems in your app. The line before the summary is
+the gem census from your `Gemfile.lock` — which of your gems are Rails
+itself, which roundhouse models, which never enter the analysis, and
+which it does not know. A call into an unknown gem's DSL or classes is
+reported as a coverage note naming the gem rather than as an error, and
+that unknown list is the tool's own to-do list for your app. Expect a real app to produce
 plenty of both today: the numbers are the project's honest to-do list,
 and they drop week over week. (Without `--continue`, ingest is strict
 and exits on the first unrecognized construct — the right mode for

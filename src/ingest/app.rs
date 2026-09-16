@@ -76,6 +76,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         Vec<crate::ident::Symbol>,
     )> = Vec::new();
 
+    // The lockfile is not a source: it never enters the analysis. It
+    // is carried so the census and the unknown-gem attribution can
+    // read it beside the diagnostics.
+    let lock_path = dir.join("Gemfile.lock");
+    if vfs.exists(&lock_path) {
+        if let Ok(text) = vfs.read_to_string(&lock_path) {
+            app.gem_lock = Some(crate::gems::Lockfile::parse(&text));
+        }
+    }
+
     let schema_path = dir.join("db/schema.rb");
     if vfs.exists(&schema_path) {
         let source = vfs.read(&schema_path)?;

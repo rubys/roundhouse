@@ -16,6 +16,11 @@ pub mod emit;
 pub mod erb;
 pub mod expr;
 pub mod facades;
+/// The app's gem census: `Gemfile.lock` parsed and each direct
+/// dependency classified (framework / stdlib / modeled / infrastructure /
+/// unknown). Shared by every analysis skin; the unknown list feeds
+/// [`analyze::attribution`].
+pub mod gems;
 pub mod haml;
 pub mod ide;
 pub mod ident;

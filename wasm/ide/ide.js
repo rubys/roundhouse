@@ -103,9 +103,15 @@ async function reanalyze() {
       analysis = result;
       const sev = { error: 0, warning: 0, info: 0 };
       for (const d of analysis.diagnostics) sev[d.severity] = (sev[d.severity] || 0) + 1;
+      // The unknown-gem count rides beside the ledger: those gems'
+      // surfaces are invisible to the analysis, and the coverage notes
+      // attributed to them say so per site.
+      const unknownGems = (analysis.gems?.gems || []).filter((g) => g.fate === "unknown").length;
       els.counts.textContent =
         `${sev.error} errors · ${sev.warning} warnings · ${sev.info} coverage notes · ` +
-        `${analysis.gaps.length} ingest gaps`;
+        `${analysis.gaps.length} ingest gaps` +
+        (analysis.gems ? ` · ${unknownGems} unknown gems` : "");
+      els.counts.title = analysis.gems_summary || "";
       const where = current?.local ? " — read from your disk, nothing uploaded" : "";
       status(`analyzed ${analysis.files.length} files in ${(result.elapsed_ms / 1000).toFixed(1)}s${where}`);
       refreshAllMarkers();
@@ -703,7 +709,8 @@ function summaryLine() {
   for (const d of analysis.diagnostics) sev[d.severity] = (sev[d.severity] || 0) + 1;
   const build = version ? `roundhouse ${version.version}${version.commit ? `@${version.commit.slice(0, 12)}` : ""}` : "roundhouse";
   return `${current?.name || "app"} · ${analysis.files.length} files · ${sev.error} errors · ` +
-    `${sev.warning} warnings · ${sev.info} coverage notes · ${analysis.gaps.length} ingest gaps · ${build}`;
+    `${sev.warning} warnings · ${sev.info} coverage notes · ${analysis.gaps.length} ingest gaps · ` +
+    (analysis.gems_summary ? `${analysis.gems_summary} · ` : "") + build;
 }
 
 async function boot() {

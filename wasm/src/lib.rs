@@ -305,6 +305,12 @@ struct AnalyzeOutput {
     /// Registered classes (models/controllers/concerns/lib), for
     /// go-to-class search.
     classes: Vec<String>,
+    /// The gem census (direct dependencies classified) when the bundle
+    /// carried a Gemfile.lock, plus its one-line summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gems: Option<roundhouse::gems::GemCensus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gems_summary: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -337,6 +343,7 @@ fn analyze_app_inner(json_in: &str) -> String {
 
     let mut diags = diagnose(&app);
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+    roundhouse::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
     diags.extend(parse_diags);
 
     let diagnostics: Vec<DiagnosticOut> = diags
@@ -383,7 +390,9 @@ fn analyze_app_inner(json_in: &str) -> String {
         analyzer.class_registry().keys().map(|c| c.0.as_str().to_string()).collect();
     classes.sort();
 
-    let out = AnalyzeOutput { diagnostics, gaps: gaps_out, files, classes };
+    let gems = app.gem_lock.as_ref().map(roundhouse::gems::GemCensus::of);
+    let gems_summary = gems.as_ref().map(|c| c.summary());
+    let out = AnalyzeOutput { diagnostics, gaps: gaps_out, files, classes, gems, gems_summary };
     let json =
         serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
     LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps }));

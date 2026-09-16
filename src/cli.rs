@@ -170,6 +170,10 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // notes with the root cause attached so the error count below means
     // "findings", not "shadows of the gaps listed at the end".
     crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &survey_errors);
+    // Likewise a dispatch on a gem the analyzer does not model — the
+    // census below names the gems, this labels the diagnostics.
+    crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
+    let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     let warnings = diags.iter().filter(|d| d.severity == Severity::Warning).count();
@@ -195,6 +199,13 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
 
     if had_output {
         eprintln!();
+    }
+    // The gem census: which of the app's declared gems the analyzer
+    // models, which never enter the analysis, and which it does not
+    // know — read beside the errors, the unknown list is the
+    // prioritization signal.
+    if let Some(census) = &census {
+        eprintln!("roundhouse-check: {}", census.summary());
     }
     eprintln!(
         "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} gap-attributed note(s), {} survey gap(s)",
