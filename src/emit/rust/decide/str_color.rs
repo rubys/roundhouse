@@ -1043,6 +1043,7 @@ mod tests {
 
     fn method(name: &str, params: Vec<&str>, signature: Ty, body: Expr) -> MethodDef {
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Instance,
             params: params.iter().map(|p| Param::positional(Symbol::from(*p))).collect(),

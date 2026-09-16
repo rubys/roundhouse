@@ -178,6 +178,7 @@ fn build_fixture_class(
             let id = (idx + 1) as i64;
             let body = build_find_call(&f.class, id);
             MethodDef {
+                name_span: crate::span::Span::synthetic(),
                 name: r.label.clone(),
                 receiver: MethodReceiver::Class,
                 params: Vec::new(),
@@ -208,6 +209,7 @@ fn build_fixture_class(
     // (spinel's AOT model has no constant table to `send` through).
     if wants_by_label {
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("by_label"),
         receiver: MethodReceiver::Class,
         params: vec![crate::dialect::Param {
@@ -238,6 +240,7 @@ fn build_fixture_class(
     // ids the label methods look up. Body is a Seq of Sends.
     let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all);
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_fixtures_load!"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),

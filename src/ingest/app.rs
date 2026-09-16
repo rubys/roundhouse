@@ -1652,6 +1652,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     .insert(method.name.clone(), module.clone());
                 methods.push(ControllerBodyItem::Action {
                     action: Action {
+                        name_span: method.name_span,
                         name: method.name.clone(),
                         params,
                         opt_params,
@@ -2115,7 +2116,7 @@ fn filter_from_send(
     module: &crate::ident::ClassId,
 ) -> Option<Vec<crate::dialect::Filter>> {
     use crate::dialect::{Filter, FilterKind};
-    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::expr::{ExprNode, Literal};
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return None;
@@ -2139,12 +2140,12 @@ fn filter_from_send(
         }
     };
 
-    let mut targets: Vec<crate::ident::Symbol> = Vec::new();
+    let mut targets: Vec<(crate::ident::Symbol, crate::span::Span)> = Vec::new();
     let mut only: Vec<crate::ident::Symbol> = Vec::new();
     let mut except: Vec<crate::ident::Symbol> = Vec::new();
     for arg in args {
         if let Some(sym) = sym_of(arg) {
-            targets.push(sym);
+            targets.push((sym, arg.span));
             continue;
         }
         let ExprNode::Hash { entries, .. } = &*arg.node else {
@@ -2172,7 +2173,8 @@ fn filter_from_send(
     Some(
         targets
             .into_iter()
-            .map(|target| Filter {
+            .map(|(target, target_span)| Filter {
+                target_span,
                 kind: kind.clone(),
                 target,
                 from_concern: Some(module.clone()),

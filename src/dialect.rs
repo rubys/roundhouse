@@ -615,6 +615,14 @@ pub struct MethodDef {
     /// Proc-as-value semantics that will read this field later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_param: Option<Param>,
+    /// Span of the method's name token in the `def` header (`show` in
+    /// `def show`). The body's spans start at its first statement, so
+    /// without this the header itself has no position: nothing to hover,
+    /// nothing for go-to-definition to land on, no place to start
+    /// find-references from. Synthetic for methods the lowerings
+    /// synthesize.
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub name_span: Span,
     pub body: Expr,
     pub signature: Option<Ty>,
     pub effects: EffectSet,
@@ -1041,6 +1049,12 @@ impl ControllerBodyItem {
 pub struct Filter {
     pub kind: FilterKind,
     pub target: Symbol,
+    /// Span of the `:target` symbol in the declaration
+    /// (`before_action :set_room`) — the reference find-references
+    /// counts for the method. Synthetic for filters the lowerings or
+    /// a concern splice synthesize without a source token.
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub target_span: Span,
     /// The concern module this filter was DECLARED in, when it reached
     /// the controller through an `include` (`splice_concerns_into_
     /// controllers` sets it as it copies the module's `included do`
@@ -1118,6 +1132,10 @@ pub struct Action {
     /// the positional `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_param: Option<Symbol>,
+    /// Span of the action's name token in its `def` header — see
+    /// [`MethodDef::name_span`].
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub name_span: Span,
     pub body: Expr,
     pub renders: RenderTarget,
     pub effects: EffectSet,

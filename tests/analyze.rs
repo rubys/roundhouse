@@ -420,6 +420,7 @@ fn actions_without_db_calls_stay_pure() {
 
     let empty_body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] });
     let mut action = Action {
+        name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("noop"),
         params: Row::closed(),
         opt_params: vec![],
@@ -720,6 +721,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
     use std::collections::BTreeSet;
 
     let action = Action {
+        name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("test_action"),
         params: Row::closed(),
         opt_params: vec![],

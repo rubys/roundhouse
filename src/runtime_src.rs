@@ -1058,6 +1058,7 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1094,6 +1095,7 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         },
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value_param)],
@@ -1132,6 +1134,7 @@ fn method_def_from(
     };
 
     Ok(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver,
         params,

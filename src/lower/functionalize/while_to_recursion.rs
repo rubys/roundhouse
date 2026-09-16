@@ -239,6 +239,7 @@ fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
     }
 
     let helper = MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: helper_name,
         // Same receiver as the entry: an instance-method loop's helper is
         // also an instance method, so mutation_to_struct_return threads
@@ -755,6 +756,7 @@ mod tests {
     }
     fn method(name: &str, receiver: MethodReceiver, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver,
             params: params.iter().map(|p| Param::positional(sym(p))).collect(),

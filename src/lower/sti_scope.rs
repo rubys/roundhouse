@@ -262,6 +262,7 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
         ));
         body.push(var_ref(&record));
         lc.methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from(BECOMES_FROM),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(source.clone())],

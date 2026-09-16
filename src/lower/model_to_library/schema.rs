@@ -95,6 +95,7 @@ pub(super) fn push_schema_methods(
     // ':'". Third copy of this rule found in one session
     // ([[feedback_port_dont_derive_inflections]]).
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("table_name"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),
@@ -113,6 +114,7 @@ pub(super) fn push_schema_methods(
     // else and no target pays a per-model method for the common case.
     if let Some(pk) = &model.primary_key {
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("primary_key"),
             receiver: MethodReceiver::Class,
             params: Vec::new(),
@@ -143,6 +145,7 @@ pub(super) fn push_schema_methods(
         Ty::Array { elem: Box::new(Ty::Sym) },
     );
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("schema_columns"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),
@@ -178,6 +181,7 @@ pub(super) fn push_schema_methods(
         Ty::Array { elem: Box::new(Ty::Sym) },
     );
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("schema_time_columns"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),
@@ -457,6 +461,7 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
     }
 
     Some(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("fill_timestamps"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(creating.clone())],
@@ -536,6 +541,7 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
         _ => not_nil(col, &slot_ty),
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}?", col.name.as_str())),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -673,6 +679,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         )
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: col.name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -742,6 +749,7 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
         Ty::Str,
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -830,6 +838,7 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
         text_ty,
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", col.name.as_str())),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value_param.clone())],
@@ -864,6 +873,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         col_ty.clone(),
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: col_storage_setter(col),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value_param.clone())],
@@ -936,6 +946,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     // narrowing happens in the body.
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(row.clone())],
@@ -1039,6 +1050,7 @@ pub(super) fn push_from_params_method(
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(p.clone())],
@@ -1137,6 +1149,7 @@ pub(super) fn push_create_from_params_method(
 
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(p.clone())],
@@ -1273,6 +1286,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let row_ty = Ty::Class { id: row_class, args: vec![] };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_row"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(row.clone())],
@@ -1394,6 +1408,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_stmt"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(stmt.clone())],
@@ -1497,6 +1512,7 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
         },
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: prev_was_name(col),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1571,6 +1587,7 @@ fn synth_column_dirty_pred(owner: &ClassId, col: &Column, name: Symbol) -> Metho
         },
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -2136,6 +2153,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         effects: EffectSet::default(),
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::with_default(attrs.clone(), attrs_default)],
@@ -2189,6 +2207,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
     );
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("attributes"),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -2249,6 +2268,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
     );
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(name.clone())],
@@ -2426,6 +2446,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
     };
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]="),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(name.clone()), Param::positional(value.clone())],
@@ -2663,6 +2684,7 @@ fn synth_update_typed(
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(p.clone())],
@@ -2953,6 +2975,7 @@ fn synth_update_hash(
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(if bang { "update!" } else { "update" }),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(attrs.clone())],

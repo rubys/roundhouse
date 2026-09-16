@@ -69,6 +69,7 @@ pub(crate) fn push_synth_instance_method(
         return;
     }
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params,
@@ -995,6 +996,7 @@ pub(crate) fn push_scope_methods(
         );
 
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: scope.name.clone(),
             receiver: MethodReceiver::Class,
             params,
@@ -1132,6 +1134,7 @@ pub(crate) fn push_scope_variants(
                     });
                 }
                 methods.push(MethodDef {
+                    name_span: crate::span::Span::synthetic(),
                     name: vname,
                     receiver: MethodReceiver::Class,
                     params,

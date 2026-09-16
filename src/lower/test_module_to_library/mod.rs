@@ -719,6 +719,7 @@ fn test_to_method_def(
         route_id_segments,
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),

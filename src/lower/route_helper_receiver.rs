@@ -204,6 +204,7 @@ mod tests {
 
     fn method(name: &str, body: Expr) -> MethodDef {
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Instance,
             params: vec![],

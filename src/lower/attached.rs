@@ -450,6 +450,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     });
     let attached_ty = Ty::Class { id: attached_class(), args: vec![] };
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: attr.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -469,6 +470,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     // proxy per record, row already known, and installs it here.
     let att = Symbol::from("att");
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: preload_setter_name(attr),
         receiver: MethodReceiver::Instance,
         params: vec![crate::dialect::Param::positional(att.clone())],
@@ -695,6 +697,7 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name,
             receiver: MethodReceiver::Class,
             params: vec![crate::dialect::Param::with_default(

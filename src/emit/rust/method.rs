@@ -848,6 +848,7 @@ mod tests {
 
     fn base_module_method(name: &str) -> MethodDef {
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Class,
             params: vec![],
@@ -915,6 +916,7 @@ mod tests {
             },
         );
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("foo"),
             receiver: MethodReceiver::Class,
             params: vec![],
@@ -963,6 +965,7 @@ mod tests {
             effects: EffectSet::pure(),
         };
         let callee = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("each"),
             receiver: MethodReceiver::Class,
             params: vec![],
@@ -998,6 +1001,7 @@ mod tests {
             },
         );
         let forwarder = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("forwarder"),
             receiver: MethodReceiver::Class,
             params: vec![],
@@ -1045,6 +1049,7 @@ mod tests {
     #[test]
     fn instance_method_with_block_param_no_yield_emits_placeholder() {
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("baz"),
             receiver: MethodReceiver::Instance,
             params: vec![],

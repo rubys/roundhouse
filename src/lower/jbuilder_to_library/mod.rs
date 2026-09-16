@@ -282,6 +282,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     body.inherit_span(view.body.span);
 
     let mut method = MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Class,
         params,

@@ -597,6 +597,7 @@ pub(super) fn expand_enum_decl(
         };
         let method_def = |name: String, body: Expr| ModelBodyItem::Method {
             method: MethodDef {
+                name_span: crate::span::Span::synthetic(),
                 name: Symbol::from(name),
                 receiver: MethodReceiver::Instance,
                 params: Vec::new(),
@@ -872,6 +873,7 @@ pub(super) fn ingest_method(
     };
 
     Ok(MethodDef {
+        name_span: super::util::def_name_span(def, file),
         name,
         receiver,
         params,

@@ -197,6 +197,7 @@ pub(crate) fn attributes_initialize(
     param.default =
         Some(Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false }));
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
         params: vec![param],
@@ -213,6 +214,7 @@ pub(crate) fn attributes_initialize(
 
 fn constant_predicate(owner: &ClassId, name: &str, value: bool) -> MethodDef {
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(name),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),

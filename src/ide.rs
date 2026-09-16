@@ -94,10 +94,178 @@ pub fn source(app: &App, file: FileId) -> Option<&SourceFile> {
 /// consumer. `None` when the offset lands outside every node (whitespace
 /// between top-level forms, a comment, or past EOF).
 pub fn type_at(app: &App, file: FileId, offset: u32) -> Option<TypeAt> {
+    // A `def` header is not inside any expression: the body's spans
+    // start at its first statement. The header answers with the
+    // method's signature.
+    let defs = defs_at(app, file, offset);
+    if let Some(def) = defs.first() {
+        let mut info = describe_def(def);
+        // A concern's method is spliced into every includer under the
+        // same header span; the concern is where it is defined, the
+        // includers are where it runs.
+        let includers: Vec<String> =
+            defs.iter().skip(1).map(|d| d.owner.to_string()).collect();
+        if !includers.is_empty() {
+            info.note = Some(format!("defined on {}, included by {}", def.owner, includers.join(", ")));
+        }
+        // A routed action's callers are the routes; say which.
+        let routes: Vec<String> = crate::lower::routes::flatten_routes(app)
+            .into_iter()
+            .filter(|r| r.controller == def.owner && r.action == def.name)
+            .map(|r| format!("{} {}", verb_str(&r.method), r.path))
+            .collect();
+        if !routes.is_empty() {
+            let note = info.note.take().unwrap_or_default();
+            info.note = Some(format!("{note}; routed {}", routes.join(", ")));
+        }
+        return Some(info);
+    }
     let expr = find_at_offset(app, file, offset)?;
     let mut info = describe(expr);
     info.note = required_belongs_to_note(app, expr);
     Some(info)
+}
+
+// ── Method definitions ───────────────────────────────────────────────
+//
+// Every `def` the IR carries, with the one position a header has: its
+// name token (`MethodDef::name_span`). Hover, go-to-definition and
+// find-references all start or end here; the body's own spans begin at
+// the first statement.
+
+/// One method definition site.
+#[derive(Clone, Debug)]
+pub struct DefSite<'a> {
+    /// The class or module the `def` sits in.
+    pub owner: ClassId,
+    pub name: Symbol,
+    /// The name token in the header.
+    pub span: Span,
+    pub body: &'a Expr,
+    /// The stamped signature, when the analysis produced one (library
+    /// classes' methods); model methods and actions carry only their
+    /// body's type.
+    pub signature: Option<&'a Ty>,
+    /// Class-side (`def self.x`) rather than instance-side.
+    pub class_side: bool,
+}
+
+/// Every definition site in the app: controller actions and helpers,
+/// model methods, library-class (concern, mailer, job, lib/) methods.
+/// Synthesized methods have no header and are left out.
+pub fn def_sites(app: &App) -> Vec<DefSite<'_>> {
+    let mut out = Vec::new();
+    for c in &app.controllers {
+        for a in c.actions() {
+            if !a.name_span.is_synthetic() {
+                out.push(DefSite {
+                    owner: c.name.clone(),
+                    name: a.name.clone(),
+                    span: a.name_span,
+                    body: &a.body,
+                    signature: None,
+                    class_side: false,
+                });
+            }
+        }
+    }
+    for m in &app.models {
+        for me in m.methods() {
+            if !me.name_span.is_synthetic() {
+                out.push(DefSite {
+                    owner: m.name.clone(),
+                    name: me.name.clone(),
+                    span: me.name_span,
+                    body: &me.body,
+                    signature: me.signature.as_ref(),
+                    class_side: matches!(me.receiver, crate::dialect::MethodReceiver::Class),
+                });
+            }
+        }
+    }
+    for lc in &app.library_classes {
+        for me in &lc.methods {
+            if !me.name_span.is_synthetic() {
+                out.push(DefSite {
+                    owner: lc.name.clone(),
+                    name: me.name.clone(),
+                    span: me.name_span,
+                    body: &me.body,
+                    signature: me.signature.as_ref(),
+                    class_side: matches!(me.receiver, crate::dialect::MethodReceiver::Class),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The definition whose header name token covers `offset`.
+pub fn def_at(app: &App, file: FileId, offset: u32) -> Option<DefSite<'_>> {
+    defs_at(app, file, offset).into_iter().next()
+}
+
+/// Every definition sharing the header at `offset`: one for a plain
+/// method; for a concern's method, the concern's own site first, then
+/// the spliced copy on each includer (same span, different owner).
+pub fn defs_at(app: &App, file: FileId, offset: u32) -> Vec<DefSite<'_>> {
+    let mut defs: Vec<DefSite<'_>> =
+        def_sites(app).into_iter().filter(|d| covers(d.span, file, offset)).collect();
+    let is_library = |d: &DefSite<'_>| app.library_classes.iter().any(|lc| lc.name == d.owner);
+    defs.sort_by_key(|d| !is_library(d));
+    defs
+}
+
+/// The header of `owner`'s `name`, searching the class itself and then
+/// its controller ancestors (an inherited action's `def` lives on the
+/// parent). Class-side and instance-side are distinguished.
+pub fn def_of<'a>(app: &'a App, owner: &ClassId, name: &Symbol, class_side: bool) -> Option<DefSite<'a>> {
+    let sites = def_sites(app);
+    let mut cur = Some(owner.clone());
+    let mut guard = 0;
+    while let Some(id) = cur {
+        if let Some(d) = sites.iter().find(|d| d.owner == id && &d.name == name && d.class_side == class_side) {
+            return Some(d.clone());
+        }
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        cur = find_controller(app, &id).and_then(|c| parent_of(app, c)).map(|p| p.name.clone());
+    }
+    None
+}
+
+/// The hover for a header: `def name(params) -> Ret` from the stamped
+/// signature, else the body's type as the return. `ty` is the return
+/// type, so nilability reads the way it does on a call.
+fn describe_def(def: &DefSite<'_>) -> TypeAt {
+    let (display, ret): (String, Option<Ty>) = match def.signature {
+        Some(Ty::Fn { params, ret, .. }) => {
+            let ps: Vec<String> = params
+                .iter()
+                .map(|p| format!("{}: {}", p.name.as_str(), render_ty(&p.ty)))
+                .collect();
+            (
+                format!("def {}({}) -> {}", def.name.as_str(), ps.join(", "), render_ty(ret)),
+                Some((**ret).clone()),
+            )
+        }
+        _ => {
+            let ret = def.body.ty.clone();
+            let shown = ret.as_ref().map(render_ty).unwrap_or_else(|| "untyped".to_string());
+            (format!("def {} -> {shown}", def.name.as_str()), ret)
+        }
+    };
+    let prefix = if def.class_side { "self." } else { "" };
+    TypeAt {
+        span: def.span,
+        node_kind: "MethodDef",
+        display: display.replacen("def ", &format!("def {prefix}"), 1),
+        nilable: ret.as_ref().is_some_and(can_be_nil),
+        ty: ret,
+        note: Some(format!("defined on {}", def.owner)),
+    }
 }
 
 /// `micropost.user` where `Micropost` declares `belongs_to :user` and
@@ -1169,10 +1337,154 @@ enum VarRef {
 /// Empty when `offset` isn't on a resolvable variable or typed call.
 /// Results are position-sorted and deduplicated.
 pub fn references(app: &App, file: FileId, offset: u32) -> Vec<Reference> {
+    // On a `def` header: every call that resolves to this definition,
+    // the header itself as the write.
+    let defs = defs_at(app, file, offset);
+    if !defs.is_empty() {
+        let mut out: Vec<Reference> = defs.iter().flat_map(|d| method_references_to(app, d)).collect();
+        out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
+        out.dedup();
+        return out;
+    }
     if let Some(refs) = variable_references(app, file, offset) {
         return refs;
     }
     method_references(app, file, offset).unwrap_or_default()
+}
+
+/// Every reference to a definition: explicit-receiver calls whose
+/// receiver type resolves to the owner (certain) or to no class
+/// (uncertain), implicit-self calls inside the owner's own bodies and
+/// its subclasses' (certain), and the header (`write`).
+fn method_references_to(app: &App, def: &DefSite<'_>) -> Vec<Reference> {
+    let mut out = vec![Reference { span: def.span, write: true, certain: true }];
+    let own: Vec<&Expr> = bodies_of_class_family(app, &def.owner);
+    // `before_action :set_room` and its kin are structured items, not
+    // expressions: their target symbols reference the method by name
+    // within the family (the declaring controller, or a concern the
+    // family includes — `from_concern` filters are spliced into the
+    // includer's body).
+    let family = class_family(app, &def.owner);
+    for c in &app.controllers {
+        for item in &c.body {
+            let ControllerBodyItem::Filter { filter, .. } = item else { continue };
+            let names_it = family.contains(&c.name) || filter.from_concern.as_ref() == Some(&def.owner);
+            if names_it && filter.target == def.name && !filter.target_span.is_synthetic() {
+                out.push(Reference { span: filter.target_span, write: false, certain: true });
+            }
+        }
+    }
+    for body in root_bodies(app) {
+        let in_family = own.iter().any(|b| std::ptr::eq(*b, body));
+        walk(body, &mut |e| {
+            let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
+            // Rails names methods by symbol in its macros —
+            // `before_action :set_room`, `helper_method :current_user`,
+            // `validate :ends_after_start`: a bare macro call in the
+            // family whose symbol argument is this name references it.
+            if in_family && recv.is_none() {
+                for a in args {
+                    if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*a.node {
+                        if value == &def.name && !a.span.is_synthetic() {
+                            out.push(Reference { span: a.span, write: false, certain: true });
+                        }
+                    }
+                }
+            }
+            if method != &def.name {
+                return;
+            }
+            match recv {
+                Some(r) => {
+                    let certain = match resolve_receiver_class(r.ty.as_ref()) {
+                        Some(id) if id == def.owner => true,
+                        Some(_) => return,
+                        None => false,
+                    };
+                    if let Some(span) = method_name_span(e, r, method, app) {
+                        out.push(Reference { span, write: false, certain });
+                    }
+                }
+                None if in_family => {
+                    let len = method.as_str().len() as u32;
+                    out.push(Reference {
+                        span: Span { file: e.span.file, start: e.span.start, end: e.span.start + len },
+                        write: false,
+                        certain: true,
+                    });
+                }
+                None => {}
+            }
+        });
+    }
+    out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
+    out.dedup();
+    out
+}
+
+/// A class and (for controllers) its subclasses, transitively.
+fn class_family(app: &App, owner: &ClassId) -> Vec<ClassId> {
+    let mut ids: Vec<ClassId> = vec![owner.clone()];
+    let mut i = 0;
+    while i < ids.len() {
+        let id = ids[i].clone();
+        i += 1;
+        for c in &app.controllers {
+            if c.parent.as_ref() == Some(&id) && !ids.contains(&c.name) {
+                ids.push(c.name.clone());
+            }
+        }
+    }
+    ids
+}
+
+/// The bodies of a class and (for controllers) its subclasses — where
+/// a bare `foo` resolves to the class's own `foo`.
+fn bodies_of_class_family<'a>(app: &'a App, owner: &ClassId) -> Vec<&'a Expr> {
+    let ids = class_family(app, owner);
+    let mut out: Vec<&Expr> = Vec::new();
+    for id in &ids {
+        if let Some(c) = find_controller(app, id) {
+            out.extend(c.actions().map(|a| &a.body));
+            out.extend(c.body.iter().filter_map(|i| match i {
+                ControllerBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            }));
+        }
+        if let Some(m) = app.models.iter().find(|m| &m.name == id) {
+            out.extend(m.scopes().map(|s| &s.body));
+            out.extend(m.methods().map(|me| &me.body));
+            out.extend(m.body.iter().filter_map(|i| match i {
+                ModelBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            }));
+        }
+        if let Some(lc) = app.library_classes.iter().find(|lc| &lc.name == id) {
+            out.extend(lc.methods.iter().map(|me| &me.body));
+        }
+    }
+    out
+}
+
+/// The class whose body contains `body` (a controller's action, a
+/// model's method or scope, a library class's method).
+fn owner_of_body(app: &App, body: &Expr) -> Option<ClassId> {
+    for c in &app.controllers {
+        if c.actions().any(|a| std::ptr::eq(&a.body, body)) {
+            return Some(c.name.clone());
+        }
+    }
+    for m in &app.models {
+        if m.methods().any(|me| std::ptr::eq(&me.body, body)) || m.scopes().any(|s| std::ptr::eq(&s.body, body)) {
+            return Some(m.name.clone());
+        }
+    }
+    for lc in &app.library_classes {
+        if lc.methods.iter().any(|me| std::ptr::eq(&me.body, body)) {
+            return Some(lc.name.clone());
+        }
+    }
+    None
 }
 
 fn variable_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Reference>> {
@@ -1314,8 +1626,17 @@ fn view_ivar_bodies<'a>(app: &'a App, view: &Symbol) -> Vec<&'a Expr> {
 /// span the IR doesn't carry.)
 fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Reference>> {
     let node = find_at_offset(app, file, offset)?;
-    let ExprNode::Send { recv: Some(recv), method, .. } = &*node.node else {
+    let ExprNode::Send { recv, method, .. } = &*node.node else {
         return None;
+    };
+    let Some(recv) = recv else {
+        // A bare `foo` inside a class: the class's own `foo` (or an
+        // ancestor's) is the definition, and its references are that
+        // definition's.
+        let (_, body) = locate(app, file, offset)?;
+        let owner = owner_of_body(app, body)?;
+        let def = def_of(app, &owner, method, false)?;
+        return Some(method_references_to(app, &def));
     };
     // The cursor must be on the method name, not the receiver — clicking the
     // receiver is a variable lookup (handled above). The receiver subtree
@@ -1324,6 +1645,13 @@ fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Referen
         return None;
     }
     let target = resolve_receiver_class(recv.ty.as_ref())?;
+    // Resolved to a class that defines the method: its definition's
+    // references, header included, so go-to-definition lands on the
+    // `def`. A column or association has no header and takes the
+    // call-site walk below.
+    if let Some(def) = def_of(app, &target, method, false) {
+        return Some(method_references_to(app, &def));
+    }
 
     let mut out = Vec::new();
     for body in root_bodies(app) {
@@ -3087,30 +3415,6 @@ pub fn trace_text(trace: &Trace, report: &TraceGapReport) -> String {
     out
 }
 
-/// The 0-based line of `def <action>` in `text`. The IR carries no span
-/// for a method header, so the header is found in the source: the
-/// nearest `def` for the name at or above `body_line` (0-based, the
-/// body's first statement) when one is known, else the first such
-/// `def` in the file. `None` when the file defines no such method.
-pub fn action_def_line(text: &str, action: &str, body_line: Option<u32>) -> Option<u32> {
-    let is_def = |line: &str| {
-        let t = line.trim_start();
-        let Some(rest) = t.strip_prefix("def ") else { return false };
-        let rest = rest.trim_start();
-        // `def self.name` is a class method; not an action.
-        rest.strip_prefix(action)
-            .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '='))
-    };
-    let lines: Vec<&str> = text.lines().collect();
-    match body_line {
-        Some(b) => (0..=(b as usize).min(lines.len().saturating_sub(1)))
-            .rev()
-            .find(|&i| is_def(lines[i]))
-            .map(|i| i as u32),
-        None => lines.iter().position(|l| is_def(l)).map(|i| i as u32),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3129,6 +3433,62 @@ mod tests {
 
     fn class(name: &str) -> Ty {
         Ty::Class { id: ClassId(Symbol::new(name)), args: vec![] }
+    }
+
+    /// A `def` header has a position now: hover answers with the
+    /// signature, references from the header find the bare calls and
+    /// the `before_action :name` symbol, and a bare call's definition
+    /// is the header.
+    #[test]
+    fn def_headers_hover_and_reference() {
+        let app = real_blog();
+        let path = "app/controllers/articles_controller.rb";
+        let file = file_id(&app, path).unwrap();
+        let text = source(&app, file).unwrap().text.clone();
+        let at = |needle: &str, skip: usize| -> u32 {
+            let mut from = 0;
+            for _ in 0..=skip {
+                let i = text[from..].find(needle).expect(needle) + from;
+                from = i + 1;
+            }
+            (from - 1) as u32
+        };
+        let line_of = |off: u32| offset_to_position(&text, off).line + 1;
+
+        // Hover on `def article_params`.
+        let hdr = at("def article_params", 0) + 4;
+        let info = type_at(&app, file, hdr).expect("header hover");
+        assert_eq!(info.node_kind, "MethodDef");
+        assert!(info.display.starts_with("def article_params -> "), "{}", info.display);
+        assert_eq!(info.note.as_deref(), Some("defined on ArticlesController"));
+        // A routed action names its routes.
+        let show = at("def show", 0) + 4;
+        let info = type_at(&app, file, show).unwrap();
+        assert!(info.note.as_deref().unwrap().contains("routed GET /articles/:id"), "{:?}", info.note);
+
+        // References from the header: the two bare calls + the header.
+        let refs = references(&app, file, hdr);
+        let lines: Vec<(u32, bool)> = refs.iter().map(|r| (line_of(r.span.start), r.write)).collect();
+        assert_eq!(lines, [(24, false), (40, false), (67, true)], "{refs:?}");
+        assert!(refs.iter().all(|r| r.certain));
+
+        // From `set_article`'s header: the before_action symbol counts.
+        let set = at("def set_article", 0) + 4;
+        let refs = references(&app, file, set);
+        let lines: Vec<(u32, bool)> = refs.iter().map(|r| (line_of(r.span.start), r.write)).collect();
+        assert_eq!(lines, [(2, false), (62, true)], "{refs:?}");
+        let sym = &text[refs[0].span.start as usize..refs[0].span.end as usize];
+        assert_eq!(sym, ":set_article");
+
+        // From the bare call on line 24: the same set, and its
+        // definition is the header.
+        let call = at("article_params", 0);
+        assert_eq!(line_of(call), 24);
+        let refs = references(&app, file, call);
+        assert_eq!(refs.len(), 3, "{refs:?}");
+        let def = definition(&app, file, call).expect("definition of a bare call");
+        assert_eq!(line_of(def.start), 67);
+        assert_eq!(&text[def.start as usize..def.end as usize], "article_params");
     }
 
     #[test]
@@ -4115,4 +4475,5 @@ end
         assert!(traceroute(&app, "NopeController#zap").is_none());
     }
 }
+
 

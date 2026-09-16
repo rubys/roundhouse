@@ -1279,6 +1279,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1310,6 +1311,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: field.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1381,6 +1383,7 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("except"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(key.clone())],
@@ -1422,6 +1425,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", field.as_str())),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value.clone())],
@@ -1565,6 +1569,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
     stmts.push(var(&instance, owner_ty.clone()));
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_raw"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(params.clone())],
@@ -1669,6 +1674,7 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     stmts.push(attrs_var());
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("to_attrs"),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1751,6 +1757,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
     );
 
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(key.clone())],
@@ -1840,6 +1847,7 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     };
     let ret_ty = hash_ty;
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("to_h"),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),

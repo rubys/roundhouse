@@ -133,6 +133,7 @@ pub(crate) fn push_attachable_sgid(
     );
     body.ty = Some(Ty::Str);
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
         params: vec![],

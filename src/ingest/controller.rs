@@ -300,6 +300,7 @@ fn ingest_controller_body_item(
         }
         return Ok(ControllerBodyItem::Action {
             action: Action {
+                name_span: super::util::def_name_span(&def, file),
                 name: Symbol::from(action_name),
                 params,
                 opt_params,
@@ -375,7 +376,7 @@ pub(super) fn parse_filter_call(
 
     let args = call.arguments()?;
 
-    let mut targets: Vec<Symbol> = Vec::new();
+    let mut targets: Vec<(Symbol, Span)> = Vec::new();
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut only_style = crate::expr::ArrayStyle::default();
@@ -387,7 +388,15 @@ pub(super) fn parse_filter_call(
 
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
-            targets.push(Symbol::from(sym.as_str()));
+            let loc = arg.location();
+            targets.push((
+                Symbol::from(sym.as_str()),
+                Span {
+                    file: super::sources::file_id(file),
+                    start: loc.start_offset() as u32,
+                    end: loc.end_offset() as u32,
+                },
+            ));
             continue;
         }
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -426,9 +435,10 @@ pub(super) fn parse_filter_call(
     Some(
         targets
             .into_iter()
-            .map(|target| Filter {
+            .map(|(target, target_span)| Filter {
                 kind: kind.clone(),
                 target,
+                target_span,
                 from_concern: None,
                 only: only.clone(),
                 except: except.clone(),

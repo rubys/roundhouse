@@ -134,6 +134,7 @@ pub(super) fn synthesize_process_action(
 
     let action_name_param = Symbol::from("action_name");
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(action_name_param.clone())],

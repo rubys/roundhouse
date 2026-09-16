@@ -14,6 +14,19 @@ use crate::span::Span;
 
 // ---- Leaf literal extractors -------------------------------------------
 
+/// The span of a `def`'s name token (`show` in `def show`, `title=` in
+/// `def title=(v)`), resolved against the sources registry — the one
+/// position a method header has, since the body's spans start at its
+/// first statement.
+pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate::span::Span {
+    let loc = def.name_loc();
+    crate::span::Span {
+        file: super::sources::file_id(file),
+        start: loc.start_offset() as u32,
+        end: loc.end_offset() as u32,
+    }
+}
+
 pub(super) fn constant_id_str<'a>(id: &ruby_prism::ConstantId<'a>) -> &'a str {
     std::str::from_utf8(id.as_slice()).expect("prism constant id is UTF-8")
 }

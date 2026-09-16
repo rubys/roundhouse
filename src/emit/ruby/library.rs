@@ -1510,6 +1510,7 @@ fn autosave_method(
         else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
     });
     crate::dialect::MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("_autosave_{}", name.as_str())),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -1555,6 +1556,7 @@ fn fold_before_validation(
         return;
     }
     methods.push(crate::dialect::MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: hook,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
@@ -2185,6 +2187,7 @@ fn push_helper_ivar_writers(
         }
         let span = Span::synthetic();
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: setter,
             receiver: MethodReceiver::Instance,
             params: vec![crate::dialect::Param::positional(Symbol::from("value"))],
@@ -2220,6 +2223,7 @@ fn push_helper_ivar_readers(
             continue;
         }
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: name.clone(),
             receiver: MethodReceiver::Instance,
             params: vec![],
@@ -5284,6 +5288,7 @@ fn synthesize_module_lc(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
             params: f.params.clone(),

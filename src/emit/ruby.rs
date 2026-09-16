@@ -1586,6 +1586,7 @@ mod method_sig_tests {
     #[test]
     fn emit_method_renders_optional_default_and_block_param() {
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("get_from_cache"),
             receiver: MethodReceiver::Instance,
             params: vec![Param::with_default(

@@ -497,11 +497,12 @@ impl Server {
     /// document: the trace summary as the title, the trace query as
     /// the command argument. Targets come from [`ide::trace_targets`]
     /// (routed, or rendering a convention template), so a private
-    /// helper gets no lens. The lens sits on the action's `def` — found
-    /// in the source, the IR carries no span for a method header — or,
-    /// for an action the controller inherits (`Rooms::OpensController`
-    /// routes `show` without defining it), on the `class` line, the one
-    /// place in that file the route can be reached from.
+    /// helper gets no lens. The lens sits on the action's `def` header
+    /// when this file has one; for an action the controller inherits
+    /// (`Rooms::OpensController` routes `show` without defining it) it
+    /// sits on the `class` line, the one place in that file the route
+    /// can be reached from; a `resources` route the controller never
+    /// implements anywhere gets none.
     fn code_lenses(&self, params: CodeLensParams) -> Vec<CodeLens> {
         let Some(analysis) = self.current() else { return Vec::new() };
         let app = &analysis.app;
@@ -517,26 +518,16 @@ impl Server {
             .map(|l| l as u32);
         let mut lenses = Vec::new();
         for target in ide::trace_targets(app) {
-            if class_files.get(&ClassId(Symbol::new(&target.controller))) != Some(&file) {
+            let controller = ClassId(Symbol::new(&target.controller));
+            if class_files.get(&controller) != Some(&file) {
                 continue;
             }
             let Some(trace) = ide::traceroute(app, &target.query) else { continue };
-            let action_site = trace.hops.iter().find_map(|h| match h {
-                ide::TraceHop::Action { file, line, .. } => Some((file.clone(), *line)),
-                _ => None,
-            });
-            let line = match action_site {
-                // Defined here: on its `def` (the body's first statement
-                // is the anchor; the header is at or above it).
-                Some((Some(f), l)) if canonical(Path::new(&f)) == canonical(&path) => {
-                    ide::action_def_line(text, &trace.action, l.map(|l| l.saturating_sub(1)))
-                }
-                // Inherited from another file: the `class` line.
-                Some((Some(_), _)) => class_line,
-                // Bodiless everywhere (`def edit; end`, or a `resources`
-                // route the controller never implements): only a `def`
-                // in this file earns a lens.
-                _ => ide::action_def_line(text, &trace.action, None),
+            let def = ide::def_of(app, &controller, &Symbol::new(&trace.action), false);
+            let line = match def {
+                Some(d) if d.span.file == file => Some(ide::offset_to_position(text, d.span.start).line),
+                Some(_) => class_line, // inherited: defined in another file
+                None => None,          // routed, defined nowhere
             };
             let Some(line) = line else { continue };
             let report =

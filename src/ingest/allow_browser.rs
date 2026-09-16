@@ -159,6 +159,7 @@ fn method_source(gate: &Gate) -> String {
 
 fn filter(gate: &Gate) -> Filter {
     Filter {
+        target_span: crate::span::Span::synthetic(),
         kind: FilterKind::Before,
         target: Symbol::from("allow_browser"),
         from_concern: None,

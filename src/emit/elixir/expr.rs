@@ -2534,6 +2534,7 @@ mod tests {
         fn syn(node: ExprNode) -> Expr { Expr::new(crate::span::Span::synthetic(), node) }
         fn m(name: &str, params: &[&str], body: Expr) -> MethodDef {
             MethodDef {
+                name_span: crate::span::Span::synthetic(),
                 name: sym(name),
                 receiver: MethodReceiver::Instance,
                 params: params.iter().map(|p| Param::positional(sym(p))).collect(),
@@ -2767,6 +2768,7 @@ mod tests {
         });
         // `def truncate(s, length = 30, omission = "...")` on ViewHelpers.
         let truncate = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("truncate"),
             receiver: MethodReceiver::Class,
             params: vec![

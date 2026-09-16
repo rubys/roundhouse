@@ -875,6 +875,7 @@ impl<'f> RouteWalker<'f> {
                 let only = if users.len() == my_leaves.len() { Vec::new() } else { users };
                 body.push(ControllerBodyItem::Filter {
                     filter: Filter {
+                        target_span: crate::span::Span::synthetic(),
                         kind: FilterKind::Before,
                         target,
                         from_concern: None,
@@ -983,6 +984,7 @@ fn action_item(name: Symbol, body: Expr) -> ControllerBodyItem {
         .unwrap_or(crate::dialect::RenderTarget::Inferred);
     ControllerBodyItem::Action {
         action: Action {
+            name_span: crate::span::Span::synthetic(),
             name,
             params: Row::closed(),
             opt_params: Vec::new(),

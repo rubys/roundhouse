@@ -325,6 +325,7 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         })
         .collect();
     methods.push(MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
         params,
@@ -791,6 +792,7 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver,
         params: Vec::new(),
@@ -848,6 +850,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
     );
     let setter_name = Symbol::from(format!("{}=", name.as_str()));
     MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver,
         params: vec![Param::positional(value_param)],
@@ -1027,6 +1030,7 @@ pub(super) fn ingest_library_method(
     };
 
     Ok(MethodDef {
+        name_span: super::util::def_name_span(def, file),
         name,
         receiver,
         params,
@@ -1293,6 +1297,7 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
     };
     let expr = ingest_expr(stmt, file).ok()?;
     Some(Filter {
+        target_span: crate::span::Span::synthetic(),
         kind,
         target: Symbol::from("__block__"),
         from_concern: None,

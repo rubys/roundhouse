@@ -259,6 +259,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("flag"))],
@@ -307,6 +308,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("v"))],
@@ -358,6 +360,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("article"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("article"))],
@@ -406,6 +409,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("v"))],
@@ -458,6 +462,7 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("coll")), Param::positional(s("k"))],
@@ -502,6 +507,7 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
             params: vec![Param::positional(s("k")), Param::positional(s("v"))],

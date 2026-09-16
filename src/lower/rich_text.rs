@@ -231,6 +231,7 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: body_col.clone(),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
@@ -258,6 +259,7 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: Symbol::from("body="),
             receiver: MethodReceiver::Instance,
             params: vec![Param::positional(value.clone())],
@@ -806,6 +808,7 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name,
             receiver: MethodReceiver::Class,
             params: vec![Param::with_default(

@@ -1254,6 +1254,7 @@ mod tests {
     }
     fn instance_method(name: &str, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver: MethodReceiver::Instance,
             params: params.iter().map(|p| Param::positional(sym(p))).collect(),
@@ -1480,6 +1481,7 @@ mod tests {
             ],
         });
         let init = MethodDef {
+            name_span: crate::span::Span::synthetic(),
             name: sym("initialize"),
             receiver: MethodReceiver::Instance,
             params: vec![Param::with_default(sym("other"), nil())],

@@ -276,6 +276,7 @@ fn unwrap_respond_to_is_noop_without_respond_to_call() {
 fn action(name: &str, body: Expr) -> roundhouse::dialect::Action {
     use roundhouse::{EffectSet, RenderTarget, Row};
     roundhouse::dialect::Action {
+        name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from(name),
         params: Row::closed(),
         opt_params: vec![],
@@ -301,6 +302,7 @@ fn filter_item(
     use roundhouse::dialect::{Filter, FilterKind};
     roundhouse::dialect::ControllerBodyItem::Filter {
         filter: Filter {
+            target_span: roundhouse::span::Span::synthetic(),
             kind: FilterKind::Before,
             from_concern: None,
             target: Symbol::from(target),
@@ -397,6 +399,7 @@ fn resolve_before_actions_respects_except_list() {
     use roundhouse::dialect::{ControllerBodyItem, Filter, FilterKind};
     let filter_with_except = ControllerBodyItem::Filter {
         filter: Filter {
+            target_span: roundhouse::span::Span::synthetic(),
             kind: FilterKind::Before,
             from_concern: None,
             target: Symbol::from("set_x"),

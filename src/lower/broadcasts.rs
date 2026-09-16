@@ -481,6 +481,7 @@ pub fn push_to_gid_param(
     );
     body.ty = Some(crate::ty::Ty::Str);
     methods.push(crate::dialect::MethodDef {
+        name_span: crate::span::Span::synthetic(),
         name,
         receiver: crate::dialect::MethodReceiver::Instance,
         params: vec![],

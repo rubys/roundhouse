@@ -76,6 +76,7 @@ fn tiny_blog_round_trips() {
     );
 
     let index_action = Action {
+        name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("index"),
         params: Row::closed(),
         opt_params: vec![],

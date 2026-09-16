@@ -4180,6 +4180,7 @@ fn build_sourced_filter_chain(
                         let source = from_concern.clone().unwrap_or_else(|| own_id.clone());
                         chain.push((
                             Filter {
+                                target_span: crate::span::Span::synthetic(),
                                 kind,
                                 target: target.clone(),
                                 from_concern,
