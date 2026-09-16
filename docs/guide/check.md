@@ -1,0 +1,153 @@
+# `roundhouse check` — analyze an app from the command line
+
+`check` runs the whole analysis — ingest, type and effect inference,
+diagnosis — over a Rails checkout and prints what it found. It is the
+same engine the editor and the MCP server use, in the shape that fits
+a terminal and a CI job: one command, one exit code.
+
+```sh
+roundhouse check --continue /path/to/your/rails/app
+```
+
+Nothing is booted and nothing is installed. The analyzer reads
+`db/schema.rb` (or the migrations), `config/routes.rb`, the models,
+controllers, concerns, helpers, views and `Gemfile.lock`, and infers
+from Rails' own conventions what was never written down: which class
+`has_many :comments` returns, what a column deserializes to, whether a
+`find_by` can come back nil.
+
+## The two modes
+
+`--continue` is the mode you want on a real app. Constructs the
+ingester does not recognize yet are recorded and skipped rather than
+aborting, and a deduplicated list of them is printed at the end.
+
+Without it (the default, also spelled `--strict`), ingest stops at the
+first unrecognized construct and exits 2. That is the right mode for an
+app you expect roundhouse to cover completely — a CI gate that should
+go red if a new construct sneaks in — and the wrong one for a first
+look at an unfamiliar codebase.
+
+`ROUNDHOUSE_INGEST_SURVEY=1` in the environment is the same as
+`--continue`; useful where the command line is not yours to edit.
+
+## A clean run
+
+The Rails Guides store — the app the *Getting Started with Rails*
+guide builds, checked in at `fixtures/store` — checks clean:
+
+```
+$ roundhouse check fixtures/store
+roundhouse-check: 24 gems: 9 framework, 2 modeled, 13 infrastructure, 0 unknown
+roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 0 warning(s), 0 gap-attributed note(s), 0 survey gap(s)
+```
+
+Exit status 0. Everything the analyzer saw, it typed.
+
+## Reading the output of a real app
+
+A real app prints more. Every line is one of five kinds, and the
+summary line at the end counts them. Which are *your* problem and which
+are roundhouse's is the whole point of the layout.
+
+```
+$ roundhouse check --continue ~/src/mastodon
+config/initializers/inflections.rb:5:46: error[parse]: expected an expression after `=`
+app/controllers/concerns/web_app_controller_concern.rb:25:7: error[send_dispatch_failed]: no known method `[]` on Class { id: ClassId(Symbol("ENV")), args: [] }
+app/controllers/about_controller.rb:9:16: warning[gradual_untyped]: method call resolves to RBS `untyped` (gradual escape)
+app/views/admin/collections/show.html.haml:21:105: warning[missing_preload]: iterating this relation reads `x.account`, but the query at app/views/admin/collections/show.html.haml:21 does not preload :account — add `.includes(:account)`
+app/helpers/domain_control_helper.rb:16:7: note[send_dispatch_failed]: no known method `blocked?` on Class { id: ClassId(Symbol("DomainBlock")), args: [] } — likely roundhouse coverage, not an app error (ingest gap in app/models/domain_block.rb: unsupported statement inside `class << self`: AliasMethodNode)
+…
+
+── Survey: 138 ingest gap(s), 20 distinct kind(s) ──
+  [30×] class-body macro not expanded: `vary_by` from CacheConcern holds a statement that is not filter DSL
+        app/controllers/activitypub/collections_controller.rb
+        … and 29 more file(s)
+  [3×] unsupported routes DSL: `concern`
+        config/routes.rb
+        config/routes/admin.rb
+        config/routes/api.rb
+  …
+
+roundhouse-check: 154 gems: 6 framework, 6 stdlib, 11 modeled, 70 infrastructure, 61 unknown (active_model_serializers, base58, …)
+roundhouse-check: /Users/you/src/mastodon — 6 parse error(s), 674 error(s), 5035 warning(s), 704 gap-attributed note(s), 138 survey gap(s)
+```
+
+(Paths are printed absolute; shortened here.)
+
+**`error[parse]`** — Prism could not parse the file. These lead the
+output because a malformed file is usually the root cause of whatever
+analysis noise follows it. Real syntax errors are yours; a construct
+Prism handles that roundhouse's ingest of the recovered tree does not
+is roundhouse's. Either way, look at these first.
+
+**`error[…]`** — the analyzer understood the site and could not type
+it: an instance variable no filter or action assigns, a method dispatch
+on a receiver with no such method, an operator applied to incompatible
+operands. Anything left at error severity after attribution (below) is
+a finding: either the app has a latent bug, or the analyzer is wrong
+about something it thinks it understands. Both are worth a look, and
+the second is a bug report roundhouse wants.
+
+**`warning[…]`** — two populations share this severity.
+`gradual_untyped` and `unresolved_type` are the coverage ledger: a call
+resolved to an RBS `untyped` (the gradual escape hatch) or to nothing
+at all. There are hundreds on any real app; they are neither errors in
+your code nor, individually, interesting. `missing_preload` is the one
+warning that *is* a finding about your app: a static N+1, naming the
+association read inside the loop, the query that built the relation,
+and the `.includes` that fixes it.
+
+**`note[…] — likely roundhouse coverage, not an app error`** — a
+diagnostic that would have been an error, downgraded because roundhouse
+can trace it to its own gap. Two tails: *(ingest gap in …)* means a
+construct listed in the survey report below prevented the analyzer
+from seeing a definition, and *(the `X` gem is in the Gemfile and
+roundhouse does not model it)* means the receiver comes from a gem the
+census lists as unknown. Skip these on a first read. They exist so the
+error count above means "findings", not "shadows of gaps".
+
+**The survey report** — printed only with `--continue`: every construct
+ingest skipped, bucketed by kind, most frequent first, with the files
+it occurred in. This is roundhouse's own to-do list for your app.
+Nothing in it is a problem with your code.
+
+**The gem census** — printed when there is a `Gemfile.lock`: each
+direct dependency classified as *framework* (Rails and its plumbing),
+*stdlib*, *modeled* (roundhouse resolves its app-facing surface),
+*infrastructure* (servers, linters, test drivers, adapters — never
+enters the analysis), or *unknown*. The unknown list is printed in
+full. A dispatch into an unknown gem's DSL or classes cannot be typed,
+and those failures are labelled as notes rather than counted as
+errors — so on an app with a long unknown list, the census is the
+first thing to read: it says how much of the error count is even
+reachable today.
+
+## Exit status
+
+| Status | Meaning |
+|---|---|
+| 0 | No parse errors and no analysis errors. Warnings, notes and survey gaps do not affect it. |
+| 1 | At least one parse error or analysis error. |
+| 2 | Bad arguments; a path that is not a directory or has no `app/` (a typo must not check clean); or, without `--continue`, ingest aborted at an unsupported construct. |
+
+That makes `roundhouse check app/` a usable CI gate for an app that
+checks clean today, and `roundhouse check --continue app/` a usable
+one for an app that doesn't: the second stays green while roundhouse's
+coverage grows and goes red only when the *findings* change.
+
+## What the numbers are and aren't
+
+On the store, the blog fixture, Campfire and the Rails tutorial's
+sample app, `check` reports zero errors and zero warnings, and CI
+asserts that on every commit. On Mastodon it reports the thousands
+above. Both numbers are honest: the first says those apps are inside
+the analyzer's coverage, the second says how far Mastodon is outside
+it, and where. The counts on large apps drop week over week as
+constructs move from the survey report into the analyzer; the
+snapshot's [`RELEASES.md`](../../RELEASES.md) entry records where
+they stood when it shipped.
+
+The same diagnostics, filtered and queryable, are what the editor
+shows in its Problems panel ([`editor.md`](editor.md)) and what an
+agent gets from the `diagnostics` tool ([`mcp.md`](mcp.md)).

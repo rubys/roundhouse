@@ -1,5 +1,9 @@
 # docs/ — map
 
+The user guide is [`guide/`](guide/README.md) — install, and one door
+each for analyzing, transpiling and compiling a Rails app. Everything
+below is for people working on roundhouse itself.
+
 Architecture references live in the two subdirectories; the loose files
 at this level are working plans. Status discipline: these docs describe
 *architecture*, not day-to-day status — when a status claim here

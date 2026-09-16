@@ -586,3 +586,32 @@ body.doc .doc-main h2 { color: var(--card-accent, var(--accent)); }
   color: var(--card-accent, var(--accent));
   font-weight: 600;
 }
+
+/* --------- User guide (docs/guide/*.md, rendered by `roundhouse --site`) --------- */
+
+body.guide .tagline a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+body.guide .tagline a:hover { text-decoration: underline; }
+
+.doc-main ol {
+  margin: 0 0 1.25rem 1.5rem;
+  line-height: 1.6;
+}
+.doc-main ol li { margin-bottom: 0.4rem; }
+
+.doc-main h4 {
+  font-size: 0.95rem;
+  color: var(--text);
+  margin: 1.25rem 0 0.5rem;
+}
+
+.doc-main hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2rem 0;
+}
+
+/* Wide tables (the coverage page) scroll rather than overflow the column. */
+.doc-main table { display: block; overflow-x: auto; }

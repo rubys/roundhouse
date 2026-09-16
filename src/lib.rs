@@ -30,6 +30,10 @@ pub mod lower;
 /// bins that delegate to them. Host-only (stdio, real directories).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
+/// The user guide (`docs/guide/*.md`) rendered for the Pages site.
+/// Host-only, like `project`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod guide;
 /// Standalone read-only LSP server over the [`ide`] query layer. Host-only
 /// (uses stdio + the synchronous `lsp-server` transport); excluded from the
 /// wasm build.

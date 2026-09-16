@@ -3,6 +3,13 @@
   "displayName": "Roundhouse LSP",
   "description": "Whole-app inferred types, nil-safety, and request traces for Rails, from the roundhouse analyzer.",
   "version": "0.0.1",
+  "publisher": "rubys",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rubys/roundhouse",
+    "directory": "editors/vscode"
+  },
+  "license": "MIT OR Apache-2.0",
   "private": true,
   "engines": {
     "vscode": "^1.82.0"
@@ -29,7 +36,7 @@
         "roundhouse.warnings": {
           "type": "boolean",
           "default": false,
-          "description": "Also publish warning-level diagnostics (the analyzer's `gradual_untyped` / `unresolved_type` ledger — hundreds on a real app). Off: errors, syntax errors and N+1 findings only."
+          "description": "Also publish warning-level diagnostics (the analyzer's `gradual_untyped` / `unresolved_type` ledger \u2014 hundreds on a real app). Off: errors, syntax errors and N+1 findings only."
         }
       }
     }

@@ -211,13 +211,16 @@ see what the analyzer can type today — no annotations, no `bundle
 install`, no booting, no database:
 
 ```sh
-cargo run --release --bin roundhouse -- check --continue /path/to/your/rails/app
+roundhouse check --continue /path/to/your/rails/app
 ```
 
-(`roundhouse check`, `roundhouse lsp` and `roundhouse mcp` are the
-subcommands the release tarball ships as one binary; `roundhouse-check`,
-`roundhouse-lsp` and `roundhouse-mcp` remain as cargo-only aliases.
-`roundhouse --version` names the commit the build came from.)
+(`roundhouse` is the one binary a snapshot ships — see
+[`docs/guide/install.md`](docs/guide/install.md); from a checkout,
+`cargo run --release --bin roundhouse -- check --continue …` is the
+same thing. `check`, `lsp` and `mcp` are its subcommands;
+`roundhouse-check`, `roundhouse-lsp` and `roundhouse-mcp` remain as
+cargo-only aliases. `roundhouse --version` names the snapshot and the
+commit the build came from.)
 
 `--continue` is the mode you want on a real app: constructs the
 ingester doesn't recognize yet are recorded and skipped instead of
@@ -297,6 +300,21 @@ CI regenerates the fixture once per run and shares it across the unit
 job and every per-target job.
 
 ## Documentation
+
+Using it:
+
+- [`docs/guide/`](docs/guide/README.md) — the user guide, one door per
+  thing the binary does: [analyze](docs/guide/check.md) (`check`, the
+  [editor](docs/guide/editor.md), the [agent](docs/guide/mcp.md), the
+  [browser IDE](docs/guide/ide.md)), [transpile](docs/guide/transpile.md)
+  (the [targets](docs/guide/targets.md), [what of Rails comes
+  through](docs/guide/rails-coverage.md), [verifying the
+  output](docs/guide/verifying.md)), and [compile with
+  Spinel](docs/guide/spinel.md). Start at
+  [`install.md`](docs/guide/install.md).
+- [`RELEASES.md`](RELEASES.md) — what each dated snapshot contains.
+
+Working on it:
 
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — day-to-day dev loop, the
   debugging tools, adding a new IR variant, repo map.

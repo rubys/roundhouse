@@ -5005,6 +5005,7 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
 
     copy_site_assets(out)?;
     copy_create_blog(out)?;
+    crate::guide::render_site(out)?;
 
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;

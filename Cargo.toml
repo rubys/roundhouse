@@ -33,6 +33,9 @@ ruby-rbs = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The user guide (docs/guide/*.md) rendered into the Pages site by
+# `roundhouse --site`. Host-only like the rest of the site build.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 # LSP server: rust-analyzer's *synchronous* transport crate (no tokio —
 # keeps the analysis engine sync). Host-only; the wasm build excludes it.
 lsp-server = "0.7.9"
