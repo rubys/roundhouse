@@ -613,5 +613,10 @@ body.guide .tagline a:hover { text-decoration: underline; }
   margin: 2rem 0;
 }
 
+/* A flex child's minimum width is its content's: a long unbreakable
+   line in a <pre> would push the whole column past the viewport on a
+   narrow window. Let the column shrink; the <pre> scrolls on its own. */
+.doc-main { min-width: 0; width: 100%; }
+
 /* Wide tables (the coverage page) scroll rather than overflow the column. */
 .doc-main table { display: block; overflow-x: auto; }
