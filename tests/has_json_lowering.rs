@@ -194,11 +194,45 @@ end
 }
 
 #[test]
-fn a_whole_hash_assignment_to_the_column_is_reported() {
-    // Rails' `settings=` casts each supplied key through the schema.
-    // That writer is also where hydration lands, so it stays the plain
-    // serialized-text one here and the Hash spelling is a diagnostic
-    // rather than a silent `Hash#to_s` in the column.
+fn the_whole_column_reads_as_a_hash_and_assigns_through_the_schema() {
+    // Rails' accessor reverse-merges the declared defaults into the
+    // stored object, so `record[:settings]` is one typed entry per
+    // schema key, in declaration order — the flat readers, gathered.
+    let src = account_source(&campfire_like_app());
+    let index_read = src
+        .split("def [](name)")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  end\n").next())
+        .expect("the synthesized [] reader");
+    assert!(
+        index_read.contains(
+            r#"{ "restrict_room_creation_to_administrators" => SchematizedJson.read_boolean(@settings, "restrict_room_creation_to_administrators", false), "max_invites" => SchematizedJson.read_integer(@settings, "max_invites", 10), "greeting" => SchematizedJson.read_string(@settings, "greeting", "Hello!") }"#
+        ),
+        "record[:settings] is the decoded object with defaults merged:\n{index_read}"
+    );
+    // Rails' `settings=` (`update!(settings: { … })`, `new(settings:
+    // { … })`, `self[:settings] = { … }`) casts each supplied key
+    // through the schema and merges — the seam, with the schema as
+    // data. The same writers carry hydration's serialized text, which
+    // is why the value stays untyped and the seam tells them apart.
+    let schema = r#"{ "restrict_room_creation_to_administrators" => "boolean", "max_invites" => "integer", "greeting" => "string" }"#;
+    assert!(
+        src.contains(&format!(
+            "self.settings = SchematizedJson.assign(@settings, attrs[:settings], {schema}) if attrs.key?(:settings)"
+        )),
+        "update!(settings: …) assigns through the seam:\n{src}"
+    );
+    assert!(
+        src.contains(&format!("@settings = SchematizedJson.assign(@settings, value, {schema})")),
+        "self[:settings] = … assigns through the seam:\n{src}"
+    );
+    assert!(
+        src.contains(&format!(
+            "self.settings = SchematizedJson.assign(@settings, attrs[:settings], {schema})\n"
+        )),
+        "new(settings: …) assigns through the seam:\n{src}"
+    );
+    // Nothing is left to report: the whole-Hash spelling is modeled.
     let mut app = app_with(
         "  has_json :settings, restrict_room_creation_to_administrators: false\n",
         vec![(
@@ -213,9 +247,8 @@ end
     );
     let diags = roundhouse::session::analyze_and_lower(&mut app);
     assert!(
-        diags.iter().any(|d| d.message.contains("whole-Hash assignment")
-            && d.message.contains("settings")),
-        "expected the unmodeled whole-column assignment to be reported, got: {:?}",
+        !diags.iter().any(|d| d.message.contains("has_json") || d.message.contains("whole-Hash")),
+        "no has_json diagnostic for a modeled assignment, got: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
     );
 }

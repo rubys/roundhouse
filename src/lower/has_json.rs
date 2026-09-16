@@ -35,6 +35,25 @@
 //! symbol-declared type, whose Rails default is nil — a value none of
 //! these typed readers can return) makes the whole declaration stay
 //! UNCLAIMED and keep warning, rather than being half-expanded.
+//!
+//! The whole column has two Rails surfaces besides the keys, and both
+//! are the schema again:
+//!
+//! * `record[:settings]` answers the stored object AS A HASH. Rails'
+//!   accessor reverse-merges the declared defaults into the data the
+//!   first time it is read (and `before_save` reads it), so the answer
+//!   is one entry per schema key, typed — which is exactly what the
+//!   flat readers already compute. `synth_index_read` builds that Hash
+//!   from them (`column_hash_read`).
+//! * `update!(settings: { … })` / `new(settings: { … })` /
+//!   `self[:settings] = { … }` — Rails' `settings=` — is
+//!   `assign_data_with_type_casting`: each supplied key written through
+//!   its declared type, merged over the stored object. The attrs-hash
+//!   writers route the column through `SchematizedJson.assign` with the
+//!   schema as data (`column_assign`). The value stays untyped there
+//!   because the same writers carry hydration's serialized text; the
+//!   seam tells the two apart, which the ruby family's runtime can and
+//!   the lowering cannot.
 
 use std::collections::{HashMap, HashSet};
 
@@ -273,35 +292,29 @@ pub fn apply_has_json_lowering(
     app: &mut crate::app::App,
 ) -> Vec<crate::diagnostic::Diagnostic> {
     let map = has_json_columns(&app.models);
-    let mut diags = Vec::new();
     if map.is_empty() {
-        return diags;
+        return Vec::new();
     }
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &map, &mut diags));
+    super::for_each_hook_body(app, &mut |e| rewrite(e, &map));
     for view in &mut app.views {
-        rewrite(&mut view.body, &map, &mut diags);
+        rewrite(&mut view.body, &map);
     }
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &map, &mut diags);
+            rewrite(setup, &map);
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body, &map, &mut diags);
+            rewrite(&mut t.body, &map);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body, &map, &mut diags);
+            rewrite(&mut m.body, &map);
         }
     }
-    diags
+    Vec::new()
 }
 
-fn rewrite(
-    expr: &mut Expr,
-    map: &HasJsonColumns,
-    diags: &mut Vec<crate::diagnostic::Diagnostic>,
-) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, map, diags));
-    report_whole_column_assignment(expr, map, diags);
+fn rewrite(expr: &mut Expr, map: &HasJsonColumns) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, map));
     match &mut *expr.node {
         // `x.settings.foo`, `x.settings.foo?`, `x.settings.foo = v` —
         // a plain attribute write ingests as a `foo=` send, so all
@@ -445,69 +458,64 @@ fn ne_empty(read: Expr) -> Expr {
     )
 }
 
-/// ActiveRecord methods that take a column => value attribute hash —
-/// the same census `enum_symbols` keys off, for the same reason.
-const ATTR_METHODS: &[&str] = &[
-    "new", "create", "create!", "build", "update", "update!", "update_columns",
-    "assign_attributes", "update_attribute", "first_or_create",
-    "first_or_create!", "first_or_initialize",
-];
-
-/// Assigning a has_json column a HASH — `account.update!(settings: { … })`,
-/// Rails' `settings=` — is not modeled, and says so.
-///
-/// Rails overrides that writer to cast each supplied key through its
-/// declared type. Here the column writer stays the plain serialized-text
-/// one, because the same method is also where hydration lands
-/// (`from_row` assigns the stored column straight through it) and only a
-/// runtime type test could tell the two shapes apart — a test whose
-/// untyped-Hash traversal no target's Hash surface resolves. So the
-/// supported spelling is the per-key writer the declaration generates
-/// (`account.settings_restrict = true`), and the unsupported one is a
-/// diagnostic rather than a silent `Hash#to_s` in the column.
-fn report_whole_column_assignment(
-    expr: &Expr,
-    map: &HasJsonColumns,
-    diags: &mut Vec<crate::diagnostic::Diagnostic>,
-) {
-    let ExprNode::Send { method, args, .. } = &*expr.node else { return };
-    // `record.settings = { … }` — a plain attribute write ingests as a
-    // `settings=` send.
-    if let Some(col) = method.as_str().strip_suffix('=') {
-        if map.contains_key(col) && args.len() == 1 && is_hash(&args[0]) {
-            diags.push(unmodeled(expr, col));
-        }
-        return;
-    }
-    if !ATTR_METHODS.contains(&method.as_str()) {
-        return;
-    }
-    for arg in args {
-        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
-        for (key, value) in entries {
-            let Some(col) = sym_lit(key) else { continue };
-            if map.contains_key(col.as_str()) && is_hash(value) {
-                diags.push(unmodeled(expr, col.as_str()));
-            }
-        }
-    }
+/// The `has_json` declaration for `column` on `model`, if there is one.
+fn decl_for(model: &Model, column: &Symbol) -> Option<HasJsonDecl> {
+    has_json_decls(&model.body).into_iter().find(|d| &d.column == column)
 }
 
-fn is_hash(expr: &Expr) -> bool {
-    matches!(&*expr.node, ExprNode::Hash { .. })
+fn str_lit(value: &str) -> Expr {
+    super::typing::with_ty(
+        sp(ExprNode::Lit { value: Literal::Str { value: value.to_string() } }),
+        Ty::Str,
+    )
 }
 
-fn unmodeled(expr: &Expr, column: &str) -> crate::diagnostic::Diagnostic {
-    let mut d = crate::diagnostic::Diagnostic::unsupported(
-        expr.span,
-        None,
-        "has_json",
-        format!(
-            "whole-Hash assignment to the `{column}` json column is not modeled \
-             (Rails casts each key through the declared schema here); assign \
-             through the per-key writer `{column}_<key>=` instead",
-        ),
+/// `record[:<col>]` on a has_json column: `{ "<key>" => <flat read>, … }`,
+/// one typed entry per schema key — the object Rails' accessor holds
+/// once the declared defaults are merged in. `None` for every other
+/// column.
+pub(crate) fn column_hash_read(model: &Model, column: &Symbol) -> Option<Expr> {
+    let decl = decl_for(model, column)?;
+    let entries = decl
+        .attrs
+        .iter()
+        .map(|a| (str_lit(a.name.as_str()), read_body(&decl.column, a)))
+        .collect();
+    Some(super::typing::with_ty(
+        sp(ExprNode::Hash { entries, kwargs: false }),
+        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+    ))
+}
+
+/// The attrs-hash writers' value for a has_json column:
+/// `SchematizedJson.assign(@<col>, <raw>, { "<key>" => "<type>", … })`
+/// — Rails' `<col>=`, which merges a Hash through the schema's casts
+/// and lets the serialized text (hydration's shape) through unchanged.
+/// Typed as the column's slot, the way the `Cast` it replaces was.
+/// `None` for every other column.
+pub(crate) fn column_assign(model: &Model, column: &Symbol, raw: Expr, slot: Ty) -> Option<Expr> {
+    let decl = decl_for(model, column)?;
+    let schema = decl
+        .attrs
+        .iter()
+        .map(|a| {
+            let type_name = match a.scalar {
+                JsonScalar::Bool => "boolean",
+                JsonScalar::Int => "integer",
+                JsonScalar::Str => "string",
+            };
+            (str_lit(a.name.as_str()), str_lit(type_name))
+        })
+        .collect();
+    let schema = super::typing::with_ty(
+        sp(ExprNode::Hash { entries: schema, kwargs: false }),
+        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
     );
-    d.severity = crate::diagnostic::Severity::Warning;
-    d
+    Some(super::typing::with_ty(
+        schematized_json(
+            "assign",
+            vec![sp(ExprNode::Ivar { name: decl.column.clone() }), raw, schema],
+        ),
+        slot,
+    ))
 }

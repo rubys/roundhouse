@@ -416,38 +416,51 @@ Rails' latency while beating it on every page with no message list
 measures it; count CACHE MISSES, not `Db.prepare` calls, or the
 per-request query cache flatters the number by half.
 
-### A `has_json` column reads back as its stored TEXT
+### A `has_json` column is its keys; the whole column is the schema again
 
 `has_json :settings, restrict: false` gives Rails a `DataAccessor`
-object out of `account.settings`, and a decoded Hash out of
-`account[:settings]` / `account.attributes`. Here the reader, `[]`, and
-`attributes` all give the SERIALIZED JSON text; the schema's keys are
-reached through the flat accessors `lower::has_json` synthesizes
-(`account.settings_restrict?`), and the two-hop source spelling rewrites
-to them. The seam itself is `runtime/spinel/schematized_json.rb` plus its
-CRuby overlay twin — per-target like `TypedStore`, so the strict targets
-carry the calls as one named unresolved seam until a native
-implementation lands.
+object out of `account.settings`. Here the reader gives the SERIALIZED
+JSON text; the schema's keys are reached through the flat accessors
+`lower::has_json` synthesizes (`account.settings_restrict?`), and the
+two-hop source spelling rewrites to them. The seam itself is
+`runtime/spinel/schematized_json.rb` plus its CRuby overlay twin —
+per-target like `TypedStore`, so the strict targets carry the calls as
+one named unresolved seam until a native implementation lands.
 
 **Why.** The accessor object answers through `method_missing` and would
 need a live back-reference into the record for a write through it to be
 visible in the record — neither survives static resolution. The schema
-is a compile-time fact, so it expands instead. `[]`/`attributes` are the
-STORAGE view (`created_at` reads back through them as its raw ISO text
-for the same reason), and the storage here is the serialized column.
+is a compile-time fact, so it expands instead.
 
-**Where it is visible.** Three places. `record[:settings]` is a String
-where Rails gives a Hash. Assigning the column a whole Hash —
-`update!(settings: { … })`, which Rails casts key by key through the
-schema — is UNMODELED and reported: the same writer is where hydration
-lands (`from_row` assigns the stored column straight through it), so
-telling a Hash of attributes from already-serialized text would need a
-runtime type test over an untyped Hash, which no target's Hash surface
-resolves. The per-key writer is the supported spelling and the whole-Hash
-one is a diagnostic, never a silent `Hash#to_s` in the column. Third: an
-integer key gets no `?` predicate, because Rails' `present?` on any
-Integer — `0` included — is unconditionally true, and a method that
-always answers the same thing is worse than an honest gap.
+**The whole column, both directions, is the schema applied again.**
+`record[:settings]` answers a Hash, as Rails does: Rails' accessor
+reverse-merges the declared defaults into the stored data the first time
+it is read (and `before_save` reads it), so the object is one entry per
+schema key, typed — which is what the flat readers compute, gathered into
+a literal by `synth_index_read`. Assigning the column a whole Hash —
+`update!(settings: { … })`, `new(settings: { … })`, `self[:settings] =
+{ … }`, Rails' `settings=` — is `assign_data_with_type_casting`: each
+supplied key cast through its declared type and MERGED over the stored
+object, a key outside the schema raising as the accessor's
+`method_missing` does. The attrs-hash writers route the column through
+`SchematizedJson.assign(@settings, value, { "restrict" => "boolean" })`
+with the schema as data. The value stays untyped there on purpose: the
+same writers carry hydration's serialized text (`from_row` assigns the
+stored column straight through `[]=`), and the seam — ruby-family
+runtime, where an `is_a?(Hash)` over an untyped value resolves — is what
+tells the two shapes apart. The lowering cannot, and that is why the
+test lives in the runtime rather than in generated per-model code.
+
+**Where it is still visible.** `attributes` keeps the serialized text
+(the STORAGE view, as `created_at` reads back through it as raw ISO
+text), and an integer key gets no `?` predicate, because Rails'
+`present?` on any Integer — `0` included — is unconditionally true, and a
+method that always answers the same thing is worse than an honest gap.
+The permit-list path is a separate, ledgered gap: `permit(:name,
+settings: {})` drops the nested key from the typed params class under
+the `params_nested_filter` warning, so a form's settings never reach
+`update_from_<params>!` — the attrs-Hash writers above are the ones that
+model the assignment.
 
 Analyze additionally types the column reader `untyped` where the emitted
 reader returns `String`: that is the source-shaped accessor object, and

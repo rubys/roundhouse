@@ -240,7 +240,7 @@ pub(super) fn push_schema_methods(
     methods.push(synth_attributes(owner, table));
 
     // def [](name); case name; when :col then @col; ...; end; end
-    methods.push(synth_index_read(owner, table));
+    methods.push(synth_index_read(owner, table, model));
 
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table, model));
@@ -1815,7 +1815,30 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             );
             stmts.push(guard_unless_nil(lookup, raw_assign));
         } else {
-            let value = if nullable {
+            // A has_json column: `new(settings: { … })` is Rails'
+            // `settings=`, the per-key cast-and-merge — through the
+            // seam, over the `|| <default>` a NOT NULL column keeps.
+            let json_assign = crate::lower::has_json::column_assign(
+                model,
+                &col.name,
+                if nullable {
+                    lookup.clone()
+                } else {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::BoolOp {
+                            op: crate::expr::BoolOpKind::Or,
+                            surface: crate::expr::BoolOpSurface::Symbol,
+                            left: lookup.clone(),
+                            right: default.clone(),
+                        },
+                    )
+                },
+                super::ty_of_column_slot(col),
+            );
+            let value = if let Some(assign) = json_assign {
+                assign
+            } else if nullable {
                 // A nullable string column casts as its non-nullable
                 // sibling below does (Rails' String type), and the
                 // Cast to a `String | nil` slot keeps nil nil.
@@ -2222,12 +2245,14 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
-fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let name = Symbol::from("name");
 
     // Patterns match the PUBLIC column symbol; bodies read the storage
     // ivar (`@col_raw` for temporal) — `record[:created_at]` yields the
-    // stored text, same as `attributes`.
+    // stored text, same as `attributes`. A `has_json` column is the one
+    // exception: Rails answers the decoded object there, so its arm is
+    // the Hash the flat readers build (`has_json::column_hash_read`).
     let arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()
@@ -2243,7 +2268,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
             // the bare read it always had; wrapping those too cost
             // them the ivar-read `.clone()` rust adds, moving out of
             // `&self`.
-            body: {
+            body: crate::lower::has_json::column_hash_read(model, &c.name).unwrap_or_else(|| {
                 let read = Expr::new(
                     Span::synthetic(),
                     ExprNode::Ivar { name: col_storage_name(c) },
@@ -2255,7 +2280,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
                     ),
                     _ => read,
                 }
-            },
+            }),
         })
         .collect();
 
@@ -2387,9 +2412,16 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
             // `self[:role] = "administrator"` — same label problem the
-            // attrs-hash writers have, same answer.
-            let casted_value = enum_label_cast(model, c, var_ref(value.clone()))
-                .unwrap_or_else(|| {
+            // attrs-hash writers have, same answer. `self[:settings] =
+            // { … }` likewise routes through the has_json seam.
+            let casted_value = crate::lower::has_json::column_assign(
+                model,
+                &c.name,
+                var_ref(value.clone()),
+                col_ty.clone(),
+            )
+            .or_else(|| enum_label_cast(model, c, var_ref(value.clone())))
+            .unwrap_or_else(|| {
                     Expr::new(
                         Span::synthetic(),
                         ExprNode::Cast {
@@ -2792,7 +2824,16 @@ fn synth_update_hash(
         // An enum column takes its LABEL here (`update(role:
         // "administrator")`) — the `Cast` to `Int` would read that as
         // zero. See `enum_label_cast`.
-        let slot_value = enum_label_cast(model, col, lookup(&col.name)).unwrap_or_else(|| {
+        // A has_json column takes a whole Hash here (`update!(settings:
+        // { … })`) — Rails' per-key cast-and-merge, through the seam.
+        let slot_value = crate::lower::has_json::column_assign(
+            model,
+            &col.name,
+            lookup(&col.name),
+            slot_ty.clone(),
+        )
+        .or_else(|| enum_label_cast(model, col, lookup(&col.name)))
+        .unwrap_or_else(|| {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Cast { value: lookup(&col.name), target_ty: slot_ty.clone() },

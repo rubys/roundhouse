@@ -116,4 +116,34 @@ class SchematizedJsonTest < Minitest::Test
     assert_equal true, SchematizedJson.read_boolean(doc, "on", false)
     assert_equal "a\"b", SchematizedJson.read_string(doc, "s", "")
   end
+
+  # ── assign ─────────────────────────────────────────────────────
+  #
+  # Rails' `<col>=`: a Hash is merged key by key through the schema's
+  # cast; the serialized text (hydration's shape) and nil pass through.
+
+  SCHEMA = { "on" => "boolean", "n" => "integer", "s" => "string" }
+
+  def test_assign_casts_each_key_through_the_schema
+    assert_equal "{\"n\":7,\"on\":true,\"s\":\"3\"}",
+      SchematizedJson.assign(nil, { "on" => "true", "n" => "7", "s" => 3 }, SCHEMA)
+  end
+
+  def test_assign_merges_over_the_stored_object
+    assert_equal "{\"n\":1,\"on\":false}",
+      SchematizedJson.assign("{\"n\":1,\"on\":true}", { "on" => "0" }, SCHEMA)
+  end
+
+  def test_assign_takes_symbol_keys_too
+    assert_equal "{\"on\":true}", SchematizedJson.assign("{}", { on: true }, SCHEMA)
+  end
+
+  def test_assign_passes_text_and_nil_through
+    assert_equal "{\"on\":true}", SchematizedJson.assign(nil, "{\"on\":true}", SCHEMA)
+    assert_nil SchematizedJson.assign("{\"on\":true}", nil, SCHEMA)
+  end
+
+  def test_assign_raises_on_a_key_outside_the_schema
+    assert_raises(NoMethodError) { SchematizedJson.assign(nil, { "other" => 1 }, SCHEMA) }
+  end
 end

@@ -204,6 +204,40 @@ module SchematizedJson
     write_raw(serialized, key, "\"" + JsonBuilder.encode_string(value) + "\"")
   end
 
+  # Rails' `<col>=` on a has_json column — `account.update!(settings: { … })`,
+  # a form's `permit(settings: {})` — is `assign_data_with_type_casting`:
+  # every supplied key is written through its declared type, MERGED over
+  # what the column already holds, and a key outside the schema raises
+  # (the accessor's `method_missing`). That is this, with the schema the
+  # lowering already knows (`key => "boolean" | "integer" | "string"`)
+  # passed in as data.
+  #
+  # `value` is untyped on purpose: the attrs-hash writers this sits in
+  # (`new`, `update!`, `[]=`) are the same methods hydration and the
+  # fixture loader assign the serialized TEXT through, so a String (or
+  # nil) is the column itself and passes straight through, and only a
+  # Hash is the Rails shape. The boolean cast is `bool_cast`'s, the one
+  # the per-key writer already applies.
+  def self.assign(serialized, value, schema)
+    return nil if value.nil?
+    return value.to_s if !value.is_a?(Hash)
+    out = serialized
+    value.each do |k, v|
+      key = k.to_s
+      type = schema.key?(key) ? schema[key] : ""
+      if type == "boolean"
+        out = write_boolean(out, key, v.to_s != "0" && v.to_s != "" && v.to_s != "false")
+      elsif type == "integer"
+        out = write_integer(out, key, v.to_i)
+      elsif type == "string"
+        out = write_string(out, key, v.to_s)
+      else
+        raise NoMethodError, "undefined method '" + key + "=' for the json column's schema"
+      end
+    end
+    out
+  end
+
   def self.write_raw(serialized, key, raw)
     data = parse_object(serialized)
     data[key] = raw
