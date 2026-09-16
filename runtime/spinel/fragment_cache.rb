@@ -152,5 +152,19 @@ module Rails
       end
       nil
     end
+
+    # The sharded twin of the shared `clear`: every shard, each under
+    # its own lock. Reached by the test harness before each test.
+    def clear
+      s = 0
+      while s < SHARD_COUNT
+        SHARD_LOCKS[s].synchronize do
+          SHARD_ENTRIES[s].clear
+          SHARD_EXPIRES[s].clear
+        end
+        s = s + 1
+      end
+      nil
+    end
   end
 end

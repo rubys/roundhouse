@@ -44,6 +44,7 @@ module Rails
     def write_str: (String key, String value, Integer ttl) -> String
     def increment_str: (String key, Integer ttl) -> Integer
     def forget: (String k) -> void
+    def clear: () -> void
     def read: (untyped key) -> untyped
     def write: (untyped key, untyped value) -> untyped
     def delete: (untyped key) -> untyped

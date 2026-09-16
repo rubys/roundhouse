@@ -276,6 +276,18 @@ module Rails
       nil
     end
 
+    # Drop every key — MemoryStore#clear. The test harness calls it
+    # before each test: Rails' test environment runs on a null store
+    # (`config.cache_store = :null_store`, the generator's default and
+    # campfire's), so nothing counted or cached in one test reaches the
+    # next — a `rate_limit` window included, which is what made every
+    # sign-in past the tenth in a file read as a rejected login.
+    def clear
+      @entries.clear
+      @expires_at.clear
+      nil
+    end
+
     def read(key)
       nil
     end

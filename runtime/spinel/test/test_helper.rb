@@ -685,6 +685,18 @@ class TestBase
     # to another host early in the file, and every later test followed it
     # to a hostname its own stubs had never heard of.
     WebMock.reset! if defined?(WebMock)
+    # Rails' test environment runs on a NULL cache store
+    # (`config.cache_store = :null_store` — the generator's default in
+    # config/environments/test.rb, which is not ingested). This tree
+    # boots the real store, so the harness empties it between tests
+    # instead: a fragment, a `Rails.cache.fetch`, or a `rate_limit`
+    # window written by one test is not seen by the next. The one
+    # place the two differ — a hit INSIDE a single test — is not a
+    # shape any corpus test asserts. Without this, campfire's
+    # `SessionsController` limit (`rate_limit to: 10, within: 3.minutes`)
+    # counted every test's `sign_in` in one window and rejected the
+    # eleventh login in a file.
+    Rails.cache.clear
   end
 
   # Default no-op so the shim's `__t.teardown` resolves on test
