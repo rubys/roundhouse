@@ -346,10 +346,16 @@ impl Server {
         // every unsupported-construct gap is collected (issue #28's sink).
         let (_files, diags) =
             crate::emit::diagnostics::scope(|| project::target_files(&app, &self.root, target));
+        // A ruby-family target composes several emits over the same
+        // models, so one unlowered declaration was reported once per
+        // composition (five times for the guide's store). One line per
+        // construct, first occurrence's order.
+        let mut seen = std::collections::HashSet::new();
         let gaps: Vec<String> = diags
             .iter()
             .filter(|d| matches!(d.kind, DiagnosticKind::Unsupported { .. }))
             .map(|d| d.render(&app.sources))
+            .filter(|line| seen.insert(line.clone()))
             .collect();
 
         if gaps.is_empty() {

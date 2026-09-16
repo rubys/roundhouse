@@ -605,6 +605,14 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "primary_abstract_class" {
             continue;
         }
+        // `include Notifications` — a model concern, spliced by the
+        // analyzer (`model_includes` + `concern_model_items`) into the
+        // includer's registry and lowered with its methods; nothing is
+        // left for an emitter to lower. Framework marker includes are
+        // dropped by `model_includes` for the same reason.
+        if name == "include" {
+            continue;
+        }
         // Block-form lifecycle hooks — claimed by markers.rs.
         if block.is_some() && self::markers::BLOCK_CALLBACK_HOOKS.contains(&name) {
             continue;

@@ -3463,6 +3463,99 @@ fn missing_preload_honours_with_attached_and_a_chain_method() {
     assert_eq!(missing_preload_diags(&app), vec![], "the method's preloads ride the read");
 }
 
+/// The Rails Guides store app's shapes: a parameterized mailer, the
+/// Rails 7.1 token APIs, and Action Text's form builder method.
+fn store_fixture() -> roundhouse::App {
+    app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/unsubscribes_controller.rb",
+            "class UnsubscribesController < ApplicationController\n  def show\n    @subscriber = Subscriber.find_by_token_for(:unsubscribe, params[:token])\n    @subscriber&.destroy\n  end\nend\n",
+        ),
+        (
+            "app/controllers/passwords_controller.rb",
+            "class PasswordsController < ApplicationController\n  def edit\n    @user = User.find_by_password_reset_token!(params[:token])\n    @token = @user.password_reset_token\n  end\nend\n",
+        ),
+        (
+            "app/models/product.rb",
+            "class Product < ApplicationRecord\n  has_many :subscribers, dependent: :destroy\n  def notify_subscribers\n    subscribers.each do |subscriber|\n      ProductMailer.with(product: self, subscriber: subscriber).in_stock.deliver_later\n    end\n  end\nend\n",
+        ),
+        (
+            "app/models/subscriber.rb",
+            "class Subscriber < ApplicationRecord\n  belongs_to :product\n  generates_token_for :unsubscribe\nend\n",
+        ),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  has_secure_password\nend\n"),
+        (
+            "app/mailers/application_mailer.rb",
+            "class ApplicationMailer < ActionMailer::Base\nend\n",
+        ),
+        (
+            "app/mailers/product_mailer.rb",
+            "class ProductMailer < ApplicationMailer\n  def in_stock\n    @product = params[:product]\n    mail to: params[:subscriber].email\n  end\nend\n",
+        ),
+        (
+            "app/views/product_mailer/in_stock.html.erb",
+            "<p><%= @product.name %></p>\n<%= link_to \"Unsubscribe\", unsubscribe_url(token: params[:subscriber].generate_token_for(:unsubscribe)) %>\n",
+        ),
+        (
+            "app/views/products/_form.html.erb",
+            "<%= form_with model: product do |form| %>\n  <%= form.rich_textarea :description %>\n<% end %>\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "products", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "subscribers", force: :cascade do |t|
+    t.integer "product_id", null: false
+    t.string "email"
+  end
+  create_table "users", force: :cascade do |t|
+    t.string "email_address", null: false
+    t.string "password_digest", null: false
+  end
+end
+"#,
+        ),
+    ])
+}
+
+fn errors_of(app: &roundhouse::App) -> Vec<String> {
+    diagnose(app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn store_shapes_type_without_errors() {
+    let app = store_fixture();
+    assert_eq!(errors_of(&app), Vec::<String>::new());
+}
+
+/// `ProductMailer.with(product:, subscriber:)` makes `params[:subscriber]`
+/// a Subscriber inside the mailer AND in its template — the `.with`
+/// row, not the request's params.
+#[test]
+fn parameterized_mailer_params_are_the_with_row() {
+    let app = store_fixture();
+    let ty = |path: &str, needle: &str, off: u32| {
+        let file = roundhouse::ide::file_id(&app, path).expect("file");
+        let text = &roundhouse::ide::source(&app, file).unwrap().text;
+        let offset = text.find(needle).expect("needle") as u32 + off;
+        roundhouse::ide::type_at(&app, file, offset).map(|t| t.display).unwrap_or_default()
+    };
+    assert_eq!(ty("app/mailers/product_mailer.rb", "params[:subscriber]", 18), "Subscriber");
+    assert_eq!(ty("app/mailers/product_mailer.rb", "@product = params", 1), "Product");
+    assert_eq!(ty("app/views/product_mailer/in_stock.html.erb", "params[:subscriber]", 18), "Subscriber");
+    assert_eq!(ty("app/views/product_mailer/in_stock.html.erb", "@product.name", 1), "Product");
+}
+
 /// A concern's method spliced into a class that never sets the ivar it
 /// reads must be typed against the CONCERN's environment — the union
 /// across includers — not the includer's own.

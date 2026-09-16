@@ -372,7 +372,10 @@ impl Analyzer {
             register_attr_accessors(&model.body, &mut cls.instance_methods);
             // `has_secure_password` generates `password=`/
             // `password_confirmation=` writers + `authenticate`.
-            register_has_secure_password(&model.body, &mut cls.instance_methods, &self_ty);
+            register_has_secure_password(&model.body, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
+            // `generates_token_for :purpose` — the token round-trip
+            // Rails 7.1 added (the guide's unsubscribe link).
+            register_generates_token_for(&model.body, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
             // `has_rich_text :body` generates the reader/predicate/
             // writer and the scoped has_one behind them.
             register_has_rich_text(model, &mut cls.instance_methods);
@@ -2401,7 +2404,24 @@ impl Analyzer {
         // send.
         let sole_includer = app.sole_includer_of_modules();
 
+        // Parameterized mailers: `ProductMailer.with(product: self,
+        // subscriber: subscriber).in_stock` makes `params[:product]` a
+        // Product inside the mailer and its templates — the `.with`
+        // hash IS the mailer's params, not the request's. Harvest every
+        // call site's kwargs (typed by the pass that walked the caller;
+        // the fixpoint re-runs this with refined types) into one row
+        // per mailer, union per key across sites.
+        let mailer_with_params = harvest_mailer_with_params(app, &mailer_names);
+        let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::new();
+
         for lc in &mut app.library_classes {
+            if let Some(row) = mailer_with_params.get(&lc.name) {
+                self.classes
+                    .entry(lc.name.clone())
+                    .or_default()
+                    .instance_methods
+                    .insert(Symbol::from("params"), Ty::Record { row: row.clone() });
+            }
             let self_id = if lc.is_module {
                 sole_includer.get(&lc.name).cloned().unwrap_or_else(|| lc.name.clone())
             } else {
@@ -2493,15 +2513,14 @@ impl Analyzer {
                             crate::analyze::body::union_of(ty.clone(), Ty::Nil)
                         });
                     }
+                    let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
+                    if let Some(row) = mailer_with_params.get(&lc_name) {
+                        mailer_params_by_view.insert(view_name.clone(), Ty::Record { row: row.clone() });
+                    }
                     if ivars.is_empty() {
                         continue;
                     }
-                    action_ivars_by_view
-                        .entry(Symbol::from(
-                            format!("{prefix}/{}", method.name.as_str()).as_str(),
-                        ))
-                        .or_default()
-                        .extend(ivars);
+                    action_ivars_by_view.entry(view_name).or_default().extend(ivars);
                 }
             }
 
@@ -2589,6 +2608,12 @@ impl Analyzer {
             // the union of every action whose `effective_layout`
             // resolved to this layout.
             view_ctx.ivar_bindings = view_ivar_seed(&view.name);
+            // A mailer template's `params` is the mailer's `.with` row
+            // (bound as a local so the bare read wins over the view
+            // context's request-params registration).
+            if let Some(row) = mailer_params_by_view.get(&view.name) {
+                view_ctx.local_bindings.insert(Symbol::from("params"), row.clone());
+            }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
             let mut targets = Vec::new();
             extract_partial_render_sites(
@@ -4887,6 +4912,74 @@ fn collect_attr_accessor_names(body: &[ModelBodyItem]) -> Vec<Symbol> {
     out
 }
 
+/// `Mailer.with(k: v, …)` call sites across the app, folded to one
+/// [`Row`] per mailer: each key's type is the union over sites of the
+/// argument's inferred type (untyped arguments contribute nothing, so
+/// a site the current pass has not typed yet is simply absent until
+/// the fixpoint re-runs). The receiver must name a mailer class
+/// exactly — `Mailer.with` chained onto anything else is not this.
+fn harvest_mailer_with_params(
+    app: &App,
+    mailers: &std::collections::HashSet<ClassId>,
+) -> HashMap<ClassId, crate::ty::Row> {
+    use crate::expr::Literal;
+    let mut out: HashMap<ClassId, crate::ty::Row> = HashMap::new();
+    let mut visit = |e: &Expr| {
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return };
+        if method.as_str() != "with" {
+            return;
+        }
+        let ExprNode::Const { path } = &*recv.node else { return };
+        let id = ClassId(Symbol::from(
+            path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str(),
+        ));
+        if !mailers.contains(&id) {
+            return;
+        }
+        let row = out.entry(id).or_insert_with(crate::ty::Row::closed);
+        for arg in args {
+            let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+                let Some(ty) = v.ty.clone() else { continue };
+                if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                let merged = match row.fields.get(key) {
+                    Some(prev) => crate::analyze::body::union_of(prev.clone(), ty),
+                    None => ty,
+                };
+                row.fields.insert(key.clone(), merged);
+            }
+        }
+    };
+    let mut walk_all = |body: &Expr| {
+        walk_expr(body, &mut visit);
+    };
+    for model in &app.models {
+        for method in model.methods() {
+            walk_all(&method.body);
+        }
+    }
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            walk_all(&action.body);
+        }
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            walk_all(&method.body);
+        }
+    }
+    out
+}
+
+/// Pre-order walk over an expression tree.
+fn walk_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    f(e);
+    e.node.for_each_child(&mut |c| walk_expr(c, f));
+}
+
 /// Register the methods `has_secure_password` generates. The macro
 /// (default attribute `:password`, or a custom one passed as the first
 /// symbol) adds a write-only virtual attribute and an authenticator:
@@ -4899,6 +4992,7 @@ fn collect_attr_accessor_names(body: &[ModelBodyItem]) -> Vec<Symbol> {
 fn register_has_secure_password(
     body: &[ModelBodyItem],
     methods: &mut HashMap<Symbol, Ty>,
+    class_methods: &mut HashMap<Symbol, Ty>,
     self_ty: &Ty,
 ) {
     for item in body {
@@ -4927,7 +5021,59 @@ fn register_has_secure_password(
             format!("authenticate_{attr}")
         };
         methods.entry(Symbol::from(auth)).or_insert(self_ty.clone());
+        // Rails 7.1+: the password-reset token round-trip the
+        // authentication generator's PasswordsController and mailer
+        // use — `user.password_reset_token` (a signed token, Str), its
+        // lifetime, `authenticate_password`, and the class-side finders
+        // (`find_by_password_reset_token!` raises, the bang-less form
+        // answers nil).
+        methods
+            .entry(Symbol::from(format!("{attr}_reset_token")))
+            .or_insert(Ty::Str);
+        methods
+            .entry(Symbol::from(format!("{attr}_reset_token_expires_in")))
+            .or_insert(Ty::Int);
+        methods
+            .entry(Symbol::from(format!("authenticate_{attr}")))
+            .or_insert(self_ty.clone());
+        methods
+            .entry(Symbol::from(format!("{attr}_salt")))
+            .or_insert(Ty::Str);
+        methods
+            .entry(Symbol::from(format!("{attr}_challenge=")))
+            .or_insert(Ty::Str);
+        class_methods
+            .entry(Symbol::from(format!("find_by_{attr}_reset_token")))
+            .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
+        class_methods
+            .entry(Symbol::from(format!("find_by_{attr}_reset_token!")))
+            .or_insert(self_ty.clone());
     }
+}
+
+/// Register the methods `generates_token_for :purpose` (Rails 7.1)
+/// generates: `record.generate_token_for(:purpose)` answers a signed
+/// String, `Model.find_by_token_for(:purpose, token)` the record or
+/// nil, and the bang form the record (raising). One declaration is
+/// enough — the purpose is an argument, not part of the method name.
+fn register_generates_token_for(
+    body: &[ModelBodyItem],
+    methods: &mut HashMap<Symbol, Ty>,
+    class_methods: &mut HashMap<Symbol, Ty>,
+    self_ty: &Ty,
+) {
+    let declared = body.iter().any(|item| {
+        let ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "generates_token_for")
+    });
+    if !declared {
+        return;
+    }
+    methods.entry(Symbol::from("generate_token_for")).or_insert(Ty::Str);
+    class_methods
+        .entry(Symbol::from("find_by_token_for"))
+        .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
+    class_methods.entry(Symbol::from("find_by_token_for!")).or_insert(self_ty.clone());
 }
 
 /// Register the methods `has_rich_text :body` generates, method for

@@ -36,6 +36,9 @@ pub(in crate::analyze) fn register(
         "collection_select", "grouped_collection_select", "time_zone_select",
         "collection_check_boxes", "collection_radio_buttons", "date_select",
         "time_select", "datetime_select", "rich_text_area", "weekday_select",
+        // Rails 7.1 renamed the Action Text builder method (the guide
+        // uses the new spelling) and `check_box`; both spellings live.
+        "rich_textarea", "checkbox",
         "id", "to_s",
     ] {
         form_builder.instance_methods.insert(Symbol::from(m), Ty::Str);

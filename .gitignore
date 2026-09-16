@@ -19,6 +19,10 @@
 # Rails 8.0 sibling fixture for the rails-jruby baseline (scripts/bench
 # generates it on demand; same regenerate-don't-commit rationale).
 /fixtures/real-blog-rails80
+# The Rails Guides "Getting Started" store, built by following the
+# guide (scripts/create-store); same rationale, and the guide's text
+# is CC BY-SA — the script quotes it, the tree is not carried.
+/fixtures/store
 /.claude/
 
 # scripts/bench output — per-run timestamps + summaries. Keep the

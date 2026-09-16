@@ -61,6 +61,37 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------------------
+  # The Rails Guides "Getting Started" store: built by following the
+  # guide (scripts/create-store, which also runs the guide's own tests),
+  # then analyzed. The claim this job keeps: the analyzer reports ZERO
+  # errors on the official tutorial app, with no annotations — the
+  # store's nine (token APIs, Action Text's form builder, parameterized
+  # mailers) were all analyzer gaps, closed 2026-09-16. Warnings are
+  # not gated; they are the coverage ledger.
+  # -------------------------------------------------------------------
+  store-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Install Rails
+        run: gem install rails
+      - name: Build the store by following the guide (runs its tests)
+        run: cd fixtures && ../scripts/create-store store
+      - name: cargo build
+        run: cargo build --release --bin roundhouse
+      - name: The analyzer reports no errors on the store
+        run: |
+          set -euo pipefail
+          target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
+          grep -E "^roundhouse-check: .* 0 error\(s\)" /tmp/store-check.txt
+
+  # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
   # and upload it as an artifact for build-site. Runs in PARALLEL with
   # generate-fixture — they're independent (the wasm embeds the compiler;

@@ -1093,6 +1093,16 @@ fn scope_groups(app: &App) -> Vec<Vec<&Expr>> {
             groups.push(group);
         }
     }
+    // Concerns, mailers, helpers, lib/: their method bodies are typed
+    // in the library-class pass, so hover, definition and references
+    // answer inside them too (the guide's `Product::Notifications` and
+    // `ProductMailer` were blank).
+    for lc in &app.library_classes {
+        let group: Vec<&Expr> = lc.methods.iter().map(|m| &m.body).collect();
+        if !group.is_empty() {
+            groups.push(group);
+        }
+    }
     for view in &app.views {
         groups.push(vec![&view.body]);
     }
