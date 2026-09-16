@@ -41,9 +41,15 @@ thread_local! {
 pub fn scope<T>(f: impl FnOnce() -> T) -> (T, Vec<Diagnostic>) {
     let prev = EMIT_DIAGS.with(|c| c.borrow_mut().replace(Vec::new()));
     let result = f();
-    let collected = EMIT_DIAGS.with(|c| {
+    let mut collected = EMIT_DIAGS.with(|c| {
         std::mem::replace(&mut *c.borrow_mut(), prev).unwrap_or_default()
     });
+    // The model lowering runs once per emitted slice of a tree, so a
+    // model-body ledger entry was pushed — and printed — once per
+    // slice: five identical lines for one `validate` on campfire. One
+    // gap, one line; first occurrence keeps its place in the order.
+    let mut seen = std::collections::HashSet::new();
+    collected.retain(|d| seen.insert((d.span, d.message.clone(), d.severity as u8)));
     (result, collected)
 }
 

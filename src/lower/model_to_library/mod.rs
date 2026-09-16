@@ -537,6 +537,30 @@ fn report_unclaimed_unknowns(model: &Model) {
             continue;
         };
         let name = method.as_str();
+        // A bare visibility keyword is a marker for the `def`s after
+        // it (the method walk reads it as one); it is not a DSL call.
+        if matches!(name, "private" | "protected" | "public") {
+            continue;
+        }
+        // `attr_accessor`/`attr_reader`/`attr_writer` — claimed by
+        // markers::push_attribute_api_methods, which synthesizes the
+        // virtual attributes the permit filter counts as writers.
+        if matches!(name, "attr_accessor" | "attr_reader" | "attr_writer") {
+            continue;
+        }
+        // `has_one_attached :name` (with or without the variants
+        // block) — claimed by lower::attached on exactly that shape, a
+        // name and any block. Campfire's three (`avatar`, `attachment`,
+        // `logo`) were reported as not lowered on every emit while the
+        // attachment lowering ran on each. `has_many_attached` is not
+        // claimed by anything and keeps warning.
+        if name == "has_one_attached" {
+            if let ExprNode::Send { args, .. } = &*expr.node {
+                if !args.is_empty() {
+                    continue;
+                }
+            }
+        }
         // `broadcasts_to` — claimed by lower::broadcasts.
         if name == "broadcasts_to" {
             continue;
@@ -614,9 +638,19 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "include" {
             continue;
         }
-        // Block-form lifecycle hooks — claimed by markers.rs.
-        if block.is_some() && self::markers::BLOCK_CALLBACK_HOOKS.contains(&name) {
-            continue;
+        // Block-form and lambda-argument lifecycle hooks
+        // (`before_create -> { … }`) — both claimed by
+        // markers::push_block_callback, on the shape it reads: a block,
+        // or a parameterless lambda as the first argument.
+        if self::markers::BLOCK_CALLBACK_HOOKS.contains(&name) {
+            if block.is_some() {
+                continue;
+            }
+            if let ExprNode::Send { args, .. } = &*expr.node {
+                if matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lambda { params, .. }) if params.is_empty()) {
+                    continue;
+                }
+            }
         }
         let mut d = Diagnostic::unsupported(
             expr.span,

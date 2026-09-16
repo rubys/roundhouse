@@ -40,7 +40,7 @@ reaches the others as their emitters and runtimes catch up.
 
 | | Blog tier (all targets) | Campfire tier (ruby, spinel) |
 |---|---|---|
-| Attributes | From `db/schema.rb` (migrations as fallback), typed per column; `id`, timestamps, defaults, nullability | + `enum`, `serialize`/`has_json` columns, `has_secure_token`, `has_secure_password` (real bcrypt), `normalizes` |
+| Attributes | From `db/schema.rb` (migrations as fallback), typed per column; `id`, timestamps, defaults, nullability | + `enum`, `serialize`/`has_json` columns, `has_secure_token`, `has_secure_password` (real bcrypt) |
 | Associations | `belongs_to`, `has_many` (with `dependent:`), `has_one`; association readers, builders, `<assoc>_ids` | + `has_many :through`, polymorphic, `touch:`, `has_one_attached`/`has_many_attached`, `has_rich_text` |
 | Validations | `presence`, `absence`, `length` (min/max), `numericality` (bounds, `only_integer`), `format`, `inclusion`, `uniqueness`; `errors`, `full_messages`, `valid?` | + custom `validate` methods, conditional `if:`/`unless:` |
 | Callbacks | `after_create_commit` and the Turbo `broadcasts_to` family | + `before_save`/`after_save`, `before_destroy`, `after_touch`, STI-aware callback inheritance |

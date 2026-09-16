@@ -1313,8 +1313,11 @@ fn unclaimed_model_dsl_reports_spanned_warning() {
     use roundhouse::ingest::ingest_model;
     use roundhouse::schema::Schema;
 
+    // `has_many_attached` is the unclaimed one; `has_one_attached` is
+    // claimed by lower::attached and must not report beside it.
     let source = br#"class Clip < ApplicationRecord
   has_one_attached :audio
+  has_many_attached :stems
 
   validates :name, presence: true
 end
@@ -1330,9 +1333,14 @@ end
     let unsupported: Vec<_> = diags
         .iter()
         .filter(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
-            if construct.as_str() == "has_one_attached"))
+            if construct.as_str() == "has_many_attached"))
         .collect();
     assert_eq!(unsupported.len(), 1, "exactly one report: {diags:?}");
+    assert!(
+        !diags.iter().any(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "has_one_attached")),
+        "has_one_attached is claimed by lower::attached and must not report: {diags:?}"
+    );
     let d = unsupported[0];
     assert_eq!(d.severity, Severity::Warning, "tolerable per-app: warning, not error");
     assert!(!d.span.is_synthetic(), "declaration site is located");
