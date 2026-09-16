@@ -1478,6 +1478,10 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
     // app-wide (the controller→view ivar channel needs every feeder),
     // so run it once per trace and attach by span containment.
     let preload_diags = crate::analyze::missing_preload_report(app).0;
+    // The bodies this request runs — applying filters and the action —
+    // so a template finding is attached only when ITS query is on this
+    // path (see `preloads_in_files`).
+    let mut path_bodies: Vec<&Expr> = Vec::new();
 
     let route_line = match matched {
         Some(r) => format!(
@@ -1626,7 +1630,10 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         });
         let applies = gated_in && skipped_by.is_none() && !matches!(decided, Some((_, false)));
         let n_plus_one = match (applies, target_body) {
-            (true, Some(body)) => preloads_in_body(app, &preload_diags, body),
+            (true, Some(body)) => {
+                path_bodies.push(body);
+                preloads_in_body(app, &preload_diags, body)
+            }
             _ => Vec::new(),
         };
         hops.push(TraceHop::Filter(FilterHop {
@@ -1692,7 +1699,10 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             },
         };
         let n_plus_one = match action_def {
-            Some((_, a)) => preloads_in_body(app, &preload_diags, &a.body),
+            Some((_, a)) => {
+                path_bodies.push(&a.body);
+                preloads_in_body(app, &preload_diags, &a.body)
+            }
             None => Vec::new(),
         };
         hops.push(TraceHop::Action {
@@ -1730,12 +1740,17 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 name: v.as_str().to_string(),
                 file: view_location(app, v),
                 partials,
-                n_plus_one: preloads_in_files(app, &preload_diags, &view_files),
+                n_plus_one: preloads_in_files(app, &preload_diags, &view_files, &path_bodies),
             });
             if let Some(layout) = &resolution.layout {
                 let file = view_location(app, layout);
                 let n_plus_one = match &file {
-                    Some(f) => preloads_in_files(app, &preload_diags, std::slice::from_ref(f)),
+                    Some(f) => preloads_in_files(
+                        app,
+                        &preload_diags,
+                        std::slice::from_ref(f),
+                        &path_bodies,
+                    ),
                     None => Vec::new(),
                 };
                 hops.push(TraceHop::Layout {
@@ -1932,15 +1947,39 @@ fn preloads_in_body(
 }
 
 /// Missing-preload findings whose access site lands in one of `files`
-/// (template hops match by file — one template per file).
+/// (template hops match by file — one template per file) AND whose
+/// query is on this request's path: in one of `path_bodies` (an
+/// applying filter or the action), in one of the same templates (a
+/// query written in the view), or in a model (a chain method the path
+/// may reach — not attributable to one trace, so kept).
+///
+/// The access site alone over-attached: the Rails tutorial's
+/// `_micropost` partial is rendered by `users#show` (whose query has no
+/// preload — the finding) AND by the home feed (whose query preloads
+/// correctly), and the home trace wore the badge for users#show's
+/// query.
 fn preloads_in_files(
     app: &App,
     diags: &[crate::diagnostic::Diagnostic],
     files: &[String],
+    path_bodies: &[&Expr],
 ) -> Vec<PreloadFinding> {
     diags
         .iter()
         .filter(|d| source(app, d.span.file).is_some_and(|s| files.iter().any(|f| f == &s.path)))
+        .filter(|d| {
+            let crate::diagnostic::DiagnosticKind::MissingPreload { query_span, .. } = &d.kind
+            else {
+                return false;
+            };
+            let in_path = path_bodies
+                .iter()
+                .any(|b| subtree_contains(b, query_span.file, query_span.start));
+            let in_files_or_model = source(app, query_span.file).is_some_and(|s| {
+                files.iter().any(|f| f == &s.path) || s.path.contains("app/models/")
+            });
+            in_path || in_files_or_model
+        })
         .map(|d| preload_finding(app, d))
         .collect()
 }

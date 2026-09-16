@@ -3347,6 +3347,12 @@ fn tutorial_fixture(show_body: &str, user_model_extra: &str) -> roundhouse::App 
             "class Micropost < ApplicationRecord\n  belongs_to :user\n  has_one_attached :image\nend\n",
         ),
         ("app/views/users/show.html.erb", "<ol><%= render @microposts %></ol>\n"),
+        // A second renderer of the same partial whose query DOES preload.
+        (
+            "app/controllers/home_controller.rb",
+            "class HomeController < ApplicationController\n  def index\n    @microposts = Micropost.with_attached_image.includes(:user)\n  end\nend\n",
+        ),
+        ("app/views/home/index.html.erb", "<ol><%= render @microposts %></ol>\n"),
         (
             "app/views/microposts/_micropost.html.erb",
             "<li><%= micropost.user.name %><% if micropost.image.attached? %>img<% end %></li>\n",
@@ -3392,6 +3398,26 @@ fn missing_preload_sees_a_collection_render_and_an_attachment() {
         0,
         "the inverse belongs_to is implicitly loaded; got {diags:?}"
     );
+}
+
+/// The finding rides the trace of the request whose query lacks the
+/// preload — and only that one. The partial is shared with a request
+/// whose query preloads correctly; that trace wears no badge.
+#[test]
+fn trace_attaches_a_template_finding_only_to_the_path_with_the_query() {
+    let app = tutorial_fixture("    @microposts = @user.microposts.order(:created_at)", "");
+    let badges = |q: &str| {
+        let t = roundhouse::ide::traceroute(&app, q).expect("trace");
+        t.hops
+            .iter()
+            .filter_map(|h| match h {
+                roundhouse::ide::TraceHop::View { n_plus_one, .. } => Some(n_plus_one.len()),
+                _ => None,
+            })
+            .sum::<usize>()
+    };
+    assert_eq!(badges("UsersController#show"), 1, "the un-preloaded query's trace");
+    assert_eq!(badges("HomeController#index"), 0, "the preloaded query's trace, same partial");
 }
 
 #[test]
