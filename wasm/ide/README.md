@@ -13,9 +13,12 @@ no server, no app boot, no annotations:
 - **F12 / ⇧F12** (or ⌘-click) — go to definition / find references:
   a local's binding, an ivar's assignments across its class, a typed
   explicit-receiver call's method — the LSP's `ide::definition` /
-  `ide::references`, exported to the wasm. Not yet: an ivar read in a
-  *view* (its writer is in the feeding controller, a different class)
-  and `def` headers (the IR carries no span for them)
+  `ide::references`, exported to the wasm. An ivar read in a *view*
+  resolves through Rails' controller→view channel: F12 lands on the
+  write in the feeding action (a `before_action` that set it wins, as
+  it ran first) and ⇧F12 lists every feeder's writes plus the reads in
+  the sibling templates those actions render. Not yet: `def` headers
+  (the IR carries no span for them)
 - **⌘P / Ctrl+P** — fuzzy file + class picker
 - **⌘⇧R** — related files, from the *inferred* render graph
   (`view_feeders`/`render_edges`) and include edges — not filename

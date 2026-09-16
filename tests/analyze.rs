@@ -3420,6 +3420,34 @@ fn trace_attaches_a_template_finding_only_to_the_path_with_the_query() {
     assert_eq!(badges("HomeController#index"), 0, "the preloaded query's trace, same partial");
 }
 
+/// F12 on an ivar in a TEMPLATE lands on the write in the feeding
+/// action — Rails' controller→view ivar channel, which no per-class
+/// scope can see — and ⇧F12 from the controller lists the template's
+/// reads.
+#[test]
+fn view_ivar_definition_is_the_feeding_actions_write() {
+    let app = tutorial_fixture("    @microposts = @user.microposts.order(:created_at)", "");
+    let at = |path: &str, needle: &str, off: u32| {
+        let file = roundhouse::ide::file_id(&app, path).expect("file");
+        let text = &roundhouse::ide::source(&app, file).unwrap().text;
+        (file, text.find(needle).expect("needle") as u32 + off)
+    };
+    let site = |span: roundhouse::span::Span| {
+        let src = roundhouse::ide::source(&app, span.file).unwrap();
+        format!("{}:{}", src.path, src.line_col(span.start).0)
+    };
+    let (file, offset) = at("app/views/users/show.html.erb", "@microposts", 1);
+    let def = roundhouse::ide::definition(&app, file, offset).expect("definition");
+    assert!(site(def).ends_with("users_controller.rb:4"), "{}", site(def));
+
+    let (file, offset) = at("app/controllers/users_controller.rb", "@microposts", 1);
+    let refs: Vec<String> = roundhouse::ide::references(&app, file, offset)
+        .into_iter()
+        .map(|r| site(r.span))
+        .collect();
+    assert!(refs.iter().any(|r| r.ends_with("users/show.html.erb:1")), "{refs:?}");
+}
+
 #[test]
 fn missing_preload_honours_with_attached_and_a_chain_method() {
     // Rails' own scope satisfies the attachment read.

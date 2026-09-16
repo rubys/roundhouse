@@ -126,6 +126,20 @@ if (MASTODON) {
     defRefs.refs > 1 && defRefs.writes >= 1 && defRefs.writes < defRefs.refs,
     `${defRefs.refs} refs, ${defRefs.writes} writes`);
 
+  // 2c. an ivar read in a TEMPLATE defines in the feeding controller
+  // (the filter that set it), across the controller→view channel.
+  const viewDef = await page.evaluate(async () => {
+    const haml = "app/views/statuses/show.html.haml";
+    const text = window.__ide.srcMap[haml];
+    const idx = text.indexOf("@status") + 1;
+    const line = text.slice(0, idx).split("\n").length - 1;
+    const ch = idx - text.lastIndexOf("\n", idx - 1) - 1;
+    return window.__ide.rpc("definition", { path: haml, line, character: ch });
+  });
+  check("definition of @status in the template is the controller's write",
+    viewDef && viewDef.path === ctrl && viewDef.write === true,
+    JSON.stringify(viewDef));
+
   // 3. completion on `@status.` typed into the controller.
   const cands = await page.evaluate(async (ctrl) => {
     const orig = window.__ide.srcMap[ctrl];

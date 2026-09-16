@@ -1169,10 +1169,37 @@ fn variable_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Refer
     let (group, body) = locate(app, file, offset)?;
     let node = find_at_offset(app, file, offset)?;
     let var = var_at(node, offset)?;
-    // Locals are body-scoped; instance variables span the whole class.
-    let bodies: Vec<&Expr> = match var {
+    // Locals are body-scoped; instance variables span the whole class —
+    // and, for a template, the class is the controller that feeds it.
+    let bodies: Vec<&Expr> = match &var {
         VarRef::Local(_) => vec![body],
-        VarRef::Ivar(_) => group,
+        VarRef::Ivar(_) => {
+            if let Some(view) = app.views.iter().find(|v| std::ptr::eq(&v.body, body)) {
+                // Rails' ivar channel: the writes ran in the feeding
+                // action (and its filters) before the template read
+                // them. Path bodies first, in execution order, so the
+                // first write IS the definition; then this template and
+                // the others the same actions render.
+                let mut bodies = view_ivar_bodies(app, &view.name);
+                bodies.push(body);
+                let mut out = Vec::new();
+                for &b in &bodies {
+                    collect_refs(b, &var, &mut out);
+                }
+                return Some(dedup_keep_order(out));
+            }
+            let mut g = group;
+            // The other direction: an ivar in a controller is read by
+            // the templates its actions feed.
+            if let Some(c) = app.controllers.iter().find(|c| c.actions().any(|a| std::ptr::eq(&a.body, body))) {
+                for view in &app.views {
+                    if app.view_feeders.get(&view.name).is_some_and(|f| f.contains(&c.name)) {
+                        g.push(&view.body);
+                    }
+                }
+            }
+            g
+        }
     };
     let mut out = Vec::new();
     for &b in &bodies {
@@ -1181,6 +1208,92 @@ fn variable_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Refer
     out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
     out.dedup();
     Some(out)
+}
+
+/// First occurrence wins; order is the caller's.
+fn dedup_keep_order(refs: Vec<Reference>) -> Vec<Reference> {
+    let mut seen = std::collections::HashSet::new();
+    refs.into_iter().filter(|r| seen.insert((r.span.file.0, r.span.start, r.span.end))).collect()
+}
+
+/// The bodies an ivar read in `view` can resolve against, in the order
+/// they run: for every action that renders the view (directly, or
+/// through the renderers of a partial), its applying filters' bodies
+/// then the action body; then the sibling templates those actions
+/// render. Composed from the same edges the trace and the ivar-type
+/// seeding use — `view_feeders`, `view_name_for_action`, the resolved
+/// filter chain, `render_edges`.
+fn view_ivar_bodies<'a>(app: &'a App, view: &Symbol) -> Vec<&'a Expr> {
+    // Views whose render tree reaches `view`: itself, plus renderers
+    // transitively (a partial's ivars come from whoever renders it).
+    let mut targets: Vec<Symbol> = vec![view.clone()];
+    let mut qi = 0;
+    while qi < targets.len() {
+        let t = targets[qi].clone();
+        qi += 1;
+        for (renderer, partials) in &app.render_edges {
+            if partials.contains(&t) && !targets.contains(renderer) {
+                targets.push(renderer.clone());
+            }
+        }
+    }
+    let mut bodies: Vec<&'a Expr> = Vec::new();
+    let mut siblings: Vec<&'a Expr> = Vec::new();
+    let Some(feeders) = app.view_feeders.get(view) else { return bodies };
+    for cid in feeders {
+        let Some(controller) = find_controller(app, cid) else { continue };
+        let resolution = app.controller_resolutions.get(cid);
+        for action in controller.actions() {
+            let Some(rendered) = crate::analyze::view_name_for_action(cid, action) else { continue };
+            if !targets.contains(&rendered) {
+                continue;
+            }
+            if let Some(res) = resolution {
+                for rf in &res.filter_chain {
+                    if !matches!(rf.filter.kind, crate::dialect::FilterKind::Before)
+                        || !crate::analyze::before_filter_applies(&rf.filter, &action.name)
+                    {
+                        continue;
+                    }
+                    let block_body = rf.filter.block.as_ref().map(|call| match &*call.node {
+                        ExprNode::Send { block: Some(b), .. } => match &*b.node {
+                            ExprNode::Lambda { body, .. } => body,
+                            _ => b,
+                        },
+                        _ => call,
+                    });
+                    if let Some(b) = block_body
+                        .or_else(|| method_body(app, &rf.defined_in, &rf.filter.target))
+                        .or_else(|| method_body(app, cid, &rf.filter.target))
+                    {
+                        bodies.push(b);
+                    }
+                }
+            }
+            bodies.push(&action.body);
+            // The templates this action renders, and their partials.
+            let mut tree: Vec<Symbol> = vec![rendered.clone()];
+            let mut ti = 0;
+            while ti < tree.len() {
+                let t = tree[ti].clone();
+                ti += 1;
+                if let Some(ps) = app.render_edges.get(&t) {
+                    for p in ps {
+                        if !tree.contains(p) {
+                            tree.push(p.clone());
+                        }
+                    }
+                }
+            }
+            for v in &app.views {
+                if &v.name != view && tree.contains(&v.name) {
+                    siblings.push(&v.body);
+                }
+            }
+        }
+    }
+    bodies.extend(siblings);
+    bodies
 }
 
 /// References to the method/attribute named at `offset`, resolved by the
@@ -2951,7 +3064,14 @@ mod tests {
         let refs = references(&app, file, at);
         assert!(refs.len() >= 5, "expected many @article refs, got {}", refs.len());
         assert!(refs.iter().any(|r| r.write), "should include the @article assignment(s)");
-        assert!(refs.iter().all(|r| r.span.file == file), "ivar scope is the one controller file");
+        // Every write is in the controller — and the reads span the
+        // templates its actions feed (Rails' controller→view channel).
+        assert!(refs.iter().filter(|r| r.write).all(|r| r.span.file == file), "writes are the controller's");
+        let in_views = refs
+            .iter()
+            .filter(|r| source(&app, r.span.file).is_some_and(|s| s.path.contains("app/views/")))
+            .count();
+        assert!(in_views > 0, "reads in the fed templates are references too");
         // The declaration resolves to a write site.
         assert!(definition(&app, file, at).is_some());
     }
