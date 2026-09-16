@@ -110,6 +110,7 @@ module ActiveRecord
     def sort_by: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def first: () -> untyped
+    def take: () -> untyped
     def first!: () -> untyped
     def last: () -> untyped
     def first_n: (Integer n) -> Array[untyped]

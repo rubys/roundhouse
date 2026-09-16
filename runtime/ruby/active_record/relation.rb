@@ -748,6 +748,13 @@ module ActiveRecord
       rows.length == 0 ? nil : rows[0]
     end
 
+    # `take` — a row with no ordering imposed. Rails leaves the order
+    # to the database; SQLite hands back the lowest rowid, which is the
+    # row `first` orders to, so one query shape serves both.
+    def take
+      first
+    end
+
     # `first!` — like `first`, but raises `RecordNotFound` (→ 404 in the
     # dispatch layer) instead of returning nil when the relation is empty.
     def first!

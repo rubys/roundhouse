@@ -789,7 +789,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `untyped`. What it buys: a Relation without `select(...)`
     // hydrates through the model's positional `from_stmt` and no
     // String-keyed Hash is built per row.
-    const CEILING: usize = 931;
+    // 2026-09-16 931 -> 933, +2: `take` on the class and on Relation,
+    // each one `first` self-send under the same declared `untyped`
+    // return `first` has always had. What it buys: the Rails 8
+    // authentication generator's `User.take` test setup.
+    const CEILING: usize = 933;
 
     assert!(
         all_untyped.len() <= CEILING,

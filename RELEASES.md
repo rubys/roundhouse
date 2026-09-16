@@ -35,8 +35,10 @@ typescript, crystal, elixir, kotlin, swift, python, csharp, ruby,
 jruby, spinel. Each emitted project's README is executed verbatim in
 CI (build, seed, test, browser e2e). Known gaps on the store as a
 *transpile* input: one type error in Action Text's generated
-attachment partial (`ActionText::Attachment#caption`), and its tests
-use `User.take`, which the emitted runtime does not answer yet.
+attachment partial (`ActionText::Attachment#caption`), and its test
+suite's sign-in helper (`ActionDispatch::TestRequest` cookie jars,
+`ActiveSupport.on_load`) is not modeled, so its controller tests stop
+at sign-in.
 **Security:** CSRF tokens are issued but not verified on any lane
 ([details](docs/guide/rails-coverage.md#security-posture)).
 

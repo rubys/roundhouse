@@ -312,6 +312,13 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).first
     end
 
+    # `User.take` — the Rails 8 authentication generator's tests set up
+    # with it (`setup { @user = User.take }`), so the Rails Guides store
+    # reaches here. Same row as `first` under SQLite; see Relation#take.
+    def self.take
+      ActiveRecord::Relation.new(self).first
+    end
+
     # The Relation load path's Hash fallback for a hand-written model
     # (one with its own `instantiate` and no lowerer-emitted
     # `_hydrate_all`): the adapter's rows through `instantiate`, which

@@ -382,7 +382,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: None,
+        return_kind: Some(ReturnKind::SelfOrNil),
     },
     CatalogedMethod {
         name: "count",
