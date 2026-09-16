@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+# scripts/create-store — build the Rails Guides "Getting Started" store
+# application by following the guide.
+#
+#   https://guides.rubyonrails.org/getting_started.html   (Rails 8.1)
+#
+# The guide links no finished repository, so this script IS the
+# canonical copy: every generator the guide runs, in the guide's order,
+# and every file the guide ends with, verbatim from its final code
+# block. The guide's prose is CC BY-SA 4.0 (rails/rails, guides/); the
+# app skeleton is `rails new`'s. Re-run when the guide changes — the
+# 8.0 → 8.1 revision moved the nav into the layout and renamed
+# `permit` to `expect`, and a fixture derived by hand would not have
+# noticed.
+#
+# Left out, deliberately: the deploy chapter (`config/deploy.yml`,
+# Kamal, the production user) and the CI/rubocop/brakeman chapter —
+# neither changes the application. `--skip-docker` for the same reason.
+#
+# Usage: create-store [app-name]      (default: store)
+#   RAILS_NEW_VERSION=8.1.3 pins the generator, as create-blog does.
+set -e
+APP_NAME="${1:-store}"
+
+echo "Creating the Getting Started store: $APP_NAME"
+if [ -n "${RAILS_NEW_VERSION:-}" ]; then
+  rails "_${RAILS_NEW_VERSION}_" new "$APP_NAME" --skip-git --skip-docker
+else
+  rails new "$APP_NAME" --skip-git --skip-docker
+fi
+cd "$APP_NAME"
+
+# ── Creating a Database Model ────────────────────────────────────────
+bin/rails generate model Product name:string
+bin/rails db:create
+bin/rails db:migrate
+
+# ── Routes / Controllers ─────────────────────────────────────────────
+bin/rails generate controller Products index --skip-routes
+
+# ── Authentication ───────────────────────────────────────────────────
+bin/rails generate authentication
+bin/rails db:migrate
+
+# ── Rich Text Fields (Action Text) ───────────────────────────────────
+bin/rails action_text:install
+bundle install
+bin/rails db:migrate
+
+# ── Basic Inventory Tracking ─────────────────────────────────────────
+# The guide edits the generated migration to add `default: 0`.
+bin/rails generate migration AddInventoryCountToProducts inventory_count:integer
+ruby -pi -e 'sub(/add_column :products, :inventory_count, :integer$/, "add_column :products, :inventory_count, :integer, default: 0")' db/migrate/*_add_inventory_count_to_products.rb
+bin/rails db:migrate
+
+# ── Adding Subscribers to Products ───────────────────────────────────
+bin/rails generate model Subscriber product:belongs_to email
+bin/rails db:migrate
+
+# ── In Stock Email Notifications ─────────────────────────────────────
+bin/rails g mailer Product in_stock
+
+# ── Final file states, in the guide's order ──────────────────────────
+cat > config/routes.rb << 'ROUTES'
+Rails.application.routes.draw do
+  resource :session
+  resources :passwords, param: :token
+  # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
+
+  # Reveal health status on /up that returns 200 if the app boots with no exceptions, otherwise 500.
+  # Can be used by load balancers and uptime monitors to verify that the app is live.
+  get "up" => "rails/health#show", as: :rails_health_check
+
+  # Render dynamic PWA files from app/views/pwa/* (remember to link manifest in application.html.erb)
+  # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
+  # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+
+  # Defines the root path route ("/")
+  root "products#index"
+  resources :products do
+    resources :subscribers, only: [ :create ]
+  end
+  resource :unsubscribe, only: [ :show ]
+end
+ROUTES
+
+cat > app/controllers/products_controller.rb << 'CONTROLLER'
+class ProductsController < ApplicationController
+  allow_unauthenticated_access only: %i[ index show ]
+  before_action :set_product, only: %i[ show edit update destroy ]
+
+  def index
+    @products = Product.all
+  end
+
+  def show
+  end
+
+  def new
+    @product = Product.new
+  end
+
+  def create
+    @product = Product.new(product_params)
+    if @product.save
+      redirect_to @product
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+
+  def edit
+  end
+
+  def update
+    if @product.update(product_params)
+      redirect_to @product
+    else
+      render :edit, status: :unprocessable_entity
+    end
+  end
+
+  def destroy
+    @product.destroy
+    redirect_to products_path
+  end
+
+  private
+    def set_product
+      @product = Product.find(params[:id])
+    end
+
+    # Only allow a list of trusted parameters through.
+    def product_params
+      params.expect(product: [ :name, :description, :featured_image, :inventory_count ])
+    end
+end
+CONTROLLER
+
+cat > app/views/products/index.html.erb << 'VIEW'
+<h1><%= t ".title" %></h1>
+
+<%= link_to "New product", new_product_path if authenticated? %>
+<%= link_to "Login", new_session_path unless authenticated? %>
+
+<div id="products">
+  <% @products.each do |product| %>
+    <div>
+      <%= link_to product.name, product_path(product.id) %>
+    </div>
+  <% end %>
+</div>
+VIEW
+
+cat > app/views/products/show.html.erb << 'VIEW'
+<p><%= link_to "Back", products_path %></p>
+
+<section class="product">
+  <%= image_tag @product.featured_image if @product.featured_image.attached? %>
+
+  <section class="product-info">
+    <% cache @product do %>
+      <h1><%= @product.name %></h1>
+      <%= @product.description %>
+    <% end %>
+
+    <%= render "inventory", product: @product %>
+
+    <% if authenticated? %>
+      <%= link_to "Edit", edit_product_path(@product) %>
+      <%= button_to "Delete", @product, method: :delete, data: { turbo_confirm: "Are you sure?" } %>
+    <% end %>
+  </section>
+</section>
+VIEW
+
+cat > app/views/products/new.html.erb << 'VIEW'
+<h1>New product</h1>
+
+<%= render "form", product: @product %>
+<%= link_to "Cancel", products_path %>
+VIEW
+
+cat > app/views/products/edit.html.erb << 'VIEW'
+<h1>Edit product</h1>
+
+<%= render "form", product: @product %>
+<%= link_to "Cancel", @product %>
+VIEW
+
+cat > app/views/products/_form.html.erb << 'VIEW'
+<%= form_with model: product do |form| %>
+  <% if form.object.errors.any? %>
+    <p class="error"><%= form.object.errors.full_messages.first %></p>
+  <% end %>
+
+  <div>
+    <%= form.label :name %>
+    <%= form.text_field :name %>
+  </div>
+
+  <div>
+    <%= form.label :description, style: "display: block" %>
+    <%= form.rich_textarea :description %>
+  </div>
+
+  <div>
+    <%= form.label :featured_image, style: "display: block" %>
+    <%= form.file_field :featured_image, accept: "image/*" %>
+  </div>
+
+  <div>
+    <%= form.label :inventory_count, style: "display: block" %>
+    <%= form.number_field :inventory_count %>
+  </div>
+
+  <div>
+    <%= form.submit %>
+  </div>
+<% end %>
+VIEW
+
+cat > app/views/products/_inventory.html.erb << 'VIEW'
+<% if product.inventory_count.positive? %>
+  <p><%= product.inventory_count %> in stock</p>
+<% else %>
+  <p>Out of stock</p>
+  <p>Email me when available.</p>
+
+  <%= form_with model: [product, Subscriber.new] do |form| %>
+    <%= form.email_field :email, placeholder: "you@example.com", required: true %>
+    <%= form.submit "Submit" %>
+  <% end %>
+<% end %>
+VIEW
+
+# The layout: the guide adds a nav and the flash divs around the
+# generated `<%= yield %>`; everything else in the generated file stays.
+ruby -pi -e 'sub(/^(\s*)<%= yield %>$/) { <<~ERB.gsub(/^/, $1).chomp }
+  <nav>
+    <%= link_to "Home", root_path %>
+    <%= button_to "Log out", session_path, method: :delete if authenticated? %>
+  </nav>
+
+  <div class="notice"><%= flash[:notice] %></div>
+  <div class="alert"><%= flash[:alert] %></div>
+
+  <main>
+    <%= yield %>
+  </main>
+ERB
+' app/views/layouts/application.html.erb
+
+cat > app/models/product.rb << 'MODEL'
+class Product < ApplicationRecord
+  include Notifications
+
+  has_one_attached :featured_image
+  has_rich_text :description
+
+  validates :name, presence: true
+  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
+end
+MODEL
+
+mkdir -p app/models/product
+cat > app/models/product/notifications.rb << 'MODEL'
+module Product::Notifications
+  extend ActiveSupport::Concern
+
+  included do
+    has_many :subscribers, dependent: :destroy
+    after_update_commit :notify_subscribers, if: :back_in_stock?
+  end
+
+  def back_in_stock?
+    inventory_count_previously_was.zero? && inventory_count.positive?
+  end
+
+  def notify_subscribers
+    subscribers.each do |subscriber|
+      ProductMailer.with(product: self, subscriber: subscriber).in_stock.deliver_later
+    end
+  end
+end
+MODEL
+
+cat > app/models/subscriber.rb << 'MODEL'
+class Subscriber < ApplicationRecord
+  belongs_to :product
+  generates_token_for :unsubscribe
+end
+MODEL
+
+cat > app/controllers/subscribers_controller.rb << 'CONTROLLER'
+class SubscribersController < ApplicationController
+  allow_unauthenticated_access
+  before_action :set_product
+
+  def create
+    @product.subscribers.where(subscriber_params).first_or_create
+    redirect_to @product, notice: "You are now subscribed."
+  end
+
+  private
+    def set_product
+      @product = Product.find(params[:product_id])
+    end
+
+    def subscriber_params
+      params.expect(subscriber: [ :email ])
+    end
+end
+CONTROLLER
+
+cat > app/controllers/unsubscribes_controller.rb << 'CONTROLLER'
+class UnsubscribesController < ApplicationController
+  allow_unauthenticated_access
+  before_action :set_subscriber
+
+  def show
+    @subscriber&.destroy
+    redirect_to root_path, notice: "Unsubscribed successfully."
+  end
+
+  private
+    def set_subscriber
+      @subscriber = Subscriber.find_by_token_for(:unsubscribe, params[:token])
+    end
+end
+CONTROLLER
+
+cat > app/mailers/product_mailer.rb << 'MAILER'
+class ProductMailer < ApplicationMailer
+  # Subject can be set in your I18n file at config/locales/en.yml
+  # with the following lookup:
+  #
+  #   en.product_mailer.in_stock.subject
+  #
+  def in_stock
+    @product = params[:product]
+    mail to: params[:subscriber].email
+  end
+end
+MAILER
+
+cat > app/views/product_mailer/in_stock.html.erb << 'VIEW'
+<h1>Good news!</h1>
+
+<p><%= link_to @product.name, product_url(@product) %> is back in stock.</p>
+
+<%= link_to "Unsubscribe", unsubscribe_url(token: params[:subscriber].generate_token_for(:unsubscribe)) %>
+VIEW
+
+cat > app/views/product_mailer/in_stock.text.erb << 'VIEW'
+Good news!
+
+<%= @product.name %> is back in stock.
+<%= product_url(@product) %>
+
+Unsubscribe: <%= unsubscribe_url(token: params[:subscriber].generate_token_for(:unsubscribe)) %>
+VIEW
+
+# ── Internationalization ─────────────────────────────────────────────
+cat > app/controllers/application_controller.rb << 'CONTROLLER'
+class ApplicationController < ActionController::Base
+  include Authentication
+  # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
+  allow_browser versions: :modern
+
+  around_action :switch_locale
+
+  def switch_locale(&action)
+    locale = params[:locale] || I18n.default_locale
+    I18n.with_locale(locale, &action)
+  end
+end
+CONTROLLER
+
+cat > config/locales/en.yml << 'YAML'
+en:
+  hello: "Hello world"
+  products:
+    index:
+      title: "Products"
+YAML
+
+cat > config/locales/es.yml << 'YAML'
+es:
+  hello: "Hola mundo"
+  products:
+    index:
+      title: "Productos"
+YAML
+
+# ── Adding CSS & JavaScript ──────────────────────────────────────────
+cat > app/assets/stylesheets/application.css << 'CSS'
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  padding: 1rem;
+}
+
+nav {
+  justify-content: flex-end;
+  display: flex;
+  font-size: 0.875em;
+  gap: 0.5rem;
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+nav a {
+  display: inline-block;
+}
+
+main {
+  max-width: 1024px;
+  margin: 0 auto;
+}
+
+.alert,
+.error {
+  color: red;
+}
+
+.notice {
+  color: green;
+}
+
+section.product {
+  display: flex;
+  gap: 1rem;
+  flex-direction: row;
+}
+
+section.product img {
+  border-radius: 8px;
+  flex-basis: 50%;
+  max-width: 50%;
+}
+CSS
+
+# ── Testing ──────────────────────────────────────────────────────────
+cat > test/fixtures/products.yml << 'YAML'
+tshirt:
+  name: T-Shirt
+  inventory_count: 15
+YAML
+
+cat > test/fixtures/subscribers.yml << 'YAML'
+david:
+  product: tshirt
+  email: david@example.org
+
+chris:
+  product: tshirt
+  email: chris@example.org
+YAML
+
+cat > test/models/product_test.rb << 'TEST'
+require "test_helper"
+
+class ProductTest < ActiveSupport::TestCase
+  include ActionMailer::TestHelper
+
+  test "sends email notifications when back in stock" do
+    product = products(:tshirt)
+
+    # Set product out of stock
+    product.update(inventory_count: 0)
+
+    assert_emails 2 do
+      product.update(inventory_count: 99)
+    end
+  end
+end
+TEST
+
+cat > test/mailers/product_mailer_test.rb << 'TEST'
+require "test_helper"
+
+class ProductMailerTest < ActionMailer::TestCase
+  test "in_stock" do
+    mail = ProductMailer.with(product: products(:tshirt), subscriber: subscribers(:david)).in_stock
+    assert_equal "In stock", mail.subject
+    assert_equal [ "david@example.org" ], mail.to
+    assert_equal [ "from@example.com" ], mail.from
+    assert_match "Good news!", mail.body.encoded
+  end
+end
+TEST
+
+echo
+echo "Store created. The guide's own tests:"
+bin/rails test
