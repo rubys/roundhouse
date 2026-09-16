@@ -2978,6 +2978,7 @@ impl Analyzer {
             let scope_names: std::collections::HashSet<Symbol> =
                 model.scopes().map(|s| s.name.clone()).collect();
             for method in model.methods() {
+                let ret = self.method_return_ty(class_id, method);
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -3034,16 +3035,13 @@ impl Analyzer {
                         continue;
                     }
                 }
-                Self::register_method_return(
-                    target,
-                    &method.name,
-                    effective_return_ty(&method.body).as_ref(),
-                );
+                Self::register_method_return(target, &method.name, ret.as_ref());
             }
         }
         for lc in &app.library_classes {
             let class_id = &lc.name;
             for method in &lc.methods {
+                let ret = self.method_return_ty(class_id, method);
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -3058,11 +3056,7 @@ impl Analyzer {
                 // Untyped (gradual) rather than "no known method". Unlike an
                 // unregistered class, this doesn't mask a typo — the method
                 // has to be defined in the file to land here.
-                Self::register_method_return(
-                    target,
-                    &method.name,
-                    effective_return_ty(&method.body).as_ref(),
-                );
+                Self::register_method_return(target, &method.name, ret.as_ref());
             }
         }
         // Controllers: harvest each action/helper method's return type so a
@@ -3112,9 +3106,18 @@ impl Analyzer {
             // `reset` have no instance twin and are typed from their own
             // bodies, and a hand-written `def self.x` that the synthesis
             // skipped is not a forwarder either.
+            // Not setters: the instance writer returns its body's tail
+            // (campfire's `session=` ends in `self.user = …`, a User?)
+            // while the forwarder `def self.session=(value);
+            // Current.instance.session = value; end` returns the
+            // assignment's value — the Session. Its own body types that
+            // correctly; copying the instance answer over it declared
+            // `-> User?` on a function spinel compiled to return the
+            // Session, and the C did not link.
             let copied: Vec<(Symbol, Ty)> = cls
                 .class_methods
                 .keys()
+                .filter(|name| !is_setter_name(name))
                 .filter_map(|name| {
                     cls.instance_methods.get(name).map(|ty| (name.clone(), ty.clone()))
                 })
@@ -3213,6 +3216,16 @@ impl Analyzer {
     /// escape) so calls to it resolve — turning a dispatch error into a
     /// gradual warning rather than a hard "no known method". A real type
     /// found by any pass is never clobbered by the fallback.
+    /// What `method`'s body returns — its tail. A setter is no
+    /// exception: `def session=(value)` RETURNS its tail (campfire's
+    /// ends in `self.user = session.user`, a User?) even though the
+    /// call `x.session = v` EVALUATES to `v`; the body typer answers
+    /// the call-site fact, the harvest the function's, and a compiled
+    /// target (spinel) returns what the function returns.
+    fn method_return_ty(&self, _class_id: &ClassId, method: &crate::dialect::MethodDef) -> Option<Ty> {
+        effective_return_ty(&method.body)
+    }
+
     fn register_method_return(
         table: &mut HashMap<Symbol, Ty>,
         method: &Symbol,
@@ -4563,6 +4576,15 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// `return`s carry the real type. Reading only `body.ty` then harvests
 /// `Bottom`, and a caller's `result[:k]` fails dispatch on `Bottom`.
 /// Collect the returns and union them with the non-`Bottom` tail.
+/// `name=` — an attribute writer, as distinct from the comparison
+/// operators that also end in `=`.
+pub(crate) fn is_setter_name(name: &Symbol) -> bool {
+    let n = name.as_str();
+    n.ends_with('=')
+        && !matches!(n, "==" | "!=" | "<=" | ">=" | "===" | "[]=")
+        && n.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+}
+
 fn effective_return_ty(body: &Expr) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
     let mut saw_return = false;

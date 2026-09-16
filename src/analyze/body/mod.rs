@@ -732,6 +732,28 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = self.assoc_extension_ty(recv.as_ref(), method) {
                     return t;
                 }
+                // `x.attr = v` evaluates to `v` — Ruby's rule for an
+                // attribute assignment, whatever the writer's body
+                // returns. Same fact the harvest declares for a setter's
+                // return; typed here too so a body that ends in one
+                // (`Current.instance.session = value`) agrees with it.
+                // An argument the typer could not resolve (Var) or only
+                // resolved gradually (Untyped) says nothing the writer's
+                // registered answer does not say better — campfire's
+                // `self.join_code = generate_join_code` keeps the
+                // column's String rather than the generator's untyped.
+                if recv.is_some()
+                    && args.len() == 1
+                    && crate::analyze::is_setter_name(method)
+                {
+                    if let Some(t) = args[0]
+                        .ty
+                        .clone()
+                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+                    {
+                        return t;
+                    }
+                }
                 // `authenticated_by.bot_key?` / `content_type.attachment?`
                 // — an inquirer predicate, decided on the receiver
                 // EXPRESSION (the value types as the Str it is).
