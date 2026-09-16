@@ -24,50 +24,96 @@ at the center, analyzed and dispatched to one of N target tracks.
 successful Rails apps off CRuby, and the option value of preserving
 the choice — see [WHY.md](WHY.md).*
 
-## Overview
+## What it does
 
-The emitted projects compile clean and pass their tests. The way we
-know they're correct is a conformance oracle: the same URL fetched from
-Rails and from each target must produce the same response, checked
-three ways — emitted unit tests against fixed expected values, a
-differential compare gate against live Rails (DOM-node-for-DOM-node
-for HTML, value-for-value for JSON), and end-to-end browser tests for
-the dynamic behavior a static diff can't reach.
+Three things, from one binary and one analysis. Each has a door in the
+[user guide](docs/guide/README.md).
 
-No type annotations are involved anywhere. Rails was already typed:
-`has_many :comments` is a type declaration, and the framework's
-conventions carry implicit type information that was simply never
+**Analyze.** No type annotations are involved anywhere. Rails was
+already typed: `has_many :comments` is a type declaration, and the
+framework's conventions carry type information that was simply never
 written down. Roundhouse recovers it by whole-program inference —
-which class an association returns, which columns a model has and what
-they deserialize to, whether a `find_by` came back nil — statically,
-from unmodified source, without booting the app or touching a
-database.
+which class an association returns, which columns a model has and
+what they deserialize to, whether a `find_by` came back nil — from
+unmodified source, without booting the app or touching a database. A
+pass over Mastodon (1,173 files, all 337 controllers, HAML views
+included) takes about 1.5 seconds. That inference is a product in its
+own right: `roundhouse check` for a terminal or a CI gate, an
+[LSP server](docs/guide/editor.md) for your editor, an
+[MCP server](docs/guide/mcp.md) for your agent — types, nil-safety,
+static N+1 findings, and the full request trace for any action — and
+an [in-browser IDE](https://rubys.github.io/roundhouse/ide/) that
+analyzes a folder on your disk without uploading it. Static, deep and
+annotation-free is a cell of the Ruby tooling space nobody else
+occupies: ruby-lsp is static but stops at names; ruby-lsp-rails and
+Tidewave are deep but need a running app; Sorbet and Steep are static
+and deep but you pay in annotations. →
+[`check`](docs/guide/check.md) · [editor](docs/guide/editor.md) ·
+[agent](docs/guide/mcp.md) · [IDE](docs/guide/ide.md)
 
-That inference is a product in its own right, not just the compiler's
-enabler. The same engine that emits Rust answers an editor's or an
-agent's questions — *what's the type here? can this be nil?* — through
-an LSP server and an MCP server (`roundhouse lsp` and `roundhouse
-mcp`, subcommands of the one binary), and an
-[in-browser IDE](https://rubys.github.io/roundhouse/ide/): no
-annotations, no app boot, no database, no warm server to babysit. A
-whole-application pass over Mastodon — 1,173 files, all 337
-controllers, HAML views included — takes about 1.5 seconds natively
-and 2.3 seconds compiled to WebAssembly, which is how the IDE analyzes
-Mastodon in a browser tab; individual queries like typed completion
-answer in a couple of milliseconds from the last completed pass.
-Static,
-deep, and annotation-free is a cell of the Ruby tooling space nobody
-else occupies: ruby-lsp is static but stops at names; ruby-lsp-rails
-and Tidewave are deep but need a running app; Sorbet and Steep are
-static and deep but you pay for it in annotations.
+**Transpile.** The same analysis fed to a dozen emitters: a
+standalone project in Rust, Go, TypeScript, Crystal, Elixir, Kotlin,
+Swift, Python, C#, or Ruby, with its own tests and no Rails at
+runtime. The way we know the output is correct is a conformance
+oracle: the same URL fetched from Rails and from each target must
+produce the same response — emitted tests, a differential compare
+against live Rails (DOM node for DOM node, JSON value for value), and
+browser end-to-end tests for what a static diff can't reach — and
+every target on the list passes it on every push. →
+[`--target`](docs/guide/transpile.md) · [targets](docs/guide/targets.md)
+· [what of Rails comes through](docs/guide/rails-coverage.md) ·
+[verifying](docs/guide/verifying.md)
 
-The performance story is partial evaluation. Rails is, operationally,
-an interpreter for your application — routes, associations,
-validations, and templates are data it consults on every request.
-Every decision whose answer cannot differ between requests, Roundhouse
-makes once at transpile time; only the per-request residue survives to
-runtime. On the benchmark fixture, serving the HTML index on a fixed
-Linux x86 server (July 2026 round):
+**Compile.** The Ruby shape compiled ahead of time to one native
+binary by [Spinel](https://github.com/matz/spinel), Matz's AOT Ruby
+compiler: one executable, one SQLite file, no interpreter. Among the
+compiled targets it has the closest behavior to Rails by a distance,
+and will for the foreseeable future, because it runs the framework
+runtime itself rather than a translation of it. Basecamp's Campfire
+runs this way — every page and every cable frame compared against
+live Rails on every push, and a
+[Docker archive](https://rubys.github.io/roundhouse/apps/campfire.html)
+you can run in minutes. → [Spinel](docs/guide/spinel.md)
+
+## Get it
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/rubys/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
+roundhouse --version
+roundhouse check --continue /path/to/your/rails/app
+```
+
+Releases are dated snapshots with binaries for macOS on Apple silicon
+and Linux x86-64; [`RELEASES.md`](RELEASES.md) says what each one
+contains. The binaries cover most needs, and `cargo build --release
+--bin roundhouse` from a checkout is always there for the rest —
+[`docs/guide/install.md`](docs/guide/install.md) has both paths and
+the prerequisites.
+
+## See it for yourself
+
+- [**IDE**](https://rubys.github.io/roundhouse/ide/) — the analyzer
+  in a browser tab, preloaded with the Rails Guides store, the blog,
+  Lobsters, Campfire and Mastodon; *open folder…* for your own app.
+- [**Campfire**](https://rubys.github.io/roundhouse/apps/campfire.html)
+  — the compiled product, as a Docker archive.
+- [**Browse**](https://rubys.github.io/roundhouse/browse/) — what every
+  emitter produces from the blog fixture, updated on each push.
+- [**Bench**](https://rubys.github.io/roundhouse/bench/) — throughput,
+  memory and latency across the live targets on a fixed box, against
+  Rails as it ships.
+- [**Demo**](https://rubys.github.io/roundhouse/demo/) — the fixture
+  every target is built and tested against, and its three test layers.
+
+## Why it is fast
+
+Rails is, operationally, an interpreter for your application —
+routes, associations, validations and templates are data it consults
+on every request. Every decision whose answer cannot differ between
+requests, Roundhouse makes once at transpile time; only the
+per-request residue survives to runtime. On the blog fixture, serving
+the HTML index on a fixed Linux x86 server (July 2026 round):
 
 | configuration | req/sec |
 |---|--:|
@@ -76,259 +122,35 @@ Linux x86 server (July 2026 round):
 | Roundhouse emit on CRuby+YJIT | 3,292 |
 | Roundhouse emit on JRuby | 24,172 |
 
-Two effects compose there: stripping Rails' interpretive layers is
-worth an order of magnitude on the same interpreter — same Ruby, same
-YJIT, ~10× — and the static, monomorphic Ruby that remains is the
-input the JVM JIT was built for, worth a further ~7× where stock
-Rails gains ~3×. End to end that's ~74×, and the compiled
-targets go further still: the Kotlin emit roughly doubles
-emitted-Ruby-on-JRuby on the JSON endpoint, and the Rust binary serves
-the same app in under 20 MB of memory where Rails holds ~320 MB. These
-are ratios from a CPU-bound microbenchmark of a small fixture — real
-workloads are I/O-bound to varying degrees, and the absolute numbers
-shift between rounds as performance gates land. The live numbers,
-per-run data, and environment capture are at
-[bench](https://rubys.github.io/roundhouse/bench/), and the caveats
-are spelled out honestly in the posts below.
-
-The long-form versions of this overview:
+Stripping the interpretive layers is worth ~10× on the same
+interpreter; the static, monomorphic Ruby that remains is the input
+the JVM JIT was built for, worth a further ~7×; the compiled targets
+go further still. These are ratios from a CPU-bound microbenchmark of
+a small fixture, and the live numbers with their environment capture
+are on the [bench page](https://rubys.github.io/roundhouse/bench/).
+The long-form versions:
 
 - [Conformance vs Comprehension](https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html) — the project, and the conformance-oracle methodology behind it
 - [Live Types for Rails](https://intertwingly.net/blog/2026/06/25/Live-Types-for-Rails.html) — the inference as a live type checker: LSP, MCP, and the competitive landscape
-- [An IDE You Don't Install](https://intertwingly.net/blog/2026/07/06/An-IDE-You-Dont-Install.html) — Mastodon analyzed in a browser tab, and a correction to the Live-Types timing numbers
+- [An IDE You Don't Install](https://intertwingly.net/blog/2026/07/06/An-IDE-You-Dont-Install.html) — Mastodon analyzed in a browser tab
+- [Campfire Chats](https://intertwingly.net/blog/2026/09/01/Campfire-Chats.html) — a real product, compiled
 - [The Ruby JRuby Was Built to Run](https://intertwingly.net/blog/2026/06/11/The-Ruby-JRuby-Was-Built-to-Run.html) — the 2×2 experiment the table above is the current round of
-- [Numbers Without Conclusions](https://intertwingly.net/blog/2026/05/25/Numbers-Without-Conclusions.html) — full benchmark methodology, and what the numbers are and aren't evidence of
-
-## Pipeline
-
-```
-          ingest       analyze        lower         emit
-Ruby ────▶ AST ─────▶ typed IR ────▶ IR ─────▶ target project
-                         │             │
-                         ▼             ▼
-                    diagnostics    runtime/<target>/
-```
-
-Ingest normalizes Ruby + ERB into a small typed IR. Analyze annotates
-every expression with a type and effect set, flowing types along the
-edges Rails conventions already draw (schema → models, associations,
-before_action, render → view, partials). Lower expands Rails-dialect
-nodes into target-neutral IR — validations become `Check` enums, routes
-become a flat dispatch table, controller bodies become a walker-ready
-`LoweredAction`. Additional passes canonicalize controller idioms
-(`params.to_h`, `redirect_to`, path helpers, association builders) and
-query DSL (`order`, `includes`, `where`) into shapes each emitter
-consumes directly. Emit walks the IR per target, consulting each
-expression's type and effect where the target needs it, and each emitted
-project links a small hand-written `runtime/<target>/` library for the
-bits that don't belong in generated code (DB connection, HTTP server,
-Action Cable).
-
-Diagnostics surface anything the analyzer couldn't type or
-intentionally left gradual — the subset of programs we can transpile
-is defined by "zero error diagnostics" (RBS-declared `untyped` sites
-surface as warnings; strict-target emitters elevate to errors at emit
-time).
-
-## Current state
-
-The analyzer fully types the Phase-1 Rails 8 MVC fixture
-(`fixtures/real-blog`) without annotations — schema-derived attributes,
-associations, controller actions, `before_action` flow, views,
-partials, and collection rendering all resolve to concrete types.
-A test enforces zero error diagnostics on every commit. The framework
-runtime (`runtime/ruby/`) is held to the same bar via
-`every_runtime_method_body_is_fully_typed` — no inference gaps in any
-method body.
-
-Ten target emitters are live and DOM-equivalent against Rails on
-real-blog as a CI invariant — Rust, TypeScript, Crystal, Elixir, Go,
-Kotlin, Swift, Python, C#/.NET, and Spinel-shape Ruby. Each boots an
-HTTP + Action Cable server, serves the generated blog with working
-forms, validation error display, Turbo streams, and Tailwind styling. A
-compare matrix in `.github/workflows/ci.yml` diffs every target against
-Rails on each push to `main` (JRuby is compared too, serving the same
-emit on the JVM), so any drift turns CI red.
-
-Cross-runtime correctness is enforced by `tools/compare/`, which
-fetches the same URL from Rails and from any roundhouse-emitted runtime
-and diffs the canonicalized DOM trees. A new ERB pattern that renders
-differently between Rails and a target is a bug.
-
-## See it for yourself
-
-**Meet the fixture.** [rubys.github.io/roundhouse/demo](https://rubys.github.io/roundhouse/demo/)
-describes the `fixtures/real-blog` app every target is built and tested
-against — how `scripts/create-blog` scaffolds it, which Rails features
-it exercises (associations, nested routes, Turbo Streams, Action
-Cable, Tailwind), and the three test layers (per-target model/controller
-tests, DOM-equivalence compare, and Playwright E2E).
-
-**Browse the emitted outputs.** [rubys.github.io/roundhouse/browse](https://rubys.github.io/roundhouse/browse/)
-shows what every target emitter produces from `fixtures/real-blog`,
-updated on each push to `main` — Rust, TypeScript, Crystal, Elixir,
-Go, Kotlin, Swift, Python, C#/.NET, plus Ruby and JRuby, and Spinel
-(the lowered output that runs as the demo below).
-
-**Compare performance.** [rubys.github.io/roundhouse/bench](https://rubys.github.io/roundhouse/bench/)
-plots throughput, memory, latency, and req/sec/GB across the live
-targets on the same `fixtures/real-blog`, run on a fixed Hetzner box.
-
-**Run the demo.** A working transpiled blog — articles, comments,
-real-time Turbo Stream broadcasts over WebSocket, SQLite persistence,
-Tailwind styling, create + destroy flows — in two `bin/rh` commands:
-
-```sh
-git clone https://github.com/rubys/roundhouse
-cd roundhouse
-bin/rh fixture            # generate the Rails fixture (~60s)
-bin/rh dev ruby           # transpile + assets + serve on :3000 (~3-5min cold)
-```
-
-Run `bin/rh doctor` first to see which prerequisites are installed and
-which subcommands are available without a Rust toolchain (`bin/rh
-fetch <target>` downloads pre-transpiled archives).
-
-Building roundhouse itself needs Rust plus a working libclang: the
-`ruby-prism-sys` / `ruby-rbs-sys` build scripts generate their C
-bindings with bindgen, which loads clang's own resource headers. On
-Debian/Ubuntu that means both packages —
-
-```sh
-sudo apt install clang libclang-dev
-```
-
-— installing only `libclang-dev` fails with
-`fatal error: 'stddef.h' file not found` (clang's builtin headers ship
-in the `clang` package). macOS with Xcode Command Line Tools needs
-nothing extra.
-
-Prerequisites and the architecture of what gets generated:
-[`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
-
-**Analyze your own app.** Point the checker at any Rails checkout to
-see what the analyzer can type today — no annotations, no `bundle
-install`, no booting, no database:
-
-```sh
-roundhouse check --continue /path/to/your/rails/app
-```
-
-(`roundhouse` is the one binary a snapshot ships — see
-[`docs/guide/install.md`](docs/guide/install.md); from a checkout,
-`cargo run --release --bin roundhouse -- check --continue …` is the
-same thing. `check`, `lsp` and `mcp` are its subcommands;
-`roundhouse-check`, `roundhouse-lsp` and `roundhouse-mcp` remain as
-cargo-only aliases. `roundhouse --version` names the snapshot and the
-commit the build came from.)
-
-`--continue` is the mode you want on a real app: constructs the
-ingester doesn't recognize yet are recorded and skipped instead of
-aborting, and a deduplicated punch list of them is printed at the end.
-Read the output accordingly — `error`/`warning` diagnostics are sites
-the analyzer understood but couldn't type (or typed gradually), while
-the punch list and any gap-attributed notes are roundhouse's own
-coverage gaps, not problems in your app. The line before the summary is
-the gem census from your `Gemfile.lock` — which of your gems are Rails
-itself, which roundhouse models, which never enter the analysis, and
-which it does not know. A call into an unknown gem's DSL or classes is
-reported as a coverage note naming the gem rather than as an error, and
-that unknown list is the tool's own to-do list for your app. Expect a real app to produce
-plenty of both today: the numbers are the project's honest to-do list,
-and they drop week over week. (Without `--continue`, ingest is strict
-and exits on the first unrecognized construct — the right mode for
-fixtures the analyzer is expected to fully cover.)
-
-## Workflow runner (`bin/rh`)
-
-`bin/rh` is the single entry point for every workflow below. Ruby is
-the only prerequisite for the onboarding subcommands; the build
-subcommands shell out to `cargo`. Run `bin/rh --help` for the full
-surface and `bin/rh <command> --help` for per-command options.
-
-Onboarding (no Rust required):
-
-- `bin/rh doctor` — check prerequisites; list which subcommands work today.
-- `bin/rh fetch <target>` — download a pre-transpiled archive into `downloads/<target>/`.
-- `bin/rh fixture` — generate the Rails source fixture via `rails new` + scaffold.
-
-Build (requires Rust):
-
-- `bin/rh transpile <target>` — build `fixtures/real-blog` into `build/transpiled-blog-<target>/`.
-- `bin/rh dev | test | run <target>` — transpile, then run the emitted tree's dev/test/run action (ruby today).
-- `bin/rh compare [<target>]` — fetch the same URL from Rails and the target, diff canonicalized DOM.
-- `bin/rh bench [<target>...]` — HTTP throughput + RSS benchmark across targets.
-- `bin/rh site` — build the full multi-target Pages site (the one linked above).
-
-Cleanup: `bin/rh clean <target | fixture>`.
-
-Targets: `spinel`, `ruby`, `jruby`, `crystal`, `csharp`, `elixir`, `go`,
-`kotlin`, `python`, `rust`, `swift`, `typescript`, `typescript-worker`.
-(An experimental `roda` target — the Roda + Sequel RFC, issue #67 —
-is reachable via `roundhouse --target roda` but isn't part of the
-`bin/rh` surface yet.)
-
-## Supporting pieces worth knowing
-
-- **Method catalog** (`src/catalog/`) — one IDL-shaped table declaring
-  effect class, chain semantics, and return-type facets for every AR
-  method the compiler recognizes. Single source of truth; replaced five
-  scattered places.
-- **Database adapter** (`src/adapter.rs`) — `DatabaseAdapter` trait
-  behind which effect classification and async-suspension decisions
-  live. `SqliteAdapter` / `SqliteAsyncAdapter` today; Postgres /
-  IndexedDB / D1 / Neon land as sibling impls.
-- **Per-target runtimes** (`runtime/<target>/`) — hand-written glue
-  (DB connection, HTTP, view helpers, Action Cable, test support)
-  included verbatim by the matching emitter.
-
-## Running the tests
-
-```
-cargo test                              # unit + analyze + ingest + emit
-cargo test --test real_blog             # the Phase-1 forcing functions
-cargo test --test rust_toolchain -- --ignored   # Rust end-to-end boot
-```
-
-The `<target>_toolchain` tests are dev-loop harnesses; in CI the same
-ground is covered by per-target compare and smoke jobs (see
-[`docs/pipeline/verification.md`](docs/pipeline/verification.md)).
-
-The `real-blog` fixture is generated on demand — `bin/rh fixture` runs
-`scripts/create-blog` and materializes it under `fixtures/real-blog/`.
-CI regenerates the fixture once per run and shares it across the unit
-job and every per-target job.
+- [Numbers Without Conclusions](https://intertwingly.net/blog/2026/05/25/Numbers-Without-Conclusions.html) — benchmark methodology, and what the numbers are and aren't evidence of
 
 ## Documentation
 
-Using it:
+Using it: the [user guide](docs/guide/README.md) — one page per door
+above, starting at [install](docs/guide/install.md) — and
+[`RELEASES.md`](RELEASES.md).
 
-- [`docs/guide/`](docs/guide/README.md) — the user guide, one door per
-  thing the binary does: [analyze](docs/guide/check.md) (`check`, the
-  [editor](docs/guide/editor.md), the [agent](docs/guide/mcp.md), the
-  [browser IDE](docs/guide/ide.md)), [transpile](docs/guide/transpile.md)
-  (the [targets](docs/guide/targets.md), [what of Rails comes
-  through](docs/guide/rails-coverage.md), [verifying the
-  output](docs/guide/verifying.md)), and [compile with
-  Spinel](docs/guide/spinel.md). Start at
-  [`install.md`](docs/guide/install.md).
-- [`RELEASES.md`](RELEASES.md) — what each dated snapshot contains.
-
-Working on it:
-
-- [`DEVELOPMENT.md`](DEVELOPMENT.md) — day-to-day dev loop, the
-  debugging tools, adding a new IR variant, repo map.
-- [`AGENTS.md`](AGENTS.md) — orientation and the invariants not to
-  break, for AI agents and new contributors alike.
-- [`docs/README.md`](docs/README.md) — index of all architecture docs
-  and working plans.
-- [`docs/data/`](docs/data/) — the compiler's inputs, one doc each for
-  Ruby + templates, schema/routes/seeds, the method catalog, and the
-  database adapter.
-- [`docs/pipeline/`](docs/pipeline/) — pipeline internals: analyze,
-  lower, emit, runtime integration, verification.
-- [`BETS.md`](BETS.md) — why this attempt is structured differently
-  from its predecessors: lineage, the three bets, acknowledged risks.
+Working on it: [`DEVELOPMENT.md`](DEVELOPMENT.md) (build, test, the
+`bin/rh` workflow runner, debugging tools, repo map),
+[`AGENTS.md`](AGENTS.md) (the invariants not to break), and
+[`docs/`](docs/README.md) — the architecture: the compiler's
+[inputs](docs/data/), the [pipeline](docs/pipeline/) (analyze, lower,
+emit, runtime, verification), and the working plans.
+[`BETS.md`](BETS.md) is why this attempt is shaped differently from
+its predecessors; [`WHY.md`](WHY.md) is why do it at all.
 
 ## Prior art
 

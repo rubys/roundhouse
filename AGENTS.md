@@ -5,17 +5,22 @@ languages, plus an inference engine (LSP/MCP/in-browser IDE) that types Rails
 without annotations. This file is the orientation an AI agent or new contributor
 needs *before* touching the code: where to look, and the invariants not to break.
 
-**Source of truth for current state is [`README.md`](README.md)** — which
-targets are live, benchmark numbers, what works today. It is kept current; the
-older docs below are accurate on *architecture* but may narrate migrations that
-have since landed. **When a status claim anywhere disagrees with README or CI,
-README and CI win.**
+**Source of truth for current state is [`RELEASES.md`](RELEASES.md) and CI** —
+which targets are live, what each snapshot proves, the known gaps; the
+[user guide](docs/guide/README.md) says what each door does today, and the
+[bench page](https://rubys.github.io/roundhouse/bench/) carries the numbers.
+[`README.md`](README.md) is the landing page. The older docs below are
+accurate on *architecture* but may narrate migrations that have since
+landed. **When a status claim anywhere disagrees with RELEASES.md or CI,
+RELEASES.md and CI win.**
 
 ## Start here
 
 | You want… | Read |
 |---|---|
-| What the project is / current state / the numbers | [`README.md`](README.md) — fresh, authoritative |
+| What the project is | [`README.md`](README.md) — the landing page |
+| Current state, per snapshot, and the known gaps | [`RELEASES.md`](RELEASES.md) — authoritative with CI |
+| Using it (check / editor / MCP / transpile / Spinel) | [`docs/guide/`](docs/guide/README.md) |
 | The dev loop, `roundhouse-ast`, adding an IR variant | [`DEVELOPMENT.md`](DEVELOPMENT.md) |
 | Pipeline internals (analyze / lower / emit / runtime / verification) | [`docs/pipeline/`](docs/pipeline/) — architecture, not status |
 | Compiler inputs (Ruby+ERB, schema/routes/seeds, method catalog, DB adapter) | [`docs/data/`](docs/data/) |

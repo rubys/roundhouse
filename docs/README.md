@@ -7,7 +7,7 @@ below is for people working on roundhouse itself.
 Architecture references live in the two subdirectories; the loose files
 at this level are working plans. Status discipline: these docs describe
 *architecture*, not day-to-day status — when a status claim here
-disagrees with [`README.md`](../README.md) or CI, README and CI win
+disagrees with [`RELEASES.md`](../RELEASES.md) or CI, RELEASES.md and CI win
 (see [`AGENTS.md`](../AGENTS.md)).
 
 ## Compiler inputs — [`data/`](data/)

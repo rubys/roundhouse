@@ -39,6 +39,35 @@ the comment in `.github/workflows/ci.yml`).
 New IR or recognizer work lands with a paired test — see [Adding a new
 IR variant](#adding-a-new-ir-variant).
 
+## Workflow runner (`bin/rh`)
+
+`bin/rh` is the single entry point for the repository's own workflows
+— the fixture, the per-target builds, the compare and bench harnesses,
+the site. Ruby is the only prerequisite for the onboarding
+subcommands; the build subcommands shell out to `cargo`. `bin/rh
+--help` lists the surface, `bin/rh <command> --help` the options.
+
+Onboarding (no Rust required):
+
+- `bin/rh doctor` — check prerequisites; list which subcommands work today.
+- `bin/rh fetch <target>` — download a pre-transpiled archive into `downloads/<target>/`.
+- `bin/rh fixture` — generate the Rails source fixture via `rails new` + scaffold.
+
+Build (requires Rust):
+
+- `bin/rh transpile <target>` — build `fixtures/real-blog` into `build/transpiled-blog-<target>/`.
+- `bin/rh dev | test | run <target>` — transpile, then run the emitted tree's dev/test/run action (ruby today).
+- `bin/rh compare [<target>]` — fetch the same URL from Rails and the target, diff canonicalized DOM.
+- `bin/rh bench [<target>...]` — HTTP throughput + RSS benchmark across targets.
+- `bin/rh site` — build the full multi-target Pages site.
+
+Cleanup: `bin/rh clean <target | fixture>`.
+
+The working demo in two commands — a transpiled blog with articles,
+comments, live Turbo Stream broadcasts over WebSocket, SQLite
+persistence and Tailwind — is `bin/rh fixture` (~60s) then `bin/rh
+dev ruby` (transpile + assets + serve on :3000, ~3-5 min cold).
+
 ## Fixtures
 
 ### tiny-blog
