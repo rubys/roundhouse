@@ -25,7 +25,9 @@ no server, no app boot, no annotations:
   conventions
 - **coverage** button — the ingest-gap punch list
 - **app** selector — switch the analyzed Rails app in place (the published
-  site offers blog · Lobsters · Campfire · Mastodon)
+  site offers the Rails Guides store · blog · Lobsters · Campfire ·
+  Mastodon; the store — the official Getting Started app, built by
+  `scripts/create-store` — is the default)
 - **open folder…** (last row of the app selector) — analyze a checkout from
   your own disk. Chromium gets the directory picker and keeps the handle,
   so **↻** re-reads the tree after you edit in your real editor; other

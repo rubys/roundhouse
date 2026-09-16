@@ -94,6 +94,22 @@ check("boots and analyzes", summary.files > 10, `${summary.files} files, ${summa
 check("coverage ledger is on", summary.gaps >= 0 && summary.counts.includes("coverage notes"), summary.counts);
 
 if (MASTODON) {
+  // 1b. The default app is the Rails Guides store: the official
+  // tutorial, and the analyzer's claim on it is zero errors — the
+  // first number a visitor sees. Its index view is the opened file
+  // (the thumbnail N+1 demo starts there).
+  const booted = await page.evaluate(() => ({
+    app: window.__ide.current && window.__ide.current.name,
+    errors: (window.__ide.analysis.diagnostics || []).filter((d) => d.severity === "error").length,
+    open: window.__ide.activePath,
+  }));
+  check("default app is the store, with 0 errors",
+    booted.app === "store" && booted.errors === 0 && booted.open === "app/views/products/index.html.erb",
+    JSON.stringify(booted));
+
+  // The Mastodon probes below drive that app explicitly.
+  await page.goto(`${BASE}?app=mastodon`);
+  await page.waitForFunction(() => window.__ide?.current?.name === "mastodon" && window.__ide.analysis, null, { timeout: 120_000 });
   const ctrl = "app/controllers/statuses_controller.rb";
 
   // 2. type_at: @account read in set_status types as Account.
@@ -228,8 +244,8 @@ if (appNames.length >= 2) {
       title: document.title,
     }));
   }
-  check("app manifest lists blog + lobsters + campfire + mastodon",
-    ["blog", "lobsters", "campfire", "mastodon"].every((n) => appNames.includes(n)), appNames.join(","));
+  check("app manifest lists store + blog + lobsters + campfire + mastodon",
+    ["store", "blog", "lobsters", "campfire", "mastodon"].every((n) => appNames.includes(n)), appNames.join(","));
   const blog = await switchTo("blog", "app/models/article.rb");
   check("switch → blog re-ingests", blog.files > 5 && /blog/.test(blog.title), `${blog.files} files`);
   const lob = await switchTo("lobsters", "app/models/story.rb");
