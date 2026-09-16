@@ -1242,7 +1242,11 @@ fn every_runtime_method_body_concretely_typed() {
     // statement through the model's `from_stmt`, and the String-keyed
     // Hash per row — the largest single allocation on campfire's
     // 600-row room page — is gone from that path.
-    const CEILING: usize = 416;
+    //
+    // 416 -> 417: `Relation#take`, one `first` self-send under the
+    // declared `untyped` return `first` has always had. What it
+    // bought: the Rails 8 authentication generator's `User.take`.
+    const CEILING: usize = 417;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
