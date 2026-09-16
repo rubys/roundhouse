@@ -57,6 +57,12 @@ pub struct TypeAt {
     /// `false` for unknown/untyped positions: we underline only types we
     /// can *prove* admit nil.
     pub nilable: bool,
+    /// Why the type reads the way it does, when a Rails reader would
+    /// otherwise push back: a `belongs_to` reader is typed `T?` although
+    /// the association is required, because the reader IS nil before
+    /// assignment and on an orphaned row. The type stays sound; the
+    /// note says so. `None` for everything else.
+    pub note: Option<String>,
 }
 
 /// Resolve a source path to its [`FileId`]. Matches the stored path
@@ -88,7 +94,47 @@ pub fn source(app: &App, file: FileId) -> Option<&SourceFile> {
 /// consumer. `None` when the offset lands outside every node (whitespace
 /// between top-level forms, a comment, or past EOF).
 pub fn type_at(app: &App, file: FileId, offset: u32) -> Option<TypeAt> {
-    find_at_offset(app, file, offset).map(describe)
+    let expr = find_at_offset(app, file, offset)?;
+    let mut info = describe(expr);
+    info.note = required_belongs_to_note(app, expr);
+    Some(info)
+}
+
+/// `micropost.user` where `Micropost` declares `belongs_to :user` and
+/// the association is not `optional:` — the reader types `User?`, and
+/// this says why.
+fn required_belongs_to_note(app: &App, expr: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let owner = match recv.ty.as_ref()? {
+        Ty::Class { id, .. } => id,
+        Ty::Union { variants } => variants.iter().find_map(|v| match v {
+            Ty::Class { id, .. } => Some(id),
+            _ => None,
+        })?,
+        _ => return None,
+    };
+    let model = app.models.iter().find(|m| &m.name == owner)?;
+    let concern_items = crate::analyze::model_includes(model)
+        .into_iter()
+        .filter_map(|m| app.concern_model_items.get(&m))
+        .flatten();
+    let declared = model
+        .associations()
+        .chain(concern_items.filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Association { assoc, .. } => Some(assoc),
+            _ => None,
+        }))
+        .any(|a| {
+            matches!(a, crate::dialect::Association::BelongsTo { name, optional: false, .. } if name == method)
+        });
+    declared.then(|| {
+        "required `belongs_to` — `nil` only on an unsaved record or an orphaned row".to_string()
+    })
 }
 
 /// Convenience for protocol wirings: resolve a source `path` and an LSP
@@ -157,6 +203,7 @@ fn describe(expr: &Expr) -> TypeAt {
         },
         nilable: expr.ty.as_ref().is_some_and(can_be_nil),
         ty: expr.ty.clone(),
+        note: None,
     }
 }
 
@@ -2219,8 +2266,13 @@ pub struct TraceGapReport {
     /// Leverage-sorted: user-actionable boundaries first (by hops
     /// blocked), then tool-coverage entries.
     pub gaps: Vec<TraceGap>,
-    /// Applicable hops (running filters + the action) whose bodies
-    /// the analysis saw.
+    /// Hops this request runs — the route, applying filters, the
+    /// action, the view and the layout — and how many of them resolved
+    /// (a body the analysis saw; a template or route it located).
+    /// Gated-out filters are shown struck through and are not hops
+    /// here, so a 7-row panel with three skipped filters reads 4/4,
+    /// not the "all 1 hops resolved" the body-only count produced. A
+    /// template the app does not carry is not counted either way.
     pub resolved_hops: usize,
     pub total_hops: usize,
 }
@@ -2327,7 +2379,21 @@ pub fn trace_gap_report(
                 resolved_hops += 1;
                 touch_file(&mut hop_files, file);
             }
-            TraceHop::View { file, .. } => touch_file(&mut hop_files, file),
+            // The route, the template and the layout are hops too. A
+            // located template counts as a resolved hop; one the app
+            // does not carry (a JSON action, a fixture without views)
+            // is not a boundary and is left out of the count, as before.
+            TraceHop::Route { .. } => {
+                total_hops += 1;
+                resolved_hops += 1;
+            }
+            TraceHop::View { file, .. } | TraceHop::Layout { file, .. } => {
+                if file.is_some() {
+                    total_hops += 1;
+                    resolved_hops += 1;
+                }
+                touch_file(&mut hop_files, file);
+            }
             _ => {}
         }
     }

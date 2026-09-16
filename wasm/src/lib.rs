@@ -490,6 +490,8 @@ struct TypeAtOut {
     display: String,
     nilable: bool,
     node_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 fn type_at_inner(json_in: &str) -> String {
@@ -508,6 +510,7 @@ fn type_at_inner(json_in: &str) -> String {
                 display: info.display,
                 nilable: info.nilable,
                 node_kind: info.node_kind,
+                note: info.note,
             })
             .unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
             None => "null".to_string(),
@@ -523,6 +526,105 @@ fn type_at_inner(json_in: &str) -> String {
 pub unsafe extern "C" fn type_at(input_ptr: *const u8, input_len: u32) -> u64 {
     let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
     pack(type_at_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+/// One source location, as the editor addresses it: zero-based
+/// line/character (UTF-16, Monaco's unit) in `path`.
+#[derive(Serialize)]
+struct LocationOut {
+    path: String,
+    line: u32,
+    character: u32,
+    end_line: u32,
+    end_character: u32,
+    /// The location is a write (the definition / an assignment), not a
+    /// read. Only on `references`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    write: bool,
+}
+
+fn location_out(app: &roundhouse::App, span: roundhouse::span::Span, write: bool) -> Option<LocationOut> {
+    let src = roundhouse::ide::source(app, span.file)?;
+    let start = roundhouse::ide::offset_to_position(&src.text, span.start);
+    let end = roundhouse::ide::offset_to_position(&src.text, span.end);
+    Some(LocationOut {
+        path: src.path.clone(),
+        line: start.line,
+        character: start.character,
+        end_line: end.line,
+        end_character: end.character,
+        write,
+    })
+}
+
+/// Shared prologue of the two position → locations queries: the file
+/// and byte offset the editor's position names in the analyzed text.
+fn with_offset<T>(
+    json_in: &str,
+    f: impl FnOnce(&roundhouse::App, roundhouse::span::FileId, u32) -> T,
+) -> Result<Option<T>, String> {
+    let input: PositionInput =
+        serde_json::from_str(json_in).map_err(|e| format!("invalid input JSON: {e}"))?;
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return Err("no analysis yet — call analyze_app first".to_string());
+        };
+        let Some(file) = roundhouse::ide::file_id(&a.app, &input.path) else { return Ok(None) };
+        let Some(src) = roundhouse::ide::source(&a.app, file) else { return Ok(None) };
+        let pos = roundhouse::ide::Position { line: input.line, character: input.character };
+        let offset = roundhouse::ide::position_to_offset(&src.text, pos);
+        Ok(Some(f(&a.app, file, offset)))
+    })
+}
+
+fn definition_inner(json_in: &str) -> String {
+    match with_offset(json_in, |app, file, offset| {
+        roundhouse::ide::definition(app, file, offset).and_then(|s| location_out(app, s, true))
+    }) {
+        Ok(Some(Some(loc))) => serde_json::to_string(&loc).unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
+        Ok(_) => "null".to_string(),
+        Err(e) => error_json(&e),
+    }
+}
+
+/// Go to definition: the write that binds the variable at a position
+/// (a local's assignment, an ivar's first assignment on the class), or
+/// the method a typed explicit-receiver call resolves to. Output a
+/// location `{"path","line","character","end_line","end_character"}`
+/// or `null`. Same resolution as the LSP's `textDocument/definition`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn definition(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(definition_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+fn references_inner(json_in: &str) -> String {
+    match with_offset(json_in, |app, file, offset| {
+        roundhouse::ide::references(app, file, offset)
+            .into_iter()
+            // Type-certain matches only — the same set the LSP returns;
+            // name-only method matches are the MCP's, which can label
+            // them uncertain.
+            .filter(|r| r.certain)
+            .filter_map(|r| location_out(app, r.span, r.write))
+            .collect::<Vec<_>>()
+    }) {
+        Ok(Some(locs)) => serde_json::to_string(&locs).unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
+        Ok(None) => "[]".to_string(),
+        Err(e) => error_json(&e),
+    }
+}
+
+/// Find references: every read and write of the variable at a position
+/// (locals by binding, ivars by name across the class), or every typed
+/// call of the method named there. Output an array of locations, each
+/// with `"write": true` on assignments. Same resolution as the LSP's
+/// `textDocument/references`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn references(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(references_inner(std::str::from_utf8(input).unwrap_or("{}")))
 }
 
 #[derive(Deserialize)]

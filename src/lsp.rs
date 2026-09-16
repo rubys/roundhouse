@@ -319,6 +319,9 @@ impl Server {
         if info.nilable {
             value.push_str("\n\nMay be `nil`.");
         }
+        if let Some(note) = &info.note {
+            value.push_str(&format!("\n\n{note}."));
+        }
         let text = &ide::source(app, info.span.file)?.text;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {

@@ -10,6 +10,12 @@ no server, no app boot, no annotations:
   last-good snapshot (`ide::complete_at`, the same core the LSP uses)
 - **markers** — diagnostics with the coverage ledger: `info`-severity
   notes mean "roundhouse can't see this yet", not "your code is wrong"
+- **F12 / ⇧F12** (or ⌘-click) — go to definition / find references:
+  a local's binding, an ivar's assignments across its class, a typed
+  explicit-receiver call's method — the LSP's `ide::definition` /
+  `ide::references`, exported to the wasm. Not yet: an ivar read in a
+  *view* (its writer is in the feeding controller, a different class)
+  and `def` headers (the IR carries no span for them)
 - **⌘P / Ctrl+P** — fuzzy file + class picker
 - **⌘⇧R** — related files, from the *inferred* render graph
   (`view_feeders`/`render_edges`) and include edges — not filename

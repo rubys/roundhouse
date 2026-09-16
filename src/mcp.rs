@@ -177,10 +177,11 @@ impl Server {
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
             Some(info) => Ok(format!(
-                "{}{} — {} node",
+                "{}{} — {} node{}",
                 info.display,
                 if info.nilable { " (may be nil)" } else { "" },
                 info.node_kind,
+                info.note.as_deref().map(|n| format!("; {n}")).unwrap_or_default(),
             )),
             None => Ok(format!("No typed expression at {path}.")),
         }

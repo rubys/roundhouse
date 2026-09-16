@@ -5,6 +5,8 @@
 // annotations:
 //
 //   hover        → inferred type at the cursor (worker type_at)
+//   F12 / ⇧F12   → go to definition / find references (worker
+//                  definition / references — the LSP's answers)
 //   completion   → members/kwargs/ivars from the last-good snapshot
 //   markers      → diagnostics with coverage notes (info severity =
 //                  "roundhouse can't see this yet", not an app error)
@@ -144,12 +146,10 @@ function refreshAllMarkers() {
 }
 
 // ── Files ────────────────────────────────────────────────────────────
-function openFile(path) {
-  if (!(path in srcMap)) return;
-  activePath = path;
-  const i = mru.indexOf(path);
-  if (i >= 0) mru.splice(i, 1);
-  mru.unshift(path);
+// The Monaco model for a source path, created on first use (an edit in
+// it re-analyzes). Shared by opening a file and by definition /
+// reference locations, which name files the visitor may not have opened.
+function modelFor(path) {
   let model = models.get(path);
   if (!model) {
     model = monaco.editor.createModel(srcMap[path], langFor(path));
@@ -160,7 +160,16 @@ function openFile(path) {
       scheduleReanalyze();
     });
   }
-  editor.setModel(model);
+  return model;
+}
+
+function openFile(path) {
+  if (!(path in srcMap)) return;
+  activePath = path;
+  const i = mru.indexOf(path);
+  if (i >= 0) mru.splice(i, 1);
+  mru.unshift(path);
+  editor.setModel(modelFor(path));
   els.editorHead.textContent = path;
   refreshAllMarkers();
   redrawTree();
@@ -720,7 +729,55 @@ async function boot() {
       });
       if (!info || info.error) return null;
       const nil = info.nilable ? "\n\nMay be `nil`." : "";
-      return { contents: [{ value: "```ruby\n" + info.display + "\n```" + nil }] };
+      const note = info.note ? `\n\n${info.note}.` : "";
+      return { contents: [{ value: "```ruby\n" + info.display + "\n```" + nil + note }] };
+    },
+  });
+
+  // Go to definition (F12 / ⌘-click) and find references (⇧F12): the
+  // LSP's answers, from the same snapshot. A location is the analyzed
+  // text's own; the model for its file is created on demand so Monaco
+  // can open it.
+  const toLocation = (loc) => {
+    if (!loc || !(loc.path in srcMap)) return null;
+    const model = modelFor(loc.path);
+    return {
+      uri: model.uri,
+      range: new monaco.Range(loc.line + 1, loc.character + 1, loc.end_line + 1, loc.end_character + 1),
+    };
+  };
+  monaco.languages.registerDefinitionProvider(["ruby", "html"], {
+    async provideDefinition(model, position) {
+      const path = modelPath.get(model);
+      if (!path) return null;
+      const loc = await rpc("definition", {
+        path, line: position.lineNumber - 1, character: position.column - 1,
+      });
+      if (!loc || loc.error) return null;
+      return toLocation(loc);
+    },
+  });
+  monaco.languages.registerReferenceProvider(["ruby", "html"], {
+    async provideReferences(model, position) {
+      const path = modelPath.get(model);
+      if (!path) return [];
+      const locs = await rpc("references", {
+        path, line: position.lineNumber - 1, character: position.column - 1,
+      });
+      if (!Array.isArray(locs)) return [];
+      return locs.map(toLocation).filter(Boolean);
+    },
+  });
+  // Monaco opens a definition in another file through the editor
+  // opener; the tree/editor state follows the same path as a tree click.
+  monaco.editor.registerEditorOpener({
+    openCodeEditor(_source, resource, selectionOrPosition) {
+      const hit = [...models.entries()].find(([, m]) => m.uri.toString() === resource.toString());
+      if (!hit) return false;
+      const line = selectionOrPosition?.startLineNumber ?? selectionOrPosition?.lineNumber;
+      goTo(hit[0], line);
+      if (selectionOrPosition && "startColumn" in selectionOrPosition) editor.setSelection(selectionOrPosition);
+      return true;
     },
   });
 

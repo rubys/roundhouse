@@ -106,6 +106,26 @@ if (MASTODON) {
   }, ctrl);
   check("type_at @account → Account", typeAt?.display === "Account", JSON.stringify(typeAt));
 
+  // 2b. definition / references: the LSP's answers through the wasm.
+  // `@status` in show reads back to its assignment in set_status
+  // (a write), and references include reads and writes across the class.
+  const defRefs = await page.evaluate(async (ctrl) => {
+    const text = window.__ide.srcMap[ctrl];
+    const idx = text.indexOf("@status.") + 1;
+    const line = text.slice(0, idx).split("\n").length - 1;
+    const ch = idx - text.lastIndexOf("\n", idx - 1) - 1;
+    const def = await window.__ide.rpc("definition", { path: ctrl, line, character: ch });
+    const refs = await window.__ide.rpc("references", { path: ctrl, line, character: ch });
+    return { def, refs: Array.isArray(refs) ? refs.length : -1,
+      writes: Array.isArray(refs) ? refs.filter((r) => r.write).length : -1 };
+  }, ctrl);
+  check("definition of @status is its assignment",
+    defRefs.def && defRefs.def.path === ctrl && defRefs.def.write === true,
+    JSON.stringify(defRefs.def));
+  check("references to @status span reads and writes",
+    defRefs.refs > 1 && defRefs.writes >= 1 && defRefs.writes < defRefs.refs,
+    `${defRefs.refs} refs, ${defRefs.writes} writes`);
+
   // 3. completion on `@status.` typed into the controller.
   const cands = await page.evaluate(async (ctrl) => {
     const orig = window.__ide.srcMap[ctrl];

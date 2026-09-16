@@ -51,6 +51,15 @@ export async function loadAnalyzer(wasmBytes, wasiOpts = {}) {
     typeAt(path, line, character) {
       return call("type_at", { path, line, character });
     },
+    // The write that binds the variable at a position, or the method a
+    // typed call resolves to — a location or null.
+    definition(path, line, character) {
+      return call("definition", { path, line, character });
+    },
+    // Every read and write of the variable / typed call at a position.
+    references(path, line, character) {
+      return call("references", { path, line, character });
+    },
     relatedFiles(path) {
       return call("related_files", { path });
     },

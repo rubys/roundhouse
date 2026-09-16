@@ -15,6 +15,8 @@ const OP_EXPORT = {
   analyze: "analyze_app",
   complete: "complete",
   typeAt: "type_at",
+  definition: "definition",
+  references: "references",
   related: "related_files",
   traceroute: "traceroute",
   traceTargets: "trace_targets",

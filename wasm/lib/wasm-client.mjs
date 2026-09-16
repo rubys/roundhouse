@@ -95,6 +95,8 @@ export function createClient({
     analyze: (src) => call("analyze", { src }),
     complete: (path, text, line, character) => call("complete", { path, text, line, character }),
     typeAt: (path, line, character) => call("typeAt", { path, line, character }),
+    definition: (path, line, character) => call("definition", { path, line, character }),
+    references: (path, line, character) => call("references", { path, line, character }),
     related: (path) => call("related", { path }),
     traceroute: (query) => call("traceroute", { query }),
     traceTargets: () => call("traceTargets", {}),
