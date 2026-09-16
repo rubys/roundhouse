@@ -90,6 +90,9 @@ require "action_controller/cookies"
 require "action_controller/message_verifier"
 # …and what it keys off: `Rails.application.secret_key_base`.
 require "rails"
+# `rate_limit`'s counter (rate_limiter_test.rb): over `Rails.cache`,
+# required from here for the same reason cookies is.
+require "action_controller/rate_limiter"
 # The keyed digest the verifier signs with. `message_digest` has no
 # `runtime/ruby` half at all: it is a two-implementation split (spinel
 # intrinsics vs OpenSSL) that the emit resolves by RENAMING the CRuby

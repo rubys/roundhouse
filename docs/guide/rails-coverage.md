@@ -52,7 +52,7 @@ reaches the others as their emitters and runtimes catch up.
 
 | | Blog tier | Campfire tier |
 |---|---|---|
-| Actions | The seven RESTful actions and any other; implicit render | + `head`, `send_file`, `rescue_from` |
+| Actions | The seven RESTful actions and any other; implicit render | + `head`, `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails) |
 | Filters | `before_action` with `only:`/`except:`, ivar flow into views | + `around_action`, `after_action`, `if:`/`unless:` guards (symbol and lambda), `skip_before_action`, filters from concerns |
 | Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
@@ -103,13 +103,12 @@ does not emit:
 - **Ruby, not Rails**: refinements, `ObjectSpace`, `Fiber`/`Thread`
   used directly by the app, `binding`, `Method` objects.
 
-Most of these are reported by name and location in the survey report,
-so the answer for a given app is a list, not a guess. One class is not
-yet: a class-body macro in a controller that roundhouse does not
-recognize (Campfire's `rate_limit`, for instance) is currently dropped
-without a survey entry, and the action it guarded runs unguarded in
-the output. Until that is reported, diff the class bodies of a
-controller you care about against the emit.
+Each of these is reported by name and location in the survey report,
+so the answer for a given app is a list, not a guess. That includes a
+class-body macro in a controller that roundhouse does not recognize
+(Lobsters' `caches_page`, say): it is listed as a survey gap rather
+than dropped in silence, because its effect — a guard, a filter, a
+header — would otherwise vanish from the output with no trace.
 
 ## Deliberate divergences
 
@@ -126,3 +125,17 @@ small results only; `increment!` is a read-modify-write.
 
 Anything not in that section that differs from Rails is a bug, and the
 [compare oracle](verifying.md) is how to demonstrate it.
+
+## Security posture
+
+One divergence is worth stating on its own, because it decides whether
+an emitted app can face the public internet today: **CSRF tokens are
+issued but not verified.** Forms carry an `authenticity_token` and
+pages carry the meta tags, exactly as Rails renders them — the compare
+oracle requires it — but no lane checks the token on the request, so
+`protect_from_forgery` and `skip_forgery_protection` are both no-ops.
+Sessions and signed cookies are real (HMAC, Rails-compatible), as is
+`has_secure_password`; what is missing is the one check that stops a
+third-party page from submitting a form on a signed-in user's behalf.
+Until it lands, put an emitted app behind something you trust, or
+treat it as the demo it is.

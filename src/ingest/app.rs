@@ -1148,6 +1148,7 @@ end
     // concern (before the splice carries both to the includer) or on
     // the controller that called it directly.
     super::allow_browser::lower_allow_browser(&mut app);
+    super::rate_limit::lower_rate_limit(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
@@ -1155,6 +1156,9 @@ end
     // After both: the chain is complete, so a repeated declaration can
     // find the one it replaces.
     dedup_repeated_filters(&mut app);
+    // After everything that consumes a class-body call: what is still
+    // an unrecognized macro is reported, not dropped in silence.
+    report_unrecognized_controller_macros(&app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
@@ -1882,6 +1886,75 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
                 continue;
             }
             qualify(&mut method.body);
+        }
+    }
+}
+
+/// Class-body calls the pipeline consumes from an `Unknown` item
+/// without turning it into a typed item: the concern splice reads
+/// `include`, the ingester's side channel reads `layout`, the lowering
+/// reads `helper_method` and `rescue_from`, and the runtime's
+/// dispatcher protects every non-GET request whether or not
+/// `protect_from_forgery` is written. Visibility keywords are markers.
+const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
+    "include",
+    "extend",
+    "layout",
+    "helper_method",
+    "rescue_from",
+    "private",
+    "protected",
+    "public",
+    // The generator's own `allow_browser versions: :modern` on
+    // ApplicationController: recognized, held back from the emit per
+    // target until every runtime's request answers `user_agent` — see
+    // `ingest::allow_browser`'s module doc. A per-target decision, not
+    // a coverage gap.
+    "allow_browser",
+    // Conditional GET: the runtime answers every request fresh, a
+    // decision recorded in docs/pipeline/runtime.md ("Conditional GET
+    // is ALWAYS FRESH"), so the importmap ETag macro has nothing to do.
+    "stale_when_importmap_changes",
+    // CSRF: the runtime issues tokens but does not verify them on the
+    // request, on every lane — the security posture the guide states —
+    // so both the default and its opt-out are no-ops today. When
+    // verification lands, both leave this list.
+    "protect_from_forgery",
+    "skip_forgery_protection",
+];
+
+/// A receiverless, blockless call left in a controller's class body
+/// after every consumer has run is a macro roundhouse does not
+/// recognize — `rate_limit`, say. Its effect (a guard, a filter, a
+/// header) would otherwise vanish from the output with no trace, which
+/// is the one thing the survey exists to prevent: record it so
+/// `check --continue` lists it and the coverage note names it. Filters
+/// were typed at ingest, concern-exported macros were expanded above,
+/// and block-form filters carry a block, so none of those reach here.
+fn report_unrecognized_controller_macros(app: &App) {
+    use crate::ControllerBodyItem;
+    use crate::expr::ExprNode;
+    if !survey::is_active() {
+        return;
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, block: None, .. } = &*expr.node else {
+                continue;
+            };
+            if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
+                continue;
+            }
+            let file = super::sources::path_of(expr.span.file)
+                .unwrap_or_else(|| controller.name.0.as_str().to_string());
+            survey::record(&IngestError::Unsupported {
+                file,
+                message: format!(
+                    "controller class-body macro not recognized: `{}` (its effect is dropped from the output)",
+                    method.as_str()
+                ),
+            });
         }
     }
 }

@@ -173,6 +173,7 @@ require_relative "../runtime/message_digest"
 require_relative "../runtime/rails"
 require_relative "../runtime/action_controller/message_verifier"
 require_relative "../runtime/action_controller/cookies"
+require_relative "../runtime/action_controller/rate_limiter"
 
 class TestBase
   def initialize
@@ -355,6 +356,18 @@ fn ac_cookies_test_passes_under_spinel() {
     build_and_run(
         Path::new("runtime/ruby/test/action_controller/cookies_test.rb"),
         "ac_cookies",
+    );
+}
+
+/// `rate_limit`'s counter (`ActionController::RateLimiter` over
+/// `Rails::Cache#increment_str`). Ruby-family lanes only: the store is
+/// the shared runtime's, which the strict-target runtimes do not stage.
+#[test]
+#[ignore]
+fn ac_rate_limiter_test_passes_under_spinel() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/rate_limiter_test.rb"),
+        "ac_rate_limiter",
     );
 }
 

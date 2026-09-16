@@ -42,6 +42,7 @@ module Rails
     # as a miss would re-render it on every request forever.
     def read_str: (String key) -> String?
     def write_str: (String key, String value, Integer ttl) -> String
+    def increment_str: (String key, Integer ttl) -> Integer
     def forget: (String k) -> void
     def read: (untyped key) -> untyped
     def write: (untyped key, untyped value) -> untyped

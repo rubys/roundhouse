@@ -26,3 +26,6 @@ require_relative "action_controller/pagination"
 # `allow_browser`'s gate — the parsed User-Agent against the app's
 # version floors. Called from the filter the lowering synthesizes.
 require_relative "action_controller/browser_blocker"
+# `rate_limit`'s counter — the window's count against its cap. Called
+# from the filter method the lowering synthesizes.
+require_relative "action_controller/rate_limiter"

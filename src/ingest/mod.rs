@@ -27,6 +27,7 @@ pub mod current_attributes;
 pub mod delegate;
 pub mod model;
 pub mod prism;
+pub mod rate_limit;
 pub mod roda_app;
 pub mod routes;
 pub mod schema;

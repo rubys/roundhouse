@@ -79,6 +79,18 @@ pub fn file_id(path: &str) -> FileId {
     })
 }
 
+/// The registered path for a `FileId`; `None` for the synthetic
+/// sentinel or an id from another ingest.
+pub fn path_of(id: FileId) -> Option<String> {
+    SOURCES.with(|s| {
+        let reg = s.borrow();
+        (id.0 as usize)
+            .checked_sub(1)
+            .and_then(|i| reg.files.get(i))
+            .map(|f| f.path.clone())
+    })
+}
+
 /// Move the registered files out (ids stay valid as indices + 1) and
 /// clear the registry.
 pub fn drain() -> Vec<SourceFile> {

@@ -249,6 +249,26 @@ module Rails
       value
     end
 
+    # A counter in the typed store: the value is the count as decimal
+    # text, so the store stays `String → String` on every target. The
+    # first increment in a window starts the window — the entry is
+    # written with `ttl` — and later increments keep that expiry, which
+    # is what `rate_limit`'s `within:` means (MemoryStore#increment does
+    # the same). A whole-store flush at the cap resets every window;
+    # that is the bound's shape, not a cost anything pays today.
+    def increment_str(key, ttl)
+      k = key.to_s
+      hit = read_str(k)
+      if hit.nil?
+        write_str(k, "1", ttl)
+        1
+      else
+        n = hit.to_i + 1
+        @entries[k] = n.to_s
+        n
+      end
+    end
+
     # Drop one key. Reached on an EXPIRY and on an explicit `delete`.
     def forget(k)
       @entries.delete(k)

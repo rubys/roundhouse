@@ -24,15 +24,21 @@ Rails tutorial's sample app and ONCE Campfire; the store and the blog
 are also free of warnings (Campfire carries 423 on the coverage
 ledger, none of them findings). Mastodon, the stress case: 674 errors,
 138 ingest gaps of 20 kinds, 61 gems the analyzer does not model — the
-honest denominator for a large app outside the covered surface. Known
-gap: an unrecognized class-body macro in a controller (Campfire's
-`rate_limit`) is dropped without a survey entry.
+honest denominator for a large app outside the covered surface. A
+controller class-body macro the analyzer does not recognize is now a
+survey entry rather than a silent drop; `rate_limit` — which the store
+uses twice — is lowered to a real filter over the app's cache.
 
 **Transpile.** Twelve targets pass the DOM-equivalence compare
 against live Rails on the blog fixture on every push: rust, go,
 typescript, crystal, elixir, kotlin, swift, python, csharp, ruby,
 jruby, spinel. Each emitted project's README is executed verbatim in
-CI (build, seed, test, browser e2e).
+CI (build, seed, test, browser e2e). Known gaps on the store as a
+*transpile* input: one type error in Action Text's generated
+attachment partial (`ActionText::Attachment#caption`), and its tests
+use `User.take`, which the emitted runtime does not answer yet.
+**Security:** CSRF tokens are issued but not verified on any lane
+([details](docs/guide/rails-coverage.md#security-posture)).
 
 **Compile.** The Spinel lane passes the compare, the cable-frame
 compare and Campfire's own suite (275 of 288 tests, 47 of 54 files

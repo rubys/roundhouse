@@ -115,6 +115,35 @@ module Rails
       value
     end
 
+    # The sharded twin of the shared `increment_str`: read-modify-write
+    # under the shard's lock, so two workers counting the same key do
+    # not both see the same old value. The expiry is kept from the
+    # first write in the window, as the shared version's note says.
+    def increment_str(key, ttl)
+      k = key.to_s
+      s = shard_of(k)
+      entries = SHARD_ENTRIES[s]
+      expires = SHARD_EXPIRES[s]
+      n = 0
+      SHARD_LOCKS[s].synchronize do
+        hit = entries[k]
+        due = expires[k]
+        if hit.nil? || due.nil? || (due != 0 && due <= Time.now.to_i)
+          n = 1
+          entries[k] = "1"
+          expires[k] = ttl > 0 ? Time.now.to_i + ttl : 0
+          if entries.size > SHARD_MAX
+            entries.clear
+            expires.clear
+          end
+        else
+          n = hit.to_i + 1
+          entries[k] = n.to_s
+        end
+      end
+      n
+    end
+
     def forget(k)
       s = shard_of(k)
       SHARD_LOCKS[s].synchronize do
