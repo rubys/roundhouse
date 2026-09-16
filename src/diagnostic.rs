@@ -37,7 +37,7 @@ pub struct Diagnostic {
 /// may *elevate* a warning to an error at emit time when the target
 /// can't accept the gradual escape (Rust elevating `GradualUntyped`
 /// is the canonical case — see `ty.rs::Ty::Untyped`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Tool-coverage note, not a defect in the user's code. Produced

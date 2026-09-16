@@ -25,6 +25,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the roundhouse binary (run as `roundhouse lsp`) or to roundhouse-lsp. Empty: use `roundhouse` on PATH, else the repo's target/release/roundhouse-lsp."
+        },
+        "roundhouse.warnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also publish warning-level diagnostics (the analyzer's `gradual_untyped` / `unresolved_type` ledger — hundreds on a real app). Off: errors, syntax errors and N+1 findings only."
         }
       }
     }

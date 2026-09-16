@@ -51,9 +51,20 @@ thread_local! {
 pub fn scope<T>(f: impl FnOnce() -> T) -> (T, Vec<Diagnostic>) {
     let prev = PARSE_DIAGS.with(|c| c.borrow_mut().replace(Vec::new()));
     let result = f();
-    let collected = PARSE_DIAGS.with(|c| {
+    let mut collected = PARSE_DIAGS.with(|c| {
         std::mem::replace(&mut *c.borrow_mut(), prev).unwrap_or_default()
     });
+    // A file can be parsed more than once — a classification pre-pass
+    // before it is registered, then the real ingest — so the same
+    // syntax error arrives message-only and then located. Keep the
+    // located copy.
+    let unlocated = |d: &Diagnostic| d.span.file.0 == 0;
+    let located: std::collections::HashSet<String> = collected
+        .iter()
+        .filter(|d| !unlocated(d))
+        .map(|d| d.message.clone())
+        .collect();
+    collected.retain(|d| !unlocated(d) || !located.contains(&d.message));
     (result, collected)
 }
 

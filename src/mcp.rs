@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 use crate::analyze::{diagnose_with_coverage, Analyzer};
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 use crate::ide;
 use crate::ingest::{ingest_app, survey, IngestError};
 use crate::project::{self, BuildTarget};
@@ -138,6 +138,8 @@ impl Server {
             "references" => self.tool_references(&args),
             "diagnostics" => self.tool_diagnostics(&args),
             "traceroute" => self.tool_traceroute(&args),
+            "trace_targets" => self.tool_trace_targets(&args),
+            "related_files" => self.tool_related_files(&args),
             "wont_lower" => self.tool_wont_lower(&args),
             other => Err(format!("unknown tool: {other}")),
         };
@@ -241,6 +243,19 @@ impl Server {
 
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {
         let path_filter = args.get("path").and_then(|v| v.as_str());
+        // `severity` is a floor: "error" = errors only, "warning" = errors
+        // + warnings, "info" (the default) = everything including
+        // gap-attributed notes.
+        let min_severity = match args.get("severity").and_then(|v| v.as_str()) {
+            None | Some("info") => Severity::Info,
+            Some("warning") => Severity::Warning,
+            Some("error") => Severity::Error,
+            Some(other) => {
+                return Err(format!("unknown severity `{other}`; valid: error, warning, info"))
+            }
+        };
+        let code_filter = args.get("code").and_then(|v| v.as_str());
+        let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
         let (app, parse_diags, gaps, _) = self.analyze()?;
         let (mut diags, preload_cov) = diagnose_with_coverage(&app);
         // Diagnostics shadowing a recorded ingest gap become `note[...]`
@@ -250,15 +265,27 @@ impl Server {
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
         diags.extend(parse_diags);
 
-        let rendered: Vec<String> = diags
+        let matching: Vec<&Diagnostic> = diags
             .iter()
             .filter(|d| match path_filter {
                 Some(p) => ide::source(&app, d.span.file)
                     .is_some_and(|s| s.path.ends_with(p) || p.ends_with(s.path.as_str())),
                 None => true,
             })
+            .filter(|d| d.severity >= min_severity)
+            .filter(|d| code_filter.is_none_or(|c| d.code() == c))
+            .collect();
+        let total = matching.len();
+        let rendered: Vec<String> = matching
+            .iter()
+            .take(limit.unwrap_or(usize::MAX))
             .map(|d| d.render(&app.sources))
             .collect();
+        // What the floor hid, by code — so "3 diagnostics" under
+        // `severity: error` never reads as the whole ledger.
+        let hidden = count_by_code(
+            diags.iter().filter(|d| d.severity < min_severity),
+        );
 
         // Ingest gaps recovered under survey mode: constructs/templates the
         // analyzer skipped (so the result above is best-effort, not a clean
@@ -279,7 +306,23 @@ impl Server {
 
         let mut sections = Vec::new();
         if !rendered.is_empty() {
-            sections.push(format!("{} diagnostic(s):\n{}", rendered.len(), rendered.join("\n")));
+            let shown = rendered.len();
+            let head = if shown < total {
+                format!("{total} diagnostic(s), first {shown} (raise `limit` for the rest):")
+            } else {
+                format!("{total} diagnostic(s):")
+            };
+            sections.push(format!("{head}\n{}", rendered.join("\n")));
+        } else if gap_lines.is_empty() {
+            sections.push(match (min_severity, code_filter) {
+                (Severity::Info, None) => "No diagnostics — the app type-checks clean.".to_string(),
+                (_, Some(c)) => format!("No `{c}` diagnostics."),
+                (Severity::Error, None) => "No errors.".to_string(),
+                (Severity::Warning, None) => "No errors or warnings.".to_string(),
+            });
+        }
+        if !hidden.is_empty() {
+            sections.push(format!("below the severity floor, not shown: {hidden}"));
         }
         if !gap_lines.is_empty() {
             sections.push(format!(
@@ -287,10 +330,6 @@ impl Server {
                 gap_lines.len(),
                 gap_lines.join("\n")
             ));
-        }
-
-        if sections.is_empty() {
-            sections.push("No diagnostics — the app type-checks clean.".to_string());
         }
 
         // The missing_preload denominator (#64): a clean N+1 report is
@@ -326,6 +365,71 @@ impl Server {
         };
         let report = ide::trace_gap_report(&app, &trace, &gaps, Some(&analyzer));
         serde_json::to_string_pretty(&ide::trace_json(&trace, &report)).map_err(|e| e.to_string())
+    }
+
+    /// Everything `traceroute` accepts, one per line: the human label
+    /// (route form when routed) and the canonical query. An agent that
+    /// can't name the action it wants picks from here rather than
+    /// guessing at `Controller#action` spellings.
+    fn tool_trace_targets(&self, args: &Value) -> Result<String, String> {
+        let controller_filter = args.get("controller").and_then(|v| v.as_str());
+        let (app, _, _, _) = self.analyze()?;
+        let targets: Vec<ide::TraceTarget> = ide::trace_targets(&app)
+            .into_iter()
+            .filter(|t| controller_filter.is_none_or(|c| t.controller.contains(c)))
+            .collect();
+        if targets.is_empty() {
+            return Ok(match controller_filter {
+                Some(c) => format!("No traceable actions on a controller matching `{c}`."),
+                None => "No traceable actions — no routes and no rendering actions.".to_string(),
+            });
+        }
+        let lines: Vec<String> = targets
+            .iter()
+            .map(|t| {
+                if t.label == t.query {
+                    format!("{} (unrouted; renders its template)", t.query)
+                } else {
+                    t.label.clone()
+                }
+            })
+            .collect();
+        Ok(format!(
+            "{} traceable action(s) — pass the `Controller#action` part to `traceroute`:\n{}",
+            targets.len(),
+            lines.join("\n")
+        ))
+    }
+
+    /// Files connected to `path` by analyzed edges: the views a
+    /// controller feeds, the partials a view renders and the views
+    /// that render it, a concern's includers, the model twin.
+    fn tool_related_files(&self, args: &Value) -> Result<String, String> {
+        let path = args.get("path").and_then(|v| v.as_str()).ok_or("missing `path`")?;
+        let (app, _, _, _) = self.analyze()?;
+        let path = resolve_path(&app, path).ok_or_else(|| format!("unknown file: {path}"))?;
+        let related = ide::related_files(&app, &path);
+        if related.is_empty() {
+            return Ok(format!(
+                "No related files — `{path}` is not a controller, model, view or concern the analysis connects."
+            ));
+        }
+        let lines: Vec<String> = related
+            .iter()
+            .map(|r| {
+                let kind = match r.kind {
+                    ide::RelatedKind::View => "view it feeds",
+                    ide::RelatedKind::Partial => "partial it renders",
+                    ide::RelatedKind::Renderer => "view rendering it",
+                    ide::RelatedKind::Controller => "controller feeding it",
+                    ide::RelatedKind::Concern => "concern it includes",
+                    ide::RelatedKind::Includer => "class including it",
+                    ide::RelatedKind::Model => "model twin (by convention)",
+                };
+                format!("{} — {kind}: {}", r.path, r.label)
+            })
+            .collect();
+        Ok(format!("{} related file(s):\n{}", related.len(), lines.join("\n")))
     }
 
     fn tool_wont_lower(&self, args: &Value) -> Result<String, String> {
@@ -381,6 +485,29 @@ fn position_args(args: &Value) -> Result<(String, ide::Position), String> {
     Ok((path, pos))
 }
 
+/// The ingested path for `path` as the agent wrote it — app-relative
+/// or absolute, matched the way `diagnostics`' path filter matches.
+fn resolve_path(app: &App, path: &str) -> Option<String> {
+    if ide::file_id(app, path).is_some() {
+        return Some(path.to_string());
+    }
+    app.sources
+        .iter()
+        .find(|s| s.path.ends_with(path) || path.ends_with(s.path.as_str()))
+        .map(|s| s.path.clone())
+}
+
+/// `code×n` pairs, descending by count, for the hidden-by-floor line.
+fn count_by_code<'a>(diags: impl Iterator<Item = &'a Diagnostic>) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    for d in diags {
+        *counts.entry(d.code()).or_default() += 1;
+    }
+    let mut pairs: Vec<(&str, usize)> = counts.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    pairs.iter().map(|(c, n)| format!("{n} {c}")).collect::<Vec<_>>().join(", ")
+}
+
 fn transpile_target_names() -> String {
     BuildTarget::TRANSPILE.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
 }
@@ -427,11 +554,14 @@ fn tools_list() -> Value {
             },
             {
                 "name": "diagnostics",
-                "description": "Type/analysis problems across the app (unresolved ivars, failed method dispatch, incompatible operators, syntax errors, static N+1 missing-preload warnings). Ends with the missing_preload coverage triple (checked / findings / unverifiable) so a clean N+1 report states its denominator. Optionally filter to one file.",
+                "description": "Type/analysis problems across the app: errors (unresolved ivars, failed method dispatch, incompatible operators, syntax errors) and warnings (static N+1 `missing_preload` findings with the `.includes` fix; the `gradual_untyped` / `unresolved_type` coverage ledger, which runs to hundreds on a real app). Start with `severity: \"error\"` or `code: \"missing_preload\"` and a `limit` — the unfiltered ledger of a large app is thousands of lines. Ends with the missing_preload coverage triple (checked / findings / unverifiable) so a clean N+1 report states its denominator.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Optional: limit to this file." }
+                        "path": { "type": "string", "description": "Optional: limit to this file (app-relative or absolute)." },
+                        "severity": { "type": "string", "enum": ["error", "warning", "info"], "description": "Optional floor: \"error\" = errors only; \"warning\" = errors and warnings; \"info\" (default) = everything, including gap-attributed notes. What the floor hides is summarized by code." },
+                        "code": { "type": "string", "description": "Optional: only this diagnostic code — ivar_unresolved, send_dispatch_failed, incompatible_binop, gradual_untyped, unresolved_type, missing_preload, parse, unsupported." },
+                        "limit": { "type": "integer", "description": "Optional: at most this many diagnostics (the total is still reported)." }
                     }
                 },
             },
@@ -444,6 +574,27 @@ fn tools_list() -> Value {
                         "query": { "type": "string", "description": "\"Controller#action\" (StatusesController#show) or \"[VERB ]/path\" (GET /articles/:id)." }
                     },
                     "required": ["query"]
+                },
+            },
+            {
+                "name": "trace_targets",
+                "description": "Every entry point `traceroute` can trace — each concrete route (`GET /rooms/:id → RoomsController#show`) plus unrouted actions that render a template — so a trace query is picked from a list, not guessed. Optionally narrow to controllers whose name contains a string.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "controller": { "type": "string", "description": "Optional: only controllers whose name contains this (e.g. \"Rooms\")." }
+                    }
+                },
+            },
+            {
+                "name": "related_files",
+                "description": "Files connected to a source file by analyzed edges, not by naming convention: the views a controller's actions feed, the partials a view renders and the views that render it, the controllers feeding a view, a concern's includers (and a class's concerns), plus the conventional controller/model twin. Answers \"what does this action render\" / \"who renders this partial\" / \"where is this concern used\" without grepping.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Source file path (app-relative or absolute)." }
+                    },
+                    "required": ["path"]
                 },
             },
             {
@@ -521,6 +672,59 @@ mod tests {
         assert_eq!(v["gaps"].as_array().map(|g| g.len()), Some(0));
     }
 
+    /// An N+1 inside a private helper the action calls is the action's:
+    /// the finding rides on the action hop, not nowhere.
+    #[test]
+    fn traceroute_attributes_a_helper_n_plus_one_to_the_action() {
+        let dir = std::env::temp_dir().join(format!("rh-mcp-helper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        let ctl = dir.join("app/controllers/articles_controller.rb");
+        let src = std::fs::read_to_string(&ctl).unwrap();
+        let src = src
+            .replace("  def index\n", "  def index\n    comment_counts\n")
+            .replace(
+                "  private\n",
+                "  private\n    def comment_counts\n      Article.all.each { |a| a.comments.size }\n    end\n\n",
+            );
+        assert!(src.contains("def comment_counts"), "fixture shape changed: {src}");
+        std::fs::write(&ctl, src).unwrap();
+        let resp = call(
+            &Server { root: dir.clone() },
+            "traceroute",
+            json!({ "query": "ArticlesController#index" }),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let v: Value = serde_json::from_str(&text_of(&resp)).expect("tool returns JSON");
+        let action = v["hops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["kind"] == "action")
+            .expect("action hop");
+        assert_eq!(action["n_plus_one"][0]["association"], "comments", "{action}");
+    }
+
+    /// A redirect-only action has no template: the chain ends in a
+    /// `response` hop, not a phantom `articles/destroy` view.
+    #[test]
+    fn traceroute_ends_a_redirecting_action_in_a_response_hop() {
+        let text = text_of(&call(&server(), "traceroute", json!({ "query": "ArticlesController#destroy" })));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let kinds: Vec<&str> = v["hops"].as_array().unwrap().iter().map(|h| h["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds.last(), Some(&"response"), "{kinds:?}");
+        assert!(!kinds.contains(&"view") && !kinds.contains(&"layout"), "{kinds:?}");
+        assert_eq!(v["hops"].as_array().unwrap().last().unwrap()["detail"], "redirect · head no_content");
+
+        // A scaffold `create` renders per format inside `respond_to`
+        // (which ingest leaves `Inferred`): every terminal is listed.
+        let text = text_of(&call(&server(), "traceroute", json!({ "query": "ArticlesController#create" })));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let last = v["hops"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["kind"], "response", "{text}");
+        assert_eq!(last["detail"], "redirect · render show · render new · render json");
+    }
+
     #[test]
     fn traceroute_misses_politely() {
         let resp = call(&server(), "traceroute", json!({ "query": "NopeController#zap" }));
@@ -537,9 +741,87 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        for tool in ["type_at", "can_be_nil", "references", "diagnostics", "traceroute", "wont_lower"] {
+        for tool in [
+            "type_at",
+            "can_be_nil",
+            "references",
+            "diagnostics",
+            "traceroute",
+            "trace_targets",
+            "related_files",
+            "wont_lower",
+        ] {
             assert!(names.contains(&tool), "missing tool {tool}");
         }
+    }
+
+    #[test]
+    fn trace_targets_lists_routes_and_narrows_by_controller() {
+        let text = text_of(&call(&server(), "trace_targets", json!({})));
+        assert!(text.contains("GET /articles/:id → ArticlesController#show"), "{text}");
+        assert!(text.contains("POST /articles/:article_id/comments → CommentsController#create"), "{text}");
+        let text = text_of(&call(&server(), "trace_targets", json!({ "controller": "Comments" })));
+        assert!(text.contains("CommentsController#create"), "{text}");
+        assert!(!text.contains("ArticlesController"), "narrowed out: {text}");
+        let text = text_of(&call(&server(), "trace_targets", json!({ "controller": "Nope" })));
+        assert!(text.starts_with("No traceable actions"), "{text}");
+    }
+
+    #[test]
+    fn related_files_follows_analyzed_edges_from_a_relative_path() {
+        let text = text_of(&call(
+            &server(),
+            "related_files",
+            json!({ "path": "app/controllers/articles_controller.rb" }),
+        ));
+        assert!(text.contains("app/views/articles/show.html.erb — view it feeds: articles/show"), "{text}");
+        assert!(text.contains("app/models/article.rb — model twin (by convention): Article"), "{text}");
+        let text = text_of(&call(
+            &server(),
+            "related_files",
+            json!({ "path": "app/views/articles/show.html.erb" }),
+        ));
+        assert!(text.contains("controller feeding it: ArticlesController"), "{text}");
+        let resp = call(&server(), "related_files", json!({ "path": "app/nowhere.rb" }));
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// `severity` is a floor whose hidden remainder is summarized by
+    /// code; `code` selects one kind; `limit` truncates but reports the
+    /// total. Witnessed on a copy of real-blog carrying one N+1 (a
+    /// warning) and one syntax error (three parse errors, each located
+    /// once — the model pre-pass used to double them).
+    #[test]
+    fn diagnostics_filters_by_severity_code_and_limit() {
+        let dir = std::env::temp_dir().join(format!("rh-mcp-filters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        let index = dir.join("app/views/articles/index.html.erb");
+        let mut view = std::fs::read_to_string(&index).unwrap();
+        view.push_str("<% Article.all.each do |article| %><%= article.comments.size %><% end %>\n");
+        std::fs::write(&index, view).unwrap();
+        std::fs::write(dir.join("app/models/broken.rb"), "class Broken\n  def x(\nend\n").unwrap();
+        let s = Server { root: dir.clone() };
+
+        let all = text_of(&call(&s, "diagnostics", json!({})));
+        let errors = text_of(&call(&s, "diagnostics", json!({ "severity": "error" })));
+        let preload = text_of(&call(&s, "diagnostics", json!({ "code": "missing_preload" })));
+        let limited = text_of(&call(&s, "diagnostics", json!({ "severity": "error", "limit": 1 })));
+        let none = text_of(&call(&s, "diagnostics", json!({ "code": "ivar_unresolved" })));
+        let bad = call(&s, "diagnostics", json!({ "severity": "loud" }));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(all.starts_with("4 diagnostic(s):"), "{all}");
+        assert_eq!(all.matches("error[parse]").count(), 3, "each parse error once: {all}");
+        assert!(errors.starts_with("3 diagnostic(s):"), "{errors}");
+        assert!(!errors.contains("missing_preload]"), "{errors}");
+        assert!(errors.contains("below the severity floor, not shown: 1 missing_preload"), "{errors}");
+        assert!(preload.starts_with("1 diagnostic(s):"), "{preload}");
+        assert!(preload.contains("add `.includes(:comments)`"), "{preload}");
+        assert!(limited.starts_with("3 diagnostic(s), first 1 (raise `limit` for the rest):"), "{limited}");
+        assert_eq!(limited.matches("error[parse]").count(), 1, "{limited}");
+        assert!(none.starts_with("No `ivar_unresolved` diagnostics."), "{none}");
+        assert_eq!(bad["result"]["isError"], true);
     }
 
     #[test]

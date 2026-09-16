@@ -510,7 +510,7 @@ fn collect_template_renders(expr: &Expr, out: &mut Vec<Symbol>) {
 /// `render template: "x"`, `render action: :y`. Returns `None` for the
 /// non-template forms (`render json:/plain:/partial:/inline:/…`,
 /// `render @record`, bare `render`) so they keep convention semantics.
-fn render_template_name(args: &[Expr]) -> Option<Symbol> {
+pub fn render_template_name(args: &[Expr]) -> Option<Symbol> {
     let first = args.first()?;
     match &*first.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),

@@ -3,7 +3,8 @@
 A minimal client for exercising [`roundhouse-lsp`](../../src/bin/roundhouse-lsp.rs)
 under VS Code's F5 dev loop. It spawns the locally-built binary and attaches
 it to Ruby files, so you get inferred-type hovers, inlay hints, nil-safety
-diagnostics, find-references, and go-to-definition over a whole Rails app.
+diagnostics, find-references, go-to-definition, and a request-trace
+CodeLens above every controller action over a whole Rails app.
 
 The server is found in this order: the `roundhouse.serverPath` setting;
 a `roundhouse` binary on PATH (run as `roundhouse lsp` — the multi-call
@@ -49,6 +50,20 @@ cargo build --release --bin roundhouse-lsp
 Then press **Cmd+R** in the Extension Development Host window. That reloads the
 extension, which respawns the binary — so you're testing the fresh build. No
 copy, no repackage. (Editing `extension.js` is the same: Cmd+R picks it up.)
+
+## What you see
+
+- **Diagnostics** — errors, syntax errors and static N+1 findings, in
+  the Problems panel. The analyzer's warning ledger (`gradual_untyped`,
+  `unresolved_type`; hundreds on a real app) is off by default: turn on
+  `roundhouse.warnings` to publish it too. The setting takes effect on
+  the next analysis pass, no reload.
+- **Trace CodeLens** — `▶ trace GET /rooms/:id · 9 filters · 2 skipped ·
+  trace complete` above each action (on the `class` line for actions the
+  controller inherits). Click it: the request chain — route, every
+  filter with its guard and what it assigns, the action, the view with
+  its partials, the layout, and the coverage footer — opens as a
+  Markdown document (written under the OS temp dir, never into the app).
 
 ## Tips
 

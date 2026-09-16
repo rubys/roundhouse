@@ -2,9 +2,21 @@
 //!
 //! Wires the [`crate::ide`] query layer to editors over the Language
 //! Server Protocol. Read-only by design: it publishes diagnostics and
-//! answers `hover` / `inlayHint` / `completion`, and never proposes
-//! edits — so the server is a pure analysis process with no filesystem
-//! side effects (it reads the workspace; the editor owns every buffer).
+//! answers `hover` / `inlayHint` / `completion` / `codeLens`, and never
+//! proposes edits — so the server is a pure analysis process that only
+//! reads the workspace (the editor owns every buffer). Its one write is
+//! the trace document a CodeLens click opens, and that goes to the OS
+//! temp dir, never into the app.
+//!
+//! ## What gets published
+//!
+//! Errors, syntax errors and static N+1 findings by default. The
+//! warning ledger (`gradual_untyped`, `unresolved_type` — hundreds on
+//! a real app, the analyzer's modeling debt rather than the author's
+//! defects) stays behind the `warnings` setting, read from
+//! `initializationOptions` and `workspace/didChangeConfiguration`
+//! (`{ "warnings": true }`, or `{ "roundhouse": { "warnings": true } }`
+//! as VS Code sends it). Gap-attributed notes ride with the warnings.
 //!
 //! Transport is the *synchronous* `lsp-server` crate (rust-analyzer's),
 //! deliberately: the analysis engine is sync and fast (~sub-second
@@ -37,21 +49,24 @@ use std::time::Duration;
 
 use lsp_server::{Connection, Message, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit, Notification as _,
-    PublishDiagnostics,
+    DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+    Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, GotoDefinition, HoverRequest, InlayHintRequest, References, Request as _,
+    CodeLensRequest, Completion, ExecuteCommand, GotoDefinition, HoverRequest, InlayHintRequest,
+    References, Request as _, ShowDocument,
 };
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionOptions,
-    CompletionParams, CompletionResponse, Diagnostic as LspDiagnostic, DiagnosticSeverity,
+    CodeLens, CodeLensOptions, CodeLensParams, Command, CompletionItem, CompletionItemKind,
+    CompletionItemLabelDetails, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
-    MarkupContent, MarkupKind, OneOf, Position as LspPosition, PublishDiagnosticsParams,
-    Range as LspRange, ReferenceParams, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, InitializeParams, InlayHint, InlayHintKind,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, OneOf,
+    Position as LspPosition, PublishDiagnosticsParams, Range as LspRange, ReferenceParams,
+    ServerCapabilities, ShowDocumentParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Uri,
 };
 
 use crate::analyze::{diagnose, Analyzer, ClassInfo, Severity};
@@ -59,8 +74,8 @@ use crate::app::App;
 use crate::diagnostic::{Diagnostic as RhDiagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ide;
-use crate::ident::ClassId;
-use crate::ingest::ingest_app_with_vfs;
+use crate::ident::{ClassId, Symbol};
+use crate::ingest::{ingest_app_with_vfs, IngestError};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::vfs::{FsVfs, Vfs};
@@ -92,7 +107,38 @@ pub fn run_connection(connection: Connection) -> LspResult<()> {
     )?;
     let init: InitializeParams = serde_json::from_value(init_params)?;
     let root = workspace_root(&init);
-    Server::new(connection, root).main_loop()
+    let mut settings = Settings::default();
+    if let Some(opts) = &init.initialization_options {
+        settings.apply(opts);
+    }
+    Server::new(connection, root, settings).main_loop()
+}
+
+/// The trace-document command a CodeLens carries; the client sends it
+/// back as `workspace/executeCommand` with the trace query as its one
+/// argument.
+const TRACEROUTE_COMMAND: &str = "roundhouse.traceroute";
+
+/// Client-settable knobs. Every field has the conservative default so a
+/// bare `initialize` (nvim-lspconfig with no `init_options`) gets the
+/// gated behaviour.
+#[derive(Clone, Copy, Debug, Default)]
+struct Settings {
+    /// Publish `Warning`/`Info` diagnostics too. Off: errors, syntax
+    /// errors and N+1 findings only.
+    warnings: bool,
+}
+
+impl Settings {
+    /// Apply a settings object: the flat `{ "warnings": … }` shape or
+    /// VS Code's sectioned `{ "roundhouse": { "warnings": … } }`.
+    /// Unknown keys are ignored; absent keys leave the value as is.
+    fn apply(&mut self, value: &serde_json::Value) {
+        let section = value.get("roundhouse").unwrap_or(value);
+        if let Some(w) = section.get("warnings").and_then(|v| v.as_bool()) {
+            self.warnings = w;
+        }
+    }
 }
 
 fn server_capabilities() -> ServerCapabilities {
@@ -104,6 +150,13 @@ fn server_capabilities() -> ServerCapabilities {
         inlay_hint_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // A trace summary above every controller action; clicking it
+        // runs the command below, which opens the chain as a document.
+        code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(false) }),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![TRACEROUTE_COMMAND.to_string()],
+            ..Default::default()
+        }),
         completion_provider: Some(CompletionOptions {
             // `.` member completion, `@` ivars, `(`/`,`/` ` typed-kwarg
             // completion inside `find_by(`/`where(` argument lists.
@@ -142,6 +195,12 @@ fn workspace_root(init: &InitializeParams) -> PathBuf {
 struct Analysis {
     app: App,
     registry: HashMap<ClassId, ClassInfo>,
+    /// Ingest gaps recovered under survey mode — the trace footer
+    /// attributes unresolved hops to them.
+    gaps: Vec<IngestError>,
+    /// The analyzer that typed `app`: supplies candidate RBS for the
+    /// trace footer's boundary entries.
+    analyzer: Analyzer,
 }
 
 /// The last-good analysis, shared between the request loop (readers)
@@ -156,6 +215,7 @@ type SharedAnalysis = Arc<Mutex<Option<Arc<Analysis>>>>;
 struct AnalyzeRequest {
     overlay: HashMap<PathBuf, String>,
     open: Vec<Uri>,
+    settings: Settings,
 }
 
 struct Server {
@@ -173,17 +233,29 @@ struct Server {
     analysis: SharedAnalysis,
     /// Channel to the debounced background analysis worker.
     worker: mpsc::Sender<AnalyzeRequest>,
+    settings: Settings,
+    /// Ids for the requests *we* send the client (`window/showDocument`).
+    next_request_id: i32,
 }
 
 impl Server {
-    fn new(connection: Connection, root: PathBuf) -> Self {
+    fn new(connection: Connection, root: PathBuf, settings: Settings) -> Self {
         let analysis: SharedAnalysis = Arc::new(Mutex::new(None));
         let worker = spawn_analysis_worker(
             root.clone(),
             connection.sender.clone(),
             Arc::clone(&analysis),
         );
-        Self { connection, root, overlay: HashMap::new(), open: Vec::new(), analysis, worker }
+        Self {
+            connection,
+            root,
+            overlay: HashMap::new(),
+            open: Vec::new(),
+            analysis,
+            worker,
+            settings,
+            next_request_id: 1,
+        }
     }
 
     /// The current last-good analysis snapshot, if any pass has
@@ -235,6 +307,14 @@ impl Server {
             let (id, params) = extract::<CompletionParams>(req)?;
             let result = self.completion(params).map(CompletionResponse::Array);
             self.respond(id, &result)?;
+        } else if req.method == CodeLensRequest::METHOD {
+            let (id, params) = extract::<CodeLensParams>(req)?;
+            let result = self.code_lenses(params);
+            self.respond(id, &result)?;
+        } else if req.method == ExecuteCommand::METHOD {
+            let (id, params) = extract::<ExecuteCommandParams>(req)?;
+            let result = self.execute_command(params)?;
+            self.respond(id, &result)?;
         } else {
             // Unknown request: reply MethodNotFound so the client doesn't
             // block waiting on a method we never advertised.
@@ -276,6 +356,13 @@ impl Server {
             // Clear diagnostics for the file we no longer track.
             publish_for(&self.connection.sender, &p.text_document.uri, Vec::new())?;
             self.schedule_reanalyze()?;
+        } else if not.method == DidChangeConfiguration::METHOD {
+            let p: DidChangeConfigurationParams = serde_json::from_value(not.params)?;
+            self.settings.apply(&p.settings);
+            // Re-publish under the new gate from the snapshot in hand;
+            // no re-analysis is needed for a filter change, but the
+            // worker path is the one place diagnostics are produced.
+            self.schedule_reanalyze()?;
         }
         Ok(())
     }
@@ -287,8 +374,11 @@ impl Server {
     /// most importantly completion, which arrives on the very keystroke
     /// that made the buffer dirty.
     fn schedule_reanalyze(&mut self) -> LspResult<()> {
-        let request =
-            AnalyzeRequest { overlay: self.overlay.clone(), open: self.open.clone() };
+        let request = AnalyzeRequest {
+            overlay: self.overlay.clone(),
+            open: self.open.clone(),
+            settings: self.settings,
+        };
         if self.current().is_none() {
             run_and_publish(&self.root, request, &self.connection.sender, &self.analysis);
             return Ok(());
@@ -403,6 +493,111 @@ impl Server {
         Some(candidates.iter().map(candidate_item).collect())
     }
 
+    /// One lens per traceable action of each controller defined in the
+    /// document: the trace summary as the title, the trace query as
+    /// the command argument. Targets come from [`ide::trace_targets`]
+    /// (routed, or rendering a convention template), so a private
+    /// helper gets no lens. The lens sits on the action's `def` — found
+    /// in the source, the IR carries no span for a method header — or,
+    /// for an action the controller inherits (`Rooms::OpensController`
+    /// routes `show` without defining it), on the `class` line, the one
+    /// place in that file the route can be reached from.
+    fn code_lenses(&self, params: CodeLensParams) -> Vec<CodeLens> {
+        let Some(analysis) = self.current() else { return Vec::new() };
+        let app = &analysis.app;
+        let Some(path) = uri_to_path(&params.text_document.uri) else { return Vec::new() };
+        let Some(path_str) = path.to_str() else { return Vec::new() };
+        let Some(file) = ide::file_id(app, path_str) else { return Vec::new() };
+        let Some(src) = ide::source(app, file) else { return Vec::new() };
+        let text = &src.text;
+        let class_files = ide::class_file_index(app);
+        let class_line = text
+            .lines()
+            .position(|l| l.trim_start().starts_with("class "))
+            .map(|l| l as u32);
+        let mut lenses = Vec::new();
+        for target in ide::trace_targets(app) {
+            if class_files.get(&ClassId(Symbol::new(&target.controller))) != Some(&file) {
+                continue;
+            }
+            let Some(trace) = ide::traceroute(app, &target.query) else { continue };
+            let action_site = trace.hops.iter().find_map(|h| match h {
+                ide::TraceHop::Action { file, line, .. } => Some((file.clone(), *line)),
+                _ => None,
+            });
+            let line = match action_site {
+                // Defined here: on its `def` (the body's first statement
+                // is the anchor; the header is at or above it).
+                Some((Some(f), l)) if canonical(Path::new(&f)) == canonical(&path) => {
+                    ide::action_def_line(text, &trace.action, l.map(|l| l.saturating_sub(1)))
+                }
+                // Inherited from another file: the `class` line.
+                Some((Some(_), _)) => class_line,
+                // Bodiless everywhere (`def edit; end`, or a `resources`
+                // route the controller never implements): only a `def`
+                // in this file earns a lens.
+                _ => ide::action_def_line(text, &trace.action, None),
+            };
+            let Some(line) = line else { continue };
+            let report =
+                ide::trace_gap_report(app, &trace, &analysis.gaps, Some(&analysis.analyzer));
+            let title = format!("▶ trace {}", ide::trace_summary(&trace, &report));
+            lenses.push(CodeLens {
+                range: LspRange {
+                    start: LspPosition { line, character: 0 },
+                    end: LspPosition { line, character: 0 },
+                },
+                command: Some(Command {
+                    title,
+                    command: TRACEROUTE_COMMAND.to_string(),
+                    arguments: Some(vec![serde_json::Value::String(target.query.clone())]),
+                }),
+                data: None,
+            });
+        }
+        lenses
+    }
+
+    /// `roundhouse.traceroute <query>`: render the chain as Markdown,
+    /// write it to the OS temp dir, and ask the client to show it. The
+    /// text is also the command's result, for clients that would
+    /// rather render it themselves.
+    fn execute_command(&mut self, params: ExecuteCommandParams) -> LspResult<Option<String>> {
+        if params.command != TRACEROUTE_COMMAND {
+            return Ok(None);
+        }
+        let Some(query) = params.arguments.first().and_then(|v| v.as_str()) else {
+            return Ok(None);
+        };
+        let Some(analysis) = self.current() else { return Ok(None) };
+        let app = &analysis.app;
+        let Some(trace) = ide::traceroute(app, query) else { return Ok(None) };
+        let report = ide::trace_gap_report(app, &trace, &analysis.gaps, Some(&analysis.analyzer));
+        let text = ide::trace_text(&trace, &report);
+
+        let dir = std::env::temp_dir().join("roundhouse-trace");
+        std::fs::create_dir_all(&dir)?;
+        let name: String = query
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let file = dir.join(format!("{name}.md"));
+        std::fs::write(&file, &text)?;
+        if let Some(uri) = path_to_uri(&file) {
+            let params = ShowDocumentParams {
+                uri,
+                external: None,
+                take_focus: Some(true),
+                selection: None,
+            };
+            let id = RequestId::from(self.next_request_id);
+            self.next_request_id += 1;
+            let req = Request::new(id, ShowDocument::METHOD.to_string(), params);
+            self.connection.sender.send(Message::Request(req))?;
+        }
+        Ok(Some(text))
+    }
+
     fn respond<T: serde::Serialize>(&self, id: RequestId, result: &T) -> LspResult<()> {
         let resp = Response { id, result: Some(serde_json::to_value(result)?), error: None };
         self.connection.sender.send(Message::Response(resp))?;
@@ -453,6 +648,7 @@ fn run_and_publish(
     shared: &SharedAnalysis,
 ) {
     let (diags, analysis) = run_analysis(root, &request.overlay);
+    let diags = gate(diags, request.settings);
     if let Some(analysis) = analysis {
         let analysis = Arc::new(analysis);
         if let Ok(mut slot) = shared.lock() {
@@ -494,13 +690,31 @@ fn run_analysis(
             let mut diags = diagnose(&app);
             crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
             diags.append(&mut parse_diags);
-            (diags, Some(Analysis { app, registry }))
+            (diags, Some(Analysis { app, registry, gaps, analyzer }))
         }
         Err(err) => {
             eprintln!("roundhouse-lsp: ingest failed: {err}");
             (parse_diags, None)
         }
     }
+}
+
+/// The publish gate: errors, syntax errors and N+1 findings always;
+/// the warning ledger and gap-attributed notes only when asked for.
+/// A `missing_preload` is Warning-severity by kind (it is tunable, not
+/// a correctness claim) but it is the one warning a Rails author acts
+/// on, so it passes on kind rather than severity.
+fn gate(diags: Vec<RhDiagnostic>, settings: Settings) -> Vec<RhDiagnostic> {
+    if settings.warnings {
+        return diags;
+    }
+    diags
+        .into_iter()
+        .filter(|d| {
+            d.severity == Severity::Error
+                || matches!(d.kind, DiagnosticKind::MissingPreload { .. } | DiagnosticKind::Parse { .. })
+        })
+        .collect()
 }
 
 fn publish(sender: &crossbeam_channel::Sender<Message>, app: &App, open: &[Uri], diags: Vec<RhDiagnostic>) {
@@ -1105,6 +1319,179 @@ mod tests {
             }))
             .unwrap();
 
+        handle.join().unwrap().expect("server loop should end cleanly");
+    }
+
+    #[test]
+    fn gate_keeps_errors_syntax_errors_and_n_plus_one_by_default() {
+        use crate::ident::Symbol;
+        let span = Span::synthetic();
+        let warn = |kind: DiagnosticKind| RhDiagnostic {
+            span,
+            severity: Severity::Warning,
+            kind,
+            message: String::new(),
+        };
+        let diags = vec![
+            RhDiagnostic::unsupported(span, None, "While", ""),
+            RhDiagnostic::parse(span, "unexpected end"),
+            warn(DiagnosticKind::MissingPreload { association: Symbol::new("user"), query_span: span }),
+            warn(DiagnosticKind::GradualUntyped { expr_kind: Symbol::new("method call") }),
+            warn(DiagnosticKind::UnresolvedType { expr_kind: Symbol::new("local"), name: None }),
+        ];
+        let kept: Vec<&str> =
+            gate(diags.clone(), Settings::default()).iter().map(|d| d.code()).collect();
+        assert_eq!(kept, ["unsupported", "parse", "missing_preload"]);
+        let all = gate(diags, Settings { warnings: true });
+        assert_eq!(all.len(), 5, "the setting publishes the whole ledger");
+
+        // Both settings shapes reach the same field.
+        let mut s = Settings::default();
+        s.apply(&json!({ "warnings": true }));
+        assert!(s.warnings);
+        s.apply(&json!({ "roundhouse": { "warnings": false } }));
+        assert!(!s.warnings);
+        s.apply(&json!({ "unrelated": 1 }));
+        assert!(!s.warnings, "an absent key leaves the value alone");
+    }
+
+    /// Every routed action in the open controller carries a lens whose
+    /// title is the trace summary; executing its command returns the
+    /// chain as text and asks the client to show a document.
+    #[test]
+    fn code_lens_traces_each_action_over_the_protocol() {
+        let root = std::env::current_dir().unwrap().join("fixtures/real-blog");
+        let path = root.join("app/controllers/articles_controller.rb");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let uri = format!("file://{}", path.to_str().unwrap());
+
+        let (server, client) = Connection::memory();
+        let handle = std::thread::spawn(move || run_connection(server));
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: RequestId::from(1),
+                method: "initialize".to_string(),
+                params: json!({
+                    "capabilities": {},
+                    "rootUri": format!("file://{}", root.to_str().unwrap()),
+                }),
+            }))
+            .unwrap();
+        let init = recv_response(&client, 1).result.expect("initialize result");
+        assert_eq!(init["capabilities"]["codeLensProvider"]["resolveProvider"], false);
+        assert_eq!(
+            init["capabilities"]["executeCommandProvider"]["commands"][0],
+            TRACEROUTE_COMMAND
+        );
+        client
+            .sender
+            .send(Message::Notification(Notification {
+                method: "initialized".to_string(),
+                params: json!({}),
+            }))
+            .unwrap();
+        client
+            .sender
+            .send(Message::Notification(Notification {
+                method: "textDocument/didOpen".to_string(),
+                params: json!({
+                    "textDocument": {
+                        "uri": uri, "languageId": "ruby", "version": 1, "text": content
+                    }
+                }),
+            }))
+            .unwrap();
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: RequestId::from(2),
+                method: "textDocument/codeLens".to_string(),
+                params: json!({ "textDocument": { "uri": uri } }),
+            }))
+            .unwrap();
+        let lenses = recv_response(&client, 2).result.expect("codeLens result");
+        let lenses = lenses.as_array().expect("array of lenses");
+        let titles: Vec<String> = lenses
+            .iter()
+            .map(|l| l["command"]["title"].as_str().unwrap().to_string())
+            .collect();
+        // One lens per action, each on its `def` line.
+        let show = lenses
+            .iter()
+            .find(|l| l["command"]["arguments"][0] == "ArticlesController#show")
+            .unwrap_or_else(|| panic!("a lens for show; got {titles:?}"));
+        let def_line = show["range"]["start"]["line"].as_u64().unwrap() as usize;
+        assert_eq!(content.lines().nth(def_line).unwrap().trim(), "def show");
+        let title = show["command"]["title"].as_str().unwrap();
+        assert!(
+            title.starts_with("▶ trace GET /articles/:id ·"),
+            "the title leads with the route; got {title:?}"
+        );
+        assert!(title.contains("filter"), "set_article is a filter on show; got {title:?}");
+        assert!(title.ends_with("trace complete"), "real-blog traces clean; got {title:?}");
+        for action in ["index", "new", "create", "edit", "update", "destroy"] {
+            assert!(
+                lenses.iter().any(|l| l["command"]["arguments"][0] == format!("ArticlesController#{action}")),
+                "a lens for {action}; got {titles:?}"
+            );
+        }
+
+        // Click: the command returns the chain and asks the client to
+        // show the document it wrote.
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: RequestId::from(3),
+                method: "workspace/executeCommand".to_string(),
+                params: json!({
+                    "command": TRACEROUTE_COMMAND,
+                    "arguments": ["ArticlesController#show"]
+                }),
+            }))
+            .unwrap();
+        let mut shown: Option<serde_json::Value> = None;
+        let text = loop {
+            let msg = client.receiver.recv_timeout(Duration::from_secs(20)).expect("reply");
+            match msg {
+                Message::Request(req) if req.method == "window/showDocument" => {
+                    shown = Some(req.params);
+                }
+                Message::Response(resp) if resp.id == RequestId::from(3) => {
+                    break resp.result.expect("executeCommand result");
+                }
+                _ => {}
+            }
+        };
+        let text = text.as_str().expect("the trace text is the result");
+        assert!(text.starts_with("# GET /articles/:id → ArticlesController#show\n"), "{text}");
+        assert!(text.contains("- **before** set_article (ArticlesController)"), "{text}");
+        assert!(text.contains("- **action** ArticlesController#show"), "{text}");
+        assert!(text.contains("- **view** articles/show"), "{text}");
+        assert!(text.contains("✓ trace complete"), "{text}");
+        let shown = shown.expect("a window/showDocument request preceded the reply");
+        let shown_uri = shown["uri"].as_str().unwrap();
+        assert!(shown_uri.ends_with("/ArticlesController_show.md"), "{shown_uri}");
+        let on_disk = std::fs::read_to_string(uri_to_path(&shown_uri.parse().unwrap()).unwrap()).unwrap();
+        assert_eq!(on_disk, text);
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: RequestId::from(9),
+                method: "shutdown".to_string(),
+                params: json!(null),
+            }))
+            .unwrap();
+        let _ = recv_response(&client, 9);
+        client
+            .sender
+            .send(Message::Notification(Notification {
+                method: "exit".to_string(),
+                params: json!(null),
+            }))
+            .unwrap();
         handle.join().unwrap().expect("server loop should end cleanly");
     }
 }

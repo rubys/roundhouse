@@ -96,6 +96,49 @@
       "tool": "wont_lower",
       "why": "Only the compiler can answer this; wont_lower(go) reports message.rb:2 include, :9 has_rich_text (as an unsupported assign-target, listed repeatedly), :11 before_create, :12 after_create_commit. (has_one_attached is in message/attachment.rb, outside the file asked about.) Without the tool the honest answer is 'cannot determine' — this question measures a capability the grep arm does not have, not a head-to-head.",
       "order": []
+    },
+    {
+      "id": "renders",
+      "prompt": "Which templates does the request GET /rooms/:id (RoomsController#show) render: the view, every partial it pulls in transitively (partials rendered by partials included), and the layout? Give the template names.",
+      "expect": [
+        "rooms/show\\b",
+        "rooms/show/_?nav",
+        "messages/_?template",
+        "rooms/show/_?invitation",
+        "messages/_?message\\b",
+        "rooms/show/_?composer",
+        "messages/_?actions",
+        "messages/_?presentation",
+        "messages/boosts/_?boosts",
+        "messages/boosts/_?boost\\b",
+        "accounts/_?invite",
+        "rooms/involvements/_?bell",
+        "pwa/_?browser_settings",
+        "pwa/_?system_settings",
+        "pwa/_?install_instructions",
+        "layouts/application"
+      ],
+      "absent": [],
+      "tool": "traceroute|related_files",
+      "why": "rooms/show.html.erb renders rooms/show/nav, messages/template, rooms/show/invitation, messages/message (collection), rooms/show/composer. _nav renders rooms/involvements/bell, which renders pwa/browser_settings, pwa/system_settings, pwa/install_instructions. _invitation renders accounts/invite. _message renders messages/actions, messages/presentation, messages/boosts/boosts; _boosts renders messages/boosts/boost (collection). No controller-level layout override, so layouts/application.",
+      "order": []
+    },
+    {
+      "id": "renderers",
+      "prompt": "Which view templates render the HTML partial app/views/messages/_message.html.erb (not the JSON partial of the same name), and which controllers feed each of those views?",
+      "expect": [
+        "messages/index",
+        "messages/show",
+        "rooms/show\\b",
+        "refreshes/show",
+        "MessagesController",
+        "RefreshesController",
+        "RoomsController"
+      ],
+      "absent": [],
+      "tool": "related_files",
+      "why": "messages/index.html.erb (render partial: \"messages/message\", collection:), messages/show.html.erb (`render @message` — the record's partial path), rooms/show.html.erb (collection), rooms/refreshes/show.turbo_stream.erb (collection + turbo_stream.replace). messages/by_bots/*.json.jbuilder name the same partial but resolve to _message.json.jbuilder. Feeders: MessagesController (index, show), RoomsController (show), Rooms::RefreshesController (show).",
+      "order": []
     }
   ]
 }

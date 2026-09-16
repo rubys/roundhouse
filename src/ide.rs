@@ -597,7 +597,7 @@ pub fn related_files(app: &App, path: &str) -> Vec<RelatedFile> {
 /// Defining file per class: models carry a span; controllers, library
 /// classes, and everything else resolve through their first
 /// real-spanned body expression.
-fn class_file_index(app: &App) -> HashMap<ClassId, FileId> {
+pub fn class_file_index(app: &App) -> HashMap<ClassId, FileId> {
     let mut out = HashMap::new();
     for m in &app.models {
         if !m.span.is_synthetic() {
@@ -1828,8 +1828,15 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
 
     // The action: defined on the queried controller or inherited.
     let action_def = find_action(app, controller, &action_name);
+    // Ingest classifies an action as `Template` or `Inferred` only; a
+    // `create` that redirects is `Inferred` → the convention template
+    // `rooms/create`, which the app does not carry. When the body says
+    // how it responds instead, the chain ends in that response rather
+    // than a phantom view.
+    let response_detail = action_def.and_then(|(_, a)| response_terminal(&a.body));
     let view_name = action_def
-        .and_then(|(_, a)| crate::analyze::view_name_for_action(&controller_id, a));
+        .and_then(|(_, a)| crate::analyze::view_name_for_action(&controller_id, a))
+        .filter(|v| response_detail.is_none() || app.views.iter().any(|w| &w.name == v));
     {
         let (file, line, effects, assigns) = match action_def {
             Some((_, a)) => {
@@ -1870,8 +1877,9 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         };
         let n_plus_one = match action_def {
             Some((_, a)) => {
-                path_bodies.push(&a.body);
-                preloads_in_body(app, &preload_diags, &a.body)
+                let bodies = with_helper_bodies(app, &target_search, &a.body);
+                path_bodies.extend(bodies.iter().copied());
+                bodies.iter().flat_map(|b| preloads_in_body(app, &preload_diags, b)).collect()
             }
             None => Vec::new(),
         };
@@ -1937,7 +1945,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                     RenderTarget::Redirect { .. } => "redirect".to_string(),
                     RenderTarget::Json { .. } => "render json".to_string(),
                     RenderTarget::Head { status } => format!("head {status}"),
-                    _ => "no template".to_string(),
+                    _ => response_detail.clone().unwrap_or_else(|| "no template".to_string()),
                 };
                 hops.push(TraceHop::Response { detail });
             }
@@ -2101,6 +2109,91 @@ fn method_body<'a>(app: &'a App, class_id: &ClassId, method: &Symbol) -> Option<
         }
     }
     None
+}
+
+/// How an action body responds without a convention template, from
+/// the calls it makes: `redirect_to`/`redirect_back`, `head`, `render
+/// json:`, and explicit template renders (`render :new`). Every
+/// distinct terminal in source order, ` · `-joined — a scaffold
+/// `create` reads `redirect · render show · render new · render json`.
+/// `None` when the body has no such call. The caller applies this only
+/// when the convention template is absent: an action whose explicit
+/// render ingest already resolved to one template keeps its view chain.
+fn response_terminal(body: &Expr) -> Option<String> {
+    use crate::expr::Literal;
+    let mut details: Vec<String> = Vec::new();
+    let mut add = |d: String| {
+        if !details.contains(&d) {
+            details.push(d);
+        }
+    };
+    walk(body, &mut |e| {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+            match method.as_str() {
+                "redirect_to" | "redirect_back" | "redirect_back_or_to" => add("redirect".to_string()),
+                "head" => {
+                    let status = args.first().and_then(|a| match &*a.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                        ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+                        _ => None,
+                    });
+                    add(match status {
+                        Some(s) => format!("head {s}"),
+                        None => "head".to_string(),
+                    });
+                }
+                "render" => {
+                    let json = args.iter().any(|a| match &*a.node {
+                        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json")
+                        }),
+                        _ => false,
+                    });
+                    if json {
+                        add("render json".to_string());
+                    } else if let Some(name) = crate::ingest::controller::render_template_name(args) {
+                        add(format!("render {}", name.as_str()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    if details.is_empty() {
+        None
+    } else {
+        Some(details.join(" · "))
+    }
+}
+
+/// `body` plus the bodies of the chain's methods it calls by implicit
+/// self, transitively — a `create` that delegates its iteration to a
+/// private `broadcast_create_room` still owns that N+1, and the trace
+/// must say so on the action hop. `chain` is the controller, its
+/// ancestors and their concerns; a call that resolves nowhere in it
+/// (a helper from a gem, a model method) contributes nothing.
+fn with_helper_bodies<'a>(app: &'a App, chain: &[ClassId], body: &'a Expr) -> Vec<&'a Expr> {
+    let mut out: Vec<&'a Expr> = vec![body];
+    let mut seen: HashSet<Symbol> = HashSet::new();
+    let mut i = 0;
+    while i < out.len() {
+        let mut calls: Vec<Symbol> = Vec::new();
+        walk(out[i], &mut |e| {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                calls.push(method.clone());
+            }
+        });
+        for m in calls {
+            if !seen.insert(m.clone()) {
+                continue;
+            }
+            if let Some(b) = chain.iter().find_map(|c| method_body(app, c, &m)) {
+                out.push(b);
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Missing-preload findings whose access site is inside `body`.
@@ -2816,6 +2909,205 @@ fn hop_json(hop: &TraceHop) -> serde_json::Value {
             set_n_plus_one(&mut o, n_plus_one);
             o
         }
+    }
+}
+
+// ── Trace text skins ─────────────────────────────────────────────────
+//
+// The LSP has no trace panel: a CodeLens above each action carries a
+// one-line summary, and clicking it opens the chain as a document.
+// Both are plain renderings of the same `Trace` + `TraceGapReport`
+// the JSON skin serializes, so the editor and the /ide/ never
+// disagree about a hop.
+
+/// One line for a CodeLens title: `GET /rooms/:id · 7 filters · 2 skipped
+/// · 1 N+1 · 1 unresolved`. Counts only what is non-zero; an action with
+/// no filters and a complete chain reads just `GET /rooms/:id · trace
+/// complete`.
+pub fn trace_summary(trace: &Trace, report: &TraceGapReport) -> String {
+    let route = match trace.hops.iter().find_map(|h| match h {
+        TraceHop::Route { method, path, .. } => Some(format!("{method} {path}")),
+        _ => None,
+    }) {
+        Some(r) => r,
+        None => "unrouted".to_string(),
+    };
+    let filters = trace.hops.iter().filter(|h| matches!(h, TraceHop::Filter(_))).count();
+    let skipped = trace
+        .hops
+        .iter()
+        .filter(|h| matches!(h, TraceHop::Filter(f) if !f.applies))
+        .count();
+    let n_plus_one = trace_n_plus_one(trace).len();
+    let mut parts = vec![route];
+    if filters > 0 {
+        parts.push(format!("{filters} filter{}", if filters == 1 { "" } else { "s" }));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} skipped"));
+    }
+    if n_plus_one > 0 {
+        parts.push(format!("{n_plus_one} N+1"));
+    }
+    if report.complete() {
+        parts.push("trace complete".to_string());
+    } else {
+        parts.push(format!("{}/{} hops resolved", report.resolved_hops, report.total_hops));
+    }
+    parts.join(" · ")
+}
+
+/// Every N+1 finding on the trace, in hop order (applying hops only —
+/// a gated-out filter carries none).
+pub fn trace_n_plus_one(trace: &Trace) -> Vec<&PreloadFinding> {
+    trace
+        .hops
+        .iter()
+        .flat_map(|h| match h {
+            TraceHop::Filter(f) => f.n_plus_one.iter(),
+            TraceHop::Action { n_plus_one, .. }
+            | TraceHop::View { n_plus_one, .. }
+            | TraceHop::Layout { n_plus_one, .. } => n_plus_one.iter(),
+            TraceHop::Route { .. } | TraceHop::Response { .. } => [].iter(),
+        })
+        .collect()
+}
+
+/// The chain as a Markdown document — what the LSP opens when the
+/// CodeLens is clicked. Hop order is chain order; gated-out filters
+/// are struck through with their reason; the footer is the gap
+/// report, phrased exactly as the /ide/ panel phrases it.
+pub fn trace_text(trace: &Trace, report: &TraceGapReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", trace.route));
+    let loc = |file: &Option<String>, line: Option<u32>| -> String {
+        match (file, line) {
+            (Some(f), Some(l)) => format!(" — {f}:{l}"),
+            (Some(f), None) => format!(" — {f}"),
+            _ => String::new(),
+        }
+    };
+    let assigns = |a: &[(String, String)]| -> String {
+        if a.is_empty() {
+            String::new()
+        } else {
+            let rendered: Vec<String> = a.iter().map(|(k, v)| format!("{k} : {v}")).collect();
+            format!("  \n  assigns {}", rendered.join(", "))
+        }
+    };
+    let findings = |f: &[PreloadFinding]| -> String {
+        f.iter().map(|f| format!("  \n  **N+1** {}", f.message)).collect::<String>()
+    };
+    for hop in &trace.hops {
+        match hop {
+            TraceHop::Route { method, path, params } => {
+                out.push_str(&format!("- **route** {method} {path}"));
+                if !params.is_empty() {
+                    out.push_str(&format!(" (binds {})", params.join(", ")));
+                }
+                out.push('\n');
+            }
+            TraceHop::Filter(f) => {
+                let name = if f.applies { f.name.clone() } else { format!("~~{}~~", f.name) };
+                out.push_str(&format!("- **{}** {name}", f.filter_kind));
+                if f.included_via != f.defined_in {
+                    out.push_str(&format!(" ({} via {})", f.defined_in, f.included_via));
+                } else {
+                    out.push_str(&format!(" ({})", f.defined_in));
+                }
+                if let Some(c) = &f.condition {
+                    out.push_str(&format!(" `{c}`"));
+                }
+                if let Some((verb, runs)) = &f.decided {
+                    out.push_str(&format!(" — {} for {verb}", if *runs { "runs" } else { "skipped" }));
+                } else if let Some(sk) = &f.skipped_by {
+                    out.push_str(&format!(" — skipped by {sk}"));
+                } else if !f.applies {
+                    if !f.only.is_empty() {
+                        out.push_str(&format!(" — only: {}", f.only.join(", ")));
+                    } else if !f.except.is_empty() {
+                        out.push_str(&format!(" — except: {}", f.except.join(", ")));
+                    }
+                }
+                if f.applies && !f.resolved {
+                    out.push_str(" — unresolved");
+                }
+                out.push_str(&loc(&f.file, f.line));
+                out.push_str(&assigns(&f.assigns));
+                out.push_str(&findings(&f.n_plus_one));
+                out.push('\n');
+            }
+            TraceHop::Action { name, controller, file, line, formats, assigns: a, n_plus_one, .. } => {
+                out.push_str(&format!("- **action** {controller}#{name}"));
+                if !formats.is_empty() {
+                    out.push_str(&format!(" ({})", formats.join(" · ")));
+                }
+                out.push_str(&loc(file, *line));
+                out.push_str(&assigns(a));
+                out.push_str(&findings(n_plus_one));
+                out.push('\n');
+            }
+            TraceHop::Response { detail } => out.push_str(&format!("- **response** {detail}\n")),
+            TraceHop::View { name, file, partials, n_plus_one } => {
+                out.push_str(&format!("- **view** {name}{}", loc(file, None)));
+                for p in partials {
+                    out.push_str(&format!("  \n  partial {p}"));
+                }
+                out.push_str(&findings(n_plus_one));
+                out.push('\n');
+            }
+            TraceHop::Layout { name, file, n_plus_one } => {
+                out.push_str(&format!("- **layout** {name}{}", loc(file, None)));
+                out.push_str(&findings(n_plus_one));
+                out.push('\n');
+            }
+        }
+    }
+    out.push('\n');
+    if report.complete() {
+        out.push_str(&format!("✓ trace complete — all {} hops resolved\n", report.total_hops));
+    } else {
+        out.push_str(&format!(
+            "── {} gap(s) · {}/{} hops resolved ──\n",
+            report.gaps.len(),
+            report.resolved_hops,
+            report.total_hops
+        ));
+        for g in &report.gaps {
+            let tag = match g.kind {
+                TraceGapKind::UntypedBoundary => "boundary",
+                TraceGapKind::IngestGap => "tool",
+            };
+            out.push_str(&format!("- [{tag}] {} — {}\n", g.boundary, g.detail));
+            if let Some(rbs) = &g.candidate_rbs {
+                out.push_str(&format!("  \n  candidate RBS: `{rbs}` — write it to sig/<file>.rbs\n"));
+            }
+        }
+    }
+    out
+}
+
+/// The 0-based line of `def <action>` in `text`. The IR carries no span
+/// for a method header, so the header is found in the source: the
+/// nearest `def` for the name at or above `body_line` (0-based, the
+/// body's first statement) when one is known, else the first such
+/// `def` in the file. `None` when the file defines no such method.
+pub fn action_def_line(text: &str, action: &str, body_line: Option<u32>) -> Option<u32> {
+    let is_def = |line: &str| {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("def ") else { return false };
+        let rest = rest.trim_start();
+        // `def self.name` is a class method; not an action.
+        rest.strip_prefix(action)
+            .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '='))
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    match body_line {
+        Some(b) => (0..=(b as usize).min(lines.len().saturating_sub(1)))
+            .rev()
+            .find(|&i| is_def(lines[i]))
+            .map(|i| i as u32),
+        None => lines.iter().position(|l| is_def(l)).map(|i| i as u32),
     }
 }
 

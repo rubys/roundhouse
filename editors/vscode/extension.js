@@ -67,6 +67,13 @@ function activate(context) {
         { scheme: 'file', pattern: '**/*.html.haml' },
         { scheme: 'file', pattern: '**/*.json.jbuilder' },
       ],
+      // The publish gate: errors and N+1 findings always; the warning
+      // ledger only when `roundhouse.warnings` is on. Sent at startup
+      // and again (as workspace/didChangeConfiguration) on change.
+      initializationOptions: {
+        warnings: vscode.workspace.getConfiguration('roundhouse').get('warnings', false),
+      },
+      synchronize: { configurationSection: 'roundhouse' },
     }
   );
   return client.start();
