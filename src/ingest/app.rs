@@ -50,6 +50,69 @@ pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App
 
 /// The actual whole-app walker. Generic over [`Vfs`] so it can read
 /// from disk or from an in-memory map without code duplication.
+/// `config/initializers/inflections.rb` → the app's inflection
+/// declarations: the `inflect.irregular` / `uncountable` / `acronym`
+/// calls inside the `ActiveSupport::Inflector.inflections(:en) do
+/// |inflect| … end` block, with literal arguments. `inflect.plural` /
+/// `inflect.singular` take regexes the port cannot carry; they are
+/// counted and, under survey mode, reported as a gap rather than
+/// silently dropped. Any parse trouble yields the defaults — the
+/// initializer is optional and often all comments.
+pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming::AppInflections {
+    use crate::expr::{Expr, ExprNode, Literal};
+    let path = dir.join("config/initializers/inflections.rb");
+    let mut out = crate::naming::AppInflections::default();
+    let Ok(source) = vfs.read_to_string(&path) else { return out };
+    let file = path.to_string_lossy().into_owned();
+    let Ok(program) = super::expr::ingest_ruby_program(&source, &file) else { return out };
+
+    fn strings(e: &Expr, out: &mut Vec<String>) {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => out.push(value.clone()),
+            ExprNode::Lit { value: Literal::Sym { value } } => out.push(value.as_str().to_string()),
+            ExprNode::Array { elements, .. } => elements.iter().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    fn walk(e: &Expr, out: &mut crate::naming::AppInflections) {
+        if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
+            let on_inflect = matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == "inflect");
+            if on_inflect {
+                let mut words = Vec::new();
+                args.iter().for_each(|a| strings(a, &mut words));
+                match method.as_str() {
+                    "irregular" if words.len() == 2 => {
+                        out.irregular.push((words[0].clone(), words[1].clone()));
+                    }
+                    "uncountable" => out.uncountable.extend(words),
+                    "acronym" => out.acronym.extend(words),
+                    // The string form carries; a regex rule cannot.
+                    "singular" if words.len() == 2 && args.len() == 2 => {
+                        out.singular.push((words[0].clone(), words[1].clone()));
+                    }
+                    "plural" if words.len() == 2 && args.len() == 2 => {
+                        out.plural.push((words[0].clone(), words[1].clone()));
+                    }
+                    "plural" | "singular" => out.regex_rules += 1,
+                    _ => {}
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    walk(&program, &mut out);
+    if out.regex_rules > 0 {
+        survey::record(&IngestError::Unsupported {
+            file: file.clone(),
+            message: format!(
+                "{} inflect.plural/singular regex rule(s) not applied — only irregular, uncountable and acronym declarations are read",
+                out.regex_rules
+            ),
+        });
+    }
+    out
+}
+
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
     // Front-end dispatch: a rack app with no config/routes.rb whose
     // app.rb subclasses Roda takes the Roda + Sequel walker (issue
@@ -75,6 +138,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         crate::ident::ClassId,
         Vec<crate::ident::Symbol>,
     )> = Vec::new();
+
+    // The app's inflections come first: everything after this that
+    // turns `:leaves` into a class name or `Leaf` into a table name
+    // consults them. A missing initializer leaves Rails' defaults.
+    crate::naming::install_app_inflections(ingest_inflections(vfs, dir));
 
     // The lockfile is not a source: it never enters the analysis. It
     // is carried so the census and the unknown-gem attribution can
@@ -2047,7 +2115,7 @@ fn filter_from_send(
     module: &crate::ident::ClassId,
 ) -> Option<Vec<crate::dialect::Filter>> {
     use crate::dialect::{Filter, FilterKind};
-    use crate::expr::{ExprNode, Literal};
+    use crate::expr::{Expr, ExprNode, Literal};
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return None;

@@ -184,7 +184,10 @@ pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "has_one_attached" || args.len() != 1 {
+        // `has_one_attached :cover, dependent: :purge_later` — the
+        // options hash rides after the name; the reader it declares is
+        // the same.
+        if method.as_str() != "has_one_attached" || args.is_empty() {
             continue;
         }
         if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
@@ -228,7 +231,7 @@ pub fn attached_variations(model: &Model, attr: &Symbol) -> Vec<VariationDecl> {
         else {
             continue;
         };
-        if method.as_str() != "has_one_attached" || args.len() != 1 {
+        if method.as_str() != "has_one_attached" || args.is_empty() {
             continue;
         }
         let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node else { continue };

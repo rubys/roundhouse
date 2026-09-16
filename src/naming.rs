@@ -33,16 +33,22 @@ pub fn underscore(class_name: &str) -> String {
 }
 
 pub fn camelize(snake: &str) -> String {
+    // An app acronym (`inflect.acronym "API"`) camelizes as itself:
+    // `api_keys` → `APIKeys`, `html_parser` → `HTMLParser`.
+    let acronyms = APP_INFLECTIONS.with(|a| a.borrow().acronym.clone());
     let mut out = String::with_capacity(snake.len());
-    let mut upper_next = true;
-    for c in snake.chars() {
-        if c == '_' {
-            upper_next = true;
-        } else if upper_next {
-            out.push(c.to_ascii_uppercase());
-            upper_next = false;
-        } else {
-            out.push(c);
+    for seg in snake.split('_') {
+        if seg.is_empty() {
+            continue; // leading or doubled `_`
+        }
+        if let Some(acr) = acronyms.iter().find(|a| a.eq_ignore_ascii_case(seg)) {
+            out.push_str(acr);
+            continue;
+        }
+        let mut c = seg.chars();
+        if let Some(f) = c.next() {
+            out.push(f.to_ascii_uppercase());
+            out.push_str(c.as_str());
         }
     }
     out
@@ -213,14 +219,28 @@ const UNCOUNTABLE: &[&str] = &[
 /// uncountable while `old_news` is not (that one is handled by the
 /// explicit `(n)ews$` singular rule instead).
 fn uncountable(word: &str) -> bool {
-    UNCOUNTABLE.iter().any(|u| {
+    let boundary = |u: &str| {
         word.strip_suffix(u).is_some_and(|head| {
             head.is_empty() || !head.ends_with(|c: char| c.is_alphanumeric() || c == '_')
         })
-    })
+    };
+    APP_INFLECTIONS.with(|a| a.borrow().uncountable.iter().any(|u| boundary(u)))
+        || UNCOUNTABLE.iter().any(|u| boundary(u))
 }
 
 fn irregular_apply(word: &str, from_singular: bool) -> Option<String> {
+    // The app's own `inflect.irregular` first — Rails prepends, so a
+    // later registration (the app's initializer runs after the
+    // defaults) wins over the built-in table.
+    let app = APP_INFLECTIONS.with(|a| {
+        a.borrow().irregular.iter().rev().find_map(|(s, p)| {
+            let (from, to) = if from_singular { (s.as_str(), p.as_str()) } else { (p.as_str(), s.as_str()) };
+            word.strip_suffix(from).map(|head| format!("{head}{to}"))
+        })
+    });
+    if app.is_some() {
+        return app;
+    }
     for (s, p) in IRREGULAR {
         let (from, to) = if from_singular { (*s, *p) } else { (*p, *s) };
         if let Some(head) = word.strip_suffix(from) {
@@ -228,6 +248,53 @@ fn irregular_apply(word: &str, from_singular: bool) -> Option<String> {
         }
     }
     None
+}
+
+// ── The app's own inflections ────────────────────────────────────────
+//
+// `config/initializers/inflections.rb` is where an app tells Rails that
+// `leaf` pluralizes to `leaves` (Rails' own table says `leafe`) or that
+// `API` is an acronym. Without it, `has_many :leaves` resolves to a
+// `Leafe` class that does not exist and every use of the association
+// is an error on the author's ledger. Ingest installs the file's
+// declarations here (thread-local, like the sources registry); the
+// naming functions consult them ahead of the built-in tables, which is
+// the order Rails applies them in.
+
+/// An app's `inflect.*` declarations.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AppInflections {
+    /// `inflect.irregular "leaf", "leaves"`, registration order.
+    pub irregular: Vec<(String, String)>,
+    /// `inflect.uncountable %w( fish )`.
+    pub uncountable: Vec<String>,
+    /// `inflect.acronym "API"`.
+    pub acronym: Vec<String>,
+    /// `inflect.singular "quotas", "quota"` — the STRING form, which
+    /// Rails applies with `String#sub` (first occurrence; in practice
+    /// the whole word), registration order.
+    pub singular: Vec<(String, String)>,
+    /// `inflect.plural "quota", "quotas"`, likewise.
+    pub plural: Vec<(String, String)>,
+    /// `inflect.plural`/`inflect.singular` REGEX rules the port cannot
+    /// carry; counted so ingest can report the gap.
+    pub regex_rules: usize,
+}
+
+thread_local! {
+    static APP_INFLECTIONS: std::cell::RefCell<AppInflections> =
+        std::cell::RefCell::new(AppInflections::default());
+}
+
+/// Install the app's inflections for this thread (replacing any
+/// previous app's). Called by ingest after reading the initializer;
+/// `reset` (an empty set) is what a fresh ingest starts from.
+pub fn install_app_inflections(inflections: AppInflections) {
+    APP_INFLECTIONS.with(|a| *a.borrow_mut() = inflections);
+}
+
+pub fn app_inflections() -> AppInflections {
+    APP_INFLECTIONS.with(|a| a.borrow().clone())
 }
 
 /// The analysis/basis/diagnosis family, both directions of
@@ -315,6 +382,19 @@ fn inflect(word: &str, rules: &[(&str, &str)], from_singular: bool) -> String {
         return word.to_string();
     }
     if let Some(hit) = irregular_apply(word, from_singular) {
+        return hit;
+    }
+    // The app's string rules, registered after the defaults and so
+    // tried before them (Rails prepends). `sub` semantics: the first
+    // occurrence is replaced — a suffix match covers every real use.
+    let app_hit = APP_INFLECTIONS.with(|a| {
+        let a = a.borrow();
+        let table = if from_singular { &a.plural } else { &a.singular };
+        table.iter().rev().find_map(|(from, to)| {
+            word.strip_suffix(from.as_str()).map(|head| format!("{head}{to}"))
+        })
+    });
+    if let Some(hit) = app_hit {
         return hit;
     }
     // Reverse registration order: `inflect.plural`/`inflect.singular`
