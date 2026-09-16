@@ -196,3 +196,47 @@ fn a_try_in_a_view_is_grounded_like_any_other_body() {
         "only User answers `nickname`, in a view as in a method:\n{src}"
     );
 }
+
+/// A `try` on a name only the RUNTIME defines keeps the nil guard — and
+/// the call it desugars to carries the type the analyzer gave the
+/// `try`, so the post-lowering diagnose does not read a typed receiver
+/// with an untyped send as a dispatch failure. The Action Text blob
+/// partial's `blob.try(:caption)` — `ActionText::Attachment` is a
+/// registry class, not an app class — is the site that turned a clean
+/// `check` into a transpile error.
+#[test]
+fn a_runtime_method_try_keeps_its_type_through_the_guard() {
+    let mut all: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\n  has_rich_text :body\nend\n"),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :rooms\nend\n"),
+        (
+            "app/views/active_storage/blobs/_blob.html.erb",
+            "<figcaption><% if caption = blob.try(:caption) %><%= caption %><% end %></figcaption>\n",
+        ),
+    ];
+    all.sort();
+    let tree: HashMap<PathBuf, Vec<u8>> = all
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let errors: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the desugared `blob.caption` must not diagnose as a failed dispatch:\n{errors:#?}"
+    );
+}

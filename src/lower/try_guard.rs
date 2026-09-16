@@ -56,6 +56,7 @@ use crate::app::App;
 use crate::dialect::MethodReceiver;
 use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 /// Past this many unrelated definers, `is_a?` arms stop being an
 /// improvement on the nil guard and start being noise. Nothing in the
@@ -130,7 +131,16 @@ fn rewrite(
     let recv = recv.clone();
     let rest: Vec<Expr> = args.iter().skip(1).cloned().collect();
     let span = expr.span;
-    let call = Expr::new(
+    // The analyzer typed the `try` itself — precisely, as `m`'s answer
+    // or nil, when the registry knows `m` on the receiver's class. The
+    // call this desugars to inherits that type: a Send built here with
+    // none would read, at the post-lowering diagnose, as a dispatch
+    // that failed on a typed receiver — which is how the Action Text
+    // blob partial's `blob.try(:caption)` turned into a transpile error
+    // on an app `check` had passed clean. A gradual `try` stays
+    // untyped, so the ledger still counts it.
+    let try_ty = expr.ty.clone().filter(|t| !matches!(t, Ty::Untyped));
+    let mut call = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(recv.clone()),
@@ -140,9 +150,10 @@ fn rewrite(
             parenthesized: true,
         },
     );
+    call.ty = try_ty.clone();
 
     let arms = if bang { None } else { narrowing(&name, definers, parents) };
-    *expr = match arms {
+    let mut replaced = match arms {
         // Nothing in the tree defines it and it is not `try!`: the only
         // answer `try` can give is nil. Folding rather than emitting a
         // call that cannot resolve — the same rule the rest of the
@@ -186,6 +197,11 @@ fn rewrite(
             },
         ),
     };
+    // Whatever shape it took, the whole answers what the `try` did.
+    if replaced.ty.is_none() {
+        replaced.ty = try_ty;
+    }
+    *expr = replaced;
 }
 
 /// The classes to test with `is_a?`, or None to keep the nil guard.
