@@ -61,7 +61,17 @@ Serve the MCP tools over stdio for the Rails app at APP
             _ => root = Some(arg.clone()),
         }
     }
-    match crate::mcp::run_at(crate::mcp::workspace_root(root)) {
+    let root = crate::mcp::workspace_root(root);
+    // Same guard as `check`: a misconfigured client would otherwise get a
+    // server that answers every question about an empty app.
+    if !root.join("app").is_dir() {
+        eprintln!(
+            "roundhouse mcp: {} does not look like a Rails app (no app/ directory)",
+            root.display()
+        );
+        return ExitCode::from(2);
+    }
+    match crate::mcp::run_at(root) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("roundhouse-mcp: fatal: {err}");
@@ -122,6 +132,20 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
 
     let fixture = fixture.unwrap_or_else(|| default_app.to_string());
     let path = Path::new(&fixture);
+
+    // A path that is not a Rails app must not check clean: ingest walks
+    // whatever is there, and a typo'd directory or a repo root one level
+    // above the app would otherwise report zero of everything and exit 0.
+    if !path.is_dir() {
+        eprintln!("roundhouse-check: {fixture} is not a directory");
+        return ExitCode::from(2);
+    }
+    if !path.join("app").is_dir() {
+        eprintln!(
+            "roundhouse-check: {fixture} does not look like a Rails app (no app/ directory)"
+        );
+        return ExitCode::from(2);
+    }
 
     if continue_on_error {
         survey::activate();
