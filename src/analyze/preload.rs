@@ -30,6 +30,19 @@
 //! - `find_each`/`in_batches` preserve the chain (batching doesn't
 //!   preload). `strict_loading`, `default_scope` preloads, and manual
 //!   `Preloader` calls are not modeled; chains through them go opaque.
+//! - A collection RENDER is an iteration: `render @microposts` (or
+//!   `render partial: …, collection: …`) runs the partial once per
+//!   member with the member bound to the partial's local, so the
+//!   partial's body is walked as the block body. The Rails tutorial
+//!   iterates every collection this way and nothing else.
+//! - A model METHOD whose body ends in a recognizable chain
+//!   (`User#feed` → `Micropost.where(…).includes(:user, …)`) is
+//!   harvested like a scope, so `current_user.feed` carries its
+//!   preloads; a method whose tail is anything else stays opaque.
+//! - Active Storage: `micropost.image` needs `image_attachment`
+//!   preloaded (`includes(image_attachment: :blob)` or
+//!   `with_attached_image`) — the attachment is an association under
+//!   another name, and the read is `attached?`/`variant` per row.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -45,7 +58,8 @@ use crate::ty::Ty;
 #[derive(Clone, Debug, PartialEq)]
 enum ChainInfo {
     /// The chain was fully recognized: these associations are
-    /// preloaded, and the query originates at `origin`.
+    /// preloaded (explicitly, or implicitly — see
+    /// [`inverse_of_owner`]), and the query originates at `origin`.
     Known { preloads: BTreeSet<Symbol>, origin: Span },
     /// The chain passed through something this pass doesn't model —
     /// no claim can be made either way.
@@ -57,25 +71,45 @@ enum ChainInfo {
 /// chain harvest.
 struct ModelIndex<'a> {
     assocs: HashMap<ClassId, BTreeSet<Symbol>>,
+    /// The declarations behind `assocs`, for the inverse rule.
+    decls: HashMap<ClassId, Vec<&'a crate::dialect::Association>>,
     scopes: HashMap<ClassId, HashMap<Symbol, &'a Scope>>,
+    /// `has_one_attached :image` / `has_many_attached :files` per
+    /// model: the reader name → the association Rails preloads it
+    /// through (`image_attachment`, `files_attachments`).
+    attachments: HashMap<ClassId, HashMap<Symbol, Symbol>>,
+    /// Model methods (instance or class side) whose body ends in a
+    /// recognizable chain, harvested once: `User#feed`'s preloads ride
+    /// every `current_user.feed` read.
+    chain_methods: HashMap<ClassId, HashMap<Symbol, ChainInfo>>,
 }
 
 impl<'a> ModelIndex<'a> {
     fn build(app: &'a App) -> Self {
         let mut assocs: HashMap<ClassId, BTreeSet<Symbol>> = HashMap::new();
+        let mut decls: HashMap<ClassId, Vec<&'a crate::dialect::Association>> = HashMap::new();
         let mut scopes: HashMap<ClassId, HashMap<Symbol, &'a Scope>> = HashMap::new();
+        let mut attachments: HashMap<ClassId, HashMap<Symbol, Symbol>> = HashMap::new();
         let concern_items = &app.concern_model_items;
         for model in &app.models {
             let a = assocs.entry(model.name.clone()).or_default();
+            let d = decls.entry(model.name.clone()).or_default();
             let s = scopes.entry(model.name.clone()).or_default();
+            let at = attachments.entry(model.name.clone()).or_default();
             let mut fold = |items: &'a [ModelBodyItem]| {
                 for item in items {
                     match item {
                         ModelBodyItem::Association { assoc, .. } => {
                             a.insert(assoc.name().clone());
+                            d.push(assoc);
                         }
                         ModelBodyItem::Scope { scope, .. } => {
                             s.insert(scope.name.clone(), scope);
+                        }
+                        ModelBodyItem::Unknown { expr, .. } => {
+                            if let Some((attr, key)) = attached_decl(expr) {
+                                at.insert(attr, key);
+                            }
                         }
                         _ => {}
                     }
@@ -88,11 +122,74 @@ impl<'a> ModelIndex<'a> {
                 }
             }
         }
-        ModelIndex { assocs, scopes }
+        let mut index =
+            ModelIndex { assocs, decls, scopes, attachments, chain_methods: HashMap::new() };
+        // Second pass: methods whose tail is a chain, harvested against
+        // the associations/scopes just indexed. A method body binds no
+        // env of its own here (locals feeding the tail — the tutorial's
+        // `following_ids = "…"; Micropost.where(…)` — are SQL strings,
+        // not chains).
+        let mut chain_methods: HashMap<ClassId, HashMap<Symbol, ChainInfo>> = HashMap::new();
+        for model in &app.models {
+            for method in model.methods() {
+                let tail = body_tail(&method.body);
+                if let info @ ChainInfo::Known { .. } =
+                    harvest_chain(tail, &index, &HashMap::new(), 0)
+                {
+                    chain_methods
+                        .entry(model.name.clone())
+                        .or_default()
+                        .insert(method.name.clone(), info);
+                }
+            }
+        }
+        index.chain_methods = chain_methods;
+        index
     }
 
     fn is_model(&self, id: &ClassId) -> bool {
         self.assocs.contains_key(id)
+    }
+
+    /// Rails' automatic `inverse_of`: records loaded through
+    /// `owner.<has_many>` answer the inverse `belongs_to` with the
+    /// already-loaded owner, no query — so `micropost.user` inside
+    /// `render @user.microposts` is not an N+1, and reporting it would
+    /// be the first thing a Rails reader disproves. Detected the way
+    /// Rails does (`automatic_inverse_of`): a plain `has_many` (no
+    /// `through:`, no scope) whose target declares a `belongs_to` back
+    /// to the owner's class on the same foreign key. Returns that
+    /// association's name as an implicit preload; empty otherwise.
+    fn inverse_of_owner(&self, owner: &ClassId, assoc: &Symbol) -> Option<Symbol> {
+        use crate::dialect::Association;
+        let decl = self.decls.get(owner)?.iter().find(|a| a.name() == assoc)?;
+        let Association::HasMany { target, foreign_key, through: None, scope: None, .. } = decl
+        else {
+            return None;
+        };
+        self.decls.get(target)?.iter().find_map(|a| match a {
+            Association::BelongsTo { name, target: t, foreign_key: fk, polymorphic: false, .. }
+                if t == owner && fk == foreign_key =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// Every per-member read this pass checks on `model`, mapped to the
+    /// preload key that satisfies it: an association to itself, an
+    /// attachment reader to its `<attr>_attachment(s)` association.
+    fn read_keys(&self, model: &ClassId) -> Option<HashMap<Symbol, Symbol>> {
+        let assocs = self.assocs.get(model)?;
+        let mut out: HashMap<Symbol, Symbol> =
+            assocs.iter().map(|a| (a.clone(), a.clone())).collect();
+        if let Some(at) = self.attachments.get(model) {
+            for (attr, key) in at {
+                out.insert(attr.clone(), key.clone());
+            }
+        }
+        Some(out)
     }
 }
 
@@ -117,6 +214,30 @@ const PRESERVERS: &[&str] = &[
 ];
 
 const PRELOADERS: &[&str] = &["includes", "preload", "eager_load"];
+
+/// `has_one_attached :image` → (`image`, `image_attachment`);
+/// `has_many_attached :files` → (`files`, `files_attachments`) — the
+/// reader and the association Rails' `with_attached_<attr>` preloads.
+fn attached_decl(expr: &Expr) -> Option<(Symbol, Symbol)> {
+    let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return None };
+    let [arg] = args.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: attr } } = &*arg.node else { return None };
+    let key = match method.as_str() {
+        "has_one_attached" => crate::lower::attached::attachment_assoc_name(attr),
+        "has_many_attached" => Symbol::from(format!("{}_attachments", attr.as_str())),
+        _ => return None,
+    };
+    Some((attr.clone(), key))
+}
+
+/// A body's value: the last expression of a `Seq`, through `Return`.
+fn body_tail(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last().map(body_tail).unwrap_or(body),
+        ExprNode::Return { value } => body_tail(value),
+        _ => body,
+    }
+}
 
 /// The coverage triple's raw counts (#64: "checked N chains, M
 /// findings, K unverifiable" — a clean report is only actionable with
@@ -154,23 +275,25 @@ pub fn missing_preload_report(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         let base_env = controller_ivar_env(controller, &index);
         for action in controller.actions() {
             let mut env = base_env.clone();
-            walk_body(&action.body, &index, &mut env, app, &mut out, &mut cov);
+            walk_body(&action.body, &index, &mut env, app, None, &mut out, &mut cov);
         }
     }
     for model in &app.models {
         for method in model.methods() {
             let mut env = HashMap::new();
-            walk_body(&method.body, &index, &mut env, app, &mut out, &mut cov);
+            walk_body(&method.body, &index, &mut env, app, None, &mut out, &mut cov);
         }
     }
 
     // Cross-procedure: each view's ivar env is the intersection of
     // what its feeding actions bound — a finding requires the preload
-    // missing from every feeder (see module docs).
+    // missing from every feeder (see module docs). Partials inherit
+    // their renderers' envs the same way (a partial renders in its
+    // parent's view context and reads its ivars).
     let view_envs = build_view_envs(app, &index);
     for view in &app.views {
         let mut env = view_envs.get(&view.name).cloned().unwrap_or_default();
-        walk_body(&view.body, &index, &mut env, app, &mut out, &mut cov);
+        walk_body(&view.body, &index, &mut env, app, Some(&view.name), &mut out, &mut cov);
     }
 
     // A chain expression re-walked through nested Seq/If wrappers can
@@ -262,9 +385,17 @@ fn harvest_chain(
                 if let Some(owner) = instance_model(recv.ty.as_ref()) {
                     if index.assocs.get(owner).is_some_and(|a| a.contains(method)) {
                         return ChainInfo::Known {
-                            preloads: BTreeSet::new(),
+                            preloads: index.inverse_of_owner(owner, method).into_iter().collect(),
                             origin: expr.span,
                         };
+                    }
+                    // A model method whose body is a chain
+                    // (`current_user.feed`) — its preloads and origin
+                    // are the method's.
+                    if let Some(info) =
+                        index.chain_methods.get(owner).and_then(|m| m.get(method))
+                    {
+                        return info.clone();
                     }
                 }
                 // Named scope on a chain that bottoms at model M: fold
@@ -275,6 +406,26 @@ fn harvest_chain(
                     return ChainInfo::Opaque;
                 };
                 let Some(model) = chain_model(recv, index) else { return ChainInfo::Opaque };
+                // `with_attached_<attr>` — the scope Active Storage's
+                // macro declares: `includes(<attr>_attachment: :blob)`.
+                if let Some(attr) = m.strip_prefix("with_attached_") {
+                    if let Some(key) = index
+                        .attachments
+                        .get(&model)
+                        .and_then(|at| at.get(&Symbol::from(attr)))
+                    {
+                        preloads.insert(key.clone());
+                        return ChainInfo::Known { preloads, origin };
+                    }
+                }
+                // A class-side chain method (`Model.visible_to(user)`)
+                // contributes its own preloads like a scope.
+                if let Some(ChainInfo::Known { preloads: theirs, .. }) =
+                    index.chain_methods.get(&model).and_then(|c| c.get(&Symbol::from(m)))
+                {
+                    preloads.extend(theirs.iter().cloned());
+                    return ChainInfo::Known { preloads, origin };
+                }
                 if let Some(scope) = index.scopes.get(&model).and_then(|s| s.get(&Symbol::from(m)))
                 {
                     match harvest_scope_body(&scope.body, index, depth + 1) {
@@ -320,7 +471,10 @@ fn chain_model(expr: &Expr, index: &ModelIndex) -> Option<ClassId> {
                 return chain_model(recv.as_ref()?, index);
             }
             let inner = chain_model(recv.as_ref()?, index)?;
-            if index.scopes.get(&inner).is_some_and(|s| s.contains_key(&Symbol::from(m))) {
+            if index.scopes.get(&inner).is_some_and(|s| s.contains_key(&Symbol::from(m)))
+                || m.starts_with("with_attached_")
+                || index.chain_methods.get(&inner).is_some_and(|c| c.contains_key(&Symbol::from(m)))
+            {
                 return Some(inner); // scopes return the same relation class
             }
             None
@@ -395,12 +549,13 @@ fn walk_body(
     index: &ModelIndex,
     env: &mut HashMap<Symbol, ChainInfo>,
     app: &App,
+    view: Option<&Symbol>,
     out: &mut Vec<Diagnostic>,
     cov: &mut PreloadCoverage,
 ) {
     match &*expr.node {
         ExprNode::Assign { target, value } => {
-            walk_body(value, index, env, app, out, cov);
+            walk_body(value, index, env, app, view, out, cov);
             let name = match target {
                 LValue::Ivar { name } => Some(name),
                 LValue::Var { name, .. } => Some(name),
@@ -419,32 +574,96 @@ fn walk_body(
         }
         ExprNode::Send { recv, method, block, args, .. } => {
             if let Some(r) = recv {
-                walk_body(r, index, env, app, out, cov);
+                walk_body(r, index, env, app, view, out, cov);
             }
             for a in args {
-                walk_body(a, index, env, app, out, cov);
+                walk_body(a, index, env, app, view, out, cov);
             }
             if let (Some(r), Some(b)) = (recv, block) {
                 if ITERATORS.contains(&method.as_str()) {
-                    check_iteration(r, b, index, env, app, out, cov);
+                    if let ExprNode::Lambda { params, body, .. } = &*b.node {
+                        if let Some(member) = params.first() {
+                            check_members(r, body, member, "iterating", index, env, app, out, cov);
+                        }
+                    }
                 }
-                walk_body(b, index, env, app, out, cov);
+                walk_body(b, index, env, app, view, out, cov);
             } else if let Some(b) = block {
-                walk_body(b, index, env, app, out, cov);
+                walk_body(b, index, env, app, view, out, cov);
+            }
+            // A collection render is an iteration whose block is the
+            // partial's body and whose block parameter is the partial's
+            // local: `render @microposts` runs `_micropost` once per
+            // member.
+            if recv.is_none() && method.as_str() == "render" {
+                if let Some((coll, partial, local)) = collection_render(args, view) {
+                    if let Some(pv) = app.views.iter().find(|v| v.name == partial) {
+                        check_members(coll, &pv.body, &local, "rendering", index, env, app, out, cov);
+                    }
+                }
             }
         }
         _ => {
-            expr.node.for_each_child(&mut |c| walk_body(c, index, env, app, out, cov));
+            expr.node.for_each_child(&mut |c| walk_body(c, index, env, app, view, out, cov));
         }
     }
 }
 
-/// One iteration site: receiver must be a typed model relation with a
-/// recognized chain; every single-hop association read on the block
-/// param that isn't preloaded is a finding.
-fn check_iteration(
+/// The collection, partial view name and member local of a collection
+/// render: `render @items` (partial and local from the element class,
+/// as Rails derives them) or `render partial: "name", collection:
+/// items[, as: :member]` (partial relative to the rendering view).
+fn collection_render<'e>(
+    args: &'e [Expr],
+    view: Option<&Symbol>,
+) -> Option<(&'e Expr, Symbol, Symbol)> {
+    let first = args.first()?;
+    if let ExprNode::Hash { entries, .. } = &*first.node {
+        let mut partial: Option<String> = None;
+        let mut coll: Option<&Expr> = None;
+        let mut as_name: Option<Symbol> = None;
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+            match key.as_str() {
+                "partial" => {
+                    if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                        partial = Some(value.clone());
+                    }
+                }
+                "collection" => coll = Some(v),
+                "as" => {
+                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
+                        as_name = Some(value.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (partial, coll) = (partial?, coll?);
+        let resolved = super::render::resolve_partial_path(&partial, view?);
+        let local = as_name.unwrap_or_else(|| {
+            Symbol::from(resolved.rsplit("/_").next().unwrap_or(&resolved))
+        });
+        return Some((coll, Symbol::from(resolved.as_str()), local));
+    }
+    // `render @items`: only the collection form is an iteration; a
+    // single-record render (`render @user`) runs the partial once.
+    let ty = first.ty.as_ref()?;
+    ty.collection_elem()?;
+    let (partial, local, _) = super::render::partial_from_receiver_type(ty)?;
+    Some((first, Symbol::from(partial.as_str()), Symbol::from(local.as_str())))
+}
+
+/// One iteration site — a block iteration or a collection render:
+/// the receiver must be a typed model relation with a recognized
+/// chain; every single-hop association (or attachment) read on
+/// `member` inside `body` that isn't preloaded is a finding. `how`
+/// names the site in the message ("iterating" / "rendering").
+fn check_members(
     recv: &Expr,
-    block: &Expr,
+    body: &Expr,
+    member: &Symbol,
+    how: &str,
     index: &ModelIndex,
     env: &HashMap<Symbol, ChainInfo>,
     app: &App,
@@ -452,60 +671,77 @@ fn check_iteration(
     cov: &mut PreloadCoverage,
 ) {
     let Some(model) = relation_elem(recv.ty.as_ref()) else { return };
-    let Some(assocs) = index.assocs.get(model) else { return };
+    let Some(keys) = index.read_keys(model) else { return };
     cov.iteration_sites += 1;
     let ChainInfo::Known { preloads, origin } = harvest_chain(recv, index, env, 0) else {
         cov.opaque_chains += 1;
         return; // opaque: no claim either way
     };
     cov.known_chains += 1;
-    let ExprNode::Lambda { params, body, .. } = &*block.node else { return };
-    let Some(member) = params.first() else { return };
 
     let mut reads: Vec<(Symbol, Span)> = Vec::new();
-    collect_member_assoc_reads(body, member, assocs, &mut reads);
+    collect_member_assoc_reads(body, member, &keys, &mut reads);
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start.cmp(&b.1.start)));
     reads.dedup_by(|a, b| a.0 == b.0);
-    for (assoc, span) in reads {
-        if preloads.contains(&assoc) {
+    for (read, span) in reads {
+        let key = &keys[&read];
+        if preloads.contains(key) {
             continue;
         }
         let query_site = render_site(app, origin);
+        let fix = if key == &read {
+            format!("`.includes(:{})`", key.as_str())
+        } else {
+            // An attachment: Rails' own scope, or its expansion.
+            format!(
+                "`.with_attached_{}` (or `.includes({}: :blob)`)",
+                read.as_str(),
+                key.as_str()
+            )
+        };
         let message = format!(
-            "iterating this relation reads `{}.{}`, but the query{} does not \
-             preload :{} — add `.includes(:{})`",
+            "{how} this relation reads `{}.{}`, but the query{} does not \
+             preload :{} — add {fix}",
             member.as_str(),
-            assoc.as_str(),
+            read.as_str(),
             query_site.map(|s| format!(" at {s}")).unwrap_or_default(),
-            assoc.as_str(),
-            assoc.as_str(),
+            key.as_str(),
         );
         out.push(Diagnostic {
             span,
-            kind: DiagnosticKind::MissingPreload { association: assoc, query_span: origin },
+            kind: DiagnosticKind::MissingPreload { association: key.clone(), query_span: origin },
             severity: Severity::Warning,
             message,
         });
     }
 }
 
-/// `member.assoc` reads inside the block body (single hop, direct
-/// receiver only). Descends everything including nested blocks — a
-/// read inside a nested `map` still runs per member.
+/// `member.<read>` sends inside the body (single hop, direct receiver
+/// only), for every read in `keys`. Descends everything including
+/// nested blocks — a read inside a nested `map` still runs per member.
 fn collect_member_assoc_reads(
     expr: &Expr,
     member: &Symbol,
-    assocs: &BTreeSet<Symbol>,
+    keys: &HashMap<Symbol, Symbol>,
     out: &mut Vec<(Symbol, Span)>,
 ) {
     if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if let ExprNode::Var { name, .. } = &*r.node {
-            if name == member && assocs.contains(method) {
-                out.push((method.clone(), expr.span));
+        // A block parameter reads as a `Var`; a partial's local reads
+        // as a bare no-arg `Send` (Prism sees an unbound bareword and
+        // ingest lifts it that way — see `ingest::expr`'s `defined?`
+        // note). Same member, two spellings.
+        let is_member = match &*r.node {
+            ExprNode::Var { name, .. } => name == member,
+            ExprNode::Send { recv: None, method: m, args, block: None, .. } => {
+                m == member && args.is_empty()
             }
+            _ => false,
+        };
+        if is_member && keys.contains_key(method) {
+            out.push((method.clone(), expr.span));
         }
     }
-    expr.node.for_each_child(&mut |c| collect_member_assoc_reads(c, member, assocs, out));
+    expr.node.for_each_child(&mut |c| collect_member_assoc_reads(c, member, keys, out));
 }
 
 fn render_site(app: &App, span: Span) -> Option<String> {
@@ -544,21 +780,49 @@ fn build_view_envs(
             if *n == 1 {
                 *entry = local;
             } else {
-                // Intersect: keep ivars every feeder bound to a known
-                // chain, with the intersection of their preloads.
-                entry.retain(|k, v| {
-                    let (Some(ChainInfo::Known { preloads: theirs, .. }),
-                         ChainInfo::Known { preloads, .. }) = (local.get(k), v)
-                    else {
-                        return false;
-                    };
-                    preloads.retain(|p| theirs.contains(p));
-                    true
-                });
+                intersect_env(entry, &local);
             }
         }
     }
+    // Partials: a partial's env is the intersection of its renderers'
+    // envs, closed over partial-renders-partial edges (bounded — the
+    // render graph is shallow and a cycle would only re-intersect).
+    for _ in 0..4 {
+        let mut next = envs.clone();
+        let mut seen: HashMap<Symbol, u32> = HashMap::new();
+        for (renderer, partials) in &app.render_edges {
+            let Some(renv) = envs.get(renderer) else { continue };
+            for partial in partials {
+                let n = seen.entry(partial.clone()).or_insert(0);
+                *n += 1;
+                let entry = next.entry(partial.clone()).or_default();
+                if *n == 1 {
+                    *entry = renv.clone();
+                } else {
+                    intersect_env(entry, renv);
+                }
+            }
+        }
+        if next == envs {
+            break;
+        }
+        envs = next;
+    }
     envs
+}
+
+/// Keep the ivars both envs bind to a known chain, with the
+/// intersection of their preloads (the missing-from-ALL rule).
+fn intersect_env(entry: &mut HashMap<Symbol, ChainInfo>, other: &HashMap<Symbol, ChainInfo>) {
+    entry.retain(|k, v| {
+        let (Some(ChainInfo::Known { preloads: theirs, .. }), ChainInfo::Known { preloads, .. }) =
+            (other.get(k), v)
+        else {
+            return false;
+        };
+        preloads.retain(|p| theirs.contains(p));
+        true
+    });
 }
 
 /// Controller-wide ivar→chain env: the union over every method's

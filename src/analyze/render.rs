@@ -363,7 +363,7 @@ fn interpret_render_call(
 /// return (partial_view_name, local_name, element_ty). For
 /// `Array<Article>` / `Relation[Article]`: partial `articles/_article`,
 /// local `article`, element `Article`.
-fn partial_from_receiver_type(ty: &Ty) -> Option<(String, String, Ty)> {
+pub(super) fn partial_from_receiver_type(ty: &Ty) -> Option<(String, String, Ty)> {
     if let Some(elem) = ty.collection_elem() {
         if let Ty::Class { id, .. } = &elem {
             let class_name = id.0.as_str();
@@ -387,7 +387,7 @@ fn partial_from_receiver_type(ty: &Ty) -> Option<(String, String, Ty)> {
 /// Resolve a partial name relative to the current view's directory.
 /// `"form"` in `articles/index` → `articles/_form`; `"shared/nav"` (absolute,
 /// contains `/`) → `shared/_nav`.
-fn resolve_partial_path(name: &str, current_view: &Symbol) -> String {
+pub(super) fn resolve_partial_path(name: &str, current_view: &Symbol) -> String {
     if let Some(idx) = name.rfind('/') {
         let (dir, file) = name.split_at(idx + 1);
         format!("{dir}_{file}")

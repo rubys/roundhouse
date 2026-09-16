@@ -3320,6 +3320,95 @@ fn missing_preload_stays_silent_when_preloaded_or_opaque() {
     assert_eq!(missing_preload_diags(&app), vec![], "opaque chain stays silent");
 }
 
+/// The Rails tutorial's shape: every collection is iterated by
+/// `render @collection`, never `.each`; the per-row read is an Active
+/// Storage attachment; and the one preloaded query lives in a model
+/// METHOD (`User#feed`), not a scope.
+fn tutorial_fixture(show_body: &str, user_model_extra: &str) -> roundhouse::App {
+    app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/users_controller.rb",
+            &format!(
+                "class UsersController < ApplicationController\n  def show\n    @user = User.find(params[:id])\n{show_body}\n  end\nend\n"
+            ),
+        ),
+        (
+            "app/models/user.rb",
+            &format!(
+                "class User < ApplicationRecord\n  has_many :microposts, dependent: :destroy\n{user_model_extra}\nend\n"
+            ),
+        ),
+        (
+            "app/models/micropost.rb",
+            "class Micropost < ApplicationRecord\n  belongs_to :user\n  has_one_attached :image\nend\n",
+        ),
+        ("app/views/users/show.html.erb", "<ol><%= render @microposts %></ol>\n"),
+        (
+            "app/views/microposts/_micropost.html.erb",
+            "<li><%= micropost.user.name %><% if micropost.image.attached? %>img<% end %></li>\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "microposts", force: :cascade do |t|
+    t.integer "user_id"
+    t.text "content"
+  end
+end
+"#,
+        ),
+    ])
+}
+
+#[test]
+fn missing_preload_sees_a_collection_render_and_an_attachment() {
+    // `render @microposts` runs `_micropost` per row; `micropost.image`
+    // needs `image_attachment` preloaded and the query has nothing.
+    let app = tutorial_fixture("    @microposts = @user.microposts.order(:created_at)", "");
+    let diags = missing_preload_diags(&app);
+    let hit = diags
+        .iter()
+        .find(|(f, _)| f.ends_with("_micropost.html.erb"))
+        .expect("finding at the partial's read");
+    assert!(
+        hit.1.contains("rendering this relation reads `micropost.image`")
+            && hit.1.contains(":image_attachment")
+            && hit.1.contains(".with_attached_image"),
+        "attachment read named with Rails' preload key and scope; got {}",
+        hit.1
+    );
+    // `micropost.user` is NOT reported: records loaded through
+    // `@user.microposts` answer the inverse `belongs_to` with the
+    // loaded owner (Rails' automatic inverse_of) — no query.
+    assert_eq!(
+        diags.iter().filter(|(_, m)| m.contains("micropost.user")).count(),
+        0,
+        "the inverse belongs_to is implicitly loaded; got {diags:?}"
+    );
+}
+
+#[test]
+fn missing_preload_honours_with_attached_and_a_chain_method() {
+    // Rails' own scope satisfies the attachment read.
+    let app = tutorial_fixture("    @microposts = @user.microposts.with_attached_image", "");
+    assert_eq!(missing_preload_diags(&app), vec![], "with_attached_image preloads it");
+
+    // A model method whose body ends in a chain is harvested like a
+    // scope: `@user.feed` carries the method's `includes`.
+    let app = tutorial_fixture(
+        "    @microposts = @user.feed",
+        "  def feed\n    ids = \"SELECT 1\"\n    Micropost.where(\"user_id = :id\", id: id).includes(:user, image_attachment: :blob)\n  end",
+    );
+    assert_eq!(missing_preload_diags(&app), vec![], "the method's preloads ride the read");
+}
+
 /// A concern's method spliced into a class that never sets the ivar it
 /// reads must be typed against the CONCERN's environment — the union
 /// across includers — not the includer's own.
