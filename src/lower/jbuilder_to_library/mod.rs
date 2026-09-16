@@ -73,7 +73,7 @@ pub fn lower_jbuilder_to_library_classes(
 ) -> Vec<LibraryClass> {
     let mut lcs: Vec<LibraryClass> = views
         .iter()
-        .filter(|v| v.format.as_str() == "json")
+        .filter(|v| v.format.as_str() == "json" && !v.analysis_only)
         .map(|v| build_library_class(v, app, /*type_body=*/ false))
         .collect();
 

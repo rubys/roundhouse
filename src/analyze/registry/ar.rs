@@ -129,6 +129,23 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     {
         let attached_id = ClassId(Symbol::from("ActiveStorage::Attached"));
         let blob_id = ClassId(Symbol::from("ActiveStorage::Blob"));
+        // `Blob#filename` is an `ActiveStorage::Filename` (extension,
+        // base, …), not a String — app code that wants the text writes
+        // `filename.to_s`, and Action Text's `_blob` partial reads
+        // `blob.filename.extension`. `runtime/ruby/active_storage.rb`
+        // answers the same class.
+        let filename_id = ClassId(Symbol::from("ActiveStorage::Filename"));
+        {
+            let mut filename = ClassInfo::default();
+            for m in [
+                "to_s", "extension", "extension_with_delimiter", "extension_without_delimiter",
+                "base", "sanitized", "as_json",
+            ] {
+                filename.instance_methods.insert(Symbol::from(m), Ty::Str);
+            }
+            filename.instance_methods.insert(Symbol::from("=="), Ty::Bool);
+            classes.insert(filename_id.clone(), filename);
+        }
         let metadata_id = ClassId(Symbol::from("ActiveStorage::BlobMetadata"));
         let variant_id = ClassId(Symbol::from("ActiveStorage::VariantWithRecord"));
         let service_id = ClassId(Symbol::from("ActiveStorage::Service"));
@@ -141,7 +158,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         for (m, ty) in [
             ("attached?", Ty::Bool),
             ("blob", nilable(class_ty(&blob_id))),
-            ("filename", nilable_str.clone()),
+            ("filename", nilable(class_ty(&filename_id))),
             ("content_type", nilable_str.clone()),
             ("key", Ty::Str),
             ("signed_id", Ty::Str),
@@ -175,7 +192,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         for (m, ty) in [
             ("id", Ty::Int),
             ("key", Ty::Str),
-            ("filename", Ty::Str),
+            ("filename", class_ty(&filename_id)),
             ("content_type", Ty::Str),
             ("byte_size", Ty::Int),
             ("metadata", class_ty(&metadata_id)),
@@ -187,6 +204,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("audio?", Ty::Bool),
             ("variable?", Ty::Bool),
             ("url", Ty::Str),
+            // Action Text's `_blob` partial: a previewable or variable
+            // blob renders through `representation(transformations)`.
+            ("representable?", Ty::Bool),
+            ("previewable?", Ty::Bool),
+            ("representation", class_ty(&variant_id)),
+            ("preview", class_ty(&variant_id)),
+            ("variant", class_ty(&variant_id)),
         ] {
             blob.instance_methods.insert(Symbol::from(m), ty);
         }

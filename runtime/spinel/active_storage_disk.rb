@@ -246,7 +246,7 @@ module ActiveStorage
 
     def self.disk_url(blob, disposition)
       "/rails/active_storage/disk/" + encode(blob.key, disposition) + "/" +
-        ActiveStorage.url_filename(blob.filename)
+        ActiveStorage.url_filename(blob.filename.to_s)
     end
   end
 
@@ -321,7 +321,7 @@ module ActiveStorage
         return nil
       end
       @headers["Content-Disposition"] = disposition + "; filename=\"" +
-        ActiveStorage.url_filename(blob.filename) + "\""
+        ActiveStorage.url_filename(blob.filename.to_s) + "\""
       @headers["Cache-Control"] = "max-age=3600, public"
       send_data(service.download(key), type: blob.content_type, disposition: disposition)
       nil

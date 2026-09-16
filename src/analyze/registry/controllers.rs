@@ -131,14 +131,74 @@ pub(in crate::analyze) fn register(
             Ty::Nil,
         ),
     );
-    // `request` / `response` / `logger` return framework objects
-    // (ActionDispatch::Request, etc.) we don't model structurally.
-    // Gradual `Untyped` so chains like `request.referer` /
-    // `request.remote_ip` / `request.env[...]` flow through
-    // dispatch instead of bottoming out at Var.
-    app_ctrl.class_methods.insert(Symbol::from("request"), Ty::Untyped);
+    // `request` is an ActionDispatch::Request with the surface an app
+    // reads (the authentication generator's `request.user_agent` /
+    // `request.remote_ip`, redirects' `request.url`, the verb
+    // predicates the trace's guard verdict already reads by name).
+    // Anything off this table falls to "no known method" — extend as
+    // the corpus demands. `response` / `logger` stay gradual.
+    {
+        let request_id = ClassId(Symbol::from("ActionDispatch::Request"));
+        let mut request = ClassInfo::default();
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        for m in [
+            "user_agent", "remote_ip", "ip", "url", "original_url", "fullpath", "path",
+            "host", "host_with_port", "domain", "protocol", "scheme", "port_string",
+            "request_method", "method", "raw_post", "uuid", "request_id", "base_url",
+            "script_name", "path_info", "query_string", "media_type",
+        ] {
+            request.instance_methods.insert(Symbol::from(m), Ty::Str);
+        }
+        for m in ["referer", "referrer", "content_type", "origin", "subdomain", "remote_addr"] {
+            request.instance_methods.insert(Symbol::from(m), str_or_nil());
+        }
+        for m in [
+            "get?", "post?", "put?", "patch?", "delete?", "head?", "options?", "xhr?",
+            "xml_http_request?", "ssl?", "local?", "form_data?",
+        ] {
+            request.instance_methods.insert(Symbol::from(m), Ty::Bool);
+        }
+        request.instance_methods.insert(Symbol::from("port"), Ty::Int);
+        request.instance_methods.insert(Symbol::from("content_length"), Ty::Int);
+        for m in ["headers", "env", "cookie_jar", "session", "params", "query_parameters",
+                  "request_parameters", "path_parameters", "format", "body", "variant",
+                  "flash", "subdomains", "accepts", "mime_type", "authorization"] {
+            request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+        }
+        classes.insert(request_id.clone(), request);
+        app_ctrl.class_methods.insert(
+            Symbol::from("request"),
+            Ty::Class { id: request_id, args: vec![] },
+        );
+    }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
+    // `cookies` is the cookie jar: string values in and out,
+    // `signed`/`permanent`/`encrypted` are the same jar with a codec
+    // (so `cookies.signed.permanent[:session_id] = …` chains), and
+    // `delete` answers the removed value.
+    {
+        let jar_id = ClassId(Symbol::from("ActionDispatch::Cookies::CookieJar"));
+        let jar_ty = Ty::Class { id: jar_id.clone(), args: vec![] };
+        let mut jar = ClassInfo::default();
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        for m in ["[]", "delete", "fetch"] {
+            jar.instance_methods.insert(Symbol::from(m), str_or_nil());
+        }
+        // `[]=` takes a String or an options Hash; answers what it was
+        // given, which callers never read.
+        jar.instance_methods.insert(Symbol::from("[]="), Ty::Nil);
+        for m in ["signed", "permanent", "encrypted", "signed_or_encrypted"] {
+            jar.instance_methods.insert(Symbol::from(m), jar_ty.clone());
+        }
+        for m in ["key?", "has_key?", "include?"] {
+            jar.instance_methods.insert(Symbol::from(m), Ty::Bool);
+        }
+        jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) });
+        jar.instance_methods.insert(Symbol::from("clear"), Ty::Nil);
+        classes.insert(jar_id, jar);
+        app_ctrl.class_methods.insert(Symbol::from("cookies"), jar_ty);
+    }
     // Devise scope helpers. A model declaring the `devise` DSL
     // (`class User; devise :registerable, …`) makes Devise generate
     // `current_user` / `user_signed_in?` / `authenticate_user!` on

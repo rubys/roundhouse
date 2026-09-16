@@ -328,6 +328,53 @@ module ActiveStorage
     end
   end
 
+  # Rails' `Blob#filename` is not a String: it is an
+  # `ActiveStorage::Filename` that knows its extension and base, which
+  # is what Action Text's copied `_blob` partial reads
+  # (`blob.filename.extension`) and why app code that wants the text
+  # writes `filename.to_s`. Same shape here, so a call the analyzer
+  # accepts on Rails runs on this runtime.
+  class Filename
+    def initialize(filename)
+      @filename = filename
+    end
+
+    def to_s
+      @filename
+    end
+
+    # `.jpg` — the delimiter and the extension, "" when there is none.
+    def extension_with_delimiter
+      i = @filename.rindex(".")
+      i.nil? || i == 0 ? "" : @filename[i..]
+    end
+
+    # `jpg` — the extension without its delimiter, "" when there is none.
+    def extension_without_delimiter
+      e = extension_with_delimiter
+      e.empty? ? "" : e[1..]
+    end
+
+    def extension
+      extension_without_delimiter
+    end
+
+    # `racecar` for `racecar.jpg`; the whole name when there is no extension.
+    def base
+      e = extension_with_delimiter
+      e.empty? ? @filename : @filename[0, @filename.length - e.length]
+    end
+
+    # Rails strips the characters no filesystem or URL wants.
+    def sanitized
+      @filename.tr("\u{202E}%$|:;/\t\r\n\\", "-")
+    end
+
+    def as_json
+      @filename
+    end
+  end
+
   # One `active_storage_blobs` row: what the file IS, apart from what it
   # is attached to. Constructed from a row (`from_row`), never queried
   # per field.
@@ -350,7 +397,7 @@ module ActiveStorage
     end
 
     def filename
-      @filename
+      Filename.new(@filename)
     end
 
     def content_type
@@ -622,7 +669,7 @@ module ActiveStorage
       data = Processor.transform(Blob.service.download(b.key), b.content_type, v)
       image = Blob.create_and_upload!(
         data,
-        ActiveStorage.filename_base(b.filename) + "." + v.output_format(b.content_type),
+        ActiveStorage.filename_base(b.filename.to_s) + "." + v.output_format(b.content_type),
         v.output_content_type(b.content_type)
       )
       record_id = ActiveRecord.adapter.insert("active_storage_variant_records", {
@@ -668,7 +715,7 @@ module ActiveStorage
       b = @blob
       return "" if b.nil?
       v = @variation
-      v.nil? ? b.filename : ActiveStorage.filename_base(b.filename) + "." + v.output_format(b.content_type)
+      v.nil? ? b.filename.to_s : ActiveStorage.filename_base(b.filename.to_s) + "." + v.output_format(b.content_type)
     end
 
     # `url_for(variant)` / `polymorphic_url(variant)`: Rails'

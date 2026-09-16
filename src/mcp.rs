@@ -464,6 +464,7 @@ fn tools_list() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn server() -> Server {
         Server { root: PathBuf::from("fixtures/real-blog") }
@@ -617,17 +618,62 @@ mod tests {
 
     #[test]
     fn diagnostics_surfaces_uningested_view_templates() {
-        // Regression for the silent-view-drop gap: real-blog ships
-        // `mailer.text.erb` / `manifest.json.erb` (non-`.html.erb`
-        // templates the analyzer doesn't type). They must show up as
-        // ingest gaps rather than vanishing. This also guards the survey-
-        // mode wiring in `analyze()`: drop `survey::activate()` and the
-        // gap collector stays empty, so this line disappears.
+        // Regression for the silent-view-drop gap: a template engine the
+        // analyzer doesn't ingest must show up as an ingest gap rather
+        // than vanish. real-blog's own `mailer.text.erb` /
+        // `manifest.json.erb` used to be the witnesses; they are ingested
+        // now (analysis-only), so the witness is a `.slim` view added to
+        // a copy of the fixture. This also guards the survey-mode wiring
+        // in `analyze()`: drop `survey::activate()` and the gap collector
+        // stays empty, so the line disappears.
+        let dir = std::env::temp_dir().join(format!("rh-mcp-slim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        std::fs::write(dir.join("app/views/articles/extra.html.slim"), "h1 Extra\n").unwrap();
+        let text = text_of(&call(&Server { root: dir.clone() }, "diagnostics", json!({})));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            text.contains("view template not ingested: slim"),
+            "expected the un-ingested slim template to be surfaced as a gap, got: {text}"
+        );
+        // And the templates every `rails new` app carries are no longer gaps.
         let text = text_of(&call(&server(), "diagnostics", json!({})));
         assert!(
-            text.contains("view template not ingested"),
-            "expected un-ingested view templates to be surfaced as gaps, got: {text}"
+            !text.contains("view template not ingested"),
+            "mailer.text.erb / manifest.json.erb are analysis-only views now, got: {text}"
         );
+    }
+
+    /// `app/`, `config/`, `db/` of a fixture, enough for ingest.
+    fn copy_dir(from: &Path, to: &Path) {
+        for sub in ["app", "config", "db"] {
+            let src = from.join(sub);
+            if !src.is_dir() {
+                continue;
+            }
+            for entry in walkdir(&src) {
+                let rel = entry.strip_prefix(from).unwrap();
+                let dest = to.join(rel);
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                std::fs::copy(&entry, &dest).unwrap();
+            }
+        }
+    }
+
+    fn walkdir(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 
     #[test]

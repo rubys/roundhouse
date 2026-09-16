@@ -114,6 +114,7 @@ pub fn ingest_template(
 
     Ok(View {
         name: Symbol::from(name),
+        analysis_only: matches!(format.as_str(), "text" | "json"),
         format: Symbol::from(format),
         locals: Row::closed(),
         body,

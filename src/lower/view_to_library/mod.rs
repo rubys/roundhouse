@@ -71,7 +71,7 @@ pub fn lower_views_to_library_classes(
     let vctx = ViewLowerCtx::new(app);
     let mut lcs: Vec<LibraryClass> = views
         .iter()
-        .filter(|v| crate::lower::view::renders_through_view_path(v.format.as_str()))
+        .filter(|v| !v.analysis_only && crate::lower::view::renders_through_view_path(v.format.as_str()))
         .map(|v| vctx.lower_untyped(v))
         .collect();
 

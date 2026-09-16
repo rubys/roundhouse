@@ -8,6 +8,7 @@ use crate::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
+use crate::ident::Symbol;
 
 use super::PreloadCoverage;
 use super::preload;
@@ -37,9 +38,23 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = Vec::new();
+    // A filter's return value is Rails' to discard (`around_action
+    // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
+    // escapes from its tail, so an `untyped` there is not a gradual
+    // escape. Every other action's tail is its value.
+    let filter_targets: std::collections::HashSet<Symbol> = app
+        .controllers
+        .iter()
+        .flat_map(|c| c.body.iter())
+        .filter_map(|item| match item {
+            crate::dialect::ControllerBodyItem::Filter { filter, .. } => Some(filter.target.clone()),
+            _ => None,
+        })
+        .chain(app.concern_filters.values().flatten().map(|f| f.target.clone()))
+        .collect();
     for controller in &app.controllers {
         for action in controller.actions() {
-            diagnose_expr(&action.body, &mut out);
+            diagnose_expr_in(&action.body, &mut out, !filter_targets.contains(&action.name));
         }
     }
     for model in &app.models {
@@ -123,6 +138,17 @@ fn unresolved_name(expr: &Expr) -> Option<crate::ident::Symbol> {
 }
 
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    diagnose_expr_in(expr, out, true)
+}
+
+/// `value_used`: whether this expression's VALUE flows anywhere. A
+/// statement before the end of a `Seq`, or the tail of a body whose
+/// caller discards the result, contributes nothing downstream, so an
+/// `untyped` there is not a gradual escape — reporting it counted the
+/// same `I18n.with_locale` twice (the call, then the body `Seq` that
+/// takes its tail's type) and once more for nothing. Every other
+/// diagnostic is position-independent and reported regardless.
+fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // Diagnostic annotations set by the body-typer during analyze.
     // These are the IR-carried path: detection happens once at the
     // point of typing, and every reader (including this walker) sees
@@ -193,7 +219,11 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
     // walker is the natural place since every node's `.ty` already
     // carries the signal.
-    if matches!(expr.ty.as_ref(), Some(Ty::Untyped)) {
+    // A `Seq` has its tail's type; the tail reports itself.
+    if value_used
+        && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
+        && !matches!(&*expr.node, ExprNode::Seq { .. })
+    {
         let kind = DiagnosticKind::GradualUntyped {
             expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
         };
@@ -290,7 +320,13 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
                 diagnose_expr(b, out);
             }
         }
-        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+        ExprNode::Seq { exprs } => {
+            let last = exprs.len().saturating_sub(1);
+            for (i, e) in exprs.iter().enumerate() {
+                diagnose_expr_in(e, out, value_used && i == last);
+            }
+        }
+        ExprNode::Array { elements: exprs, .. } => {
             for e in exprs {
                 diagnose_expr(e, out);
             }

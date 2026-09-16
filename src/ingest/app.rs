@@ -2719,10 +2719,16 @@ fn walk_erb<V: Vfs + ?Sized>(
                 // answer to the stem-collision worry — the lowered method
                 // carries the format suffix (`show_svg`) and sits beside
                 // `show` rather than on top of it.
+                // `.text.erb` (mailer plain-text variants, the mailer
+                // layout) and `.json.erb` (the PWA manifest) join them
+                // the same way: lowered as `<action>_text` /
+                // `<action>_json`, beside the html template. They were
+                // the last un-ingested templates in every `rails new`
+                // app, so an otherwise fully-covered app still showed
+                // four coverage gaps.
                 if stem.ends_with(".html")
                     || !stem.contains('.')
-                    || format == Some("turbo_stream")
-                    || format == Some("svg")
+                    || matches!(format, Some("turbo_stream" | "svg" | "text" | "json"))
                 {
                     out.push((path, engine));
                 } else {

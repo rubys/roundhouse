@@ -121,6 +121,9 @@ pub(in crate::analyze) fn register(
         // dom / rendering / capture
         "dom_id", "dom_class", "render", "render_to_string", "capture",
         "content_for", "provide", "escape_javascript", "j",
+        // fragment caching: `cache @product do … end` renders the block
+        // (or the cached fragment) — a String either way.
+        "cache", "cache_if", "cache_unless", "uncached",
         // turbo / hotwire
         "turbo_frame_tag", "turbo_stream_from", "turbo_refreshes_with",
         "turbo_include_tags", "turbo_page_requires_reload",
@@ -152,10 +155,14 @@ pub(in crate::analyze) fn register(
             .or_insert(Ty::Str);
     }
     // `tag` is the dynamic TagBuilder — `tag.div`/`tag.details` build an
-    // element from the *method name*, so it can't be a fixed Str return
-    // (that turns `tag.foo` into a dispatch error). Untyped (gradual):
-    // both `tag("br")` and `tag.section` flow through without erroring.
-    action_view.instance_methods.insert(Symbol::from("tag"), Ty::Untyped);
+    // element from the *method name*, so no fixed method table fits.
+    // Typed as the builder class, whose dispatch rule (send.rs, beside
+    // the StringInquirer one) answers every method as the String it
+    // renders; `tag("br")`, the call form, is the same String.
+    action_view.instance_methods.insert(
+        Symbol::from("tag"),
+        Ty::Class { id: ClassId(Symbol::from("ActionView::Helpers::TagHelper::TagBuilder")), args: vec![] },
+    );
     // Flash convenience accessors — Rails 7 scaffolds emit bare
     // `notice`/`alert` in views; both read `flash[:notice]`/`[:alert]`.
     // Typed Str (not Str|Nil): consistent with the other Str-returning
@@ -202,6 +209,12 @@ pub(in crate::analyze) fn register(
             .entry(Symbol::from(m))
             .or_insert(Ty::Str);
     }
+    // `local_assigns` — the locals a render passed, as a Hash. Its
+    // values are whatever the site passed, so the read is gradual.
+    action_view.instance_methods.insert(
+        Symbol::from("local_assigns"),
+        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+    );
     // `params` is exposed to templates too (same strong-params
     // surface the controller context declares).
     action_view.instance_methods.insert(

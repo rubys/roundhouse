@@ -1334,6 +1334,15 @@ pub struct View {
     /// for the overwhelmingly common headerless partial/view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_locals: Option<Vec<Param>>,
+    /// Ingested for the analyzer only — a mailer's `.text.erb` variant,
+    /// the mailer layout, the PWA `manifest.json.erb`: templates every
+    /// `rails new` app carries, whose Ruby the type checks and the IDE
+    /// should see, but which no emitter renders (a text or JSON body
+    /// is not the HTML walker's shape, and the stem would sit on the
+    /// html template's). `session::analyze_and_lower` drops them
+    /// before lowering; `check`, the LSP and the MCP keep them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub analysis_only: bool,
 }
 
 // Tests -----------------------------------------------------------------

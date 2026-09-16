@@ -72,10 +72,14 @@ jobs:
   # The Rails Guides "Getting Started" store: built by following the
   # guide (scripts/create-store, which also runs the guide's own tests),
   # then analyzed. The claim this job keeps: the analyzer reports ZERO
-  # errors on the official tutorial app, with no annotations — the
-  # store's nine (token APIs, Action Text's form builder, parameterized
-  # mailers) were all analyzer gaps, closed 2026-09-16. Warnings are
-  # not gated; they are the coverage ledger.
+  # errors and ZERO ingest gaps on the official tutorial app, with no
+  # annotations — the store's nine errors (token APIs, Action Text's
+  # form builder, parameterized mailers) and four gaps (`.text.erb` /
+  # `.json.erb` templates) were all analyzer gaps, closed 2026-09-16.
+  # Warnings are not gated; they are the coverage ledger (3 at the
+  # time of writing, all `blob.try(:caption)` in Action Text's copied
+  # partial — `caption` is not in the Blob registry, and claiming its
+  # absence would be claiming the registry complete).
   # -------------------------------------------------------------------
   store-check:
     runs-on: ubuntu-latest
@@ -93,11 +97,11 @@ jobs:
         run: cd fixtures && ../scripts/create-store store
       - name: cargo build
         run: cargo build --release --bin roundhouse
-      - name: The analyzer reports no errors on the store
+      - name: The analyzer reports no errors and no ingest gaps on the store
         run: |
           set -euo pipefail
           target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
-          grep -E "^roundhouse-check: .* 0 error\(s\)" /tmp/store-check.txt
+          grep -E "^roundhouse-check: .* 0 error\(s\), .* 0 survey gap\(s\)" /tmp/store-check.txt
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source

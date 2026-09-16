@@ -3556,6 +3556,154 @@ fn parameterized_mailer_params_are_the_with_row() {
     assert_eq!(ty("app/views/product_mailer/in_stock.html.erb", "@product.name", 1), "Product");
 }
 
+/// The authentication generator's shapes, which every Rails 8 app
+/// carries: `helper_method` declared in a concern, the cookie jar,
+/// `request` readers, a concern method called from a subclass with the
+/// concern included on the parent, and an `around_action` whose value
+/// Rails discards.
+fn generated_auth_fixture() -> roundhouse::App {
+    app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include Authentication\n  around_action :switch_locale\n\n  def switch_locale(&action)\n    locale = params[:locale] || \"en\"\n    I18n.with_locale(locale, &action)\n  end\nend\n",
+        ),
+        (
+            "app/controllers/concerns/authentication.rb",
+            "module Authentication\n  extend ActiveSupport::Concern\n\n  included do\n    helper_method :authenticated?\n  end\n\n  private\n    def authenticated?\n      cookies.signed[:session_id].present?\n    end\n\n    def start_new_session_for(user)\n      user.sessions.create!(user_agent: request.user_agent).tap do |session|\n        cookies.signed.permanent[:session_id] = { value: session.id, httponly: true }\n      end\n    end\nend\n",
+        ),
+        (
+            "app/controllers/sessions_controller.rb",
+            "class SessionsController < ApplicationController\n  def create\n    if user = User.find_by(email_address: params[:email_address])\n      start_new_session_for user\n    end\n  end\nend\n",
+        ),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  has_many :sessions\nend\n"),
+        ("app/models/session.rb", "class Session < ApplicationRecord\n  belongs_to :user\nend\n"),
+        (
+            "app/views/sessions/create.html.erb",
+            "<%= link_to \"New\", \"/new\" if authenticated? %>\n<% cache \"k\" do %><%= tag.div(\"x\") %><% end %>\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "email_address"
+  end
+  create_table "sessions", force: :cascade do |t|
+    t.integer "user_id"
+    t.string "user_agent"
+  end
+end
+"#,
+        ),
+    ])
+}
+
+fn warnings_of(app: &roundhouse::App) -> Vec<String> {
+    diagnose(app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Warning)
+        .filter(|d| !matches!(d.kind, DiagnosticKind::MissingPreload { .. }))
+        .map(|d| {
+            let file = app
+                .sources
+                .get((d.span.file.0 as usize).saturating_sub(1))
+                .map(|s| s.path.clone())
+                .unwrap_or_default();
+            format!("{file}: {}", d.message)
+        })
+        .collect()
+}
+
+#[test]
+fn generated_authentication_shapes_type_cleanly() {
+    let app = generated_auth_fixture();
+    assert_eq!(errors_of(&app), Vec::<String>::new());
+    let warnings = warnings_of(&app);
+    // `I18n.with_locale` is honestly untyped, but the around_action's
+    // value is Rails' to discard — no gradual escape is reported for
+    // it, nor for the body `Seq` that would have echoed it.
+    assert_eq!(warnings, Vec::<String>::new(), "{warnings:?}");
+
+    let ty = |path: &str, needle: &str, off: u32| {
+        let file = roundhouse::ide::file_id(&app, path).expect("file");
+        let text = &roundhouse::ide::source(&app, file).unwrap().text;
+        let offset = text.find(needle).expect("needle") as u32 + off;
+        roundhouse::ide::type_at(&app, file, offset).map(|t| t.display).unwrap_or_default()
+    };
+    // The concern's `user` parameter is typed from the subclass's call
+    // site (the concern is included on the parent), so the `tap` block
+    // parameter is the created Session.
+    assert_eq!(ty("app/controllers/concerns/authentication.rb", "session.id", 0), "Session");
+    assert_eq!(ty("app/controllers/concerns/authentication.rb", "cookies.signed.permanent", 0), "ActionDispatch::Cookies::CookieJar");
+    assert_eq!(ty("app/controllers/concerns/authentication.rb", "request.user_agent", 8), "String");
+    // A concern-declared helper_method is visible in the template.
+    assert_eq!(ty("app/views/sessions/create.html.erb", "authenticated?", 0), "bool");
+    assert_eq!(ty("app/views/sessions/create.html.erb", "tag.div", 4), "String");
+}
+
+/// `form_with model: product` parameterizes the builder, so
+/// `form.object` is the record; `Object#try` answers the method's
+/// return or nil when the registry knows the method.
+#[test]
+fn form_object_and_try_are_typed() {
+    let app = app_from_files(&[
+        ("app/models/product.rb", "class Product < ApplicationRecord\nend\n"),
+        (
+            "app/views/products/_form.html.erb",
+            "<%= form_with model: product do |form| %>\n  <%= form.object.name %>\n  <%= form.object.try(:name) %>\n<% end %>\n",
+        ),
+        (
+            "app/views/products/new.html.erb",
+            "<%= render \"form\", product: Product.new %>\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "products", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+    let ty = |needle: &str, off: u32| {
+        let path = "app/views/products/_form.html.erb";
+        let file = roundhouse::ide::file_id(&app, path).expect("file");
+        let text = &roundhouse::ide::source(&app, file).unwrap().text;
+        let offset = text.find(needle).expect("needle") as u32 + off;
+        roundhouse::ide::type_at(&app, file, offset).map(|t| t.display).unwrap_or_default()
+    };
+    assert_eq!(ty("form.object.name", 5), "Product");
+    assert_eq!(ty("form.object.name", 12), "String?");
+    assert_eq!(ty("form.object.try(:name)", 12), "String?");
+}
+
+/// `.text.erb` and `.json.erb` templates are ingested for the analyzer
+/// (their Ruby types, the IDE sees them) and dropped before lowering.
+#[test]
+fn text_and_json_erb_templates_are_analysis_only() {
+    let mut app = app_from_files(&[
+        ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
+        ("app/mailers/product_mailer.rb", "class ProductMailer < ApplicationMailer\n  def in_stock\n    @name = \"x\"\n  end\nend\n"),
+        ("app/views/product_mailer/in_stock.html.erb", "<p><%= @name %></p>\n"),
+        ("app/views/product_mailer/in_stock.text.erb", "<%= @name.upcase %>\n"),
+        ("app/views/pwa/manifest.json.erb", "{ \"name\": \"<%= 1 + 1 %>\" }\n"),
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n"),
+    ]);
+    let analysis_only: Vec<String> = app
+        .views
+        .iter()
+        .filter(|v| v.analysis_only)
+        .map(|v| format!("{}.{}", v.name.as_str(), v.format.as_str()))
+        .collect();
+    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text", "pwa/manifest.json"]);
+    let file = roundhouse::ide::file_id(&app, "app/views/product_mailer/in_stock.text.erb").expect("file");
+    let text = &roundhouse::ide::source(&app, file).unwrap().text;
+    let offset = text.find("@name.upcase").unwrap() as u32 + 7;
+    assert_eq!(roundhouse::ide::type_at(&app, file, offset).map(|t| t.display), Some("String".into()));
+    roundhouse::session::analyze_and_lower(&mut app);
+    assert!(app.views.iter().all(|v| !v.analysis_only), "dropped before lowering");
+}
+
 /// A concern's method spliced into a class that never sets the ivar it
 /// reads must be typed against the CONCERN's environment — the union
 /// across includers — not the includer's own.

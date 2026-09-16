@@ -32,6 +32,18 @@ module ActiveStorage
     def self.parse: (String json) -> ActiveStorage::BlobMetadata
   end
 
+  class Filename
+    @filename: String
+    def initialize: (String filename) -> void
+    def to_s: () -> String
+    def extension_with_delimiter: () -> String
+    def extension_without_delimiter: () -> String
+    def extension: () -> String
+    def base: () -> String
+    def sanitized: () -> String
+    def as_json: () -> String
+  end
+
   class Blob
     @id: Integer
     @key: String
@@ -42,7 +54,7 @@ module ActiveStorage
     def initialize: (Integer id, String key, String filename, String content_type, Integer byte_size, ActiveStorage::BlobMetadata metadata) -> void
     def id: () -> Integer
     def key: () -> String
-    def filename: () -> String
+    def filename: () -> ActiveStorage::Filename
     def content_type: () -> String
     def byte_size: () -> Integer
     def metadata: () -> ActiveStorage::BlobMetadata
@@ -129,7 +141,7 @@ module ActiveStorage
     def _preload_row: (Integer attachment_id, ActiveStorage::Blob? blob) -> nil
     def attached?: () -> bool
     def blob: () -> ActiveStorage::Blob?
-    def filename: () -> String?
+    def filename: () -> ActiveStorage::Filename?
     def content_type: () -> String?
     def key: () -> String
     def signed_id: () -> String

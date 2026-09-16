@@ -143,12 +143,28 @@ impl<'a> BodyTyper<'a> {
         outer: &Ctx,
         recv_ty: Option<&Ty>,
         method: &Symbol,
+        args: &[Expr],
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
+        // `form_with model: product do |form|` / `form_for @product do
+        // |f|`: the builder is parameterized by the record the form is
+        // for, so `form.object` (and `form.object.errors`) answer it.
+        if matches!(method.as_str(), "form_with" | "form_for" | "simple_form_for") {
+            if let (Some(name), Some(model)) = (params.first(), Self::form_model_ty(method, args)) {
+                new_ctx.local_bindings.insert(
+                    name.clone(),
+                    Ty::Class {
+                        id: ClassId(Symbol::from("ActionView::Helpers::FormBuilder")),
+                        args: vec![model],
+                    },
+                );
+                return new_ctx;
+            }
+        }
         // Untyped receiver: bind every block param to `Untyped` (the
         // gradual choice extends to the destructured params). Without
         // this, `untyped_hash.each { |k, v| ... }` would give k=Untyped
@@ -168,7 +184,36 @@ impl<'a> BodyTyper<'a> {
         new_ctx
     }
 
-    /// Per-param types a block yields, given the receiver type and method.
+    /// The record a form helper is building for: `form_with`'s `model:`
+/// kwarg (a record, or `[parent, child]` — the last element), or
+/// `form_for`'s first positional argument. Nil is peeled: a
+/// `Product?` still builds a form for a Product. `None` for URL forms.
+    fn form_model_ty(method: &Symbol, args: &[Expr]) -> Option<Ty> {
+    let model_expr = if method.as_str() == "form_with" {
+        args.iter().find_map(|a| {
+            let ExprNode::Hash { entries, .. } = &*a.node else { return None };
+            entries.iter().find_map(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                    if value.as_str() == "model" =>
+                {
+                    Some(v)
+                }
+                _ => None,
+            })
+        })?
+    } else {
+        args.first().filter(|a| !matches!(&*a.node, ExprNode::Hash { .. }))?
+    };
+    let ty = match &*model_expr.node {
+        // `[product, Subscriber.new]` — the form is for the last one.
+        ExprNode::Array { elements, .. } => elements.last()?.ty.clone()?,
+        _ => model_expr.ty.clone()?,
+    };
+    let peeled = super::narrowing::remove_nil(&ty);
+    matches!(peeled, Ty::Class { .. }).then_some(peeled)
+}
+
+/// Per-param types a block yields, given the receiver type and method.
     /// `None` means "no binding info available" — params stay unknown.
     pub(super) fn block_params_for(
         &self,
@@ -456,6 +501,30 @@ impl<'a> BodyTyper<'a> {
                 };
             }
         }
+        // `recv.try(:m, …)` — the method's answer, or nil when the
+        // receiver does not respond. Precise when the registry knows
+        // `m` on the receiver's class (walking its parents and mixins);
+        // otherwise the gradual answer stands — silence about a method
+        // is not a claim that the class lacks it.
+        if matches!(method.as_str(), "try" | "try!") {
+            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty, args.first()) {
+                if let ExprNode::Lit { value: crate::expr::Literal::Sym { value: m } } = &*first.node {
+                    let mut cur = Some(id.clone());
+                    let mut depth = 0;
+                    while let Some(cid) = cur {
+                        let Some(cls) = self.classes().get(&cid) else { break };
+                        if let Some(ty) = cls.instance_methods.get(m).or_else(|| cls.class_methods.get(m)) {
+                            return union_of(unwrap_fn_ret(ty), Ty::Nil);
+                        }
+                        depth += 1;
+                        if depth > 32 {
+                            break;
+                        }
+                        cur = cls.parent.clone();
+                    }
+                }
+            }
+        }
         if method.as_str() == "class" {
             return match recv_ty {
                 Some(Ty::Class { id, args }) => Ty::Class {
@@ -688,6 +757,19 @@ impl<'a> BodyTyper<'a> {
                 // gem parent has a genuinely-unknown inherited surface, so an
                 // unresolved method is a gradual escape (`Untyped`), not an
                 // error. A wholly-unregistered receiver keeps erroring.
+                // `form.object` is the record the form was built for —
+                // `block_ctx_for` parameterizes the builder from
+                // `form_with model: product` (`FormBuilder[Product]`), and
+                // the type argument is the answer. Before the registry
+                // walk, whose entry is the gradual answer for a builder
+                // without one (`form_with url:`).
+                if id.0.as_str() == "ActionView::Helpers::FormBuilder"
+                    && method.as_str() == "object"
+                {
+                    if let [model] = args.as_slice() {
+                        return model.clone();
+                    }
+                }
                 let mut steps = 0usize;
                 let mut unknown_named_ancestor = false;
                 while let Some(cid) = current_id {
@@ -807,6 +889,14 @@ impl<'a> BodyTyper<'a> {
                     }
                     return str_method(method);
                 }
+                // `tag.div(…)` / `tag.section { … }` — the TagBuilder
+                // builds an element from the METHOD NAME, so every
+                // method is a rendered String. (`tag.attributes(h)` is
+                // one too.)
+                if id.0.as_str() == "ActionView::Helpers::TagHelper::TagBuilder" {
+                    return Ty::Str;
+                }
+
                 // Base64 stdlib — `Base64.strict_encode64(JSON.generate(x))`
                 // appears in turbo_stream_from. All Base64 module-level
                 // encoders/decoders return String.

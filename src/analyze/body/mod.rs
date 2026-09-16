@@ -655,7 +655,7 @@ impl<'a> BodyTyper<'a> {
                 };
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                 let block_ret = if let Some(b) = block {
-                    let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, b);
+                    let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, args, b);
                     self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
                     // on the body expr itself. `map`/`collect`/similar

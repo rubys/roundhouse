@@ -33,5 +33,6 @@ pub fn ingest_jbuilder(source: &str, rel_path: &Path, file: &str) -> IngestResul
         locals: Row::closed(),
         body,
         strict_locals: None,
+        analysis_only: false,
     })
 }

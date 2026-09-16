@@ -1360,9 +1360,21 @@ impl Analyzer {
             // return types — resolve; routed actions have empty param
             // rows and seed nothing.
             let ctrl_id = controller.name.clone();
+            let spliced_from = app.concern_spliced_actions.get(&ctrl_id).cloned();
             for action in controller.actions_mut() {
-                let mctx =
-                    self.seed_action_params(&ctx, &ctrl_id, &action.name, &action.params);
+                // A concern method spliced into this controller carries
+                // its call-site observations under the MODULE's key
+                // (`fold_concern_param_sites`), whichever includer the
+                // sites were in.
+                let origin = spliced_from.as_ref().and_then(|m| m.get(&action.name));
+                let mctx = self.seed_action_params(
+                    &ctx,
+                    &ctrl_id,
+                    origin,
+                    &action.name,
+                    &action.params,
+                    action.block_param.as_ref(),
+                );
                 self.body_typer().analyze_expr(&mut action.body, &mctx);
                 action.effects = self.collect_effects(&mut action.body, &mctx);
             }
@@ -1693,11 +1705,17 @@ impl Analyzer {
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
                         // the re-analysis pass (matches Pass A).
+                        let origin = app
+                            .concern_spliced_actions
+                            .get(&ctrl_name)
+                            .and_then(|m| m.get(&action.name));
                         let inner_ctx = self.seed_action_params(
                             &base_ctx,
                             &ctrl_name,
+                            origin,
                             &action.name,
                             &action.params,
+                            action.block_param.as_ref(),
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                         action.effects = self.collect_effects(&mut action.body, &inner_ctx);
@@ -2169,11 +2187,17 @@ impl Analyzer {
                         annotate_self_dispatch: false,
                         in_view: false,
                     };
+                    let origin = app
+                        .concern_spliced_actions
+                        .get(&ctrl_name)
+                        .and_then(|m| m.get(&action.name));
                     let inner_ctx = self.seed_action_params(
                         &base_ctx,
                         &ctrl_name,
+                        origin,
                         &action.name,
                         &action.params,
+                        action.block_param.as_ref(),
                     );
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     action.effects = self.collect_effects(&mut action.body, &inner_ctx);
@@ -2776,6 +2800,17 @@ impl Analyzer {
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
                 view_ctx.local_bindings = locals.clone();
             }
+            // Partials the FRAMEWORK renders, so no site in the app seeds
+            // them: `action_text:install` copies `active_storage/blobs/
+            // _blob.html.erb` into every app and Action Text renders it
+            // with `blob:` for each attachment. The convention is the
+            // render site.
+            if view.name.as_str() == "active_storage/blobs/_blob" {
+                view_ctx.local_bindings.entry(Symbol::from("blob")).or_insert(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveStorage::Blob")),
+                    args: vec![],
+                });
+            }
             if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
                 view_ctx.ivar_bindings = ivars.clone();
             }
@@ -2829,6 +2864,9 @@ impl Analyzer {
                 ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
+        if let Some(bp) = &method.block_param {
+            ctx.local_bindings.insert(bp.name.clone(), captured_block_ty());
+        }
         ctx
     }
 
@@ -2844,18 +2882,28 @@ impl Analyzer {
         &self,
         base: &Ctx,
         class_id: &ClassId,
+        origin: Option<&ClassId>,
         action_name: &Symbol,
         params: &Row,
+        block_param: Option<&Symbol>,
     ) -> Ctx {
-        let key = (class_id.clone(), action_name.clone());
-        let Some(types) = self.inferred_params.get(&key) else {
-            return base.clone();
-        };
+        let own = self.inferred_params.get(&(class_id.clone(), action_name.clone()));
+        let from_origin =
+            origin.and_then(|m| self.inferred_params.get(&(m.clone(), action_name.clone())));
         let mut ctx = base.clone();
-        for (name, ty) in params.fields.keys().zip(types.iter()) {
-            if !matches!(ty, Ty::Var { .. }) {
-                ctx.local_bindings.insert(name.clone(), ty.clone());
+        for (i, name) in params.fields.keys().enumerate() {
+            let observed = [own, from_origin]
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.get(i).cloned())
+                .filter(|t| !matches!(t, Ty::Var { .. }))
+                .reduce(unify_param_ty);
+            if let Some(ty) = observed {
+                ctx.local_bindings.insert(name.clone(), ty);
             }
+        }
+        if let Some(bp) = block_param {
+            ctx.local_bindings.insert(bp.clone(), captured_block_ty());
         }
         ctx
     }
@@ -2901,6 +2949,30 @@ impl Analyzer {
     /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
     /// body is `Ty::Var` (no information gained).
     fn harvest_returns_to_registry(&mut self, app: &App) {
+        self.harvest_method_returns(app);
+        // Rails' `helper_method :name` makes a controller (or concern)
+        // method callable from templates. The names were ingested from
+        // both spellings (`App::view_visible_controller_methods`); the
+        // TYPES are the methods' harvested returns, copied onto the view
+        // context each round so a template's `authenticated?` resolves
+        // — the authentication generator's shape, in every Rails 8 app.
+        let view_ctx = ClassId(Symbol::from("ActionView::Base"));
+        for name in &app.view_visible_controller_methods {
+            let owners = app
+                .controllers
+                .iter()
+                .map(|c| &c.name)
+                .chain(app.library_classes.iter().map(|lc| &lc.name));
+            let ty = owners
+                .filter_map(|cid| self.classes.get(cid))
+                .find_map(|c| c.instance_methods.get(name).cloned());
+            if let Some(ty) = ty {
+                self.classes.entry(view_ctx.clone()).or_default().instance_methods.insert(name.clone(), ty);
+            }
+        }
+    }
+
+    fn harvest_method_returns(&mut self, app: &App) {
         for model in &app.models {
             let class_id = &model.name;
             let scope_names: std::collections::HashSet<Symbol> =
@@ -3293,11 +3365,36 @@ impl Analyzer {
             }
         }
 
+        // A class reaches a module through its own `include`s AND its
+        // ancestors' — `SessionsController` calls
+        // `start_new_session_for(user)`, defined in `Authentication`,
+        // which `ApplicationController` includes. Without the parent
+        // walk the site was keyed to the subclass, matched nothing, and
+        // the concern's `user` parameter stayed unresolved (the
+        // authentication generator's shape, in every Rails 8 app).
         let targets: Vec<(ClassId, Vec<ClassId>)> = self
             .classes
             .iter()
-            .filter(|(_, c)| !c.includes.is_empty())
-            .map(|(id, c)| (id.clone(), c.includes.clone()))
+            .map(|(id, _)| {
+                let mut includes: Vec<ClassId> = Vec::new();
+                let mut cur = Some(id.clone());
+                let mut depth = 0;
+                while let Some(cid) = cur {
+                    let Some(c) = self.classes.get(&cid) else { break };
+                    for inc in &c.includes {
+                        if !includes.contains(inc) {
+                            includes.push(inc.clone());
+                        }
+                    }
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    cur = c.parent.clone();
+                }
+                (id.clone(), includes)
+            })
+            .filter(|(_, includes)| !includes.is_empty())
             .collect();
         let mut adds: Vec<((ClassId, Symbol), Vec<Ty>)> = Vec::new();
         for (id, includes) in targets {
@@ -4132,6 +4229,13 @@ fn block_filter_gates(call: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
 /// rules are:
 /// - same type → keep
 /// - one side is `Ty::Var` (no info yet) → take the other
+/// - one side is `Untyped` (an argument nobody could type) → take the
+///   other: an untyped observation says nothing about the value, and
+///   letting it into the union turns every concrete observation into
+///   `untyped` downstream (gradual absorption at dispatch). campfire's
+///   `start_new_session_for(user)` has three callers passing `User`
+///   and one passing the result of a relation-delegated concern
+///   finder the registry answers `untyped`; the parameter is a User.
 /// - one side is `Nil` and the other is concrete → nullable union (T?)
 /// - already a Union containing `observed` → keep
 /// - otherwise → widen via `union_of`
@@ -4139,10 +4243,10 @@ fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     if stored == observed {
         return stored;
     }
-    if matches!(stored, Ty::Var { .. }) {
+    if matches!(stored, Ty::Var { .. } | Ty::Untyped) {
         return observed;
     }
-    if matches!(observed, Ty::Var { .. }) {
+    if matches!(observed, Ty::Var { .. } | Ty::Untyped) {
         return stored;
     }
     // T + Nil → Union<T, Nil>; same for the symmetric case. Skip
@@ -4376,6 +4480,19 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
 /// and one some callers pass is the union. `None` when neither says
 /// anything (an observation of `Var` is no observation — see
 /// `place_keyword_args`).
+/// The type of a captured block parameter (`def switch_locale(&action)`):
+/// a callable whose arguments and answer are unknown here. `action.call`
+/// answers `untyped`, and passing it on (`I18n.with_locale(locale,
+/// &action)`) is a read of a bound local rather than of nothing.
+fn captured_block_ty() -> Ty {
+    Ty::Fn {
+        params: vec![],
+        block: None,
+        ret: Box::new(Ty::Untyped),
+        effects: crate::effect::EffectSet::default(),
+    }
+}
+
 fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) -> Option<Ty> {
     let observed = observed.filter(|t| !matches!(t, Ty::Var { .. }));
     let default = param

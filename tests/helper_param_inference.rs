@@ -30,6 +30,7 @@ fn helper_app(view_body: Expr) -> App {
         locals: Row::default(),
         body: view_body,
         strict_locals: None,
+        analysis_only: false,
     });
     app
 }

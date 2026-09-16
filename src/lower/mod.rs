@@ -604,6 +604,10 @@ pub fn apply_post_analyze_lowerings(
     app: &mut crate::app::App,
     registry: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Vec<crate::diagnostic::Diagnostic> {
+    // Templates ingested for the analyzer only (`View::analysis_only`)
+    // leave here: the type checker and the IDE have seen them; no
+    // lowering or emitter should.
+    app.views.retain(|v| !v.analysis_only);
     debug_assert!(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
