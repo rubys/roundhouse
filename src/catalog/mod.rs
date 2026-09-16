@@ -325,6 +325,35 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
+    // will_paginate's entry point, `Model.paginate(page: n)` — kaminari's
+    // `page` under another gem's name, same builder shape, same
+    // reasoning for living here.
+    CatalogedMethod {
+        name: "paginate",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    // `has_secure_password`'s `Model.authenticate_by(email:, password:)`
+    // (Rails 7.1) — a lookup that answers the record or nil, delegated
+    // on a relation receiver too (`User.active.authenticate_by(...)`).
+    CatalogedMethod {
+        name: "authenticate_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::SelfOrNil),
+    },
+    // `Model.destroy_by(conditions)` — the class-side spelling of the
+    // Relation entry below; answers the destroyed records.
+    CatalogedMethod {
+        name: "destroy_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
     // Async query surface — returns an ActiveRecord::Promise handle
     // (cataloged in GEM_CATALOG) whose `.value` yields the count.
     CatalogedMethod {
@@ -1136,6 +1165,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
+    // will_paginate's `paginate(page:)` on a relation — same builder
+    // shape as kaminari's `page` below.
+    CatalogedMethod {
+        name: "paginate",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "authenticate_by",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::SelfOrNil),
+    },
     // Kaminari's pagination chain — same builder shape.
     CatalogedMethod {
         name: "page",
@@ -1733,7 +1778,7 @@ mod tests {
             "references", "eager_load", "readonly", "reorder", "rewhere",
             "merge", "merge!", "extending", "unscope", "not", "or", "and",
             "none", "load", "reload", "reselect",
-            "page", "per", "padding", "without_count",
+            "page", "per", "padding", "without_count", "paginate",
         ] {
             let entry = lookup(m, ReceiverContext::Relation)
                 .unwrap_or_else(|| panic!("no Relation entry for `{m}`"));

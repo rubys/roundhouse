@@ -93,6 +93,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("base58", Ty::Str), ("uuid", Ty::Str), ("alphanumeric", Ty::Str),
         ("random_bytes", Ty::Str), ("random_number", Ty::Untyped),
     ], &[]);
+    // `Random` carries the same `Random::Formatter` surface as
+    // SecureRandom since Ruby 3.3 (`Random.uuid` is campfire's test
+    // notification body); `rand`/`random_number` answer Int or Float
+    // by argument, so they stay gradual.
+    register_stdlib_class(classes, "Random", &[
+        ("uuid", Ty::Str), ("hex", Ty::Str), ("base64", Ty::Str),
+        ("urlsafe_base64", Ty::Str), ("alphanumeric", Ty::Str),
+        ("bytes", Ty::Str), ("random_bytes", Ty::Str),
+        ("rand", Ty::Untyped), ("random_number", Ty::Untyped),
+        ("new_seed", Ty::Int), ("seed", Ty::Int),
+    ], &[
+        ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
+    ]);
     register_stdlib_class(classes, "File", &[
         ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),

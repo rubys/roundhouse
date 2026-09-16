@@ -35,7 +35,9 @@ mod render;
 mod effects;
 mod diagnostics;
 mod inferred_types;
+pub mod inquiry;
 pub use inferred_types::inferred_types;
+pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
 
 pub use body::{BodyTyper, ClassInfo, Ctx};
@@ -84,6 +86,10 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Methods whose body ends in `.inquiry` — the evidence
+    /// [`inquiry::is_inquiry_predicate`] needs to answer
+    /// `content_type.attachment?` as Bool on a `Str` receiver.
+    inquirers: std::collections::HashSet<Symbol>,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -570,6 +576,9 @@ impl Analyzer {
                 }
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
+                for (name, ty) in association_builder_members(assoc) {
+                    cls.instance_methods.entry(name).or_insert(ty);
+                }
             }
 
             // Concern-declared model DSL: associations and scopes a
@@ -603,6 +612,9 @@ impl Analyzer {
                                 let writer = Symbol::from(format!("{}=", name.as_str()));
                                 cls.instance_methods.entry(name).or_insert(ty.clone());
                                 cls.instance_methods.entry(writer).or_insert(ty);
+                                for (name, ty) in association_builder_members(assoc) {
+                                    cls.instance_methods.entry(name).or_insert(ty);
+                                }
                             }
                             ModelBodyItem::Scope { scope, .. } => {
                                 cls.class_methods
@@ -706,13 +718,14 @@ impl Analyzer {
             adapter,
             concern_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
+            inquirers: inquiry::inquirer_methods(app),
         }
     }
 
     /// Build a body-typer borrowing this analyzer's dispatch tables.
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
-        BodyTyper::new(&self.classes)
+        BodyTyper::new(&self.classes).with_inquirers(&self.inquirers)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -3791,7 +3804,7 @@ fn body_tail_terminal_kind(
     // rule as `body::send::counted_first_last`, which types the call
     // where it can see the argument's type; here only its presence is
     // needed.
-    if matches!(method.as_str(), "first" | "last") && args.len() == 1 {
+    if matches!(method.as_str(), "first" | "last" | "take") && args.len() == 1 {
         return Some(crate::catalog::ReturnKind::ArrayOfSelf);
     }
     entry.return_kind
@@ -4268,6 +4281,35 @@ fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
             Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
         ),
     }
+}
+
+/// The singular-association BUILDERS Rails generates beside the reader:
+/// `build_<name>` / `create_<name>` / `create_<name>!` answer the new
+/// target record (never nil — `create_` returns the unsaved record on
+/// failure, `create_!` raises), and `reload_<name>` re-reads the
+/// association, nil when there is none. campfire's `User::Bot` does
+/// `user.create_webhook!(url:)` on a `has_one :webhook`. Collections
+/// build through their proxy (`user.posts.build`), which the Array
+/// representation already answers, so `has_many` contributes nothing
+/// here.
+fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symbol, Ty)> {
+    use crate::dialect::Association;
+    let (name, target) = match assoc {
+        Association::BelongsTo { name, target, polymorphic: false, .. }
+        | Association::HasOne { name, target, .. } => (name, target),
+        _ => return Vec::new(),
+    };
+    let record = Ty::Class { id: target.clone(), args: vec![] };
+    let n = name.as_str();
+    vec![
+        (Symbol::from(format!("build_{n}")), record.clone()),
+        (Symbol::from(format!("create_{n}")), record.clone()),
+        (Symbol::from(format!("create_{n}!")), record.clone()),
+        (
+            Symbol::from(format!("reload_{n}")),
+            Ty::Union { variants: vec![record, Ty::Nil] },
+        ),
+    ]
 }
 
 /// The model-side twin of [`controller_includes`]: modules a model mixes

@@ -957,30 +957,11 @@ impl<'a> BodyTyper<'a> {
                         };
                     }
                 }
-                // `Array#[]` / `slice` return a *sub-array* (`Array<elem>
-                // | Nil`) when indexed by a `Range` or a `(start, length)`
-                // pair, but a single *element* (`elem | Nil`) for a lone
-                // integer. `array_method` sees only the method name, so
-                // disambiguate here from the argument shape — otherwise
-                // `comment.split[0..10].join(' ')` mistypes the slice as
-                // `Str | Nil` and `.join` fails to dispatch.
                 if counted_first_last(method, args) {
                     return Ty::Array { elem: Box::new(elem.clone()) };
                 }
-                if matches!(method.as_str(), "[]" | "slice") {
-                    let range_index = args.len() == 1
-                        && matches!(
-                            args[0].ty.as_ref(),
-                            Some(Ty::Class { id, .. }) if id.0.as_str() == "Range"
-                        );
-                    if range_index || args.len() == 2 {
-                        return Ty::Union {
-                            variants: vec![
-                                Ty::Array { elem: Box::new(elem.clone()) },
-                                Ty::Nil,
-                            ],
-                        };
-                    }
+                if let Some(t) = sub_array_slice(method, args, elem) {
+                    return t;
                 }
                 array_method(method, elem, block_ret)
             }
@@ -1010,6 +991,14 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Array {
                         elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
                     };
+                }
+                // `users[2..50]` on a relation loads it and slices the
+                // Array — the tutorial's seed builds follower sets this
+                // way. Same rule as the Array representation above.
+                if let Some(t) =
+                    sub_array_slice(method, args, &Ty::Class { id: of.clone(), args: vec![] })
+                {
+                    return t;
                 }
                 if let Some(entry) = crate::catalog::lookup(
                     method.as_str(),
@@ -1352,8 +1341,31 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
 /// Integer (or not yet typed): `first { … }` and `first` stay as they
 /// were. Mirrors `lower::scope_chain::counted_terminal`, which renames
 /// the call for the runtime for the same reason.
+/// `Array#[]` / `slice` return a *sub-array* (`Array<elem> | Nil`) when
+/// indexed by a `Range` or a `(start, length)` pair, but a single
+/// *element* (`elem | Nil`) for a lone integer. `array_method` sees only
+/// the method name, so the argument shape is read here — otherwise
+/// `comment.split[0..10].join(' ')` mistypes the slice as `Str | Nil`
+/// and `.join` fails to dispatch. `None` for every other call.
+fn sub_array_slice(method: &Symbol, args: &[crate::expr::Expr], elem: &Ty) -> Option<Ty> {
+    if !matches!(method.as_str(), "[]" | "slice") {
+        return None;
+    }
+    let range_index = args.len() == 1
+        && matches!(
+            args[0].ty.as_ref(),
+            Some(Ty::Class { id, .. }) if id.0.as_str() == "Range"
+        );
+    (range_index || args.len() == 2).then(|| Ty::Union {
+        variants: vec![Ty::Array { elem: Box::new(elem.clone()) }, Ty::Nil],
+    })
+}
+
 fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
-    matches!(method.as_str(), "first" | "last")
+    // `take(n)` is the same counted terminal as `first(n)`: the Rails
+    // tutorial seeds with `User.order(:created_at).take(6)` and then
+    // `.each`es the result.
+    matches!(method.as_str(), "first" | "last" | "take")
         && args.len() == 1
         && matches!(
             args[0].ty.as_ref(),
@@ -1516,8 +1528,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // desugars `rest` to `arr.drop(n)`) among other uses.
         | "drop" | "take" | "drop_while" | "take_while"
         // ActiveSupport's `without` / `excluding` — the receiver minus
-        // the named elements, so same-element.
-        | "without" | "excluding" => {
+        // the named elements — and `including`, the receiver plus
+        // them; same-element either way.
+        | "without" | "excluding" | "including" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
         // ActiveSupport's `compact_blank` — `reject(&:blank?)`. Same
@@ -1563,6 +1576,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // result rarely chains into further array methods).
         "*" => Ty::Array { elem: Box::new(elem.clone()) },
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
+        // ActiveSupport `Enumerable#many?` — more than one element.
+        "many?" => Ty::Bool,
+        // JSON serialization of a collection is a String whatever the
+        // elements are.
+        "to_json" => Ty::Str,
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
@@ -1826,6 +1844,10 @@ pub(super) fn hash_method(
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
+        // JSON/string renderings of a Hash are Strings whatever the
+        // value type — campfire's `Webhook#payload(message).to_json`
+        // nests hashes three deep.
+        "to_json" | "to_s" | "inspect" => Ty::Str,
         _ => unknown(),
     }
 }
@@ -1873,6 +1895,11 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
+        // ActiveSupport `Object#presence_in(collection)` — the receiver
+        // when the collection includes it, else nil. campfire's
+        // `params.require(:user)[:role].presence_in(%w[ member
+        // administrator ]) || "member"` whitelists a role.
+        "presence_in" => Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
         // `String#match(regex)` returns MatchData or nil; we don't
         // model MatchData structurally so propagate Untyped (the
         // value is typically chained as `m[1]` which on Untyped

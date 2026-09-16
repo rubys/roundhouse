@@ -191,6 +191,14 @@ pub(in crate::analyze) fn register(
         .instance_methods
         .entry(Symbol::from("paginate"))
         .or_insert(Ty::Str);
+    // will_paginate's view helper — same shape (the Rails tutorial's
+    // `<%= will_paginate %>`), plus its `page_entries_info` caption.
+    for m in ["will_paginate", "page_entries_info"] {
+        action_view
+            .instance_methods
+            .entry(Symbol::from(m))
+            .or_insert(Ty::Str);
+    }
     // `params` is exposed to templates too (same strong-params
     // surface the controller context declares).
     action_view.instance_methods.insert(

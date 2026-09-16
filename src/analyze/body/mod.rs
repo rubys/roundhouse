@@ -189,6 +189,10 @@ fn expand_bare_const(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    /// Methods whose value is an ActiveSupport inquirer (see
+    /// [`crate::analyze::inquiry`]); empty for the bare constructor,
+    /// which the runtime-source typer and tests use.
+    inquirers: Option<&'a std::collections::HashSet<Symbol>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -201,7 +205,17 @@ impl<'a> BodyTyper<'a> {
 
 impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes }
+        Self { classes, inquirers: None }
+    }
+
+    /// Name the app's inquirer-returning methods, so their predicates
+    /// type as Bool instead of failing dispatch on `Str`.
+    pub fn with_inquirers(
+        mut self,
+        inquirers: &'a std::collections::HashSet<Symbol>,
+    ) -> Self {
+        self.inquirers = Some(inquirers);
+        self
     }
 
     /// Analyze an expression: compute its type, populate `expr.ty`,
@@ -717,6 +731,18 @@ impl<'a> BodyTyper<'a> {
                 self.normalize_trailing_kwargs(recv_ty.as_ref(), method, args);
                 if let Some(t) = self.assoc_extension_ty(recv.as_ref(), method) {
                     return t;
+                }
+                // `authenticated_by.bot_key?` / `content_type.attachment?`
+                // — an inquirer predicate, decided on the receiver
+                // EXPRESSION (the value types as the Str it is).
+                if let Some(recv) = recv.as_ref() {
+                    if let Some(inquirers) = self.inquirers {
+                        if crate::analyze::inquiry::is_inquiry_predicate(
+                            recv, method, args, inquirers,
+                        ) {
+                            return Ty::Bool;
+                        }
+                    }
                 }
                 // `group(:col).count` answers a Hash, not an Int. Resolved
                 // here rather than in `dispatch` because the discriminator

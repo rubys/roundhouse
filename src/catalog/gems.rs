@@ -216,6 +216,48 @@ pub const GEM_CATALOG: &[GemClass] = &[
     },
     // Nokogiri — HTML/XML parsing. The `HTML`/`XML` module methods
     // (`Nokogiri::HTML(str)`) return a Document we don't model.
+    // bcrypt — what `has_secure_password` is built on, and what an app
+    // reaches for directly when it hashes something that is not a
+    // password (the Rails tutorial's remember/activation/reset tokens:
+    // `BCrypt::Password.create(string, cost:)` and
+    // `BCrypt::Password.new(digest).is_password?(token)`).
+    GemClass {
+        name: "BCrypt::Password",
+        class_methods: &[
+            ("create", GemTy::Instance("BCrypt::Password")),
+            ("valid_hash?", GemTy::Bool),
+        ],
+        instance_methods: &[
+            ("is_password?", GemTy::Bool),
+            ("==", GemTy::Bool),
+            ("to_s", GemTy::Str),
+            ("to_str", GemTy::Str),
+            ("cost", GemTy::Int),
+            ("salt", GemTy::Str),
+            ("checksum", GemTy::Str),
+            ("version", GemTy::Str),
+        ],
+    },
+    GemClass {
+        name: "BCrypt::Engine",
+        class_methods: &[
+            ("cost", GemTy::Int),
+            ("cost=", GemTy::Int),
+            ("generate_salt", GemTy::Str),
+            ("hash_secret", GemTy::Str),
+            ("calibrate", GemTy::Int),
+            ("valid_salt?", GemTy::Bool),
+            ("valid_secret?", GemTy::Bool),
+        ],
+        instance_methods: &[],
+    },
+    // `ActiveModel::SecurePassword.min_cost` — the test-environment
+    // switch the tutorial reads to pick a bcrypt cost.
+    GemClass {
+        name: "ActiveModel::SecurePassword",
+        class_methods: &[("min_cost", GemTy::Bool), ("min_cost=", GemTy::Bool)],
+        instance_methods: &[],
+    },
     GemClass {
         name: "Nokogiri",
         class_methods: &[("HTML", GemTy::Untyped), ("XML", GemTy::Untyped)],
