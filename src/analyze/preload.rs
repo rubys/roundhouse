@@ -177,6 +177,26 @@ impl<'a> ModelIndex<'a> {
         })
     }
 
+    /// Is `method`, sent to `member.<assoc>`, a query that preloading
+    /// cannot serve? A [`SQL_TAILS`] entry, or a scope of the
+    /// association's target model (`column.cards.active`).
+    fn is_sql_tail(&self, owner: &ClassId, assoc: &Symbol, method: &Symbol) -> bool {
+        use crate::dialect::Association;
+        if SQL_TAILS.contains(&method.as_str()) {
+            return true;
+        }
+        let Some(decl) = self.decls.get(owner).and_then(|d| d.iter().find(|a| a.name() == assoc))
+        else {
+            return false;
+        };
+        let target = match decl {
+            Association::HasMany { target, .. }
+            | Association::HasAndBelongsToMany { target, .. } => target,
+            _ => return false,
+        };
+        self.scopes.get(target).is_some_and(|s| s.contains_key(method))
+    }
+
     /// Every per-member read this pass checks on `model`, mapped to the
     /// preload key that satisfies it: an association to itself, an
     /// attachment reader to its `<attr>_attachment(s)` association.
@@ -214,6 +234,20 @@ const PRESERVERS: &[&str] = &[
 ];
 
 const PRELOADERS: &[&str] = &["includes", "preload", "eager_load"];
+
+/// Methods on a loaded collection that go back to SQL anyway:
+/// `product.subscribers.count` runs `SELECT COUNT(*)` per row whether
+/// or not `:subscribers` was preloaded (`size`/`length`/`any?` read
+/// the loaded target; `count` never does). A read under one of these
+/// is still an N+1, but `.includes` is not its fix, and a message
+/// that says so is worse than none — the reader who knows Rails stops
+/// trusting the rest. Not here: `first`/`last`/`take`, `any?`/`empty?`,
+/// `size`/`length`, which read the loaded target when there is one.
+const SQL_TAILS: &[&str] = &[
+    "count", "sum", "minimum", "maximum", "average", "calculate", "pluck", "pick", "ids",
+    "exists?", "where", "not", "order", "reorder", "limit", "offset", "group", "distinct",
+    "find", "find_by", "find_by!", "select", "joins", "left_joins",
+];
 
 /// `has_one_attached :image` → (`image`, `image_attachment`);
 /// `has_many_attached :files` → (`files`, `files_attachments`) — the
@@ -679,34 +713,64 @@ fn check_members(
     };
     cov.known_chains += 1;
 
-    let mut reads: Vec<(Symbol, Span)> = Vec::new();
-    collect_member_assoc_reads(body, member, &keys, &mut reads);
-    reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start.cmp(&b.1.start)));
-    reads.dedup_by(|a, b| a.0 == b.0);
-    for (read, span) in reads {
+    let mut reads: Vec<(Symbol, Span, Option<Symbol>)> = Vec::new();
+    collect_member_assoc_reads(body, member, &keys, None, &mut reads);
+    for r in &mut reads {
+        if r.2.as_ref().is_some_and(|q| !index.is_sql_tail(model, &r.0, q)) {
+            r.2 = None;
+        }
+    }
+    // One finding per association per shape: a `.count` and an
+    // `.each` on the same association are two different fixes.
+    reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)).then(a.1.start.cmp(&b.1.start)));
+    reads.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2);
+    for (read, span, sql_tail) in reads {
         let key = &keys[&read];
-        if preloads.contains(key) {
+        if preloads.contains(key) && sql_tail.is_none() {
             continue;
         }
-        let query_site = render_site(app, origin);
-        let fix = if key == &read {
-            format!("`.includes(:{})`", key.as_str())
-        } else {
-            // An attachment: Rails' own scope, or its expansion.
+        let query_site =
+            render_site(app, origin).map(|s| format!(" at {s}")).unwrap_or_default();
+        let message = if let Some(q) = &sql_tail {
+            // The read is a query in its own right; the preload is
+            // beside the point and the honest fix is structural.
+            let fix = match q.as_str() {
+                "count" => format!(
+                    "read `.size` over `.includes(:{})`, or add a `counter_cache`",
+                    key.as_str()
+                ),
+                "exists?" => format!("read `.any?` over `.includes(:{})`", key.as_str()),
+                _ => "move it into a scoped association (`has_many :…, -> { … }`) and \
+                      preload that, or into the query itself"
+                    .to_string(),
+            };
             format!(
-                "`.with_attached_{}` (or `.includes({}: :blob)`)",
+                "{how} this relation runs `{}.{}.{}` per row — a query that preloading \
+                 :{}{query_site} would not avoid; {fix}",
+                member.as_str(),
                 read.as_str(),
-                key.as_str()
+                q.as_str(),
+                key.as_str(),
+            )
+        } else {
+            let fix = if key == &read {
+                format!("`.includes(:{})`", key.as_str())
+            } else {
+                // An attachment: Rails' own scope, or its expansion.
+                format!(
+                    "`.with_attached_{}` (or `.includes({}: :blob)`)",
+                    read.as_str(),
+                    key.as_str()
+                )
+            };
+            format!(
+                "{how} this relation reads `{}.{}`, but the query{query_site} does not \
+                 preload :{} — add {fix}",
+                member.as_str(),
+                read.as_str(),
+                key.as_str(),
             )
         };
-        let message = format!(
-            "{how} this relation reads `{}.{}`, but the query{} does not \
-             preload :{} — add {fix}",
-            member.as_str(),
-            read.as_str(),
-            query_site.map(|s| format!(" at {s}")).unwrap_or_default(),
-            key.as_str(),
-        );
         out.push(Diagnostic {
             span,
             kind: DiagnosticKind::MissingPreload { association: key.clone(), query_span: origin },
@@ -719,13 +783,20 @@ fn check_members(
 /// `member.<read>` sends inside the body (single hop, direct receiver
 /// only), for every read in `keys`. Descends everything including
 /// nested blocks — a read inside a nested `map` still runs per member.
+///
+/// `tail` is the method the enclosing send applies to this expression
+/// (`member.assoc` as the receiver of `.count`), recorded with the
+/// read so the caller can tell a query from a load — a bare `sum`
+/// with a block is Ruby, `sum(:column)` is SQL, and only the caller
+/// has the model to say which names are scopes.
 fn collect_member_assoc_reads(
     expr: &Expr,
     member: &Symbol,
     keys: &HashMap<Symbol, Symbol>,
-    out: &mut Vec<(Symbol, Span)>,
+    tail: Option<&Symbol>,
+    out: &mut Vec<(Symbol, Span, Option<Symbol>)>,
 ) {
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+    if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*expr.node {
         // A block parameter reads as a `Var`; a partial's local reads
         // as a bare no-arg `Send` (Prism sees an unbound bareword and
         // ingest lifts it that way — see `ingest::expr`'s `defined?`
@@ -738,10 +809,21 @@ fn collect_member_assoc_reads(
             _ => false,
         };
         if is_member && keys.contains_key(method) {
-            out.push((method.clone(), expr.span));
+            out.push((method.clone(), expr.span, tail.cloned()));
         }
+        // `assoc.sum { … }` / `assoc.count { … }` enumerate the loaded
+        // target; only the block-less form is a query.
+        let applied = if block.is_none() { Some(method) } else { None };
+        collect_member_assoc_reads(r, member, keys, applied, out);
+        for a in args {
+            collect_member_assoc_reads(a, member, keys, None, out);
+        }
+        if let Some(b) = block {
+            collect_member_assoc_reads(b, member, keys, None, out);
+        }
+        return;
     }
-    expr.node.for_each_child(&mut |c| collect_member_assoc_reads(c, member, keys, out));
+    expr.node.for_each_child(&mut |c| collect_member_assoc_reads(c, member, keys, None, out));
 }
 
 fn render_site(app: &App, span: Span) -> Option<String> {

@@ -3243,7 +3243,10 @@ fn preload_fixture(controller_body: &str, view: &str) -> roundhouse::App {
 end
 "#,
         ),
-        ("app/models/comment.rb", "class Comment < ApplicationRecord\n  belongs_to :article\nend\n"),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :article\n  scope :recent, -> { order(:id) }\nend\n",
+        ),
         ("app/views/articles/index.html.erb", view),
         (
             "db/schema.rb",
@@ -3289,6 +3292,50 @@ fn missing_preload_fires_same_procedure_and_cross_procedure() {
         "message names the query site; got {}",
         view_hit.1
     );
+}
+
+#[test]
+fn missing_preload_names_a_query_tail_preloading_cannot_serve() {
+    // `a.comments.count` is a COUNT per row whether or not :comments
+    // is preloaded — the fix is `.size` or a counter cache, never
+    // `.includes`. A scope of the target (`a.comments.recent`) and a
+    // `where` are queries too. `.size` and a block-taking `sum` read
+    // the loaded target, so those keep the preload fix; and a
+    // preloaded chain still reports the `.count`.
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.order(:title)
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.count %><%= a.comments.recent.size %>\
+         <%= a.comments.sum { |c| 1 } %><% end %>\n",
+    );
+    let msgs: Vec<String> = missing_preload_diags(&app).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(msgs.len(), 3, "count, recent, and the plain read; got {msgs:?}");
+    let count = msgs.iter().find(|m| m.contains("`a.comments.count`")).expect("count finding");
+    assert!(
+        count.contains("would not avoid")
+            && count.contains("`.size`")
+            && count.contains("counter_cache"),
+        "count names the real fix; got {count}"
+    );
+    assert!(!count.contains("add `.includes"), "count must not suggest includes; got {count}");
+    let recent = msgs.iter().find(|m| m.contains("`a.comments.recent`")).expect("scope finding");
+    assert!(recent.contains("scoped association"), "scope tail is structural; got {recent}");
+    let plain = msgs.iter().find(|m| m.contains("reads `a.comments`")).expect("plain read");
+    assert!(
+        plain.contains("add `.includes(:comments)`"),
+        "block-sum keeps the preload fix; got {plain}"
+    );
+
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.includes(:comments)
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.count %><%= a.comments.size %><% end %>\n",
+    );
+    let msgs: Vec<String> = missing_preload_diags(&app).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(msgs.len(), 1, "preloaded: only the count survives; got {msgs:?}");
+    assert!(msgs[0].contains("`a.comments.count`"), "{msgs:?}");
 }
 
 #[test]
