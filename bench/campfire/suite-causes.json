@@ -221,6 +221,14 @@
       "note": "The request went out as `POST /users/{params: {push_subscription: {…}}}` — the params object rendered into the path instead of being sent as the body. Bracket-nested query parameters are the shape behind it: the test writes `params: { push_subscription: { endpoint: …, keys: { … } } }` and nothing splits the nesting into a body. Reads as a routing error, which is why it sat untriaged."
     },
     {
+      "slug": "shared-cache-table-lock",
+      "title": "A table lock from the harness's shared-cache memory database",
+      "owner": "harness",
+      "match": "database table is locked",
+      "note": "SQLITE_LOCKED (6), not BUSY: the test database was SQLite's shared-cache memory URI, whose table locks never wait \u2014 a read cursor open on `accounts` on one connection makes an INSERT on another fail at once, `busy_timeout` notwithstanding. campfire's first-run race test (five threads posting the first account together) died on the lock before reaching the singleton guard it was written to prove: ~40% of runs on a Mac, one in eight on the box. Rails tests against a file (`storage/test.sqlite3`, `timeout: 5000`), so the harness does too now (test/test_helper.rb): writers wait, the guard answers.",
+      "at_zero": "the harness opens a per-test file database since 2026-09-17; the rule stays as the tripwire \u2014 a reappearance means a shim opened a shared-cache database again."
+    },
+    {
       "slug": "render-json-encoder",
       "title": "Inline `render json:` reaches the CRuby-only encoder",
       "owner": "compiler",

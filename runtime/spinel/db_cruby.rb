@@ -99,6 +99,11 @@ module Db
       # compile-time accident is not agreement, so each states it.
       db.execute("PRAGMA journal_mode=WAL")
       db.execute("PRAGMA synchronous=NORMAL")
+      # The gem's default is 0: a second writer fails at once with
+      # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
+      # the binary's PRAGMAS — the harness's file database (see
+      # test/test_helper.rb) relies on writers waiting.
+      db.busy_timeout = 5000
       db
     end
   end

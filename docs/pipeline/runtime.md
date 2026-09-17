@@ -56,7 +56,7 @@ Conventional file roles (file names vary by target):
 | Role | Description |
 |------|-------------|
 | Model base / shims | `ActiveRecordAdapter` trait / adapter interface, validation error type |
-| DB connection | Lifecycle (open, with_conn borrow, test-mode in-memory) |
+| DB connection | Lifecycle (open, with_conn borrow, test-mode database — in-memory on the typed targets, a per-test file on the ruby family since the shared-cache lock, see `runtime/spinel/test/test_helper.rb`) |
 | HTTP server | Production HTTP entry — listens on a port, dispatches through Router |
 | Action Cable | WebSocket endpoint |
 | View helpers | Delegates into transpiled framework Ruby (where present) or implements helpers directly (legacy) |

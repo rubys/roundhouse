@@ -124,6 +124,7 @@ module Db
       st = raw.create_statement
       st.execute("PRAGMA journal_mode=WAL")
       st.execute("PRAGMA synchronous=NORMAL")
+      st.execute("PRAGMA busy_timeout=5000")
       st.close
       conn = Conn.new(raw)
       @free << conn

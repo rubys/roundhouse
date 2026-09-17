@@ -71,17 +71,44 @@ require_relative "../app/models"
 # model's `_adapter_truncate`. Each model's lowered class has its
 # own truncate primitive (per-table DELETE).
 #
-# ONE in-memory database, SHARED by every connection in the pool. A
-# bare `:memory:` is a database PER CONNECTION, and every Db shim opens
-# a pool of them: the unleased path a test runs on used the first, and
-# any `Db.with_connection` on another thread leased a different, empty
-# one — "no such table" from the web-push pool's invalidation thread,
-# the first thing in the suite to take a lease of its own
-# (`Rails.application.executor.wrap`). SQLite's shared-cache URI is the
-# one spelling all three shims open (spinel's `OPEN_URI_RWC`, the
-# sqlite3 gem with its URI flag, xerial's JDBC URL) that means "the same
-# memory, whoever asks".
-Db.configure("file::memory:?cache=shared")
+# ONE database, SHARED by every connection in the pool, and a FILE — the
+# shape Rails tests against (`storage/test.sqlite3`, `timeout: 5000`).
+#
+# Not a bare `:memory:`: that is a database PER CONNECTION, and every Db
+# shim opens a pool of them — the unleased path a test runs on used the
+# first, and any `Db.with_connection` on another thread leased a
+# different, empty one ("no such table" from the web-push pool's
+# invalidation thread, the first thing in the suite to take a lease of
+# its own).
+#
+# And not SQLite's shared-cache memory URI (`file::memory:?cache=shared`),
+# which this ran on until 2026-09-17. Shared cache trades the file
+# database's locking for TABLE locks that never wait: a read cursor open
+# on `accounts` on one connection makes an INSERT into `accounts` on
+# another fail at once with SQLITE_LOCKED, `busy_timeout` notwithstanding.
+# campfire's first-run race test — five threads posting the first
+# account together, written to prove the singleton guard — then died on
+# the lock instead of reaching the guard, ~40% of runs on a Mac (11/20,
+# 12/20, 16/20 measured) and one run in eight on the Linux box. Under a
+# file database the writers wait, as they do in Rails, and the guard
+# answers: 20/20. Every shim opens a plain path with WAL, and
+# `busy_timeout` is stated in each.
+#
+# Named by the test binary and deleted before it is opened: fresh every
+# run, one file per test file (so a parallel sweep never shares one),
+# and bounded — a rerun overwrites, never accumulates. The schema is
+# created below on the empty file.
+def _test_db_path
+  base = File.basename($0, ".rb")
+  Dir.mkdir("tmp") if !Dir.exist?("tmp")
+  Dir.mkdir("tmp/test") if !Dir.exist?("tmp/test")
+  path = "tmp/test/" + base + ".sqlite3"
+  [path, path + "-wal", path + "-shm"].each do |f|
+    File.delete(f) if File.exist?(f)
+  end
+  path
+end
+Db.configure(_test_db_path)
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
 
