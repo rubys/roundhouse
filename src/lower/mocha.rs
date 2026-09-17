@@ -741,28 +741,40 @@ fn guard_app_methods(app: &mut App, stubbed: &BTreeMap<(String, String), BTreeSe
         let Some(def) = model.methods_mut().find(|d| d.name.as_str() == method && d.receiver == MethodReceiver::Instance) else {
             continue;
         };
-        let stub_var = || Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") });
-        let ivar_read = || Expr::new(sp(), ExprNode::Ivar { name: ivar.clone() });
-        let nil_q = |e: Expr| call(sp(), e, "nil?", vec![]);
-        let not = |e: Expr| Expr::new(sp(), ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false });
+        // TYPED as it is built: this runs after analysis, and the
+        // diagnostics walker reads an untyped ivar as `has no known
+        // type` — an error on the strict emit, which is what the
+        // archive build and the conformance ceiling run.
+        let with_ty = crate::lower::typing::with_ty;
+        let stub_ty = Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![] }, Ty::Nil] };
+        let stub_var = || with_ty(Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") }), stub_ty.clone());
+        let ivar_read = || with_ty(Expr::new(sp(), ExprNode::Ivar { name: ivar.clone() }), stub_ty.clone());
+        let nil_q = |e: Expr| with_ty(call(sp(), e, "nil?", vec![]), Ty::Bool);
+        let not = |e: Expr| with_ty(Expr::new(sp(), ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false }), Ty::Bool);
         let mocha_stub = Expr::new(sp(), ExprNode::Const { path: vec![Symbol::from("MochaStub")] });
         let name = format!("{class}#{method}");
-        let pick = Expr::new(
-            sp(),
-            ExprNode::If {
-                cond: nil_q(ivar_read()),
-                then_branch: call(sp(), mocha_stub, "any_instance_for", vec![str_lit(sp(), &name)]),
-                else_branch: ivar_read(),
-            },
+        let pick = with_ty(
+            Expr::new(
+                sp(),
+                ExprNode::If {
+                    cond: nil_q(ivar_read()),
+                    then_branch: with_ty(call(sp(), mocha_stub, "any_instance_for", vec![str_lit(sp(), &name)]), stub_ty.clone()),
+                    else_branch: ivar_read(),
+                },
+            ),
+            stub_ty.clone(),
         );
         let bind = Expr::new(sp(), ExprNode::Assign { target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") }, value: pick });
-        let mut arm: Vec<Expr> = vec![call(sp(), stub_var(), "record!", vec![])];
+        let mut arm: Vec<Expr> = vec![with_ty(call(sp(), stub_var(), "record!", vec![]), Ty::Nil)];
         for e in exceptions {
             let konst = Expr::new(sp(), ExprNode::Const { path: e.split("::").map(Symbol::from).collect() });
             let raise = Expr::new(sp(), ExprNode::Raise { value: konst });
-            let is = Expr::new(
-                sp(),
-                ExprNode::Send { recv: Some(call(sp(), stub_var(), "raises", vec![])), method: Symbol::from("=="), args: vec![str_lit(sp(), e)], block: None, parenthesized: false },
+            let is = with_ty(
+                Expr::new(
+                    sp(),
+                    ExprNode::Send { recv: Some(with_ty(call(sp(), stub_var(), "raises", vec![]), Ty::Str)), method: Symbol::from("=="), args: vec![str_lit(sp(), e)], block: None, parenthesized: false },
+                ),
+                Ty::Bool,
             );
             arm.push(Expr::new(sp(), ExprNode::If { cond: is, then_branch: raise, else_branch: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }) }));
         }
