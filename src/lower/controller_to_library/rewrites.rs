@@ -327,7 +327,12 @@ pub(super) fn rewrite_render_to_views(
                             // the JSON encoding of the value. Encoding
                             // happens at runtime (`JsonRender.encode`
                             // walks as_json/Hash/Array/Time), because the
-                            // value's shape is a runtime fact.
+                            // value's shape is a runtime fact — for what
+                            // reaches here. A value typed as a class with
+                            // declared readers never does: `as_json_poro`
+                            // has already respelled that site as `render
+                            // plain: v.as_json_str, content_type:
+                            // "application/json"`, the writer's text.
                             "json" => {
                                 body = Some((json_render_encode(v), Some("application/json")))
                             }
@@ -748,7 +753,8 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// just this entry. The runtime's `render(body, status:, content_type:)`
 /// expects ONE kwargs hash, not multiple.
 /// `ActionController::JsonRender.encode(<value>)` — the runtime JSON
-/// encoder behind inline `render json: <expr>`. CRuby answers it via
+/// encoder behind inline `render json: <expr>` whose value
+/// `as_json_poro` could not write a serializer for. CRuby answers it via
 /// the overlay (as_json-aware recursive encode); a strict target whose
 /// app reaches this call surfaces an unresolved-constant gap loudly
 /// rather than silently rendering html.

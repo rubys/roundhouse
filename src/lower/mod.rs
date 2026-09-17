@@ -490,9 +490,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // turns `Model.create!(p.merge(...)) { }` into the `Model.new(...)`
     // shape this pass matches.
     ("params_merge", &["create_block"]),
-    // Reads `render json: <expr>` while it is still spelled that way —
-    // `controller_to_library` rewrites it to `JsonRender.encode` at emit
-    // time, and needs the `as_json` this synthesizes to already be there.
+    // Reads `render json: <expr>` while it is still spelled that way,
+    // and rewrites the sites it can serve to `render plain:
+    // <v>.as_json_str` before `controller_to_library` lowers whatever
+    // is left to `JsonRender.encode` at emit time.
     ("as_json_poro", &[]),
     // `include ActiveModel::Model` on a library class → a synthesized
     // `initialize(attributes = {})` / `valid?` / `persisted?`, and the

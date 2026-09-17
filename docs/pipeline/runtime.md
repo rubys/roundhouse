@@ -601,6 +601,29 @@ request body a bot receives) holds strings, integers and nested hashes
 of the same; a value JSON cannot encode raises rather than rendering
 wrongly.
 
+**Inline `render json: <object>` is written down, not walked.** Rails
+encodes a plain object through `Object#as_json` — `instance_values`,
+reflection over every ivar — and then a structural walk of the Hash.
+The CRuby overlay's `ActionController::JsonRender.encode` reproduces
+that walk (`respond_to?(:as_json)`, `case … when Hash`), and it is
+CRuby-only by nature: on a compiled tree the constant is unresolved and
+the site is a 500 (campfire's `POST /unfurl_links`, every pasted link).
+The compiler already knows the key set — it is the class's declared
+`attr_*` readers — so `lower::as_json_poro` writes both halves down: an
+`as_json` Hash over those readers, and an `as_json_str` writer in the
+same `io << "\"title\":" << JsonBuilder.encode_value(…)` accumulator
+shape jbuilder templates lower to. The site becomes the Rails idiom for
+an already-encoded body, `render plain: v.as_json_str, content_type:
+"application/json"`, which the controller rewrite lowers on every
+target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
+writer the compiled lane does. Demand-gated and type-gated: only a class
+the analyzer typed at a `render json:` site is given the pair. A value
+with no writer — a Hash literal, a Relation, a class with its own
+`as_json` (whose pairs `as_json_shape` recognizes but whose computed
+values are not yet typed, see that module) — keeps the runtime
+encoder, CRuby-only and loud elsewhere; the suite ledger's
+`render-json-encoder` rule is the tripwire for it.
+
 ### Active Storage: rows and bytes are modeled, variants are a seam
 
 `runtime/ruby/active_storage.rb` models the attachment ROWS and the

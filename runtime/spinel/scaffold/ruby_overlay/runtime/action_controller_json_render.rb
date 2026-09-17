@@ -16,9 +16,13 @@
 # shadows the gem's — routing through it here would `to_s` the payload
 # into Ruby-inspect notation, not JSON.
 #
-# CRuby-only by nature (respond_to? dispatch); other targets surface
-# `render json:` as an unresolved constant until their runtime grows
-# an encoder.
+# CRuby-only by nature (respond_to? dispatch). A site whose value the
+# compiler typed as a class with declared readers never reaches this:
+# lower::as_json_poro writes that class an `as_json_str` writer and
+# respells the site `render plain: v.as_json_str, content_type:
+# "application/json"`, on every target. What is left here — a Hash
+# literal, a Relation, a class with its own `as_json` — surfaces on
+# other targets as an unresolved constant until the writer covers it.
 module ActionController
   module JsonRender
     def self.encode(value)

@@ -55,7 +55,8 @@ the full list):
   strictly worse for imperative targets, which keep the native
   `while`.
 - **JSON / serialization** — `src/lower/jbuilder_to_library/`,
-  `as_json_shape.rs`, `as_json_writer.rs`.
+  `as_json_shape.rs`, `as_json_writer.rs`, `as_json_poro.rs` (inline
+  `render json: <object>` — the declared-readers case, monomorphized).
 - **ActiveSupport grounding** — `blank.rs`, `duration.rs`,
   `inquiry.rs`, ….
 - **Rails-API grounding** — `secure_password.rs`, `signed_id.rs`,

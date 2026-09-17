@@ -32,6 +32,33 @@
 //! validation bookkeeping no client reads, and inventing them here would
 //! mean naming internals of a shim rather than the app's own surface.
 //! What the app DECLARED is what ships.
+//!
+//! ## The encoder, monomorphized
+//!
+//! `as_json` answers the Hash; something still has to turn it into
+//! text. The CRuby overlay's `ActionController::JsonRender.encode` walks
+//! that Hash reflectively (`respond_to?(:as_json)`, `case value when
+//! Hash …`), which no strict target can bind — on the spinel tree the
+//! constant is unresolved and every `POST /unfurl_links` is a 500.
+//!
+//! The key set is known here, so the text is written down too: the same
+//! readers become an `as_json_str` writer ([`super::as_json_writer`],
+//! the straight-line `io << "\"title\":" << JsonBuilder.encode_value(…)`
+//! shape jbuilder templates lower to), and the call site becomes the
+//! Rails idiom for an already-encoded body —
+//!
+//! ```text
+//! render json: opengraph
+//! render plain: opengraph.as_json_str, content_type: "application/json"
+//! ```
+//!
+//! — which the controller rewrite already lowers on every target, with
+//! the author's `content_type:` standing. `JsonBuilder` ships in the
+//! shared runtime, so the ruby lane runs the very writer the compiled
+//! lane does: one oracle, one text. A `render json:` whose value is not
+//! a class this pass wrote a writer for (a Hash literal, a Relation, a
+//! model with its own `as_json` — see `as_json_shape`'s known gaps)
+//! keeps the runtime encoder, CRuby-only as before.
 
 use std::collections::HashSet;
 
@@ -43,6 +70,10 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
+use super::as_json_shape::{JsonPair, PairValue};
+use super::as_json_writer::{writer_method, WRITER_METHOD};
+use super::typing::with_ty;
+
 pub fn apply_as_json_synthesis(app: &mut App) {
     let wanted = json_rendered_classes(app);
     if wanted.is_empty() {
@@ -52,6 +83,9 @@ pub fn apply_as_json_synthesis(app: &mut App) {
     // campfire's `Opengraph::Metadata` is — rides in `app.models`, not
     // `app.library_classes`, so looking in one place found nothing and
     // the pass was silently inert.
+    // The classes given a writer, so the call sites below rewrite for
+    // exactly those and no other.
+    let mut written: HashSet<ClassId> = HashSet::new();
     for model in &mut app.models {
         if !wanted.contains(&model.name) {
             continue;
@@ -76,6 +110,12 @@ pub fn apply_as_json_synthesis(app: &mut App) {
             leading_comments: Vec::new(),
             leading_blank_line: true,
         });
+        model.body.push(ModelBodyItem::Method {
+            method: as_json_str_method(&model.name, &readers),
+            leading_comments: Vec::new(),
+            leading_blank_line: true,
+        });
+        written.insert(model.name.clone());
     }
     for lc in &mut app.library_classes {
         if !wanted.contains(&lc.name) {
@@ -91,7 +131,109 @@ pub fn apply_as_json_synthesis(app: &mut App) {
             continue;
         }
         lc.methods.push(as_json_method(&lc.name, &readers));
+        lc.methods.push(as_json_str_method(&lc.name, &readers));
+        written.insert(lc.name.clone());
     }
+    if written.is_empty() {
+        return;
+    }
+    for controller in &mut app.controllers {
+        for action in controller.actions_mut() {
+            replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written));
+        }
+    }
+}
+
+/// `render json: <v>` → `render plain: <v>.as_json_str, content_type:
+/// "application/json"` when `<v>` is typed as a class this pass wrote a
+/// writer for. Other entries ride along untouched; an author's own
+/// `content_type:` stands (the controller rewrite keeps the first).
+fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "render" || args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return None };
+    let is_key = |k: &Expr, name: &str| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
+    };
+    let value = entries.iter().find_map(|(k, v)| is_key(k, "json").then_some(v))?;
+    let Some(Ty::Class { id, .. }) = value.ty.as_ref() else { return None };
+    if !written.contains(id) {
+        return None;
+    }
+    let sym = |name: &str| {
+        with_ty(
+            Expr::new(value.span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } }),
+            Ty::Sym,
+        )
+    };
+    let encoded = with_ty(
+        Expr::new(
+            value.span,
+            ExprNode::Send {
+                recv: Some(value.clone()),
+                method: Symbol::from(WRITER_METHOD),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Str,
+    );
+    let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
+    for (k, v) in entries {
+        if is_key(k, "json") {
+            new_entries.push((sym("plain"), encoded.clone()));
+        } else {
+            new_entries.push((k.clone(), v.clone()));
+        }
+    }
+    if !entries.iter().any(|(k, _)| is_key(k, "content_type")) {
+        new_entries.push((
+            sym("content_type"),
+            with_ty(
+                Expr::new(
+                    value.span,
+                    ExprNode::Lit { value: Literal::Str { value: "application/json".to_string() } },
+                ),
+                Ty::Str,
+            ),
+        ));
+    }
+    let mut hash = args[0].clone();
+    hash.node = Box::new(ExprNode::Hash { entries: new_entries, kwargs: true });
+    Some(Expr {
+        node: Box::new(ExprNode::Send {
+            recv: None,
+            method: method.clone(),
+            args: vec![hash],
+            block: block.clone(),
+            parenthesized: *parenthesized,
+        }),
+        ..e.clone()
+    })
+}
+
+/// Post-order in-place replacement, the shape `params_merge` uses.
+fn replace_in(expr: &mut Expr, f: &mut impl FnMut(&Expr) -> Option<Expr>) {
+    expr.node.for_each_child_mut(&mut |c| replace_in(c, f));
+    if let Some(replacement) = f(expr) {
+        *expr = replacement;
+    }
+}
+
+/// The writer over the same readers `as_json` answers: one
+/// unconditional `Reader` pair per attribute, in declaration order. A
+/// PORO has no table and no associations, so the writer never declines.
+fn as_json_str_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
+    let pairs: Vec<JsonPair> = readers
+        .iter()
+        .map(|name| JsonPair { key: name.clone(), value: PairValue::Reader(name.clone()), cond: None })
+        .collect();
+    writer_method(owner, &pairs, None, &[]).expect("unconditional reader pairs always encode")
 }
 
 /// The classes `render json: <expr>` names, by the type analyze stamped

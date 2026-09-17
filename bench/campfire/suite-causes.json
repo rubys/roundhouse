@@ -221,6 +221,14 @@
       "note": "The request went out as `POST /users/{params: {push_subscription: {…}}}` — the params object rendered into the path instead of being sent as the body. Bracket-nested query parameters are the shape behind it: the test writes `params: { push_subscription: { endpoint: …, keys: { … } } }` and nothing splits the nesting into a body. Reads as a routing error, which is why it sat untriaged."
     },
     {
+      "slug": "render-json-encoder",
+      "title": "Inline `render json:` reaches the CRuby-only encoder",
+      "owner": "compiler",
+      "match": "(undefined method 'encode' for unknown|uninitialized constant ActionController::JsonRender)",
+      "note": "`render json: opengraph` lowered to `ActionController::JsonRender.encode(v)`, a reflective walk only the CRuby overlay defines \u2014 on the compiled lane the constant is unresolved and every `POST /unfurl_links` is a 500, so the app pasted links with no preview card. The key set is known at transpile time (the class's declared readers), so it is written down instead: an `as_json_str` writer on the class and `render plain: v.as_json_str, content_type: \"application/json\"` at the site (lower::as_json_poro). A value with no writer (a Hash literal, a Relation, a class with its own `as_json`) still reaches the encoder, and would still match here.",
+      "at_zero": "the monomorphized writer landed for the declared-readers case (campfire's only site); the rule stays as a regression tripwire, and names the shapes that would still reach the encoder."
+    },
+    {
       "slug": "silent-divergence",
       "title": "The emit ran and answered differently",
       "owner": "unknown",

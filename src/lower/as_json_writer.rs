@@ -52,12 +52,16 @@
 //! response. Closing it needs the value's inferred type, which is also
 //! what the nested-record and Array[String] cases need.
 
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver};
+use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, IrHint, Literal};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{ColumnType, Table};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use super::as_json_shape::{JsonPair, PairValue, ShapeError};
+use super::typing::with_ty;
 
 /// Name of the synthesized method. `_json` mirrors the jbuilder views'
 /// suffix; `_str` says it hands back the encoded String, not the Hash
@@ -65,6 +69,36 @@ use super::as_json_shape::{JsonPair, PairValue, ShapeError};
 pub const WRITER_METHOD: &str = "as_json_str";
 
 const ACC: &str = "io";
+
+/// The writer as a method on its model: `def as_json_str = <body>`.
+///
+/// TYPED AS IT IS BUILT. Everything that calls this runs after analysis,
+/// and the strict emit reads an untyped node as unknown — an error on the
+/// archive build. The pieces below stamp what they know (`io` and every
+/// `JsonBuilder` call answer `String`); a `Computed` expression keeps the
+/// type analysis gave it in the source `as_json`.
+pub fn writer_method(
+    owner: &ClassId,
+    pairs: &[JsonPair],
+    table: Option<&Table>,
+    assoc_names: &[Symbol],
+) -> Result<MethodDef, ShapeError> {
+    let stmts = writer_body(pairs, table, assoc_names)?;
+    Ok(MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from(WRITER_METHOD),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }), Ty::Str),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    })
+}
 
 /// Statements for the writer body, or why the pairs could not be turned
 /// into one.
@@ -85,7 +119,7 @@ pub fn writer_body(
     let mut out: Vec<Expr> = vec![
         // `io = String.new` — the accumulator every lowered renderer
         // opens with.
-        assign_local(ACC, send(Some(const_ref("String")), "new", vec![], true)),
+        assign_local(ACC, with_ty(send(Some(const_ref("String")), "new", vec![], true), Ty::Str)),
         io_append_lit("{"),
     ];
 
@@ -122,7 +156,11 @@ pub fn writer_body(
     }
 
     out.push(io_append_lit("}"));
-    out.push(var_ref(ACC));
+    // Init/Result stamps, as the jbuilder lowerer leaves them: the
+    // accumulator triple every target's string-builder emit keys on.
+    let mut result = var_ref(ACC);
+    result.hint = Some(IrHint::StringBuilderResult);
+    out.push(result);
     Ok(out)
 }
 
@@ -160,27 +198,34 @@ fn is_temporal_column(table: Option<&Table>, name: &Symbol) -> bool {
 // ── IR construction ────────────────────────────────────────────────
 
 fn io_append_lit(s: &str) -> Expr {
-    let mut e = send(Some(var_ref(ACC)), "<<", vec![lit_str(s)], false);
+    let mut e = with_ty(send(Some(var_ref(ACC)), "<<", vec![lit_str(s)], false), Ty::Str);
     e.hint = Some(IrHint::StringBuilderAppend);
     e
 }
 
 fn io_append_call(call: Expr) -> Expr {
-    let mut e = send(Some(var_ref(ACC)), "<<", vec![call], false);
+    let mut e = with_ty(send(Some(var_ref(ACC)), "<<", vec![call], false), Ty::Str);
     e.hint = Some(IrHint::StringBuilderAppend);
     e
 }
 
 fn json_builder_call(method: &str, value: Expr) -> Expr {
-    send(Some(const_ref("JsonBuilder")), method, vec![value], true)
+    with_ty(send(Some(const_ref("JsonBuilder")), method, vec![value], true), Ty::Str)
 }
 
+/// `self.<reader>` — the attribute readers this serializes declare no
+/// type (`attr_accessor`), and `encode_value` takes `untyped`; the stamp
+/// says that rather than leaving the node for the diagnostics walker
+/// to call unknown.
 fn self_send(method: &str) -> Expr {
-    send(
-        Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
-        method,
-        vec![],
-        false,
+    with_ty(
+        send(
+            Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method,
+            vec![],
+            false,
+        ),
+        Ty::Untyped,
     )
 }
 
@@ -196,16 +241,21 @@ fn if_then(cond: Expr, then_stmts: Vec<Expr>) -> Expr {
 }
 
 fn assign_local(name: &str, value: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: crate::expr::LValue::Var {
-                id: VarId(0),
-                name: Symbol::from(name),
+    let mut e = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from(name),
+                },
+                value,
             },
-            value,
-        },
-    )
+        ),
+        Ty::Str,
+    );
+    e.hint = Some(IrHint::StringBuilderInit);
+    e
 }
 
 fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>, parenthesized: bool) -> Expr {
@@ -231,20 +281,26 @@ fn const_ref(name: &str) -> Expr {
 }
 
 fn var_ref(name: &str) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Var {
-            id: VarId(0),
-            name: Symbol::from(name),
-        },
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from(name),
+            },
+        ),
+        Ty::Str,
     )
 }
 
 fn lit_str(s: &str) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Lit {
-            value: Literal::Str { value: s.to_string() },
-        },
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Str { value: s.to_string() },
+            },
+        ),
+        Ty::Str,
     )
 }
