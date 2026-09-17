@@ -14,7 +14,7 @@
 //!
 //! Called from the `If` arm in the body-typer's `compute` match.
 
-use crate::expr::{BoolOpKind, Expr, ExprNode, Literal};
+use crate::expr::{BoolOpKind, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
@@ -96,6 +96,19 @@ pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
         // return; defer until a real shape demands it.
         ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
             extract_narrowing(left).or_else(|| extract_narrowing(right))
+        }
+        // Assignment as the condition: `if user = User.authenticate_by(…)`
+        // (the Rails authentication generator's idiom) tests the
+        // assigned value's truthiness, so the then-branch reads the
+        // variable without its nil arm. The binding itself is seeded
+        // by the caller from the assignment (see the `If` and `BoolOp`
+        // arms' `collect_var_assignments_into`); this only names what
+        // to narrow. Parenthesized `(x = …)` parses the same.
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            Some(NarrowPred::IsTruthy(VarKey::Local(name.clone())))
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, .. } => {
+            Some(NarrowPred::IsTruthy(VarKey::Ivar(name.clone())))
         }
         // Bare variable / ivar / bareword as truthiness guard. Tried
         // last because the explicit predicate matches above are more

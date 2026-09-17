@@ -475,16 +475,6 @@ impl<'a> BodyTyper<'a> {
                 // narrowed Ctx so subsequent reads of the same var
                 // see the refined type. Mirrors how the `If` arm
                 // threads narrowing into its then/else branches.
-                let pred = narrowing::extract_narrowing(left);
-                let mut right_ctx = match (&pred, &*op) {
-                    (Some(p), crate::expr::BoolOpKind::And) => {
-                        narrowing::apply_narrowing(ctx, p, true)
-                    }
-                    (Some(p), crate::expr::BoolOpKind::Or) => {
-                        narrowing::apply_narrowing(ctx, p, false)
-                    }
-                    _ => ctx.clone(),
-                };
                 // Var assignments inside `left` (the canonical case is
                 // `(x = find_by(...)) && x.foo`) need to flow into
                 // `right`'s scope. Without this, `x` reads as Var
@@ -493,8 +483,23 @@ impl<'a> BodyTyper<'a> {
                 // ones inside expressions. For `&&` the assignment
                 // executed (left was truthy); for `||` it executed
                 // because left was falsy — in either case the binding
-                // is observable on the right side.
-                collect_var_assignments_into(left, &mut right_ctx.local_bindings);
+                // is observable on the right side. Seeded BEFORE the
+                // narrowing so that a left that is itself the
+                // assignment narrows what it just bound (`x` is `T`
+                // on the right of `(x = find_by(…)) &&`, `T?` after
+                // `||`).
+                let mut seeded = ctx.clone();
+                collect_var_assignments_into(left, &mut seeded.local_bindings);
+                let pred = narrowing::extract_narrowing(left);
+                let right_ctx = match (&pred, &*op) {
+                    (Some(p), crate::expr::BoolOpKind::And) => {
+                        narrowing::apply_narrowing(&seeded, p, true)
+                    }
+                    (Some(p), crate::expr::BoolOpKind::Or) => {
+                        narrowing::apply_narrowing(&seeded, p, false)
+                    }
+                    _ => seeded,
+                };
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -791,40 +796,27 @@ impl<'a> BodyTyper<'a> {
                 // executed during cond evaluation regardless of
                 // branch taken. Then-branch may further narrow via
                 // truthiness; else-branch sees the raw assigned type.
+                // The assignment binds first and the predicate narrows
+                // what it bound: `if user = User.authenticate_by(…)`
+                // reads `user` as `User` in the then-branch, `User?`
+                // in the else-branch. (Narrowing before seeding would
+                // find no binding to narrow and leave the nil arm.)
                 let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                 collect_var_assignments_into(cond, &mut cond_assigns);
-                let t = match &pred {
-                    Some(p) => {
-                        let mut then_ctx = narrowing::apply_narrowing(ctx, p, true);
-                        for (k, v) in &cond_assigns {
-                            then_ctx.local_bindings.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                        self.analyze_expr(then_branch, &then_ctx)
-                    }
-                    None => {
-                        let mut then_ctx = ctx.clone();
-                        for (k, v) in &cond_assigns {
-                            then_ctx.local_bindings.insert(k.clone(), v.clone());
-                        }
-                        self.analyze_expr(then_branch, &then_ctx)
-                    }
+                let mut base = ctx.clone();
+                for (k, v) in &cond_assigns {
+                    base.local_bindings.insert(k.clone(), v.clone());
+                }
+                let then_ctx = match &pred {
+                    Some(p) => narrowing::apply_narrowing(&base, p, true),
+                    None => base.clone(),
                 };
-                let e = match &pred {
-                    Some(p) => {
-                        let mut else_ctx = narrowing::apply_narrowing(ctx, p, false);
-                        for (k, v) in &cond_assigns {
-                            else_ctx.local_bindings.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                        self.analyze_expr(else_branch, &else_ctx)
-                    }
-                    None => {
-                        let mut else_ctx = ctx.clone();
-                        for (k, v) in &cond_assigns {
-                            else_ctx.local_bindings.insert(k.clone(), v.clone());
-                        }
-                        self.analyze_expr(else_branch, &else_ctx)
-                    }
+                let t = self.analyze_expr(then_branch, &then_ctx);
+                let else_ctx = match &pred {
+                    Some(p) => narrowing::apply_narrowing(&base, p, false),
+                    None => base,
                 };
+                let e = self.analyze_expr(else_branch, &else_ctx);
                 union_of(t, e)
             }
 
@@ -1916,6 +1908,48 @@ mod tests {
         };
         assert!(variants.contains(&Ty::Nil), "variants: {variants:?}");
         assert!(variants.contains(&Ty::Int), "variants: {variants:?}");
+    }
+
+    #[test]
+    fn assignment_in_condition_binds_then_narrows() {
+        // `if x = y then x else x end` with `y: String?` and `x`
+        // unbound — the authentication generator's
+        // `if user = User.authenticate_by(…)`. The then-branch reads
+        // `x` as String (assigned, then truthy), the else-branch as
+        // String? (assigned, not narrowed: the falsy side is left
+        // alone, see `apply_narrowing`). The same for `(x = y) && x`.
+        let assign = || {
+            synth(ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from("x") },
+                value: var("y"),
+            })
+        };
+        let mut if_expr = synth(ExprNode::If {
+            cond: assign(),
+            then_branch: var("x"),
+            else_branch: var("x"),
+        });
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("y", optional_str());
+        typer.analyze_expr(&mut if_expr, &ctx);
+        let ExprNode::If { then_branch, else_branch, .. } = &*if_expr.node else {
+            panic!("expected If");
+        };
+        assert_eq!(then_branch.ty, Some(Ty::Str), "then-branch: assigned, then narrowed");
+        assert_eq!(else_branch.ty, Some(optional_str()), "else-branch: assigned, not narrowed");
+
+        let mut and_expr = synth(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: Default::default(),
+            left: assign(),
+            right: var("x"),
+        });
+        typer.analyze_expr(&mut and_expr, &ctx);
+        let ExprNode::BoolOp { right, .. } = &*and_expr.node else {
+            panic!("expected BoolOp");
+        };
+        assert_eq!(right.ty, Some(Ty::Str), "right of `&&`: assigned, then narrowed");
     }
 
     #[test]
