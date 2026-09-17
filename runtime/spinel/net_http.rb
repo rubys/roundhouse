@@ -32,21 +32,19 @@
 # the connect to the first request that no stub answers is what puts
 # the double above the transport.
 #
-# `self.start` is NOT redefined, although that is where `ipaddr:` — the
-# keyword campfire's DNS-rebinding pin is written on, and the package
-# does not declare — would naturally be added. A reopened, yielding
-# CLASS method reached through a scoped constant (`Net::HTTP.start do`)
-# mistypes its block parameter as the CALLER's class; `http.request do`
-# inside the block then resolves to `Opengraph::Fetch#request` itself,
-# the inliner recurses until its rename table fills, and the declined
-# call is emitted against a symbol no yielding method has — an
-# undefined-symbol link error, with no diagnostic (matz/spinel#4416,
-# reduced repro and instrumentation there). Until that lands the
-# package's `self.start` is what runs, and spinel drops the undeclared
-# `ipaddr:` silently (matz/spinel#4419; the package gap itself is
-# matz/spinel#4420, with the block form). Neither is papered over here:
-# the pin is not honoured on this lane, and this comment is where that
-# is stated.
+# `self.start` is NOT redefined, and `ipaddr:` — the keyword campfire's
+# DNS-rebinding pin is written on — is the PACKAGE's to honour: since
+# matz/spinel#4420 closed (2026-09-10) `Net::HTTP.start` declares it and
+# `open_connection` connects to it while `Host:` and the TLS name stay
+# `address`. Probed 2026-09-17: `Net::HTTP.start("example.com", 80,
+# ipaddr: "127.0.0.1")` from a spinel binary fails with ECONNREFUSED on
+# 127.0.0.1, exactly as CRuby does, so the pin holds on this lane. What
+# is still not served is the TEST's proof of it — `TCPSocket.expects
+# (:open).with { … }.throws`, sequential `Resolv` answers, `assert_throws`
+# — which is the `socket-interception` cause on the conformance page,
+# not a hole in the client. (#4416 and #4419, the reopened-yielding-
+# class-method and dropped-keyword bugs this comment used to describe,
+# closed the same day.)
 #
 # Last definition wins under spinel, and a redefined method sees the
 # class's other methods and ivars — `transport_request` below is the
