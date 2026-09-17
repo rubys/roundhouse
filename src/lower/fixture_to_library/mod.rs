@@ -16,11 +16,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::lower::fixtures::{
     LoweredFixture, LoweredFixtureRecord, LoweredFixtureSet, LoweredFixtureValue,
 };
+use crate::lower::controller_to_library::util::map_expr;
 use crate::lower::typing::{fn_sig, lit_int, lit_str, with_ty};
 use crate::naming::camelize;
 use crate::span::Span;
@@ -603,6 +604,12 @@ fn resolve_fk_id(
 /// Called by `test_module_to_library` on each method body before
 /// typing. Takes the App's fixtures slice (uses fixture names as
 /// the key set) plus an optional model lookup for the class name.
+///
+/// Walks with the shared `map_expr`, not a copy: this file carried its
+/// own walker, which never learned `MultiAssign`, so `message, signature
+/// = rooms(:pets).attachable_sgid.split("--")` kept its bare fixture
+/// call — `undefined method 'rooms'` on the ruby lane, a compile error
+/// on spinel — while the plain assignment beside it was rewritten.
 pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
     map_expr(body, &|e| {
         let ExprNode::Send {
@@ -688,114 +695,3 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
     })
 }
 
-/// Minimal map_expr — bottom-up rewrite. Returns Some(replacement)
-/// to substitute, None to descend unchanged. Modeled on the pattern
-/// in `controller_to_library/rewrites.rs`; duplicated here to keep
-/// the lowerer self-contained.
-fn map_expr(e: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
-    let mapped = match &*e.node {
-        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(|r| map_expr(r, f)),
-            method: method.clone(),
-            args: args.iter().map(|a| map_expr(a, f)).collect(),
-            block: block.as_ref().map(|b| map_expr(b, f)),
-            parenthesized: *parenthesized,
-        },
-        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
-            fun: map_expr(fun, f),
-            args: args.iter().map(|a| map_expr(a, f)).collect(),
-            block: block.as_ref().map(|b| map_expr(b, f)),
-        },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
-            params: params.clone(),
-            block_param: block_param.clone(),
-            body: map_expr(body, f),
-            block_style: *block_style,
-        },
-        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: map_expr(cond, f),
-            then_branch: map_expr(then_branch, f),
-            else_branch: map_expr(else_branch, f),
-        },
-        ExprNode::Seq { exprs } => ExprNode::Seq {
-            exprs: exprs.iter().map(|c| map_expr(c, f)).collect(),
-        },
-        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
-            op: *op,
-            surface: *surface,
-            left: map_expr(left, f),
-            right: map_expr(right, f),
-        },
-        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
-            entries: entries
-                .iter()
-                .map(|(k, v)| (map_expr(k, f), map_expr(v, f)))
-                .collect(),
-            kwargs: *kwargs,
-        },
-        ExprNode::Array { elements, style } => ExprNode::Array {
-            elements: elements.iter().map(|x| map_expr(x, f)).collect(),
-            style: *style,
-        },
-        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
-            scrutinee: map_expr(scrutinee, f),
-            arms: arms
-                .iter()
-                .map(|a| crate::expr::Arm {
-                    pattern: a.pattern.clone(),
-                    guard: a.guard.as_ref().map(|g| map_expr(g, f)),
-                    body: map_expr(&a.body, f),
-                })
-                .collect(),
-        },
-        ExprNode::Assign { target, value } => ExprNode::Assign {
-            target: match target {
-                LValue::Attr { recv, name } => LValue::Attr {
-                    recv: map_expr(recv, f),
-                    name: name.clone(),
-                },
-                LValue::Index { recv, index } => LValue::Index {
-                    recv: map_expr(recv, f),
-                    index: map_expr(index, f),
-                },
-                other => other.clone(),
-            },
-            value: map_expr(value, f),
-        },
-        ExprNode::Let { id, name, value, body } => ExprNode::Let {
-            id: *id,
-            name: name.clone(),
-            value: map_expr(value, f),
-            body: map_expr(body, f),
-        },
-        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
-            parts: parts
-                .iter()
-                .map(|p| match p {
-                    InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
-                    InterpPart::Expr { expr } => InterpPart::Expr {
-                        expr: map_expr(expr, f),
-                    },
-                })
-                .collect(),
-        },
-        ExprNode::Return { value } => ExprNode::Return { value: map_expr(value, f) },
-        ExprNode::Raise { value } => ExprNode::Raise { value: map_expr(value, f) },
-        ExprNode::Yield { args } => ExprNode::Yield {
-            args: args.iter().map(|a| map_expr(a, f)).collect(),
-        },
-        // Leaves and other composites pass through.
-        _ => return f(e).unwrap_or_else(|| e.clone()),
-    };
-    let new_e = Expr {
-        span: e.span,
-        node: Box::new(mapped),
-        ty: e.ty.clone(),
-        effects: e.effects.clone(),
-        leading_blank_line: e.leading_blank_line,
-        diagnostic: e.diagnostic.clone(),
-        hint: e.hint,
-        decisions: e.decisions,
-    };
-    f(&new_e).unwrap_or(new_e)
-}
