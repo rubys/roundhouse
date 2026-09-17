@@ -62,10 +62,33 @@
 //! mocha reads as once) become `<Const>.expect_<m>(n)`, and the helper's
 //! teardown runs each row's verify, which raises on a mismatch the way
 //! `mocha_verify` does — a failure of THAT test.
+//!
+//! THE APP'S OWN METHODS are the one shape the table cannot hold a row
+//! for: `@membership.user.expects :reset_remote_connections`,
+//! `Webhook.any_instance.stubs(:post).raises(Net::OpenTimeout)`. The
+//! same closed-set argument applies, so the METHOD gets the slot. The
+//! chain becomes a `MochaStub` (runtime/spinel/mocha_stub.rb) parked on
+//! the instance (`user.__mocha_reset_remote_connections = …`, for an
+//! object head whose static type names an app model) or filed by
+//! "Klass#m" in the runtime's registry (for `any_instance`), and
+//! `guard_app_methods` prepends to the lowered method a check that asks
+//! for the stub first and, when one is in force, records the call,
+//! raises the class the chains named (one arm per class, spelled as the
+//! constant), and returns nil in place of the body — mocha's
+//! replacement. Served: a bare `expects`, `.never`/`.once`/`.twice`/
+//! `.times(n)`, `.raises(E)`; a `.returns(v)` or a `.with` would widen
+//! the app method's return type or need argument matching, and goes to
+//! the bridge (an instance head with no app-model type is left as
+//! written).
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::App;
-use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, ModelBodyItem, Param};
+use crate::effect::EffectSet;
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ident::{ClassId, Symbol};
+use crate::ty::Ty;
 
 /// One stubbable method, and everything the emit needs to serve it.
 ///
@@ -256,6 +279,9 @@ const STUBBABLE: &[Stubbable] = &[
 /// The file that defines `MochaBridge` — per target, see `project.rs`.
 const BRIDGE_REQUIRE: &str = "../runtime/mocha_bridge";
 
+/// The file that defines `MochaStub`, the app-method slot.
+const APP_STUB_REQUIRE: &str = "../runtime/mocha_stub";
+
 /// The chain methods mocha's expectation API answers. A method outside
 /// this set ends the chain: the expression is not a stub and is left
 /// alone.
@@ -318,7 +344,7 @@ const MATCHERS: &[&str] = &[
 pub fn stub_requires() -> String {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = String::new();
-    for s in STUBBABLE.iter().map(|s| s.require).chain(std::iter::once(BRIDGE_REQUIRE)) {
+    for s in STUBBABLE.iter().map(|s| s.require).chain([BRIDGE_REQUIRE, APP_STUB_REQUIRE]) {
         if seen.contains(&s) {
             continue;
         }
@@ -348,6 +374,7 @@ pub fn stub_clear_lines(indent: &str) -> String {
         seen.push((konst, s.clear));
         out.push_str(&format!("{indent}{}.{}\n", konst, s.clear));
     }
+    out.push_str(&format!("{indent}MochaStub.clear!\n"));
     out
 }
 
@@ -366,21 +393,129 @@ pub fn stub_verify_lines(indent: &str) -> String {
         seen.push((konst, verify));
         out.push_str(&format!("{indent}{}.{}\n", konst, verify));
     }
+    out.push_str(&format!("{indent}MochaStub.verify_all!\n"));
     out
 }
 
 pub fn apply_mocha_lowering(app: &mut App) {
+    let mut ctx = AppMethods::index(app);
     for tm in &mut app.test_modules {
+        ctx.setup = tm.setup.clone();
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup);
+            rewrite(setup, &mut ctx);
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body);
+            rewrite(&mut t.body, &mut ctx);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body);
+            rewrite(&mut m.body, &mut ctx);
         }
     }
+    guard_app_methods(app, &ctx.stubbed);
+}
+
+/// The app's instance methods, by model — what an instance or
+/// `any_instance` chain may name — and the (model, method) pairs the
+/// test bodies stubbed, with the exception classes their chains raise.
+struct AppMethods {
+    methods: BTreeMap<String, BTreeSet<String>>,
+    stubbed: BTreeMap<(String, String), BTreeSet<String>>,
+    /// Fixture accessor name -> the model class its rows are.
+    fixtures: BTreeMap<String, String>,
+    /// (model, singular association) -> target, for `belongs_to` and
+    /// `has_one` reads.
+    singular_assocs: BTreeMap<(String, String), String>,
+    /// The enclosing test module's `setup` body, for an ivar's origin.
+    setup: Option<Expr>,
+}
+
+impl AppMethods {
+    fn index(app: &App) -> Self {
+        let mut methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut singular_assocs: BTreeMap<(String, String), String> = BTreeMap::new();
+        for m in &app.models {
+            let class = m.name.0.as_str().to_string();
+            let names = methods.entry(class.clone()).or_default();
+            for def in m.methods() {
+                if def.receiver == MethodReceiver::Instance && def.kind == AccessorKind::Method {
+                    names.insert(def.name.as_str().to_string());
+                }
+            }
+            for a in m.associations() {
+                match a {
+                    crate::dialect::Association::BelongsTo { name, target, polymorphic: false, .. }
+                    | crate::dialect::Association::HasOne { name, target, .. } => {
+                        singular_assocs.insert((class.clone(), name.as_str().to_string()), target.0.as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let fixtures = app
+            .fixtures
+            .iter()
+            .map(|f| (f.name.as_str().to_string(), crate::naming::classify_path(f.path.as_str())))
+            .collect();
+        AppMethods { methods, stubbed: BTreeMap::new(), fixtures, singular_assocs, setup: None }
+    }
+
+    #[cfg(test)]
+    fn empty() -> Self {
+        AppMethods {
+            methods: BTreeMap::new(),
+            stubbed: BTreeMap::new(),
+            fixtures: BTreeMap::new(),
+            singular_assocs: BTreeMap::new(),
+            setup: None,
+        }
+    }
+
+    fn has(&self, class: &str, method: &str) -> bool {
+        self.methods.get(class).is_some_and(|ms| ms.contains(method))
+    }
+
+    /// The app class an object head is an instance of, read off the
+    /// shapes a test body writes rather than off a type: this pass runs
+    /// before the test modules are lowered and typed, so `@membership`
+    /// carries no `ty` yet. A fixture call (`users(:david)`) is its
+    /// model; an ivar is whatever the setup assigned it; a bare read
+    /// off either (`@membership.user`) follows a `belongs_to`/`has_one`.
+    /// Anything else is not a head this pass names.
+    fn class_of_head(&self, recv: &Expr) -> Option<String> {
+        if let Some(id) = recv.ty.as_ref().and_then(class_of) {
+            return Some(id.0.as_str().to_string());
+        }
+        match &*recv.node {
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.len() == 1 => {
+                self.fixtures.get(method.as_str()).cloned()
+            }
+            ExprNode::Ivar { name } => {
+                let setup = self.setup.as_ref()?;
+                let assigned = find_ivar_assignment(setup, name)?;
+                self.class_of_head(&assigned)
+            }
+            ExprNode::Send { recv: Some(base), method, args, block: None, .. } if args.is_empty() => {
+                let owner = self.class_of_head(base)?;
+                self.singular_assocs.get(&(owner, method.as_str().to_string())).cloned()
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The value the last `@name = …` in `body` assigns, if any.
+fn find_ivar_assignment(body: &Expr, name: &Symbol) -> Option<Expr> {
+    let mut found: Option<Expr> = None;
+    fn walk(e: &Expr, name: &Symbol, found: &mut Option<Expr>) {
+        if let ExprNode::Assign { target: LValue::Ivar { name: n }, value } = &*e.node {
+            if n == name {
+                *found = Some(value.clone());
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, name, found));
+    }
+    walk(body, name, &mut found);
+    found
 }
 
 /// One link of an expectation chain: `.with(a)`, `.returns(v)`,
@@ -394,9 +529,12 @@ struct Op {
 /// A recognised chain, head to tail: `<konst>[.any_instance].<kind>(:<method>)` then `ops`.
 struct Chain {
     konst: Expr,
-    /// The constant as spelled, `::`-joined.
+    /// The constant as spelled, `::`-joined — or, for an instance head,
+    /// the class its static type names.
     path: String,
     any_instance: bool,
+    /// `obj.expects(:m)` — the object, whose static type is `path`.
+    instance: Option<Expr>,
     /// `stubs` or `expects`.
     kind: Symbol,
     method: Symbol,
@@ -409,7 +547,7 @@ struct Chain {
 /// is not one of mocha's, a head whose receiver is not a constant, a
 /// non-Symbol method name — means this is not a stub, and `None` leaves
 /// the expression alone.
-fn parse_chain(expr: &Expr) -> Option<Chain> {
+fn parse_chain(expr: &Expr, ctx: &AppMethods) -> Option<Chain> {
     let mut ops: Vec<Op> = Vec::new();
     let mut cur = expr;
     loop {
@@ -421,21 +559,32 @@ fn parse_chain(expr: &Expr) -> Option<Chain> {
             let ExprNode::Lit { value: Literal::Sym { value: stubbed } } = &*args[0].node else {
                 return None;
             };
-            let (konst, any_instance) = match &*recv.node {
-                ExprNode::Const { .. } => (recv.clone(), false),
+            let (konst, any_instance, instance) = match &*recv.node {
+                ExprNode::Const { .. } => (recv.clone(), false, None),
                 ExprNode::Send { recv: Some(k), method: ai, args: a, block: None, .. }
                     if ai.as_str() == "any_instance"
                         && a.is_empty()
                         && matches!(&*k.node, ExprNode::Const { .. }) =>
                 {
-                    (k.clone(), true)
+                    (k.clone(), true, None)
                 }
-                _ => return None,
+                // An object head: the class is whatever the analyzer
+                // typed the receiver as (`@membership.user` — `User?`,
+                // the nil arm stripped). Untyped, and this is not a
+                // chain this pass reads.
+                _ => {
+                    let class = ctx.class_of_head(recv)?;
+                    let konst = Expr::new(
+                        recv.span,
+                        ExprNode::Const { path: class.split("::").map(Symbol::from).collect() },
+                    );
+                    (konst, false, Some(recv.clone()))
+                }
             };
             let ExprNode::Const { path } = &*konst.node else { return None };
             let path = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             ops.reverse();
-            return Some(Chain { konst, path, any_instance, kind: method.clone(), method: stubbed.clone(), ops });
+            return Some(Chain { konst, path, any_instance, instance, kind: method.clone(), method: stubbed.clone(), ops });
         }
         if !OPS.contains(&m) {
             return None;
@@ -460,24 +609,208 @@ fn row_for(path: &str, method: &str) -> Option<&'static Stubbable> {
 /// expression and has to be read whole. The bottom-up walk this used to
 /// do would have rewritten (or bridged) the inner `stubs(:m)` before the
 /// outer `.returns(v)` was ever seen.
-fn rewrite(expr: &mut Expr) {
-    if let Some(chain) = parse_chain(expr) {
+fn rewrite(expr: &mut Expr, ctx: &mut AppMethods) {
+    if let Some(chain) = parse_chain(expr, ctx) {
         let span = expr.span;
-        *expr = lower_chain(span, chain);
+        if let Some(lowered) = lower_chain(span, chain, ctx) {
+            *expr = lowered;
+        }
         return;
     }
-    expr.node.for_each_child_mut(&mut rewrite);
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, ctx));
 }
 
-fn lower_chain(span: crate::span::Span, chain: Chain) -> Expr {
-    if !chain.any_instance {
+/// `None` leaves the expression as written: an object head naming an
+/// app class that has no such method is not this pass's to judge.
+fn lower_chain(span: crate::span::Span, chain: Chain, ctx: &mut AppMethods) -> Option<Expr> {
+    if chain.instance.is_none() && !chain.any_instance {
         if let Some(row) = row_for(&chain.path, chain.method.as_str()) {
             if let Some(served) = lower_known(span, &chain, row) {
-                return served;
+                return Some(served);
             }
         }
     }
-    bridge_chain(span, chain)
+    if ctx.has(&chain.path, chain.method.as_str()) {
+        if let Some(served) = lower_app_method(span, &chain, ctx) {
+            return Some(served);
+        }
+    }
+    if chain.instance.is_some() {
+        return None;
+    }
+    Some(bridge_chain(span, chain))
+}
+
+/// The class a receiver's static type names, its nil arm stripped.
+fn class_of(ty: &Ty) -> Option<ClassId> {
+    match ty.clone().strip_nil() {
+        Ty::Class { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+/// An app-method chain as its `MochaStub`:
+///
+/// ```text
+///   obj.expects(:m)                 obj.__mocha_m = MochaStub.expect("K#m", 1)
+///   obj.expects(:m).never           …expect("K#m", 0)
+///   K.any_instance.stubs(:m)        MochaStub.file_any_instance("K#m", MochaStub.stub("K#m"))
+///   K.any_instance.stubs(:m).raises(E)   …stub("K#m").raising("E")
+/// ```
+///
+/// `None` for a link this slot does not serve — `returns`, `with`, a
+/// second raise — and the chain goes on to the bridge (or, on an
+/// object head, stays as written).
+fn lower_app_method(span: crate::span::Span, chain: &Chain, ctx: &mut AppMethods) -> Option<Expr> {
+    let plain = |op: &Op, name: &str, arity: usize| op.name.as_str() == name && op.args.len() == arity && op.block.is_none();
+    let mut count: Option<Expr> = None;
+    let mut raises: Option<String> = None;
+    for op in &chain.ops {
+        if let Some(n) = count_of(op) {
+            if count.is_some() {
+                return None;
+            }
+            count = Some(n);
+        } else if plain(op, "raises", 1) {
+            if raises.is_some() {
+                return None;
+            }
+            raises = Some(exception_class_name(&op.args[0])?);
+        } else {
+            return None;
+        }
+    }
+    let name = format!("{}#{}", chain.path, chain.method.as_str());
+    let mocha_stub = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("MochaStub")] });
+    let mut stub = match chain.kind.as_str() {
+        "expects" => call(span, mocha_stub.clone(), "expect", vec![str_lit(span, &name), count.unwrap_or_else(|| int_lit(span, 1))]),
+        "stubs" if count.is_none() => call(span, mocha_stub.clone(), "stub", vec![str_lit(span, &name)]),
+        _ => return None,
+    };
+    if let Some(e) = &raises {
+        stub = call(span, stub, "raising", vec![str_lit(span, e)]);
+    }
+    let key = (chain.path.clone(), chain.method.as_str().to_string());
+    let exceptions = ctx.stubbed.entry(key).or_default();
+    if let Some(e) = raises {
+        exceptions.insert(e);
+    }
+    Some(match &chain.instance {
+        Some(obj) => Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Attr { recv: obj.clone(), name: Symbol::from(slot_name(chain.method.as_str())) },
+                value: stub,
+            },
+        ),
+        None => call(span, mocha_stub, "file_any_instance", vec![str_lit(span, &name), stub]),
+    })
+}
+
+/// `__mocha_<m>` — the instance slot's name, and the ivar behind it.
+fn slot_name(method: &str) -> String {
+    format!("__mocha_{}", method.trim_end_matches(['?', '!']))
+}
+
+/// Give every stubbed app method its slot: the `__mocha_<m>=` writer, and
+/// the guard at the top of the body.
+///
+/// ```ruby
+///   def __mocha_post=(value); @__mocha_post = value; end
+///   def post(payload)
+///     __stub = @__mocha_post.nil? ? MochaStub.any_instance_for("Webhook#post") : @__mocha_post
+///     if !__stub.nil?
+///       __stub.record!
+///       raise Net::OpenTimeout if __stub.raises == "Net::OpenTimeout"
+///       return nil
+///     end
+///     <body>
+///   end
+/// ```
+///
+/// The raise arms are one per class the chains named for THIS method,
+/// spelled as the constant — no name-to-class lookup at run time. The
+/// `return nil` is mocha's replacement semantics; it widens the
+/// method's return to nullable, which every lane carries for free.
+fn guard_app_methods(app: &mut App, stubbed: &BTreeMap<(String, String), BTreeSet<String>>) {
+    for ((class, method), exceptions) in stubbed {
+        let Some(model) = app.models.iter_mut().find(|m| m.name.0.as_str() == class) else { continue };
+        let slot = Symbol::from(slot_name(method));
+        let ivar = slot.clone();
+        let sp = crate::span::Span::synthetic;
+        let Some(def) = model.methods_mut().find(|d| d.name.as_str() == method && d.receiver == MethodReceiver::Instance) else {
+            continue;
+        };
+        let stub_var = || Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") });
+        let ivar_read = || Expr::new(sp(), ExprNode::Ivar { name: ivar.clone() });
+        let nil_q = |e: Expr| call(sp(), e, "nil?", vec![]);
+        let not = |e: Expr| Expr::new(sp(), ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false });
+        let mocha_stub = Expr::new(sp(), ExprNode::Const { path: vec![Symbol::from("MochaStub")] });
+        let name = format!("{class}#{method}");
+        let pick = Expr::new(
+            sp(),
+            ExprNode::If {
+                cond: nil_q(ivar_read()),
+                then_branch: call(sp(), mocha_stub, "any_instance_for", vec![str_lit(sp(), &name)]),
+                else_branch: ivar_read(),
+            },
+        );
+        let bind = Expr::new(sp(), ExprNode::Assign { target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") }, value: pick });
+        let mut arm: Vec<Expr> = vec![call(sp(), stub_var(), "record!", vec![])];
+        for e in exceptions {
+            let konst = Expr::new(sp(), ExprNode::Const { path: e.split("::").map(Symbol::from).collect() });
+            let raise = Expr::new(sp(), ExprNode::Raise { value: konst });
+            let is = Expr::new(
+                sp(),
+                ExprNode::Send { recv: Some(call(sp(), stub_var(), "raises", vec![])), method: Symbol::from("=="), args: vec![str_lit(sp(), e)], block: None, parenthesized: false },
+            );
+            arm.push(Expr::new(sp(), ExprNode::If { cond: is, then_branch: raise, else_branch: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }) }));
+        }
+        arm.push(Expr::new(sp(), ExprNode::Return { value: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }) }));
+        let guard = Expr::new(
+            sp(),
+            ExprNode::If {
+                cond: not(nil_q(stub_var())),
+                then_branch: Expr::new(sp(), ExprNode::Seq { exprs: arm }),
+                else_branch: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        );
+        let body = std::mem::replace(&mut def.body, Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }));
+        let mut exprs = vec![bind, guard];
+        match *body.node {
+            ExprNode::Seq { exprs: rest } => exprs.extend(rest),
+            _ => exprs.push(body),
+        }
+        def.body = Expr::new(sp(), ExprNode::Seq { exprs });
+
+        // The writer. Typed by its signature, since this runs after
+        // analysis: the slot is `MochaStub?`.
+        let value = Symbol::from("value");
+        let writer = MethodDef {
+            name_span: sp(),
+            name: Symbol::from(format!("{}=", slot.as_str())),
+            receiver: MethodReceiver::Instance,
+            params: vec![Param::positional(value.clone())],
+            body: Expr::new(
+                sp(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: ivar.clone() },
+                    value: Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: value.clone() }),
+                },
+            ),
+            signature: Some(crate::lower::typing::fn_sig(
+                vec![(value, Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![] }, Ty::Nil] })],
+                Ty::Nil,
+            )),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        };
+        model.body.push(ModelBodyItem::Method { method: writer, leading_comments: Vec::new(), leading_blank_line: true });
+    }
 }
 
 fn int_lit(span: crate::span::Span, v: i64) -> Expr {
@@ -733,7 +1066,7 @@ mod tests {
             "returns",
             vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])],
         );
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "Resolv");
         assert_eq!(m, "stub_getaddresses");
@@ -743,7 +1076,7 @@ mod tests {
     #[test]
     fn a_bare_stubs_lowers_to_the_rows_default() {
         let mut e = send(Some(konst(&["WebPush"])), "stubs", vec![sym("payload_send")]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "WebPush");
         assert_eq!(m, "stub_payload_send");
@@ -757,7 +1090,7 @@ mod tests {
         let times = send(Some(head), "times", vec![Expr::new(sp(), ExprNode::Lit { value: Literal::Int { value: 2 } })]);
         let instance = send(Some(konst(&["WebPush", "ExpiredSubscription"])), "new", vec![str_lit(sp(), "example.com")]);
         let mut e = send(Some(times), "raises", vec![instance]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "WebPush");
         assert_eq!(m, "expect_payload_send_raising");
@@ -768,7 +1101,7 @@ mod tests {
         // (Resolv's `expects` has none) goes to the bridge.
         let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
         let mut e = send(Some(head), "raises", vec![konst(&["WebPush", "Unauthorized"])]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (_, m, args, _) = as_send(&e);
         assert_eq!(m, "expect_payload_send_raising");
         assert_eq!(int_of(&args[0]), 1);
@@ -779,7 +1112,7 @@ mod tests {
     fn expects_with_a_count_files_the_count() {
         for (link, n) in [("never", 0), ("once", 1), ("twice", 2)] {
             let mut e = send(Some(send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")])), link, vec![]);
-            rewrite(&mut e);
+            rewrite(&mut e, &mut AppMethods::empty());
             let (_, m, args, _) = as_send(&e);
             assert_eq!(m, "expect_payload_send", "{link}");
             assert_eq!(int_of(&args[0]), n, "{link}");
@@ -790,13 +1123,13 @@ mod tests {
             "times",
             vec![int_lit(sp(), 3)],
         );
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "Turbo::StreamsChannel");
         assert_eq!(m, "expect_broadcast_remove_to");
         assert_eq!(int_of(&args[0]), 3);
         let mut e = send(Some(konst(&["Turbo", "StreamsChannel"])), "expects", vec![sym("broadcast_replace_to")]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (_, m, args, _) = as_send(&e);
         assert_eq!(m, "expect_broadcast_replace_to");
         assert_eq!(int_of(&args[0]), 1);
@@ -809,7 +1142,7 @@ mod tests {
         let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
         let with = send_blk(head, "with", lambda());
         let mut e = send(Some(with), "throws", vec![sym("x")]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, block) = as_send(&e);
         assert_eq!(const_path(recv), "MochaBridge");
         assert_eq!(m, "chain");
@@ -828,7 +1161,7 @@ mod tests {
         let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
         let with = send_blk(head, "with", lambda());
         let mut e = send(Some(with), "returns", vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")])]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, block) = as_send(&e);
         assert_eq!(const_path(recv), "Resolv");
         assert_eq!(m, "stub_getaddresses_where");
@@ -842,7 +1175,7 @@ mod tests {
         // Resolv.stubs(:getaddresses).raises(error)
         let head = send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")]);
         let mut e = send(Some(head), "raises", vec![Expr::new(sp(), ExprNode::Ivar { name: Symbol::from("error") })]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "Resolv");
         assert_eq!(m, "stub_getaddresses_raises");
@@ -852,7 +1185,7 @@ mod tests {
         let matcher = send(None, "has_entry", vec![Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("endpoint_ip"), str_lit(sp(), "1.2.3.4"))], kwargs: true })]);
         let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
         let mut e = send(Some(head), "with", vec![matcher]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (recv, m, args, _) = as_send(&e);
         assert_eq!(const_path(recv), "WebPush");
         assert_eq!(m, "expect_payload_send_with_entry");
@@ -868,7 +1201,7 @@ mod tests {
         let head = send(Some(konst(&["WebPush"])), "expects", vec![sym("payload_send")]);
         let with = send(Some(head), "with", vec![matcher]);
         let mut e = send(Some(with), "raises", vec![konst(&["Net", "OpenTimeout"])]);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         let (_, m, args, _) = as_send(&e);
         assert_eq!(m, "chain");
         let ExprNode::Array { elements: elems, .. } = &*args[3].node else { panic!() };
@@ -883,11 +1216,94 @@ mod tests {
         assert!(matches!(&*raises_args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Net::OpenTimeout"));
     }
 
+    /// An app with one model, `User`, carrying `reset_remote_connections`,
+    /// a `users` fixture, and a `Membership` whose `user` is a
+    /// `belongs_to`.
+    fn app_ctx() -> AppMethods {
+        let mut ctx = AppMethods::empty();
+        ctx.methods.entry("User".into()).or_default().insert("reset_remote_connections".into());
+        ctx.methods.entry("Webhook".into()).or_default().insert("post".into());
+        ctx.fixtures.insert("users".into(), "User".into());
+        ctx.fixtures.insert("memberships".into(), "Membership".into());
+        ctx.singular_assocs.insert(("Membership".into(), "user".into()), "User".into());
+        ctx
+    }
+
+    #[test]
+    fn an_expects_on_an_app_instance_parks_a_stub_on_the_object() {
+        // @membership.user.expects :reset_remote_connections — with
+        // `@membership = memberships(:one)` in setup.
+        let mut ctx = app_ctx();
+        ctx.setup = Some(Expr::new(
+            sp(),
+            ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: Symbol::from("membership") },
+                value: send(None, "memberships", vec![sym("one")]),
+            },
+        ));
+        let obj = send(Some(Expr::new(sp(), ExprNode::Ivar { name: Symbol::from("membership") })), "user", vec![]);
+        let mut e = send(Some(obj), "expects", vec![sym("reset_remote_connections")]);
+        rewrite(&mut e, &mut ctx);
+        let ExprNode::Assign { target: crate::expr::LValue::Attr { name, .. }, value } = &*e.node else { panic!("{:?}", e.node) };
+        assert_eq!(name.as_str(), "__mocha_reset_remote_connections");
+        let (recv, m, args, _) = as_send(value);
+        assert_eq!(const_path(recv), "MochaStub");
+        assert_eq!(m, "expect");
+        assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "User#reset_remote_connections"));
+        assert_eq!(int_of(&args[1]), 1, "a bare expects is once");
+        assert!(ctx.stubbed.contains_key(&("User".to_string(), "reset_remote_connections".to_string())));
+    }
+
+    #[test]
+    fn an_any_instance_stub_that_raises_files_by_name_and_records_the_class() {
+        // Webhook.any_instance.stubs(:post).raises(Net::OpenTimeout)
+        let mut ctx = app_ctx();
+        let head = send(Some(send(Some(konst(&["Webhook"])), "any_instance", vec![])), "stubs", vec![sym("post")]);
+        let mut e = send(Some(head), "raises", vec![konst(&["Net", "OpenTimeout"])]);
+        rewrite(&mut e, &mut ctx);
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "MochaStub");
+        assert_eq!(m, "file_any_instance");
+        assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Webhook#post"));
+        let (stub, raising, rargs, _) = as_send(&args[1]);
+        assert_eq!(raising, "raising");
+        assert!(matches!(&*rargs[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "Net::OpenTimeout"));
+        let (_, kind, _, _) = as_send(stub);
+        assert_eq!(kind, "stub");
+        let exceptions = &ctx.stubbed[&("Webhook".to_string(), "post".to_string())];
+        assert!(exceptions.contains("Net::OpenTimeout"), "the guard gets one raise arm per class");
+    }
+
+    #[test]
+    fn an_app_method_chain_with_a_returns_goes_on_to_the_bridge() {
+        // Webhook.any_instance.stubs(:post).returns(x) — a value would
+        // widen the app method's return; not served here.
+        let mut ctx = app_ctx();
+        let head = send(Some(send(Some(konst(&["Webhook"])), "any_instance", vec![])), "stubs", vec![sym("post")]);
+        let mut e = send(Some(head), "returns", vec![sym("x")]);
+        rewrite(&mut e, &mut ctx);
+        let (recv, m, _, _) = as_send(&e);
+        assert_eq!(const_path(recv), "MochaBridge");
+        assert_eq!(m, "chain");
+        assert!(ctx.stubbed.is_empty());
+    }
+
+    #[test]
+    fn an_object_head_without_an_app_class_is_left_as_written() {
+        // something.expects(:m) where nothing says what `something` is.
+        let mut ctx = app_ctx();
+        let obj = send(None, "something", vec![]);
+        let mut e = send(Some(obj), "expects", vec![sym("m")]);
+        rewrite(&mut e, &mut ctx);
+        let (_, m, _, _) = as_send(&e);
+        assert_eq!(m, "expects");
+    }
+
     #[test]
     fn a_send_that_is_not_a_chain_is_left_alone() {
         let mut e = send(Some(konst(&["Resolv"])), "getaddresses", vec![str_lit(sp(), "h")]);
         let before = format!("{:?}", e);
-        rewrite(&mut e);
+        rewrite(&mut e, &mut AppMethods::empty());
         assert_eq!(format!("{:?}", e), before);
     }
 }
