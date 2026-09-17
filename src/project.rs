@@ -1412,6 +1412,18 @@ module HttpStub
     nil
   end
 
+  # `.with(body: hash_including(expected))`, handed back to the gem's
+  # own matcher.
+  def self.stub_matching(verb, url, status, body, headers, expected_json)
+    require "webmock"
+    require "json"
+    extend WebMock::API unless singleton_class.include?(WebMock::API)
+    WebMock.stub_request(verb.downcase.to_sym, url)
+      .with(body: hash_including(JSON.parse(expected_json)))
+      .to_return(status: status, body: body, headers: headers)
+    nil
+  end
+
   def self.allow_net_connect(hosts)
     require "webmock"
     WebMock.disable_net_connect!(allow: hosts)
@@ -2786,6 +2798,24 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/cgi_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/cgi_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/cgi_spinel.rbs".to_string(), rbs));
+    }
+
+    // `HttpStub` sidecar — the WebMock double's contract; see the file
+    // for why `headers` has to be DECLARED.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/http_stub.rbs")
+            .map_err(|e| format!("read runtime/spinel/http_stub.rbs: {e}"))?;
+        files.push(("sig/runtime/http_stub.rbs".to_string(), rbs));
+    }
+
+    // `MochaStub` sidecar — the app-method stub slot `lower::mocha` writes
+    // into lowered test bodies and model guards; the flat walk emits the
+    // .rb, and the .rbs is what types the slot on the model
+    // (`@__mocha_<m>: MochaStub?`).
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/mocha_stub.rbs")
+            .map_err(|e| format!("read runtime/spinel/mocha_stub.rbs: {e}"))?;
+        files.push(("sig/runtime/mocha_stub.rbs".to_string(), rbs));
     }
 
     // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib

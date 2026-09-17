@@ -130,7 +130,7 @@ module Net
     # documents; `read_body` above is what slices it for a streaming
     # reader.
     def request(req, &blk)
-      i = HttpStub.find(req.method, stub_url(req.path))
+      i = HttpStub.find_for(req.method, stub_url(req.path), req.body)
       res =
         if i < 0
           transport_request(req)

@@ -46,6 +46,9 @@ require_relative "runtime/params"
 # this is only the value its `body` column reads back as, so it loads
 # with the other value classes rather than with the models.
 require_relative "runtime/action_text"
+# Content's JSON form is the fragment, not the rendered wrapper — see
+# the file; it reopens the class the line above defined.
+require_relative "runtime/action_text_json"
 require_relative "runtime/importmap"
 # ActiveSupport::Duration value class — the emit grounds `70.days` etc.
 # to `ActiveSupport::Duration.days(70)`, so the class must be loadable

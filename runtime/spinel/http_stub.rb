@@ -26,6 +26,8 @@
 # gates. The seeds can never match — no request has an empty verb.
 require "uri"
 
+require "json"
+
 module HttpStub
   STUB_VERBS = [ "" ]
   STUB_URLS = [ "" ]
@@ -39,6 +41,12 @@ module HttpStub
   # element was read: passed, bound to a local, or iterated). Four
   # parallel String arrays are what the table is; this keeps it so.
   STUB_HEADER_LINES = [ "" ]
+  # A request-body matcher per stub — `.with(body: hash_including(h))`
+  # — as the JSON text of `h`, or `""` for a stub that matches any body.
+  # Text for the same reason the headers are: one more String column
+  # keeps the table's element types flat. Both sides are parsed back to
+  # objects at match time (`subset?`).
+  STUB_MATCHER_JSON = [ "" ]
 
   # One spelling for a URL, whichever side wrote it. WebMock treats
   # `https://www.example.com/` and `https://www.example.com:443/` as the
@@ -68,12 +76,29 @@ module HttpStub
   # the shape spinel's `Net::HTTPResponse` stores, so `response["Content-Type"]`
   # and `response.content_type` read them without a second pass.
   def self.stub(verb, url, status, body, headers)
+    file(verb, url, status, body, headers, "")
+  end
+
+  # `WebMock.stub_request(verb, url).with(body: hash_including(expected))`
+  # — answers only a request whose JSON body carries every key of
+  # `expected` with an equal value, nested Hashes recursively (WebMock's
+  # `hash_including`). `expected_json` is the test's literal, whatever
+  # it nests, generated to text AT THE CALL SITE by `lower::webmock`: a
+  # typed nested Hash handed through an untyped parameter reached
+  # `JSON.generate` as a boxed value it could not read (a crash in
+  # `sp_str_byte_len`), where the same literal generated in place is
+  # fine. Text is also what the column holds (`STUB_MATCHER_JSON`).
+  def self.stub_matching(verb, url, status, body, headers, expected_json)
+    file(verb, url, status, body, headers, expected_json)
+  end
+
+  def self.file(verb, url, status, body, headers, matcher_json)
     v = verb.to_s.upcase
     u = normalize(url)
     lines = header_lines(headers)
     i = 0
     while i < STUB_URLS.length
-      if STUB_VERBS[i] == v && STUB_URLS[i] == u
+      if STUB_VERBS[i] == v && STUB_URLS[i] == u && STUB_MATCHER_JSON[i] == matcher_json
         STUB_STATUSES[i] = status
         STUB_BODIES[i] = body
         STUB_HEADER_LINES[i] = lines
@@ -86,6 +111,7 @@ module HttpStub
     STUB_STATUSES << status
     STUB_BODIES << body
     STUB_HEADER_LINES << lines
+    STUB_MATCHER_JSON << matcher_json
     nil
   end
 
@@ -112,13 +138,54 @@ module HttpStub
   # The index of the stub answering `(verb, url)`, or -1. The reopen
   # reads the three value arrays at that index.
   def self.find(verb, url)
+    find_for(verb, url, "")
+  end
+
+  # The same, for a request carrying `body`: a stub with a matcher
+  # answers only when the body satisfies it. A stub for the URL that
+  # matches on body and does not match THIS body RAISES, which is what
+  # WebMock does for a request no stub accepts — the test asserted the
+  # body's shape, and a silent pass through to the network is the
+  # failure that matters.
+  def self.find_for(verb, url, body)
     v = verb.to_s.upcase
     i = 0
+    saw_matcher = false
     while i < STUB_URLS.length
-      return i if STUB_VERBS[i] == v && STUB_URLS[i] == url
+      if STUB_VERBS[i] == v && STUB_URLS[i] == url
+        return i if STUB_MATCHER_JSON[i] == ""
+        saw_matcher = true
+        return i if body_matches?(body, STUB_MATCHER_JSON[i])
+      end
       i += 1
     end
+    raise "WebMock: #{v} #{url} was stubbed with a body matcher the request body did not satisfy: #{body}" if saw_matcher
     -1
+  end
+
+  def self.body_matches?(body, matcher_json)
+    return false if body.nil? || body.to_s == ""
+    subset?(JSON.parse(body.to_s), JSON.parse(matcher_json))
+  end
+
+  # WebMock's `hash_including`, over two parsed JSON values: every key
+  # of `expected` is present in `actual` with an equal value, a nested
+  # Hash recursively. Keys compare as text — the expectation was
+  # written with Symbols and the wire carries Strings.
+  def self.subset?(actual, expected)
+    return false if !actual.is_a?(Hash) || !expected.is_a?(Hash)
+    ok = true
+    expected.each do |k, v|
+      key = k.to_s
+      if !actual.key?(key)
+        ok = false
+      elsif v.is_a?(Hash)
+        ok = false if !subset?(actual[key], v)
+      elsif actual[key] != v
+        ok = false
+      end
+    end
+    ok
   end
 
   # `WebMock.disable_net_connect!(allow: [...])`. There is no transport
@@ -141,11 +208,13 @@ module HttpStub
     STUB_STATUSES.clear
     STUB_BODIES.clear
     STUB_HEADER_LINES.clear
+    STUB_MATCHER_JSON.clear
     STUB_VERBS << ""
     STUB_URLS << ""
     STUB_STATUSES << 0
     STUB_BODIES << ""
     STUB_HEADER_LINES << ""
+    STUB_MATCHER_JSON << ""
     nil
   end
 end

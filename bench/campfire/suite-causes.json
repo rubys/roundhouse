@@ -95,6 +95,14 @@
       "note": "campfire's `lib/rails_ext/action_text_attachables.rb` reopens `ActionText::Attachment.from_node` to accept a `User` sgid whose SIGNATURE fails, so rotating SECRET_KEY_BASE does not orphan every @mention: it decodes Rails' `_rails.data` base64 envelope by hand and finds the record from the gid inside. This runtime mints a different envelope (`SignedGlobalId`, `<Model>/<id>` through `MessageVerifier` — a stated divergence in docs/pipeline/runtime.md), and the reopen is an `ActiveSupport.on_load` block the ingest does not carry. Stock Rails semantics answer here: a tampered sgid is a `MissingAttachable`. A LEDGERED divergence, deferred rather than declined: closing it means minting Rails' `gid://` envelope so the two ends interoperate, which is a body of work of its own, and only then carrying the reopen."
     },
     {
+      "slug": "socket-interception",
+      "title": "Proving which address the HTTP client connects to — `TCPSocket.expects(:open).with { … }.throws`",
+      "owner": "compiler",
+      "match": "Resolv.stubs\\(:getaddresses\\) with 2 chained link",
+      "match_test": "dns_rebinding",
+      "note": "campfire's two DNS-rebinding tests stub `Resolv.getaddresses` with SEQUENTIAL answers (`.returns([a], [b])` — first call, then every later one), set `TCPSocket.expects(:open).with { |*args, **| … }` to `.never` for the hostname and `.throws(:dns_not_rebound)` for the resolved IP, and `assert_throws` around the fetch: the proof is which ADDRESS the client opened a socket to. Serving it means a socket seam inside the ruby-family `Net::HTTP` the double can intercept (the client resolves and connects natively today), sequential return values on the Resolv slot, and `throw`/`catch`. A body of work of its own; deferred, not declined."
+    },
+    {
       "slug": "object-extend",
       "title": "`obj.extend Mod` on one live object",
       "owner": "subset",

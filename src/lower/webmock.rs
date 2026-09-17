@@ -37,12 +37,21 @@
 //! infer it; a value that is not a String literal is wrapped in `.to_s`
 //! for the same reason (`content_length: 1.gigabyte`).
 //!
+//! THE ONE REQUEST MATCHER the corpus writes is served too:
+//! `.with(body: hash_including(h))` — the test asserts the shape of the
+//! JSON the app posts — becomes `HttpStub.stub_matching(verb, url,
+//! status, body, headers, h)`, with a chain that ends at the `with`
+//! taking WebMock's default response (200, empty). The double keeps `h`
+//! as JSON text beside the stub and matches a request's body against
+//! it as `hash_including` does (nested, keys as text); on the ruby
+//! family the delegate hands `h` to the gem's own matcher.
+//!
 //! WHAT IS DELIBERATELY LEFT ALONE. A chain this pass does not fully
 //! understand keeps its WebMock spelling, so it fails loudly at the
 //! `WebMock` constant on a strict target rather than being silently
 //! dropped — the failure mode that matters is a stub that never took
-//! while the test reports green. That covers `.with(...)` matchers, a
-//! `stub_request` with no `to_return`, a `status:` given as
+//! while the test reports green. That covers any other `.with(...)`
+//! matcher (`query:`, `headers:`, a block), a `status:` given as
 //! `[code, message]`, a non-literal `headers:`, and `:any` as the verb.
 
 use crate::app::App;
@@ -119,19 +128,87 @@ fn http_stub_call(span: crate::span::Span, method: &str, args: Vec<Expr>) -> Exp
 /// outermost send and `stub_request` its receiver.
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    if let Some(r) = replacement_for(expr) {
+        *expr = r;
+    }
+}
 
+fn replacement_for(expr: &Expr) -> Option<Expr> {
     let ExprNode::Send { recv: Some(outer), method, args, block: None, .. } = &*expr.node else {
-        return;
+        return None;
     };
     let span = expr.span;
-    let replacement = match method.as_str() {
+    match method.as_str() {
         "to_return" => lower_to_return(outer, args, span),
+        // A chain ending at the matcher: WebMock's default response.
+        "with" => {
+            let (verb, url) = stub_request_head(outer)?;
+            let expected = body_matcher(args)?;
+            Some(stub_call(span, verb, url, None, None, None, Some(expected)))
+        }
         "disable_net_connect!" if is_webmock(outer) => lower_disable_net_connect(args, span),
         "reset!" if is_webmock(outer) && args.is_empty() => Some(http_stub_call(span, "clear", vec![])),
         _ => None,
-    };
-    if let Some(r) = replacement {
-        *expr = r;
+    }
+}
+
+/// `.with(body: hash_including(h))` -> `h`. Any other matcher leaves
+/// the chain alone.
+fn body_matcher(args: &[Expr]) -> Option<Expr> {
+    let entries = literal_sym_entries(args)?;
+    let [(key, value)] = entries.as_slice() else { return None };
+    if key != "body" {
+        return None;
+    }
+    let ExprNode::Send { recv: None, method, args: margs, block: None, .. } = &*value.node else { return None };
+    if method.as_str() != "hash_including" || margs.len() != 1 {
+        return None;
+    }
+    // `JSON.generate({ … })`, braced whatever the source wrote: the
+    // slot takes the expectation as TEXT. Generated here, at the site,
+    // because a typed nested Hash boxed through the slot's untyped
+    // parameter reached spinel's `JSON.generate` as something it could
+    // not read (a crash), while the same literal generated in place is
+    // fine — and text is what the double stores anyway.
+    let ExprNode::Hash { entries, .. } = &*margs[0].node else { return None };
+    let span = margs[0].span;
+    let hash = Expr::new(span, ExprNode::Hash { entries: entries.clone(), kwargs: false });
+    Some(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("JSON")] })),
+            method: Symbol::from("generate"),
+            args: vec![hash],
+            block: None,
+            parenthesized: true,
+        },
+    ))
+}
+
+/// `HttpStub.stub(...)` or, with a matcher, `HttpStub.stub_matching(...)`;
+/// absent status/body/headers take WebMock's defaults.
+fn stub_call(
+    span: crate::span::Span,
+    verb: &str,
+    url: Expr,
+    status: Option<Expr>,
+    body: Option<Expr>,
+    headers: Option<Expr>,
+    matcher: Option<Expr>,
+) -> Expr {
+    let mut args = vec![
+        str_lit(span, verb),
+        url,
+        status.unwrap_or_else(|| Expr::new(span, ExprNode::Lit { value: Literal::Int { value: 200 } })),
+        body.unwrap_or_else(|| str_lit(span, "")),
+        headers.unwrap_or_else(|| Expr::new(span, ExprNode::Hash { entries: vec![], kwargs: false })),
+    ];
+    match matcher {
+        Some(m) => {
+            args.push(m);
+            http_stub_call(span, "stub_matching", args)
+        }
+        None => http_stub_call(span, "stub", args),
     }
 }
 
@@ -165,7 +242,25 @@ fn literal_sym_entries(args: &[Expr]) -> Option<Vec<(String, Expr)>> {
 }
 
 fn lower_to_return(head: &Expr, args: &[Expr], span: crate::span::Span) -> Option<Expr> {
-    let (verb, url) = stub_request_head(head)?;
+    // `stub_request(...).with(body: hash_including(h)).to_return(...)`:
+    // the walk is bottom-up, so by now the `with` is already
+    // `HttpStub.stub_matching(verb, url, 200, "", {}, json)` — take the
+    // head and the matcher back off it and fill in the response.
+    let (verb, url, matcher) = match &*head.node {
+        ExprNode::Send { recv: Some(h), method, args: sargs, block: None, .. }
+            if method.as_str() == "stub_matching"
+                && sargs.len() == 6
+                && matches!(&*h.node, ExprNode::Const { path } if path.last().is_some_and(|p| p.as_str() == "HttpStub")) =>
+        {
+            let ExprNode::Lit { value: Literal::Str { value: verb } } = &*sargs[0].node else { return None };
+            let verb = VERBS.iter().find(|(_, w)| *w == verb.as_str()).map(|(_, w)| *w)?;
+            (verb, sargs[1].clone(), Some(sargs[5].clone()))
+        }
+        _ => {
+            let (verb, url) = stub_request_head(head)?;
+            (verb, url, None)
+        }
+    };
     let entries = literal_sym_entries(args)?;
     if entries.iter().any(|(k, _)| !matches!(k.as_str(), "status" | "body" | "headers")) {
         return None;
@@ -203,7 +298,7 @@ fn lower_to_return(head: &Expr, args: &[Expr], span: crate::span::Span) -> Optio
         None => Expr::new(span, ExprNode::Hash { entries: vec![], kwargs: false }),
     };
 
-    Some(http_stub_call(span, "stub", vec![str_lit(span, verb), url, status, body, headers]))
+    Some(stub_call(span, verb, url, Some(status), Some(body), Some(headers), matcher))
 }
 
 fn is_bare_call(e: &Expr, name: &str) -> bool {
@@ -331,6 +426,55 @@ mod tests {
         // The non-String value is spelled `.to_s`.
         assert!(matches!(&*entries[1].1.node, ExprNode::Send { method, .. } if method.as_str() == "to_s"));
         assert!(matches!(&*entries[0].1.node, ExprNode::Lit { value: Literal::Str { .. } }));
+    }
+
+    #[test]
+    fn a_body_matcher_becomes_stub_matching_with_the_json_generated_at_the_site() {
+        // stub_request(:post, u).with(body: hash_including(user: { id: 1 }))
+        let inner = Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("id"), int(1))], kwargs: false });
+        let expected = Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("user"), inner)], kwargs: true });
+        let matcher = send(None, "hash_including", vec![expected]);
+        let mut e = send(Some(stub_request("post")), "with", vec![kwargs(vec![(sym("body"), matcher)])]);
+        rewrite(&mut e);
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { panic!("{:?}", e.node) };
+        assert!(matches!(&*recv.node, ExprNode::Const { path } if path[0].as_str() == "HttpStub"));
+        assert_eq!(method.as_str(), "stub_matching");
+        assert_eq!(args.len(), 6);
+        assert_eq!(str_of(&args[0]), "POST");
+        assert!(matches!(&*args[2].node, ExprNode::Lit { value: Literal::Int { value: 200 } }), "WebMock's default status");
+        assert_eq!(str_of(&args[3]), "");
+        // The expectation is `JSON.generate({ … })`, braced.
+        let ExprNode::Send { recv: Some(j), method: generate, args: gargs, .. } = &*args[5].node else { panic!("{:?}", args[5].node) };
+        assert!(matches!(&*j.node, ExprNode::Const { path } if path[0].as_str() == "JSON"));
+        assert_eq!(generate.as_str(), "generate");
+        assert!(matches!(&*gargs[0].node, ExprNode::Hash { kwargs: false, .. }));
+    }
+
+    #[test]
+    fn a_body_matcher_followed_by_to_return_keeps_both() {
+        // stub_request(:post, u).with(body: hash_including(a: 1)).to_return(status: 201)
+        let expected = Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("a"), int(1))], kwargs: true });
+        let with = send(
+            Some(stub_request("post")),
+            "with",
+            vec![kwargs(vec![(sym("body"), send(None, "hash_including", vec![expected]))])],
+        );
+        let mut e = send(Some(with), "to_return", vec![kwargs(vec![(sym("status"), int(201))])]);
+        rewrite(&mut e);
+        let ExprNode::Send { method, args, .. } = &*e.node else { panic!("{:?}", e.node) };
+        assert_eq!(method.as_str(), "stub_matching");
+        assert!(matches!(&*args[2].node, ExprNode::Lit { value: Literal::Int { value: 201 } }));
+        assert!(matches!(&*args[5].node, ExprNode::Send { method, .. } if method.as_str() == "generate"));
+    }
+
+    #[test]
+    fn any_other_with_matcher_is_left_alone() {
+        // stub_request(:get, u).with(query: { q: 1 })
+        let q = Expr::new(sp(), ExprNode::Hash { entries: vec![(sym("q"), int(1))], kwargs: false });
+        let mut e = send(Some(stub_request("get")), "with", vec![kwargs(vec![(sym("query"), q)])]);
+        rewrite(&mut e);
+        let ExprNode::Send { method, .. } = &*e.node else { panic!() };
+        assert_eq!(method.as_str(), "with");
     }
 
     #[test]

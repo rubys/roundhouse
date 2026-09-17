@@ -1,0 +1,28 @@
+# Typing contract for runtime/spinel/http_stub.rb — the WebMock double.
+#
+# Declared rather than inferred for one reason: `headers` is a
+# `Hash[String, String]` at every slot, and a call site whose only
+# argument for it is a bare `{}` (a stub with no `to_return`, which is
+# what `.with(body: …)` alone means) gives inference nothing — the
+# parameter came out poly and the first read of it crashed.
+module HttpStub
+  STUB_VERBS: Array[String]
+  STUB_URLS: Array[String]
+  STUB_STATUSES: Array[Integer]
+  STUB_BODIES: Array[String]
+  STUB_HEADER_LINES: Array[String]
+  STUB_MATCHER_JSON: Array[String]
+  def self.normalize: (String url) -> String
+  def self.stub: (String verb, String url, Integer status, String body, Hash[String, String] headers) -> nil
+  def self.stub_matching: (String verb, String url, Integer status, String body, Hash[String, String] headers, String expected_json) -> nil
+  def self.file: (String verb, String url, Integer status, String body, Hash[String, String] headers, String matcher_json) -> nil
+  def self.header_lines: (Hash[String, String] headers) -> String
+  def self.headers_at: (Integer i) -> Hash[String, String]
+  def self.find: (String verb, String url) -> Integer
+  def self.find_for: (String verb, String url, String? body) -> Integer
+  def self.body_matches?: (String? body, String matcher_json) -> bool
+  def self.subset?: (untyped actual, untyped expected) -> bool
+  # Ignored by the double, and a caller passes whatever `allow:` held.
+  def self.allow_net_connect: (untyped hosts) -> nil
+  def self.clear: () -> nil
+end
