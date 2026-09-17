@@ -1038,9 +1038,13 @@ jobs:
       #             installs fine and then fails at LOAD time without
       #             libvips on the box — which is why the apt step below
       #             is not optional.
-      - name: Install libvips (ruby-vips binds it through FFI)
+      #   ffmpeg — the video previewer (`runtime/spinel/active_storage_
+      #             previewer.rb`): campfire's own Dockerfile installs it,
+      #             and `Message::AttachmentTest` posts a .mov and asserts
+      #             the poster frame got attached.
+      - name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev ffmpeg
       #   concurrent-ruby, net-http-persistent, web-push — also from the
       #             app, all three behind `WebPush::Pool`: the thread
       #             pools it posts deliveries to, the keep-alive client

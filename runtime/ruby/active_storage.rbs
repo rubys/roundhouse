@@ -75,6 +75,8 @@ module ActiveStorage
     def download: () -> String
     def purge: () -> nil
     def video?: () -> bool
+    def previewable?: () -> bool
+    def preview_image: () -> ActiveStorage::Attached
     def image?: () -> bool
     def audio?: () -> bool
     def variable?: () -> bool
@@ -83,6 +85,24 @@ module ActiveStorage
 
   class ImageAnalyzer
     def self.dimensions: (String data, String content_type) -> Array[Integer]
+  end
+
+  class Previewer
+    def self.poster: (String path) -> String
+  end
+
+  class Preview
+    def initialize: (ActiveStorage::Blob? blob, ActiveStorage::Variation? variation) -> void
+    def blob: () -> ActiveStorage::Blob?
+    def variation: () -> ActiveStorage::Variation?
+    def image: () -> ActiveStorage::Attached
+    def processed?: () -> bool
+    def processed: () -> ActiveStorage::Preview
+    def process: () -> nil
+    def variant: () -> ActiveStorage::VariantWithRecord
+    def key: () -> String
+    def filename: () -> String
+    def url: () -> String
   end
 
   class Processor
@@ -159,7 +179,7 @@ module ActiveStorage
     def variant: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
     def representation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
     def find_variation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::Variation?
-    def preview: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
+    def preview: (ActiveStorage::Variation? transformations) -> ActiveStorage::Preview
     def url: () -> String
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil

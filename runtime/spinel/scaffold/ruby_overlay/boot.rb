@@ -123,6 +123,8 @@ require_relative "runtime/active_storage_disk"
 # in the ruby-vips reopen. After config/application — it applies the
 # app's lifted loader policy at load.
 require_relative "runtime/active_storage_processor"
+# The video previewer over ffmpeg — see the file.
+require_relative "runtime/active_storage_previewer"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win
 # that reopen (same ordering contract as action_controller_session's

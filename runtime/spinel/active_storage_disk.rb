@@ -292,7 +292,14 @@ module ActiveStorage
           head(:not_found)
         else
           variation = ActiveStorage::Variation.decode(Params.str(@params, "variation_key", ""))
-          image = ActiveStorage::VariantWithRecord.new(blob, variation).image_blob
+          # Rails' `blob.representation(variation)`: a previewable blob
+          # (a video) answers its poster's variant, drawn on demand;
+          # any other its own.
+          image = if blob.previewable?
+            ActiveStorage::Preview.new(blob, variation).variant.image_blob
+          else
+            ActiveStorage::VariantWithRecord.new(blob, variation).image_blob
+          end
           redirect_to(ActiveStorage::DiskKey.disk_url(image.nil? ? blob : image, "inline"))
         end
         nil

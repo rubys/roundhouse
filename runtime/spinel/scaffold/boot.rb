@@ -114,6 +114,8 @@ require_relative "runtime/active_storage_disk"
 # in the ruby-vips reopen. After config/application — it applies the
 # app's lifted loader policy at load.
 require_relative "runtime/active_storage_processor"
+# The video previewer over ffmpeg — see the file.
+require_relative "runtime/active_storage_previewer"
 # typed_store virtual-attribute seam (flat-YAML subset on this tree;
 # the CRuby overlay swaps in its real-YAML sibling at the same path).
 # Before app/models — the synthesized settings accessors route

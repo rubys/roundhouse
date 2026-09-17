@@ -656,19 +656,30 @@ is Rails' content-type question, answered from `variable_content_types`
 minus what the app's initializer subtracts (ingest lifts
 `config.active_storage.variable_content_types -= %w[…]` onto the same
 reopen), so a bmp avatar falls back to initials exactly as in campfire.
-`preview` (a video poster, a PDF page) raises and `previewable?` is
-false — there is no previewer, and serving the video's bytes in an
-`<img>` would be the failure that looks like success. The image
-DIMENSIONS are read from the file header at upload (`ImageAnalyzer`,
-ruby family: PNG/GIF/JPEG/BMP/WebP), so `metadata[:width]` answers what
-Rails' analyzer would.
+`preview` (a video poster) is Rails' `Preview`: the poster is drawn once
+by `ActiveStorage::Previewer.poster` — the ruby family's reopen runs the
+same ffmpeg command Rails' `VideoPreviewer` does, with the same frame-
+selection filter (`runtime/spinel/active_storage_previewer.rb`) — stored
+as the blob's own `preview_image` attachment, and served as a VARIANT of
+that image under the transformations the call named (`preview(format:
+:webp, resize_to_limit: [w, h])`, which `lower::attached` turns into a
+`Variation` at the site). `previewable?` is `video?`; a PDF has no
+previewer here. ffmpeg is a runtime prerequisite the way libvips is:
+campfire's Dockerfile installs it, so does the archive's, and the
+conformance job. Without it the previewer raises, as Rails does. The
+image DIMENSIONS are read from the file header at upload
+(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
+`metadata[:width]` answers what Rails' analyzer would.
 
-**The visible divergence** on campfire's own suite:
-`test_creating_a_message_creates_video_preview` fails on `preview`
-(no previewer). The account-logo tests that decode the served PNG and
-assert 512×512 / 192×192 pass on both lanes, on the real variant's
-bytes — the numbers ruby-vips and the port answer for the same input
-are byte-identical (spinel-ruby-vips' oracle lane holds it to that).
+**Where the preview still differs.** `representation(...)` answers the
+variant whatever the blob is, where Rails answers a `Preview` for a
+previewable one — kept so the reader has one type (a union would box
+every image on the room page); campfire only asks for a representation
+off its `video?`-guarded branch. The account-logo tests that decode the
+served PNG and assert 512×512 / 192×192 pass on both lanes, on the real
+variant's bytes — the numbers ruby-vips and the port answer for the
+same input are byte-identical (spinel-ruby-vips' oracle lane holds it
+to that).
 
 ### The query cache replays results of at most 16 rows
 

@@ -186,6 +186,109 @@ module ActiveStorage
     end
   end
 
+  # The video previewer's swap point — Rails' `Previewer::VideoPreviewer`,
+  # which draws a poster frame with ffmpeg. The shared definition raises,
+  # as `Processor` does: nothing here can run a program, and answering
+  # the video's own bytes as its poster would put them in an `<img>`.
+  # The ruby family reopens it over ffmpeg
+  # (`runtime/spinel/active_storage_previewer.rb`), the same command
+  # Rails runs; a tree without ffmpeg raises there the way Rails does.
+  class Previewer
+    # The PNG poster frame of the video stored at `path`.
+    def self.poster(path)
+      raise NotImplementedError,
+            "ActiveStorage::Previewer.poster: no previewer on this target — " \
+            "a video poster needs ffmpeg"
+    end
+  end
+
+  # Rails' `ActiveStorage::Preview`: a still of a previewable blob (a
+  # video here), stored as the blob's OWN `preview_image` attachment —
+  # `has_one_attached :preview_image` on the Blob in Rails, the same
+  # attachments row shape here (`record_type` "ActiveStorage::Blob",
+  # `name` "preview_image") — and served as a VARIANT of that image
+  # under the transformations the caller asked for (`preview(format:
+  # :webp, resize_to_limit: [w, h])`).
+  #
+  # `processed` is Rails' find-or-create: the poster is drawn once,
+  # `Previewer.poster` → `Blob.create_and_upload!` → the attachment row,
+  # and every later `preview` of the blob finds it attached. `url` is
+  # the representation route on the ORIGINAL blob with the variation,
+  # exactly where `url_for(preview)` points in Rails; serving it draws
+  # and transforms on demand, so building the URL does not.
+  class Preview
+    def initialize(blob, variation)
+      @blob = blob
+      @variation = variation
+    end
+
+    def blob
+      @blob
+    end
+
+    def variation
+      @variation
+    end
+
+    # The poster, as the blob's `preview_image` attachment.
+    def image
+      b = @blob
+      Attached.new("ActiveStorage::Blob", b.nil? ? 0 : b.id, "preview_image", [])
+    end
+
+    def processed?
+      image.attached?
+    end
+
+    def processed
+      process
+      self
+    end
+
+    def process
+      return nil if processed?
+      b = @blob
+      return nil if b.nil?
+      png = Previewer.poster(Blob.service.path_for(b.key))
+      poster = Blob.create_and_upload!(png, ActiveStorage.filename_base(b.filename.to_s) + ".png", "image/png")
+      ActiveRecord.adapter.insert("active_storage_attachments", {
+        "name" => "preview_image",
+        "record_type" => "ActiveStorage::Blob",
+        "record_id" => b.id,
+        "blob_id" => poster.id,
+        "created_at" => ActiveSupport.db_now,
+      })
+      nil
+    end
+
+    # The poster's variant under this preview's transformations — what
+    # the representation route serves.
+    def variant
+      process
+      VariantWithRecord.new(image.blob, @variation)
+    end
+
+    def key
+      variant.key
+    end
+
+    # Rails: "<original base>.<format>" — the transformed poster's name.
+    def filename
+      b = @blob
+      return "" if b.nil?
+      v = @variation
+      ActiveStorage.filename_base(b.filename.to_s) + "." + (v.nil? ? "png" : v.output_format("image/png"))
+    end
+
+    def url
+      b = @blob
+      return "" if b.nil?
+      v = @variation
+      "/rails/active_storage/representations/redirect/" + b.signed_id +
+        "/" + (v.nil? ? "original" : v.encode) + "/" + ActiveStorage.url_filename(filename)
+    end
+  end
+
   # One `attachable.variant :name, resize_to_limit: [w, h], format: :f`
   # declaration, as the model's `has_one_attached` block names it —
   # Rails' `ActiveStorage::Variation`, narrowed to the transformations
@@ -540,6 +643,9 @@ module ActiveStorage
     # gone is a file nothing can reach.
     def purge
       VariantWithRecord.purge_records_of(@id)
+      # The poster goes with its video — Rails' `has_one_attached
+      # :preview_image` cascades the same way.
+      preview_image.purge
       Blob.service.delete(@key)
       ActiveRecord.adapter.delete("active_storage_blobs", @id)
       nil
@@ -547,6 +653,18 @@ module ActiveStorage
 
     def video?
       @content_type.start_with?("video/")
+    end
+
+    # Rails: a previewer accepts this content type. The video previewer
+    # is the one modeled (ffmpeg); a PDF has none here.
+    def previewable?
+      video?
+    end
+
+    # Rails' `has_one_attached :preview_image` on the Blob: the poster a
+    # `Preview` draws, attached to the video's own blob.
+    def preview_image
+      Attached.new("ActiveStorage::Blob", @id, "preview_image", [])
     end
 
     def image?
@@ -868,15 +986,17 @@ module ActiveStorage
     end
 
     # Rails: a previewer (ffmpeg for video, poppler/mutool for PDF)
-    # can produce a still. None exists here, so no. Distinct from
-    # `variable?` on purpose: a video is not served as its own poster.
+    # can produce a still — the video one is modeled (`Preview`). The
+    # answer decides which PATH a view takes (campfire's `<video
+    # poster=…>` against a download link), as `variable?` does.
     def previewable?
-      false
+      b = blob
+      b.nil? ? false : b.previewable?
     end
 
     # Rails: `variable? || previewable?`.
     def representable?
-      variable?
+      variable? || previewable?
     end
 
     # Rails' `analyze` reads the blob's bytes to fill its metadata.
@@ -897,6 +1017,11 @@ module ActiveStorage
       VariantWithRecord.new(blob, find_variation(transformations))
     end
 
+    # Rails answers a `Preview` here for a previewable blob and a variant
+    # otherwise; this stays the VARIANT so the reader has one type (a
+    # union would box every image on the room page). campfire only asks
+    # for a representation off the `video?`-guarded branch, and a video
+    # reaches `preview` by name.
     def representation(transformations)
       VariantWithRecord.new(blob, find_variation(transformations))
     end
@@ -916,15 +1041,15 @@ module ActiveStorage
       raise ArgumentError, "Cannot find variant :" + name + " for " + @record_type + "#" + @name
     end
 
-    # A poster frame or a page image: nothing here can produce one, and
-    # serving the original in its place would put a video's bytes in an
-    # `<img>`. Unreachable through the app's own guards
-    # (`previewable?` is false), so a call that lands here is a view
-    # that skipped them.
+    # Rails' `preview(transformations)`: the poster frame of a video,
+    # as a `Preview` over this attachment's blob. `transformations` is
+    # an `ActiveStorage::Variation` — `lower::attached` builds one from
+    # the inline `format: :webp, resize_to_limit: [w, h]` hash at the
+    # call site — or nil for the poster as drawn. On a blob that is not
+    # previewable the previewer itself refuses (ffmpeg has no poster
+    # for an image), which is where Rails' `UnpreviewableError` lands.
     def preview(transformations)
-      raise NotImplementedError,
-            "ActiveStorage::Attached#preview: no previewer is modeled — " \
-            "`previewable?` is false, so this call skipped Rails' own guard"
+      Preview.new(blob, transformations)
     end
 
     # `url_for(attachment)` / `polymorphic_url(attachment)`: the blob's

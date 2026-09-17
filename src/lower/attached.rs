@@ -83,6 +83,44 @@ pub fn apply_attach_lowering(app: &mut crate::app::App) {
     // Test bodies too: every `attach` in the corpus today is written by
     // a test, so gating this to app code would lower nothing at all.
     super::for_each_test_body(app, &mut rewrite_attach);
+    // An inline transformation — `attachment.preview(format: :webp,
+    // resize_to_limit: [w, h])` in campfire's video presentation and
+    // its attachment test — becomes the `Variation` the runtime's
+    // `Preview` takes, built here from the same keys a declared
+    // `attachable.variant` lowers. Views carry the presentation
+    // helper's call, so they are walked too.
+    super::for_each_hook_body(app, &mut rewrite_inline_transformation);
+    for view in &mut app.views {
+        rewrite_inline_transformation(&mut view.body);
+    }
+    super::for_each_test_body(app, &mut rewrite_inline_transformation);
+}
+
+/// `x.preview(format: :webp, resize_to_limit: [w, h])` ->
+/// `x.preview(ActiveStorage::Variation.new("", w, h, "webp"))`. Only
+/// `preview`: `variant`/`representation` take a declared name in the
+/// corpus, and their inline form stays the identity variant the
+/// runtime documents. A hash with a key this cannot lower is left as
+/// written.
+fn rewrite_inline_transformation(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut rewrite_inline_transformation);
+    let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
+    if method.as_str() != "preview" || args.len() != 1 {
+        return;
+    }
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { return };
+    let Some((width, height, format)) = variation_from_entries(entries) else { return };
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let str_lit = |v: &str| syn(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    args[0] = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: vec![Symbol::from("ActiveStorage"), Symbol::from("Variation")],
+        })),
+        method: Symbol::from("new"),
+        args: vec![str_lit(""), width, height, str_lit(&format)],
+        block: None,
+        parenthesized: true,
+    });
 }
 
 fn rewrite_attach(e: &mut Expr) {
@@ -263,6 +301,15 @@ fn variation_decl(stmt: &Expr, attachable: &Symbol) -> Option<VariationDecl> {
         return None;
     };
     let ExprNode::Hash { entries, .. } = &*args[1].node else { return None };
+    let (width, height, format) = variation_from_entries(entries)?;
+    Some(VariationDecl { name: vname.as_str().to_string(), width, height, format })
+}
+
+/// The `(width, height, format)` a transformation hash names —
+/// `resize_to_limit`/`resize_to_fit: [w, h]` and `format: :f`, each
+/// optional (0 / "" when absent, the runtime's "no resize" / "keep the
+/// original's"). Any other key means the hash is not one this lowers.
+fn variation_from_entries(entries: &[(Expr, Expr)]) -> Option<(Expr, Expr, String)> {
     let mut width = None;
     let mut height = None;
     let mut format = String::new();
@@ -287,12 +334,7 @@ fn variation_decl(stmt: &Expr, attachable: &Symbol) -> Option<VariationDecl> {
         }
     }
     let int = |n: i64| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: n } });
-    Some(VariationDecl {
-        name: vname.as_str().to_string(),
-        width: width.unwrap_or_else(|| int(0)),
-        height: height.unwrap_or_else(|| int(0)),
-        format,
-    })
+    Some((width.unwrap_or_else(|| int(0)), height.unwrap_or_else(|| int(0)), format))
 }
 
 /// `[ActiveStorage::Variation.new("thumb", W, H, "png"), …]` — the

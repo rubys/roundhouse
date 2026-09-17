@@ -173,6 +173,11 @@ fn real_blog_spinel_tests_pass() {
         // mismatched bind answers the wrong rows with no error at all.
         // Rides in the same way the others do.
         "test/temporal_bind_test.rb",
+        // The ffmpeg half of a video's `Preview`
+        // (`runtime/active_storage_previewer.rb`): draws a clip with
+        // ffmpeg's lavfi source and asserts the poster's PNG header.
+        // Skips itself where ffmpeg is absent.
+        "test/active_storage_previewer_test.rb",
         // `Relation#find` raising `RecordNotFound` (Rails' whole
         // distinction between it and `find_by`) and the harness's
         // `parsed_body`. Both are RUNTIME behavior the compiler's own

@@ -158,7 +158,7 @@
       "title": "Active Storage — the attachment scopes and the bytes",
       "owner": "compiler",
       "match": "(with_attached_attachment|ActiveStorage::)",
-      "note": "The metadata half answers (205c3031). What is left is the macro-generated preload scopes (`with_attached_*`, `with_rich_text_*`) and everything variant-shaped: `ActiveStorage::VariantWithRecord`, `representation` and `preview` on an `Attached`, and the bytes. Avatars and logos reach it now that the fixture-file helpers in front of them answer — clearing a wall ahead of this cause moves tests INTO it, which is what just happened."
+      "note": "The metadata half answers (205c3031). What is left is the macro-generated preload scopes (`with_attached_*`, `with_rich_text_*`) and everything variant-shaped: `ActiveStorage::VariantWithRecord`, `representation` and `preview` on an `Attached`, and the bytes — the variants landed over ruby-vips and the video poster over ffmpeg (`Preview`), so a row here now is one of the preload scopes or a shape neither covers. Avatars and logos reach it now that the fixture-file helpers in front of them answer — clearing a wall ahead of this cause moves tests INTO it, which is what just happened."
     },
     {
       "slug": "conditional-get",

@@ -41,7 +41,7 @@ RUN make -C /src -j"$(nproc)" CC=clang
 
 FROM debian:trixie-slim
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 && \
+    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ ./
