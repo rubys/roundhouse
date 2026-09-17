@@ -79,7 +79,7 @@
       "title": "`ActionText::Attachment.from_node` — building an attachment from a parsed node",
       "owner": "compiler",
       "match": "undefined method 'from_node' for class ActionText::Attachment",
-      "note": "Named in docs/pipeline/runtime.md's \"What is left\" for attachments, alongside `ActionText::Attachables::MissingAttachable`. The PARSE already works — `#attachments` returns every node with every attribute it carried — so this is the constructor that turns one of those nodes back into an attachment object, plus the missing-attachable case a stale sgid should land in.",
+      "note": "Was named in docs/pipeline/runtime.md's \"What is left\" for attachments, alongside `ActionText::Attachables::MissingAttachable`. The PARSE already worked — `#attachments` returns every node with every attribute it carried — so this is the constructor that turns one of those nodes back into an attachment object, plus the missing-attachable case a stale sgid should land in.",
       "at_zero": "`from_node`, `#attachable` and `MissingAttachable` landed with the generated `ActionText::Attachable.locate` (the includer set is the registry); the rule stays as a regression tripwire."
     },
     {
@@ -102,7 +102,7 @@
       "title": "Global IDs — minting and dereferencing an sgid",
       "owner": "compiler",
       "match": "(attachable_sgid|to_gid_param|uninitialized constant ActionText::Fragment)",
-      "note": "docs/pipeline/runtime.md now carries the split: `attachable_ids(\"User\")` verifies an sgid and `lower::attachables_grep` rewrites `body.attachables.grep(User)` into a query over the ids, so a caller that NAMES its class resolves. What is left is MINTING — `to_gid_param` on a record — and the name-keyed class dispatch a bare `attachables` would need to answer anything but `[]`. Mint plus resolve plus that map is a body of work of its own, not a method."
+      "note": "docs/pipeline/runtime.md now carries the split: `attachable_ids(\"User\")` verifies an sgid and `lower::attachables_grep` rewrites `body.attachables.grep(User)` into a query over the ids, so a caller that NAMES its class resolves. The name-keyed dispatch exists now too: `ActionText::Attachable.locate` is generated per app as a `case` over the models that mix `Attachable` in, and `Attachment#attachable` resolves through it. What is left is MINTING — `to_gid_param` on a record — and a bare `attachables`, which still answers `[]` rather than the poly list the generated locator could now fill."
     },
     {
       "slug": "rails-module-facade",

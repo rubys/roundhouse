@@ -454,7 +454,12 @@ if by_file.any?
   html << "<h2>By test file</h2>\n"
   html << %(<p>A file that never ran is not the same as a file whose tests failed: it died at load, so its whole count is charged to one error and nothing behind that error has been seen yet.</p>\n)
   if compiled
-    html << %(<p>And on this lane there is a third row: a file that <strong>never linked</strong>. Its tests are charged to its first compile error, and unlike a load failure it has not been observed to do anything at all — the emit may be perfectly correct behind it. Sort the work by asking which of the three a row is: didn't link, linked and diverged, linked and agreed.</p>\n)
+    third = if files["unbuilt"].to_i > 0
+      "And on this lane there is a third row: a file that <strong>never linked</strong>."
+    else
+      "And on this lane there is a third row, empty this run: a file that <strong>never linked</strong>."
+    end
+    html << %(<p>#{third} Its tests are charged to its first compile error, and unlike a load failure it has not been observed to do anything at all — the emit may be perfectly correct behind it. Sort the work by asking which of the three a row is: didn't link, linked and diverged, linked and agreed.</p>\n)
   end
   html << "<table>\n<tr><th>File</th><th class=num>Tests</th><th class=num>Pass</th><th class=num>Fail</th><th>First error</th></tr>\n"
   by_file.each do |f|
