@@ -5,6 +5,7 @@
 //! from `crate::analyze` so external call paths are unchanged.
 
 use crate::App;
+use crate::ide::render_ty;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
@@ -155,18 +156,23 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // the same set.
     if let Some(kind) = &expr.diagnostic {
         let message = match kind {
+            // Types render as a Ruby developer reads them (`Integer?`,
+            // `Product`), not as the IR's Debug form — the message is
+            // what the editor, the MCP and `check` show.
             DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => {
                 format!(
-                    "`{}` with incompatible operand types: {lhs_ty:?} {} {rhs_ty:?}",
+                    "`{}` with incompatible operand types: {} {} {}",
                     op.as_str(),
-                    op.as_str()
+                    render_ty(lhs_ty),
+                    op.as_str(),
+                    render_ty(rhs_ty)
                 )
             }
             DiagnosticKind::IvarUnresolved { name } => {
                 format!("@{} has no known type", name.as_str())
             }
             DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
-                format!("no known method `{}` on {recv_ty:?}", method.as_str())
+                format!("no known method `{}` on {}", method.as_str(), render_ty(recv_ty))
             }
             DiagnosticKind::GradualUntyped { expr_kind } => {
                 format!("{} resolves to RBS `untyped` (gradual escape)", expr_kind.as_str())
@@ -262,9 +268,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                     severity: Diagnostic::default_severity(&kind),
                     kind,
                     message: format!(
-                        "no known method `{}` on {:?}",
+                        "no known method `{}` on {}",
                         method.as_str(),
-                        recv_ty,
+                        render_ty(&recv_ty),
                     ),
                 });
             }

@@ -53,10 +53,10 @@ are roundhouse's is the whole point of the layout.
 ```
 $ roundhouse check --continue ~/src/mastodon
 config/initializers/inflections.rb:5:46: error[parse]: expected an expression after `=`
-app/controllers/concerns/web_app_controller_concern.rb:25:7: error[send_dispatch_failed]: no known method `[]` on Class { id: ClassId(Symbol("ENV")), args: [] }
+app/controllers/concerns/web_app_controller_concern.rb:25:7: error[send_dispatch_failed]: no known method `[]` on ENV
 app/controllers/about_controller.rb:9:16: warning[gradual_untyped]: method call resolves to RBS `untyped` (gradual escape)
 app/views/admin/collections/show.html.haml:21:105: warning[missing_preload]: iterating this relation reads `x.account`, but the query at app/views/admin/collections/show.html.haml:21 does not preload :account — add `.includes(:account)`
-app/helpers/domain_control_helper.rb:16:7: note[send_dispatch_failed]: no known method `blocked?` on Class { id: ClassId(Symbol("DomainBlock")), args: [] } — likely roundhouse coverage, not an app error (ingest gap in app/models/domain_block.rb: unsupported statement inside `class << self`: AliasMethodNode)
+app/helpers/domain_control_helper.rb:16:7: note[send_dispatch_failed]: no known method `blocked?` on DomainBlock — likely roundhouse coverage, not an app error (ingest gap in app/models/domain_block.rb: unsupported statement inside `class << self`: AliasMethodNode)
 …
 
 ── Survey: 138 ingest gap(s), 20 distinct kind(s) ──
