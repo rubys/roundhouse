@@ -79,7 +79,23 @@
       "title": "`ActionText::Attachment.from_node` — building an attachment from a parsed node",
       "owner": "compiler",
       "match": "undefined method 'from_node' for class ActionText::Attachment",
-      "note": "Named in docs/pipeline/runtime.md's \"What is left\" for attachments, alongside `ActionText::Attachables::MissingAttachable`. The PARSE already works — `#attachments` returns every node with every attribute it carried — so this is the constructor that turns one of those nodes back into an attachment object, plus the missing-attachable case a stale sgid should land in."
+      "note": "Named in docs/pipeline/runtime.md's \"What is left\" for attachments, alongside `ActionText::Attachables::MissingAttachable`. The PARSE already works — `#attachments` returns every node with every attribute it carried — so this is the constructor that turns one of those nodes back into an attachment object, plus the missing-attachable case a stale sgid should land in.",
+      "at_zero": "`from_node`, `#attachable` and `MissingAttachable` landed with the generated `ActionText::Attachable.locate` (the includer set is the registry); the rule stays as a regression tripwire."
+    },
+    {
+      "slug": "sgid-wire-format",
+      "title": "An sgid minted by Rails, read here — campfire's tolerant `from_node` for a rotated secret",
+      "owner": "compiler",
+      "match": "assert_equal failed",
+      "match_test": "ActionTextAttachmentTest#test_lookup_user_attachable_with_invalid_sgid",
+      "note": "campfire's `lib/rails_ext/action_text_attachables.rb` reopens `ActionText::Attachment.from_node` to accept a `User` sgid whose SIGNATURE fails, so rotating SECRET_KEY_BASE does not orphan every @mention: it decodes Rails' `_rails.data` base64 envelope by hand and finds the record from the gid inside. This runtime mints a different envelope (`SignedGlobalId`, `<Model>/<id>` through `MessageVerifier` — a stated divergence in docs/pipeline/runtime.md), and the reopen is an `ActiveSupport.on_load` block the ingest does not carry. Stock Rails semantics answer here: a tampered sgid is a `MissingAttachable`. Closing this means minting Rails' `gid://` envelope so the two ends interoperate, which is a body of work of its own, and only then carrying the reopen."
+    },
+    {
+      "slug": "object-extend",
+      "title": "`obj.extend Mod` on one live object",
+      "owner": "compiler",
+      "match": "Object#extend not supported",
+      "note": "Mixing a module into a single instance needs a per-object method table, which no compiled target has — spinel refuses the call at compile time, and one such line kept this whole file from linking. `lower::object_extend` now stubs the TEST that reaches for it with this report, so the file's other tests run. The test makes a `Room` attachable for one assertion; the honest answer is that the shape is dynamic."
     },
     {
       "slug": "globalid-sgid",

@@ -322,4 +322,77 @@ class ActionTextFragmentTest < Minitest::Test
     assert_raises(RuntimeError) { fragment.find_all(".cls") }
     assert_raises(RuntimeError) { fragment.find_all("div[disabled]") }
   end
+
+  # ── Attachment.from_node / #attachable ─────────────────────────
+  #
+  # `ActionText::Attachable.locate` is REDEFINED per app in the emitted
+  # tree's global_id_locator.rb (see action_text.rb's `Attachable`
+  # note); here the shared default (nil) is in force, and a test-local
+  # redefinition stands in for the generated one, answering exactly one
+  # record, then the default is put back.
+
+  FakeUser = Struct.new(:id)
+
+  def with_locator
+    ActionText::Attachable.define_singleton_method(:locate) do |model_name, id|
+      model_name == "User" && id == 7 ? FakeUser.new(7) : nil
+    end
+    Rails.secret_key_base = "test-secret"
+    yield
+  ensure
+    ActionText::Attachable.define_singleton_method(:locate) { |_model_name, _id| nil }
+    Rails.secret_key_base = nil
+  end
+
+  def test_attachable_is_missing_under_the_default_locator
+    Rails.secret_key_base = "test-secret"
+    sgid = ActionText::SignedGlobalId.generate("User", 7)
+    attachable = attachment_for(%(<action-text-attachment sgid="#{sgid}"></action-text-attachment>)).attachable
+    assert_kind_of ActionText::Attachables::MissingAttachable, attachable
+  ensure
+    Rails.secret_key_base = nil
+  end
+
+  def attachment_for(html)
+    node = ActionText::Fragment.wrap(html).find_all(ActionText::Attachment.tag_name).first
+    ActionText::Attachment.from_node(node)
+  end
+
+  def test_from_node_carries_the_nodes_attributes
+    attachment = attachment_for(%(<action-text-attachment sgid="x" caption="hi"></action-text-attachment>))
+    assert_equal "x", attachment.sgid
+    assert_equal "hi", attachment.caption
+  end
+
+  def test_attachable_resolves_a_verified_sgid_through_the_locator
+    with_locator do
+      sgid = ActionText::SignedGlobalId.generate("User", 7)
+      attachment = attachment_for(%(<action-text-attachment sgid="#{sgid}"></action-text-attachment>))
+      assert_equal 7, attachment.attachable.id
+    end
+  end
+
+  def test_attachable_is_missing_without_an_sgid
+    with_locator do
+      attachable = attachment_for("<action-text-attachment></action-text-attachment>").attachable
+      assert_kind_of ActionText::Attachables::MissingAttachable, attachable
+      assert_equal "action_text/attachables/missing_attachable", attachable.to_partial_path
+    end
+  end
+
+  def test_attachable_is_missing_for_a_tampered_sgid
+    with_locator do
+      message, _signature = ActionText::SignedGlobalId.generate("User", 7).split("--")
+      attachable = attachment_for(%(<action-text-attachment sgid="#{message}--invalid"></action-text-attachment>)).attachable
+      assert_kind_of ActionText::Attachables::MissingAttachable, attachable
+    end
+  end
+
+  def test_attachable_is_missing_when_the_locator_has_no_row
+    with_locator do
+      sgid = ActionText::SignedGlobalId.generate("User", 8)
+      attachable = attachment_for(%(<action-text-attachment sgid="#{sgid}"></action-text-attachment>)).attachable
+      assert_kind_of ActionText::Attachables::MissingAttachable, attachable
+    end
+  end
 end

@@ -98,6 +98,7 @@ pub mod in_predicate;
 pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
+pub mod object_extend;
 pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
@@ -513,6 +514,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // chain, which the ruby emit's scope lowering then folds like any
     // other; consumes a shape no pass produces, so no constraints.
     ("attachables_grep", &[]),
+    // `obj.extend Mod` on an instance -> a raise stub with the report.
+    // Consumes a shape no pass produces or reads; no constraints.
+    ("object_extend", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -783,6 +787,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("assoc_attr_key");
     attachables_grep::apply_attachables_grep_lowering(app);
     ran!("attachables_grep");
+    diags.extend(object_extend::apply_object_extend_stub(app));
+    ran!("object_extend");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));

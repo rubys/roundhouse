@@ -1906,6 +1906,54 @@ fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// Write `ActionText::Attachable.locate(model_name, id)` into
+/// `runtime/global_id_locator.rb`: one `when "<Model>" then
+/// <Model>.find_by(id: id)` per model that mixes `ActionText::Attachable`
+/// in (directly or through a concern — `lower::attachable_models`
+/// resolves the include), with the finder spelled as a LITERAL constant.
+///
+/// The read half of the sgid round trip that `Attachment#attachable`
+/// needs and a shared runtime cannot write: the sgid verifies and
+/// splits into a name and an id there, and turning the name into a
+/// class is the one step that is either reflection (`constantize`,
+/// which this pipeline does not emit and a wire string should not
+/// steer) or this switch. The set is closed at ingest, so the switch IS
+/// the registry, and an app with no attachable model keeps the
+/// scaffold's nil-answering body — every sgid then reads as missing,
+/// Rails' answer for a gid naming no class.
+///
+/// A SPAN REPLACE between two markers, like `apply_global_id_locate`
+/// above it, and on the same file — both trees require it once.
+fn apply_attachable_locate(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "    # >>> generated: attachable-locate\n";
+    const TAIL: &str = "    # <<< generated: attachable-locate\n";
+
+    let models = crate::lower::attachable::attachable_models(app);
+    if models.is_empty() {
+        return;
+    }
+    let mut generated = String::from(HEAD);
+    generated.push_str("    def self.locate(model_name, id)\n      case model_name\n");
+    for model in &models {
+        let name = model.0.as_str();
+        generated.push_str(&format!(
+            "      when \"{name}\"\n        {name}.find_by({{ id: id }})\n"
+        ));
+    }
+    generated.push_str("      end\n    end\n");
+    generated.push_str(TAIL);
+
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("global_id_locator.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// De-cable the CRuby/JRuby overlay for a broadcast-less app: drop
 /// `cable.rb` and the three /cable seams in `config.ru` (the require,
 /// the `Cable::Registry` transport registration, and the WebSocket-
@@ -2999,6 +3047,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // chosen. Generating on only one lane would leave the other calling
     // a method nothing defined.
     apply_global_id_locate(&mut files, app);
+    apply_attachable_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);

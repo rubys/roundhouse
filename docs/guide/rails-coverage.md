@@ -91,7 +91,9 @@ does not emit:
 - **Metaprogramming that constructs names at runtime**: `send` and
   `public_send` with a non-literal method name, `define_method`,
   `method_missing`, `instance_variable_get`/`set`, `const_get`,
-  `eval` in any form, `Class.new`.
+  `eval` in any form, `Class.new`, and `obj.extend Mod` on one live
+  object (the site — or in a test, the whole test — becomes a raise
+  that names the construct, so the rest of the file still compiles).
 - **Reopening the framework**: monkey-patches of Rails or core classes
   from initializers (`Module#prepend` into a framework class is
   recorded and skipped on Spinel), `alias_method` inside

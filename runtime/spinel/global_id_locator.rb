@@ -120,3 +120,27 @@ module GlobalID
     end
   end
 end
+
+# `ActionText::Attachable.locate` — the record an attachment's sgid
+# names, for `ActionText::Attachment#attachable`. A REDEFINITION: the
+# shared runtime (runtime/action_text.rb, whose `Attachable` module says
+# why) carries a default that answers nil, and this reopen, required
+# after it by both boots, replaces it with the app's own. The sgid has already verified and been split into a model
+# name and an id by the time this is asked; what is left is the one step
+# a shared runtime cannot take, turning the NAME into a finder. The
+# models that mix `ActionText::Attachable` in are known at ingest, so
+# `project::apply_attachable_locate` writes one `when` per model
+# between the markers, spelled as a literal constant — the same reason
+# and the same shape as the `locate_<model>` entry points above.
+# `find_by`, not `find`: a row that is gone reads as nil, which
+# `#attachable` turns into `MissingAttachable`, as Rails' rescue of
+# `RecordNotFound` does.
+module ActionText
+  module Attachable
+    # >>> generated: attachable-locate
+    def self.locate(model_name, id)
+      nil
+    end
+    # <<< generated: attachable-locate
+  end
+end

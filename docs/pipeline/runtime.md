@@ -311,24 +311,38 @@ them correct with no enum type at runtime. Fixing the reader means
 mapping at every read; do it only if an app is found that reads the raw
 attribute.
 
-### An attachment sgid resolves only where the caller names its class
+### An attachment sgid resolves through a generated locator, not reflection
 
 `ActionText::Content#attachables` — the untyped list of every record a
 fragment's `<action-text-attachment sgid="…">` nodes point at — still
-answers `[]`. Its per-model twin does not:
-`attachable_ids("User")` verifies each node's sgid and answers the ids
-minted for that model, and `lower::attachables_grep` rewrites the shape
-app code actually writes into a query over them:
+answers `[]`. Two typed routes exist instead. Where the caller names
+its class, `attachable_ids("User")` verifies each node's sgid and
+answers the ids minted for that model, and `lower::attachables_grep`
+rewrites the shape app code actually writes into a query over them:
 
 ```text
 body.attachables.grep(User)  →  User.where(id: body.attachable_ids("User")).to_a
 ```
 
-**Why the split.** Dereferencing an arbitrary sgid needs a
-name-to-class map, and building one means reflection or per-model
-registration at load. `grep(User)` has already told the compiler which
-class it wants, so that lookup never arises — the name becomes a
-literal. A bare `attachables` has no such caller and keeps the `[]`.
+Where it does not — `ActionText::Attachment.from_node(node).attachable`,
+the shape campfire's tests build — the sgid's verified model NAME is
+turned into a finder by `ActionText::Attachable.locate(model_name, id)`,
+which `project::apply_attachable_locate` GENERATES into the emitted
+tree's `global_id_locator.rb` (`runtime/spinel/global_id_locator.rb`,
+the ruby family's) as one `when "<Model>" then
+<Model>.find_by(id: id)` per model that mixes `ActionText::Attachable`
+in. Nothing answering — no sgid, a signature that does not verify, a
+model no arm names, a row since deleted — is an
+`ActionText::Attachables::MissingAttachable`, as Rails' rescue of
+`RecordNotFound` makes it.
+
+**Why generated.** Dereferencing an arbitrary sgid needs a
+name-to-class map, and building one at run time means reflection
+(`constantize` from a wire string) or per-model registration at load.
+The includer set is closed at ingest, so the switch IS the registry:
+no `const_get`, nothing a crafted name can steer, and an app with no
+attachable model keeps a body that answers nil. A bare `attachables`
+has no such caller and keeps the `[]`.
 
 **The wire format is ours, not Rails'.** `ActionText::SignedGlobalId`
 signs `<Model>/<id>` through the same `MessageVerifier` envelope signed
@@ -339,12 +353,15 @@ process does not verify here and vice versa. Both ends of every round
 trip in a transpiled app are this runtime, and nothing in the corpus
 hands an sgid across that boundary.
 
-**What is left.** A stale sgid (the record was deleted) drops out of
-the `where` rather than materializing a MissingAttachable.
-`ActionText::Attachment.from_node` and
-`ActionText::Attachables::MissingAttachable` do not exist, so the tests
-that build an attachment from a parsed node still fail there.
-`RichText#to_trix_html` hands back the stored markup instead of
+**What is left.** campfire's `lib/rails_ext/action_text_attachables.rb`
+reopens `Attachment.from_node` to accept a `User` sgid whose signature
+FAILS (so rotating `SECRET_KEY_BASE` does not orphan every @mention),
+by decoding Rails' `_rails.data` envelope by hand. That reopen is an
+`ActiveSupport.on_load` block the ingest does not carry, and it reads
+an envelope this runtime does not mint, so stock Rails semantics answer
+here — a tampered sgid is missing — and the one test asserting the
+tolerant behaviour stays red (`sgid-wire-format` on the conformance
+page). `RichText#to_trix_html` hands back the stored markup instead of
 rendering attachment previews into it, so an editor loads the text and
 shows attachment nodes bare.
 

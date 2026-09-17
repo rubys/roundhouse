@@ -43,6 +43,43 @@ module ActionText
   # `include` resolves at load time rather than taking the app down
   # before it serves a request.
   module Attachable
+    # `locate(model_name, id)` — the record an sgid names, or nil. THIS
+    # body is the default, and it is REDEFINED per app: the models that
+    # mix this module in are a compile-time set, so
+    # `project::apply_attachable_locate` generates the real method into
+    # the emitted tree's `global_id_locator.rb` (the ruby family's
+    # locator file, required after this one by both boots) as a `case`
+    # over them — `when "User" then User.find_by(id: id)`. The switch IS
+    # the registry: no `const_get`, nothing filled in at load time. An
+    # app with no attachable model keeps this nil, so every sgid reads
+    # as missing there, which is what Rails answers for a gid naming no
+    # class. Redefinition by a later reopen is a shape both CRuby and
+    # spinel take (the later definition wins; probed).
+    def self.locate(model_name, id)
+      nil
+    end
+  end
+
+  module Attachables
+    # Rails' stand-in for an attachment whose sgid names nothing: the
+    # node carried none, it did not verify, it named a model no locator
+    # knows, or the row is gone. Rendered through its own partial, as
+    # Rails does.
+    class MissingAttachable
+      DEFAULT_PARTIAL_PATH = "action_text/attachables/missing_attachable"
+
+      def initialize(sgid)
+        @sgid = sgid
+      end
+
+      def sgid
+        @sgid
+      end
+
+      def to_partial_path
+        DEFAULT_PARTIAL_PATH
+      end
+    end
   end
 
   # The signed GlobalID an `<action-text-attachment>` node carries.
@@ -134,12 +171,46 @@ module ActionText
       @attributes = attributes
     end
 
+    # Rails' `Attachment.from_node(node, attachable = nil)` — the
+    # attachment over one parsed `<action-text-attachment>` element.
+    # The attachable is not taken here: it is dereferenced lazily by
+    # `#attachable` from the node's sgid, which is the only source this
+    # runtime has for it (Rails also accepts a caller-supplied record).
+    def self.from_node(node)
+      Attachment.new(node.attributes)
+    end
+
     def attributes
       @attributes
     end
 
     def [](name)
       @attributes.fetch(name, "")
+    end
+
+    # The record this attachment points at — Rails' `attachable`,
+    # resolved from the node's SIGNED sgid through `Attachable.locate`
+    # — or a `MissingAttachable` when nothing answers: no sgid on the
+    # node, a signature that does not verify (tampered, or minted under
+    # another secret), a model no locator knows, a row since deleted.
+    #
+    # STATED DIVERGENCE: campfire's `lib/rails_ext/action_text_attachables.rb`
+    # reopens this method to accept an sgid whose signature fails for
+    # `User` alone (so rotating SECRET_KEY_BASE does not orphan every
+    # @mention) by decoding Rails' `_rails.data` envelope by hand.
+    # That envelope is not the one `SignedGlobalId` mints here (see
+    # its note), so the reopen is not carried and a tampered sgid is
+    # missing here as it is in stock Rails.
+    def attachable
+      sgid = self["sgid"]
+      record = nil
+      if sgid != ""
+        model_name = ActionText::SignedGlobalId.model_of(sgid)
+        if model_name != ""
+          record = ActionText::Attachable.locate(model_name, ActionText::SignedGlobalId.id_of(sgid))
+        end
+      end
+      record.nil? ? ActionText::Attachables::MissingAttachable.new(sgid) : record
     end
 
     def sgid

@@ -4,6 +4,7 @@
 //! for arrays, hashes, sends, blocks, literals, lvalues, patterns, and
 //! match arms live here too.
 
+use crate::diagnostic::DiagnosticKind;
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::ty::Ty;
@@ -34,6 +35,16 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    // A site a lowering replaced with a stub — `lower::object_extend`,
+    // the arel `ColumnSpec::Named` placeholder — renders as the raise
+    // the report describes, so the program fails THERE with the reason
+    // rather than compiling a construct no target can run. Only the
+    // `Unsupported` kind: an `IncompatibleBinop` the analyzer stamps is
+    // left to Ruby itself, which raises at the same site on its own.
+    if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic {
+        return crate::emit::diagnostics::StubStyle::Raise
+            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
+    }
     emit_node(&e.node)
 }
 

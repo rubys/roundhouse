@@ -6,6 +6,18 @@
 # `Hash[String, String]` per tag rather than a pair or a variant.
 module ActionText
   module Attachable
+    # Redefined per app in the emitted tree's global_id_locator.rb —
+    # see the module's note in action_text.rb.
+    def self.locate: (String model_name, Integer id) -> untyped
+  end
+
+  module Attachables
+    class MissingAttachable
+      DEFAULT_PARTIAL_PATH: String
+      def initialize: (String sgid) -> void
+      def sgid: () -> String
+      def to_partial_path: () -> String
+    end
   end
 
   module SignedGlobalId
@@ -20,9 +32,11 @@ module ActionText
   class Attachment
     ATTRIBUTES: Array[String]
     def self.tag_name: () -> String
+    def self.from_node: (ActionText::Node node) -> ActionText::Attachment
     def initialize: (Hash[String, String] attributes) -> void
     def attributes: () -> Hash[String, String]
     def []: (String name) -> String
+    def attachable: () -> untyped
     def sgid: () -> String
     def content_type: () -> String
     def caption: () -> String?
