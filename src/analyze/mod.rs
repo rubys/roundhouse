@@ -2496,16 +2496,24 @@ impl Analyzer {
             let is_current_attributes = current_attribute_writes.contains_key(&lc_name);
             if let Some(writes) = current_attribute_writes.get(&lc_name) {
                 for (name, ty) in writes {
-                    // The Nil arm STAYS, unlike the controller-wide ivar
-                    // seed's `strip_nil`. `Current.user` really is nil
-                    // until authentication runs, and something reads
-                    // that: `def signed_in?; Current.user.present?; end`
-                    // folds to `true` against a non-nilable type, which
-                    // is a correct fold of an incorrect type — campfire
-                    // signed everyone in and the join-code page stopped
-                    // 404ing. A lie the type system can act on is worse
-                    // than a gap.
-                    flow_ivars.insert(name.clone(), ty.clone());
+                    // The Nil arm is ADDED, unlike the controller-wide
+                    // ivar seed's `strip_nil`: a CurrentAttributes
+                    // attribute is nil until the request's setup writes
+                    // it and is reset after, so nil is the attribute's
+                    // own state, not evidence the write sites carry.
+                    // They used to carry it by accident — `Current.session
+                    // = session` under `if session = find_session_by_cookie`
+                    // read `Session?` until the narrowing (fbd7f350) made
+                    // it `Session` — and the day it left, `def signed_in?;
+                    // Current.user.present?; end` folded to `true` against
+                    // the non-nilable type: a correct fold of an incorrect
+                    // type, campfire signed everyone in and the join-code
+                    // page stopped 404ing (users_controller 6 -> 2). A lie
+                    // the type system can act on is worse than a gap.
+                    flow_ivars.insert(
+                        name.clone(),
+                        crate::analyze::body::union_of(ty.clone(), Ty::Nil),
+                    );
                 }
             }
 
