@@ -24,6 +24,10 @@
     "  gem      — a gem whose surface we shim, or one deliberately out of scope.",
     "  spinel   — upstream spinel.",
     "  harness  — this harness's own gap, not the emit's.",
+    "  subset   — the test reaches for dynamic Ruby no compiled target has",
+    "             (a per-object `extend`, `define_method`, `eval`). Nobody",
+    "             can act: not a todo, named so it is not triaged twice, and",
+    "             left out of the who-can-act line.",
     "  unknown  — the cluster is real, its root cause is not yet known.",
     "",
     "THE TAIL IS FLAT. Nothing here blocks more than a handful of tests, and the",
@@ -88,12 +92,12 @@
       "owner": "compiler",
       "match": "assert_equal failed",
       "match_test": "ActionTextAttachmentTest#test_lookup_user_attachable_with_invalid_sgid",
-      "note": "campfire's `lib/rails_ext/action_text_attachables.rb` reopens `ActionText::Attachment.from_node` to accept a `User` sgid whose SIGNATURE fails, so rotating SECRET_KEY_BASE does not orphan every @mention: it decodes Rails' `_rails.data` base64 envelope by hand and finds the record from the gid inside. This runtime mints a different envelope (`SignedGlobalId`, `<Model>/<id>` through `MessageVerifier` — a stated divergence in docs/pipeline/runtime.md), and the reopen is an `ActiveSupport.on_load` block the ingest does not carry. Stock Rails semantics answer here: a tampered sgid is a `MissingAttachable`. Closing this means minting Rails' `gid://` envelope so the two ends interoperate, which is a body of work of its own, and only then carrying the reopen."
+      "note": "campfire's `lib/rails_ext/action_text_attachables.rb` reopens `ActionText::Attachment.from_node` to accept a `User` sgid whose SIGNATURE fails, so rotating SECRET_KEY_BASE does not orphan every @mention: it decodes Rails' `_rails.data` base64 envelope by hand and finds the record from the gid inside. This runtime mints a different envelope (`SignedGlobalId`, `<Model>/<id>` through `MessageVerifier` — a stated divergence in docs/pipeline/runtime.md), and the reopen is an `ActiveSupport.on_load` block the ingest does not carry. Stock Rails semantics answer here: a tampered sgid is a `MissingAttachable`. A LEDGERED divergence, deferred rather than declined: closing it means minting Rails' `gid://` envelope so the two ends interoperate, which is a body of work of its own, and only then carrying the reopen."
     },
     {
       "slug": "object-extend",
       "title": "`obj.extend Mod` on one live object",
-      "owner": "compiler",
+      "owner": "subset",
       "match": "Object#extend not supported",
       "note": "Mixing a module into a single instance needs a per-object method table, which no compiled target has — spinel refuses the call at compile time, and one such line kept this whole file from linking. `lower::object_extend` now stubs the TEST that reaches for it with this report, so the file's other tests run. The test makes a `Room` attachable for one assertion; the honest answer is that the shape is dynamic."
     },

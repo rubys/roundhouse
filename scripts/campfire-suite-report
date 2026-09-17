@@ -73,6 +73,7 @@ OWNER_LABEL = {
   "gem" => "gem",
   "spinel" => "spinel",
   "harness" => "this harness",
+  "subset" => "outside the subset",
   "unknown" => "untriaged",
 }.freeze
 
@@ -196,6 +197,7 @@ html << <<~CSS
   .owner.app      { background: #e6f0fb; color: #1c5d99; }
   .owner.gem      { background: #eee; color: #555; }
   .owner.spinel   { background: #e8f4f4; color: #256; }
+  .owner.subset   { background: #f3f3f3; color: #666; border: 1px dashed #bbb; }
   .owner.unknown  { background: #fdecea; color: #c0392b; }
   .green  { color: #2e7d32; font-weight: 600; }
   .abort  { color: #c0392b; font-weight: 600; }
@@ -215,8 +217,13 @@ html << "<h1>Campfire conformance#{compiled ? " — compiled" : ""}</h1>\n"
 # The lead used to claim "a few are this harness's own gaps", a category
 # no rule has ever been filed under. Owners come from the run instead, so
 # the sentence cannot drift from the table under it again.
+# "Who can act" — so a cause nobody can act on (`subset`: the test reaches
+# for dynamic Ruby no compiled target has) is named in its row, not here.
 owner_tally = Hash.new(0)
-causes.each { |c| owner_tally[c["owner"].to_s] += c["failures"].to_i if c["failures"].to_i > 0 }
+causes.each do |c|
+  next if c["owner"].to_s == "subset"
+  owner_tally[c["owner"].to_s] += c["failures"].to_i if c["failures"].to_i > 0
+end
 owner_phrase = owner_tally.sort_by { |_, n| -n }
                           .map { |o, n| "#{n} #{OWNER_LABEL[o] || o}" }.join(" · ")
 html << %(<p class="lead">ONCE Campfire's own Minitest suite, run against a Roundhouse emit of the same commit. A failure here mostly names a Rails construct not yet modeled; some are answers that came out wrong with nothing raised, and some have not been triaged at all. That makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
