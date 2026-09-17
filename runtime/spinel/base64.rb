@@ -66,7 +66,11 @@ module Base64
       if val < 0
         next   # padding "=" or stray byte
       end
-      acc = (acc << 6) | val
+      # Masked: only the low `nbits + 6` bits (at most 13) are ever
+      # read, and an unmasked accumulator grows without bound — a
+      # Bignum in Ruby, and on a fixed-width Integer a silent wrap that
+      # spinel now raises on (`integer overflow in <<`, e3883499).
+      acc = ((acc << 6) | val) & 0xFFFF
       nbits = nbits + 6
       if nbits >= 8
         nbits = nbits - 8
