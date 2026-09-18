@@ -31,12 +31,14 @@ puts "shared auto_link, no overlay"
 
 # ── The gem's LINKER, byte for byte ───────────────────────────────────
 #
-# These are `auto_link(..., :sanitize => false)` on the real gem, which
-# is the gem MINUS its body-sanitize pass — and the body-sanitize pass
-# is the one thing this port does not do (see the header of
-# `runtime/ruby/action_view/view_helpers_ext.rb`). On that comparison
-# the two agree on every probe below, which is the claim worth gating:
-# the LINKING DECISIONS are the gem's, not an approximation of them.
+# These are the real gem's answers: the LINKING DECISIONS are the
+# gem's, not an approximation of them, and since the body pass runs
+# here too (see the header of `runtime/ruby/action_view/
+# view_helpers_ext.rb`) the comparison is against the gem's DEFAULT —
+# 30 of 31 probes byte for byte, the one exception pinned below with
+# its reason. The three probes that ask about the linker on markup
+# the pass would rewrite first say `sanitize: false`, as the gem's own
+# `:sanitize => false` did when they were measured.
 check.("a plain url, with the caller's attribute first",
        V.auto_link("see https://example.com/a", html: { target: "_blank" }),
        %q{see <a target="_blank" href="https://example.com/a">https://example.com/a</a>})
@@ -97,14 +99,17 @@ check.("a one-label domain is not an e-mail",
 # `auto_linked?`'s first clause is CRUDER than "skip over tags", and
 # this is the probe that tells the two apart: the character right after
 # a `<` is not inside a tag, so the address is linked.
+# The three probes below ask about the LINKER on markup the body pass
+# would rewrite first, so they pass `sanitize: false` — the gem's own
+# `:sanitize => false` was always their reference.
 check.("the character after a `<` is not inside a tag",
-       V.auto_link("addr <foo@bar.com> ok"),
+       V.auto_link("addr <foo@bar.com> ok", sanitize: false),
        %q{addr <<a href="mailto:foo@bar.com">foo@bar.com</a>> ok})
 check.("a `<` that never closes does not suppress linking",
-       V.auto_link("unterminated <b tag https://x.co/y"),
+       V.auto_link("unterminated <b tag https://x.co/y", sanitize: false),
        %q{unterminated <b tag <a href="https://x.co/y">https://x.co/y</a>})
 check.("anchor text is skipped, text after `</a>` is not",
-       V.auto_link(%q{<a href='x'>inner https://no.co/l</a> out https://yes.co/l}),
+       V.auto_link(%q{<a href='x'>inner https://no.co/l</a> out https://yes.co/l}, sanitize: false),
        %q{<a href='x'>inner https://no.co/l</a> out } +
        %q{<a href="https://yes.co/l">https://yes.co/l</a>})
 check.("`<abbr>` is not an anchor",
@@ -131,36 +136,54 @@ check.("the message-body shape: markup kept, url linked, entity intact",
        %q{<a target="_blank" href="https://ex.co/a?x=1&amp;y=2">} +
        %q{https://ex.co/a?x=1&amp;y=2</a>})
 
-# ── The DIVERGENCE, pinned rather than described ──────────────────────
+# ── The body pass, pinned against the gem's DEFAULT ─────────────────
 #
-# Rails safe-list-sanitizes the body first and this does not (the pass
-# is HTML5 tree construction, not filtering — see `sanitize` in the same
-# file). These are the values where that shows, with the gem's DEFAULT
-# answer in the comment. If a future change starts sanitizing, these are
-# the assertions that will say so instead of the campfire suite.
-check.("bare angle brackets survive (Rails: `a &lt; b &gt; c`)",
-       V.auto_link("a < b > c"), "a < b > c")
-check.("an unknown tag survives (Rails drops it: `addr  ok`)",
-       V.auto_link("addr <foo@bar.com> ok"),
-       %q{addr <<a href="mailto:foo@bar.com">foo@bar.com</a>> ok})
-check.("single-quoted attributes are not renormalised (Rails: `href=\"x\"`)",
-       V.auto_link("<a href='x'>t</a>"), "<a href='x'>t</a>")
-# And the one that follows from it: with no body pass, a bare `&` is
-# never turned into an entity, so it reaches the href as written.
-check.("a bare `&` reaches the href as written (Rails: `&amp;`)",
+# Rails safe-list-sanitizes the body before linking, and so does this
+# (the pass is the shared `sanitize` engine). These used to pin the
+# divergence of skipping it; they now pin the gem's default answers,
+# measured under the campfire oracle's bundle (rails_autolink 1.1.8,
+# actionview 8.1.3): 30 of the 31 probes in this file agree with the
+# default byte for byte, and the one that does not is malformed
+# markup, below.
+check.("bare angle brackets are escaped",
+       V.auto_link("a < b > c"), "a &lt; b &gt; c")
+check.("an unknown tag is dropped, its text kept",
+       V.auto_link("addr <foo@bar.com> ok"), "addr  ok")
+check.("single-quoted attributes are renormalised",
+       V.auto_link("<a href='x'>t</a>"), %q{<a href="x">t</a>})
+check.("a bare `&` is an entity before it reaches the href",
        V.auto_link("https://x.co/a?b=1&c=2"),
-       %q{<a href="https://x.co/a?b=1&c=2">https://x.co/a?b=1&c=2</a>})
+       %q{<a href="https://x.co/a?b=1&amp;c=2">https://x.co/a?b=1&amp;c=2</a>})
+# The rendered-attachment shape: the outer node and the `<figure>` are
+# not on the default list and are stripped, their children kept — which
+# is how a mention or a link preview `Content#render_attachments` put
+# inside its node reaches the page as the partial alone, as Rails
+# serves it.
+check.("an attachment node is stripped around its rendered partial",
+       V.auto_link(%q{<div>Hey <action-text-attachment sgid="s" url="data:x"><div class="mention">Bender</div></action-text-attachment></div>}),
+       %q{<div>Hey <div class="mention">Bender</div></div>})
+# The one probe the gem answers differently: an UNTERMINATED tag. Its
+# HTML5 parser reads `<b tag https://x.co/y` as a `<b>` with two
+# attributes and closes it (`unterminated <b></b>`); the scanner drops
+# it. Malformed markup is the scanner's stated boundary (see the header
+# of `ruby_overlay/runtime/action_view_sanitize.rb`), and both answers
+# link nothing.
+check.("an unterminated tag is dropped (gem: `unterminated <b></b>`)",
+       V.auto_link("unterminated <b tag https://x.co/y"), "unterminated ")
 
-# ── `sanitize:` is accepted and inert ─────────────────────────────────
+# ── `sanitize:` gates the body pass and nothing else ──────────────────
 #
-# All three settings produce the same anchor in the gem too: `escape` is
-# `content_tag`'s fourth argument and it is true only when the sanitize
-# ran, at which point the value is html_safe and is spliced raw anyway.
+# The anchor is the same under every setting, in the gem too: `escape`
+# is `content_tag`'s fourth argument and it is true only when the
+# sanitize ran, at which point the value is html_safe and is spliced
+# raw anyway. What the flag changes is the body around it.
 same = V.auto_link("https://x.co/a?b=1&amp;c=2")
 check.("sanitize: false is the same anchor",
        V.auto_link("https://x.co/a?b=1&amp;c=2", sanitize: false), same)
 check.("sanitize: true is the same anchor",
        V.auto_link("https://x.co/a?b=1&amp;c=2", sanitize: true), same)
+check.("sanitize: false skips the body pass",
+       V.auto_link("a < b", sanitize: false), "a < b")
 
 puts(fail_count.zero? ? "ALL OK" : "#{fail_count} FAILED")
 exit(fail_count.zero? ? 0 : 1)

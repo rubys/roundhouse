@@ -1098,49 +1098,37 @@ module ActionView
     #     that carries that state is the same answer without the globals,
     #     which no strict target models.
     #
-    # DIVERGENCE, and it is a SECURITY one, so it is stated here and
-    # ledgered in docs/pipeline/runtime.md. Rails' `auto_link`
-    # safe-list-sanitizes the whole body first. This does NOT: the
-    # safe-list pass is HTML5 tree construction rather than filtering
-    # (see the header of `ruby_overlay/runtime/action_view_sanitize.rb`
-    # and the note on `sanitize` above), so the shared runtime refuses it
-    # rather than approximate it, and refusing is not available on the
-    # read path. The body therefore passes through as given.
+    # Rails' `auto_link` safe-list-sanitizes the whole body first
+    # (`conditional_sanitize`, on by default), and so does this — through
+    # `sanitize` above, the same engine the message filters run. That
+    # pass is where an element the default list does not allow is
+    # stripped with its children kept: an `<action-text-attachment>`
+    # whose partial `Content#render_attachments` has just rendered
+    # inside it arrives on the page as the partial alone, which is what
+    # Rails serves. This file used to skip the pass, when the shared
+    # `sanitize` was a raising façade rather than an engine; the
+    # divergence that skip cost is closed and the probes in
+    # `tests/shared_autolink.rb` that pinned it now pin the gem's
+    # default answers instead.
     #
-    # What that does and does not cost:
-    #
-    #   * The links this helper CREATES are still safe by the rule table
-    #     above — the scheme list has no `javascript:` in it and the
-    #     `www.` branch is prefixed `http://`, so `auto_link` cannot
-    #     manufacture a scripting URL out of text.
-    #   * What is lost is Rails' SECOND layer over markup that was
-    #     already in the body. campfire's is ActionText content that
-    #     arrived through `h`, so the first layer is the one doing the
-    #     work — but an app that feeds `auto_link` raw user HTML and
-    #     leans on this pass to clean it gets no cleaning here.
-    #
-    # The CRuby lane does better and does not use this: the overlay
-    # serves `auto_link` from the real gem chain, which is why the two
-    # are pinned against each other in `tests/overlay_sanitize_autolink.rb`.
-    #
-    # `sanitize:` is ACCEPTED AND HAS NO EFFECT, which is a stronger
-    # statement than it looks and was measured rather than assumed. In
-    # the gem the flag does two things: it runs the body pass (skipped
-    # here), and it is forwarded as `content_tag`'s fourth argument,
-    # `escape`. That second one never bites — `escape` is true only when
-    # the sanitize ran, and a sanitized value is an html_safe buffer,
-    # which `content_tag` splices raw regardless. All three settings
-    # (unset, `false`, `true`) therefore produce the same anchor text in
-    # the gem, and all three produce it here. Kept on the signature so a
-    # call site that passes it still compiles.
+    # `sanitize: false` skips the pass, as it does in the gem. What the
+    # gem's flag also does — forward itself as `content_tag`'s `escape` —
+    # never bites: `escape` is true only when the sanitize ran, and a
+    # sanitized value is an html_safe buffer, which `content_tag`
+    # splices raw regardless. So the anchors this helper CREATES are
+    # the same under either setting, and they are safe by the rule
+    # table above either way: the scheme list has no `javascript:` in
+    # it and the `www.` branch is prefixed `http://`.
     #
     # NOT MODELLED: the block form (`auto_link(text) { |url| ... }`,
     # which rewrites the link TEXT). No corpus call site passes one, and
     # a block argument through the strict targets is a shape this file
-    # has no other use for. `sanitize_options:` likewise: it configures
-    # a pass that does not run here.
-    def self.auto_link(text, html: {}, link: :all, sanitize: false)
+    # has no other use for. `sanitize_options:` likewise: the pass runs
+    # with the default lists.
+    def self.auto_link(text, html: {}, link: :all, sanitize: true)
       s = text.to_s
+      return "" if s.empty?
+      s = sanitize(s) if sanitize
       return "" if s.empty?
       do_urls = link != :email_addresses
       do_emails = link != :urls

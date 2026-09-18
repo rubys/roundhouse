@@ -344,6 +344,18 @@ module ActionView
       "<a#{attrs}>#{html_escape(text)}</a>"
     end
 
+    # Rails' `link_to_if(condition, name, url, html_options)`: the link
+    # when the condition holds, the escaped name alone otherwise (the
+    # block form, which renders something else in the else case, is not
+    # modelled — no caller in the corpus passes one). campfire's
+    # link-preview partial links a title only when the preview kept an
+    # href, which its `web_url` drops for anything that is not a web URL
+    # on another host.
+    def self.link_to_if(condition, text, href, opts = {})
+      return link_to(text, href, opts) if condition
+      html_escape(text.to_s)
+    end
+
     # Rails' `mail_to` — a `mailto:` anchor. `mail_to(addr)` labels the
     # link with the address itself; `mail_to(addr, name)` labels it with
     # `name`. campfire's user page renders the bare form.

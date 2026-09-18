@@ -12,14 +12,13 @@
 //! `$&` / `$'` / `` $` ``, which no strict target models.
 //!
 //! MEASURED, not reasoned: against `rails_autolink` 1.1.8 on
-//! `actionview` 8.1.3, the port agrees with `auto_link(..., :sanitize
-//! => false)` on 36 of 36 probes — that setting being the gem MINUS its
-//! body-sanitize pass, which is the one thing the port does not do. On
-//! the gem's default it is 30 of 36, and all six differences are that
-//! pass: escaped angle brackets, a dropped unknown tag, renormalised
-//! attribute quotes. Not one of them is a different LINKING decision.
-//! The divergence and its consequence are ledgered in
-//! docs/pipeline/runtime.md.
+//! `actionview` 8.1.3 (the campfire oracle's bundle), the port agrees
+//! with the gem's DEFAULT — body-sanitize pass included, now that the
+//! shared `sanitize` is an engine and `auto_link` runs it as Rails
+//! does — on 30 of 31 probes byte for byte. The one difference is an
+//! unterminated tag, which the gem's HTML5 parser closes and the
+//! scanner drops: malformed markup, the scanner's stated boundary. The
+//! driver pins that one with the gem's answer beside it.
 //!
 //! `ruby tests/shared_autolink.rb .` reproduces it by hand — no emit,
 //! no server, and no gem needed on the runner.

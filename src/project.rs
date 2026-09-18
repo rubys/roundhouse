@@ -1919,27 +1919,47 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
          Views::Layouts::ActionText::Contents.content(render_attachments)\n    end\n{TAIL}"
     );
 
-    let mut arms = String::new();
-    for (model, partial) in crate::lower::attachable::attachable_partials(app) {
-        let (dir, stem) = crate::lower::view_to_library::split_view_name(&partial);
+    // Two kinds of arm, in the order campfire's own `from_node` reopen
+    // dispatches them: a class the node names by CONTENT TYPE builds
+    // itself from the node (`OpengraphEmbed.from_node`, which applies
+    // its own `web_url` filter and answers nil for any other node), and
+    // is asked first; then the sgid's model, by name.
+    let mut by_content_type = String::new();
+    let mut by_model = String::new();
+    for binding in crate::lower::attachable::attachable_partial_bindings(app) {
+        let (dir, stem) = crate::lower::view_to_library::split_view_name(&binding.partial);
         let view_path = format!("app/views/{dir}/_{stem}.rb");
         if !files.iter().any(|(path, _)| path.ends_with(&view_path)) {
             continue;
         }
         let module = crate::lower::view_to_library::view_module_id(dir);
-        let name = model.0.as_str();
-        let local = crate::naming::safe_local(&crate::naming::snake_case(name));
-        arms.push_str(&format!(
-            "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
-             {local}.nil? ? \"\" : {module}.{stem}({local})\n",
-            module = module.0.as_str(),
-        ));
+        let name = binding.class.0.as_str();
+        let local = &binding.local;
+        if binding.content_type.is_some() {
+            by_content_type.push_str(&format!(
+                "      {local} = ::{name}.from_node(attachment)\n      \
+                 unless {local}.nil?\n        {local}.attachment = attachment\n        \
+                 return {module}.{stem}({local})\n      end\n",
+                module = module.0.as_str(),
+            ));
+        } else {
+            by_model.push_str(&format!(
+                "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
+                 {local}.nil? ? \"\" : {module}.{stem}({local})\n",
+                module = module.0.as_str(),
+            ));
+        }
     }
-    let render = if arms.is_empty() {
+    let render = if by_content_type.is_empty() && by_model.is_empty() {
         None
     } else {
+        let sgid_dispatch = if by_model.is_empty() {
+            "      \"\"\n".to_string()
+        } else {
+            format!("      case attachment.resolved_model_name\n{by_model}      else\n        \"\"\n      end\n")
+        };
         Some(format!(
-            "{RENDER_HEAD}    def self.render_attachment(attachment)\n      case attachment.resolved_model_name\n{arms}      else\n        \"\"\n      end\n    end\n{RENDER_TAIL}"
+            "{RENDER_HEAD}    def self.render_attachment(attachment)\n{by_content_type}{sgid_dispatch}    end\n{RENDER_TAIL}"
         ))
     };
 

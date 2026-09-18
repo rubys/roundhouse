@@ -416,20 +416,42 @@ campfire's own mention nodes carry the rendered mention in a `content`
 attribute with a `>` inside the quotes; `scan_tags` took the first `>`
 as the end of the tag and read past the `sgid` by luck.
 
-**What is still bare: link previews.** An opengraph embed is not an
-sgid but a content-type (`application/vnd.actiontext.opengraph-embed`)
-that campfire's `from_node` reopen dispatches FIRST, building an
-`OpengraphEmbed` from the node's attributes with `web_url` dropping any
-`href`/`url` that is not a web URL on another host. That arm is not
-generated yet, and the emitted `_opengraph_embed` partial is not yet
-callable: Rails names its local after the attachable's
-`model_name.element` (`opengraph_embed`) while the view lowering named
-it after the directory (`attachable`), and the partial reads `caption`
-through the Attachment's delegation. The three room-page link-preview
-tests campfire added at 977cbcd assert on exactly this
-(`attachable-partials-not-rendered` on the conformance page). Both
-lanes' safe-list sanitizers drop a `javascript:` href on the node; that
-was checked, and is not the gap.
+**Link previews render the same way, by content type.** An opengraph
+embed is not an sgid but a content-type
+(`application/vnd.actiontext.opengraph-embed`) that campfire's
+`from_node` reopen dispatches FIRST, building an `OpengraphEmbed` from
+the node's attributes with `web_url` dropping any `href`/`url` that is
+not a web URL on another host. The generated `render_attachment` has
+that arm ahead of the sgid `case`: a class that answers
+`attachable_content_type` and defines `from_node` is asked to build
+itself from the node, and its partial is rendered when it does. Three
+facts the framework's own render site states are read off the class
+rather than guessed: the partial's LOCAL is the class's
+`model_name.element` (`opengraph_embed`, where the directory rule
+said `attachable` and the body read neither), its type is the class,
+and the Attachment's own readers the partial uses (`caption`) are
+delegations the other way — the record carries the node in an
+`attachment=` slot the seam fills, and `caption` reads through it
+(`lower::attachable::push_attachment_delegation`). `link_to_if`, which
+that partial writes, lowers as an `if` over the two `link_to` halves so
+a `truncate`d label is escaped once.
+
+The harness's default request host is Rails' `www.example.com` now,
+not `example.org`: the own-host preview test mints
+`room_url(host: "www.example.com")` and expects the app to know it as
+itself.
+
+**`auto_link` sanitizes the body first, as Rails does.** The shared
+`auto_link` used to skip Rails' safe-list pass on the reasoning that
+the shared `sanitize` was a raising façade; it is an engine now, and
+the pass runs (`sanitize: false` skips it, as in the gem). This is what
+strips the `<action-text-attachment>` and `<figure>` around a rendered
+partial — neither is on the default list — so a mention or a preview
+reaches the page as the partial alone on every lane, which is what
+the ruby lane's real gem chain already did. Measured against the gem's
+default under the oracle's bundle: 30 of 31 probes in
+`tests/shared_autolink.rb` byte for byte; the one difference is an
+unterminated tag the HTML5 parser closes and the scanner drops.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
@@ -1882,7 +1904,13 @@ own difference, not ours: a Rails app on JRuby answers the same way.
 BOTH values, branching on the vendor, so a runner whose nokogiri lacks
 HTML5 reads as the other correct answer rather than as a regression.
 
-### `auto_link` does NOT sanitize the body; Rails does
+### `auto_link` does NOT sanitize the body; Rails does — CLOSED
+
+`ActionView::ViewHelpers.auto_link` now runs the safe-list pass before
+linking, through the shared `sanitize` engine, with `sanitize: false`
+skipping it as the gem's flag does. The entry below is kept as the
+record of what the skip cost while it stood.
+
 
 `ActionView::ViewHelpers.auto_link` on every target except the CRuby
 overlay's finds and wraps the links exactly as `rails_autolink` does,

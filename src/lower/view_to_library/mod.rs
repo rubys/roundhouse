@@ -311,7 +311,7 @@ impl<'a> ViewLowerCtx<'a> {
             ),
             route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
-            collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views)),
+            collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
         }
     }
@@ -2617,6 +2617,7 @@ pub(crate) fn view_ivar_closures(
 /// so it is dropped and keeps the convention arg.
 fn collection_element_locals(
     views: &[View],
+    app: &App,
 ) -> std::collections::HashMap<ViewKey, String> {
     use std::collections::{HashMap, HashSet};
     let mut out: HashMap<ViewKey, String> = HashMap::new();
@@ -2624,6 +2625,23 @@ fn collection_element_locals(
     for view in views {
         let (dir, _) = split_view_name(view.name.as_str());
         collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
+    }
+    // The partials the FRAMEWORK renders, whose call site is Action
+    // Text's `render_action_text_attachment` — `render(partial:
+    // attachment.to_attachable_partial_path, object: attachment, as:
+    // attachment.model_name.element)`. Same rule as a collection
+    // render, same reason it is not guessed from the body: the local
+    // is the class's element (`user`, `opengraph_embed`), which for
+    // campfire's `action_text/attachables/_opengraph_embed` is neither
+    // the directory's singular (`attachable`) nor anything the body
+    // could be trusted to reveal. An app call site that says otherwise
+    // wins, as it does for a collection.
+    for binding in crate::lower::attachable::attachable_partial_bindings(app) {
+        let key = partial_name_to_key(&binding.partial, "");
+        if conflicted.contains(&key) {
+            continue;
+        }
+        out.entry(key).or_insert(binding.local);
     }
     out
 }

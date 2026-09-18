@@ -168,6 +168,67 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             vec![lit_sym(Symbol::from(*slot))],
         )),
         LinkTo { text, url, opts } => emit_link_to_inline(text, url, *opts, ctx),
+        // Inlined as an `if` over the two `link_to` halves rather than
+        // dispatched to the runtime helper, so the label is escaped
+        // ONCE: a `truncate(…)` label lowers to `html_escape(truncate)`
+        // on its own and a runtime `link_to` would escape it again,
+        // where Rails' `truncate` is already an html_safe buffer.
+        //
+        // A url the lowering cannot resolve statically (campfire's
+        // `opengraph_embed.href`, a reader on the local) goes to the
+        // runtime `link_to`, which escapes its label itself — so a
+        // label the Truncate arm already wrapped is handed over
+        // unwrapped, and escaped once either way.
+        LinkToIf { cond, text, url, opts } => {
+            // The label as the template's own helpers lower it: a
+            // `truncate(…)` arrives as `html_escape(truncate(…))`,
+            // already escape-correct, which the two branches below
+            // each take exactly once.
+            let lowered = rewrite_helpers_in_expr(text, ctx);
+            let pre_escaped = match &*lowered.node {
+                ExprNode::Send { recv: Some(r), method, args, .. }
+                    if method.as_str() == "html_escape"
+                        && args.len() == 1
+                        && matches!(&*r.node, ExprNode::Const { .. }) =>
+                {
+                    Some(args[0].clone())
+                }
+                _ => None,
+            };
+            let linked = match emit_link_to_inline(text, url, *opts, ctx) {
+                Some(inline) => inline,
+                None => {
+                    let label = pre_escaped.clone().unwrap_or_else(|| lit_str_coerce(lowered.clone()));
+                    let mut args = vec![label, rewrite_helpers_in_expr(url, ctx)];
+                    if let Some(o) = opts {
+                        args.push((*o).clone());
+                    }
+                    view_helpers_call("link_to", args)
+                }
+            };
+            let bare = if pre_escaped.is_some() {
+                lowered
+            } else {
+                view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
+            };
+            Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    // The condition is a template condition in all but
+                    // spelling: the same predicate grounding an `if`
+                    // gets (`href.present?` on a nilable reader is a
+                    // nil test, not a dispatch no compiled target has).
+                    cond: super::predicates::rewrite_predicates(
+                        &rewrite_helpers_in_expr(cond, ctx),
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
+                    then_branch: linked,
+                    else_branch: bare,
+                },
+            ))
+        }
         ButtonTo { text, target, opts } => emit_button_to_inline(text, target, *opts, ctx),
         // Layout-`<head>` helpers — bare zero-arg ViewHelpers calls.
         CsrfMetaTags => Some(view_helpers_call("csrf_meta_tags", Vec::new())),

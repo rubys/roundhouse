@@ -1079,13 +1079,22 @@ module RequestDispatch
   # this test carries. Rails' integration tests set it when the app
   # reads the host back: campfire's messages_controller_test does,
   # because a message's attachment URLs are absolute. Per-test, like the
-  # cookie jar; the default is the one the env below always used.
+  # cookie jar.
+  #
+  # The default is Rails' (`ActionDispatch::Integration::Session::
+  # DEFAULT_HOST`, `www.example.com`), and it is load-bearing: a test
+  # that mints an absolute url with `host: "www.example.com"` and
+  # expects the app to recognise it as ITS OWN host (campfire's
+  # link-preview test posts a preview pointing at this Campfire and
+  # asserts it is not rendered as a link) is comparing against the
+  # request's Host. The env used to say `example.org`, which no Rails
+  # test has ever seen.
   def host!(name)
     @__host = name
   end
 
   def host
-    @__host = "example.org" if @__host.nil?
+    @__host = "www.example.com" if @__host.nil?
     @__host
   end
 

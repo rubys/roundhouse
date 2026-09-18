@@ -58,6 +58,9 @@ pub enum ViewHelperKind<'a> {
     ContentForSetter { slot: &'a str, body: &'a Expr },
     /// `<%= link_to text, url [, opts] %>`.
     LinkTo { text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= link_to_if cond, text, url [, opts] %>` — the link when the
+    /// condition holds, the escaped text alone otherwise.
+    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= button_to text, target [, opts] %>`.
     ButtonTo { text: &'a Expr, target: &'a Expr, opts: Option<&'a Expr> },
 }
@@ -523,6 +526,18 @@ pub fn classify_view_helper<'a>(
             text: &args[0],
             url: &args[1],
             opts: Some(&args[2]),
+        }),
+        ("link_to_if", 3) => Some(ViewHelperKind::LinkToIf {
+            cond: &args[0],
+            text: &args[1],
+            url: &args[2],
+            opts: None,
+        }),
+        ("link_to_if", 4) => Some(ViewHelperKind::LinkToIf {
+            cond: &args[0],
+            text: &args[1],
+            url: &args[2],
+            opts: Some(&args[3]),
         }),
         ("button_to", 2) => Some(ViewHelperKind::ButtonTo {
             text: &args[0],

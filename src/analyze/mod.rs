@@ -2814,6 +2814,7 @@ impl Analyzer {
         // Phase 3b: partials. Seed local_bindings from the render-site map
         // and ivar_bindings from the propagated controller context, then
         // analyze.
+        let attachable_partial_bindings = crate::lower::attachable::attachable_partial_bindings(app);
         for view in &mut app.views {
             if !is_partial_view_name(&view.name) {
                 continue;
@@ -2844,6 +2845,24 @@ impl Analyzer {
                     id: ClassId(Symbol::from("ActionText::Attachment")),
                     args: vec![],
                 });
+            }
+            // The same framework render site for the app's OWN
+            // attachables: `render(partial: to_attachable_partial_path,
+            // as: model_name.element)`, so `users/_mention` reads `user`
+            // and campfire's `_opengraph_embed` reads `opengraph_embed`.
+            // The local is the record (Rails hands the Attachment, which
+            // delegates to it; the emitted partial takes the record, and
+            // the Attachment's own readers a partial uses — `caption` —
+            // are synthesized onto the class as delegations the other
+            // way, see `lower::attachable::attachable_partial_bindings`).
+            for binding in &attachable_partial_bindings {
+                if crate::lower::attachable::partial_view_name(&binding.partial) != view.name.as_str() {
+                    continue;
+                }
+                view_ctx
+                    .local_bindings
+                    .entry(Symbol::from(binding.local.as_str()))
+                    .or_insert(Ty::Class { id: binding.class.clone(), args: vec![] });
             }
             if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
                 view_ctx.ivar_bindings = ivars.clone();

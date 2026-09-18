@@ -216,3 +216,226 @@ fn partial_path_literal(m: &MethodDef) -> Option<String> {
         _ => None,
     }
 }
+
+/// One class that names the partial Action Text renders for its
+/// attachment nodes, and how the framework hands it over. The
+/// call site is `ActionText::ContentHelper#render_action_text_attachment`:
+/// `render(partial: attachment.to_attachable_partial_path, object:
+/// attachment, as: attachment.model_name.element)` — so the partial's
+/// LOCAL is the class's `model_name.element` (`user` for `User`,
+/// `opengraph_embed` for `ActionText::Attachment::OpengraphEmbed`), not
+/// its directory's singular, and what it holds is the Attachment
+/// delegating to the record. This is the fact the view lowering, the
+/// analyzer and the render seam each need one piece of.
+#[derive(Debug, Clone)]
+pub struct AttachablePartial {
+    /// The class: a model that mixes `ActionText::Attachable` in, or a
+    /// library class that answers `to_partial_path` and is dispatched
+    /// by content type.
+    pub class: ClassId,
+    /// The partial as the class spells it: `users/mention`.
+    pub partial: String,
+    /// `model_name.element`: the last segment of the class name, snake
+    /// cased.
+    pub local: String,
+    /// `attachable_content_type`'s literal, for a class the node names
+    /// by content type rather than by sgid (campfire's
+    /// `OpengraphEmbed`, `application/vnd.actiontext.opengraph-embed`);
+    /// such a class builds itself from the node through its own
+    /// `from_node`.
+    pub content_type: Option<String>,
+}
+
+/// Every class in the app that names an attachment partial by literal —
+/// `to_attachable_partial_path` first, `to_partial_path` otherwise, the
+/// order Rails' `render_action_text_attachment` resolves them in.
+/// Models come through the include chain (`attachable_partials`);
+/// library classes are read directly. Deterministic: models in app
+/// order, then library classes in app order.
+pub fn attachable_partial_bindings(app: &App) -> Vec<AttachablePartial> {
+    let mut out = Vec::new();
+    for (class, partial) in attachable_partials(app) {
+        out.push(AttachablePartial {
+            local: element_of(&class),
+            class,
+            partial,
+            content_type: None,
+        });
+    }
+    for lc in &app.library_classes {
+        if lc.is_module || out.iter().any(|b| b.class == lc.name) {
+            continue;
+        }
+        let partial = lc
+            .methods
+            .iter()
+            .find_map(partial_path_literal)
+            .or_else(|| lc.methods.iter().find_map(|m| literal_of(m, "to_partial_path")));
+        let Some(partial) = partial else { continue };
+        let content_type = lc
+            .methods
+            .iter()
+            .find_map(|m| literal_or_constant_of(m, "attachable_content_type", &lc.constants));
+        // Only a class the framework could hand a node to: one the
+        // sgid names (a model, handled above) or one that builds
+        // itself from the node by content type. A library class with
+        // a `to_partial_path` and neither is some other partial owner.
+        if content_type.is_none() {
+            continue;
+        }
+        let has_from_node = lc
+            .methods
+            .iter()
+            .any(|m| m.name.as_str() == "from_node" && m.receiver == MethodReceiver::Class);
+        if !has_from_node {
+            continue;
+        }
+        out.push(AttachablePartial {
+            local: element_of(&lc.name),
+            class: lc.name.clone(),
+            partial,
+            content_type,
+        });
+    }
+    out
+}
+
+/// `model_name.element` for a class: the last segment, snake cased —
+/// `ActionText::Attachment::OpengraphEmbed` → `opengraph_embed`.
+fn element_of(class: &ClassId) -> String {
+    let last = class.0.as_str().rsplit("::").next().unwrap_or("");
+    crate::naming::safe_local(&crate::naming::snake_case(last))
+}
+
+fn literal_of(m: &MethodDef, name: &str) -> Option<String> {
+    literal_or_constant_of(m, name, &[])
+}
+
+/// A body that is one String literal, or one bare constant the class
+/// declares as one — campfire's `attachable_content_type` answers
+/// `OPENGRAPH_EMBED_CONTENT_TYPE`, declared two lines up.
+fn literal_or_constant_of(m: &MethodDef, name: &str, constants: &[(Symbol, Expr)]) -> Option<String> {
+    if m.name.as_str() != name || m.receiver != MethodReceiver::Instance {
+        return None;
+    }
+    match &*m.body.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Const { path } if path.len() == 1 => constants.iter().find_map(|(n, e)| {
+            if *n != path[0] {
+                return None;
+            }
+            match &*e.node {
+                ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// The view name (`action_text/attachables/_opengraph_embed`) a
+/// partial path maps to.
+pub fn partial_view_name(partial: &str) -> String {
+    match partial.rsplit_once('/') {
+        Some((dir, stem)) => format!("{dir}/_{stem}"),
+        None => format!("_{partial}"),
+    }
+}
+
+/// `attachment=` and `caption` on a content-type attachable — the
+/// delegation Rails' Attachment does for the record, mirrored the other
+/// way. Rails renders the partial with the ATTACHMENT as its local
+/// (`delegate_missing_to :attachable`), so `opengraph_embed.caption`
+/// there is `Attachment#caption`, the node's caption, on a class that
+/// never defines it. The emitted partial takes the RECORD — a typed
+/// local — so the record carries the node it was built from in a slot
+/// the render seam sets (`embed.attachment = attachment`) and answers
+/// the Attachment's readers through it. Only what campfire's partial
+/// reads (`caption`); a class that defines its own keeps it.
+///
+/// Types are stamped rather than inferred: this runs after analysis,
+/// and a node without a type is an error on the strict emit.
+pub(crate) fn push_attachment_delegation(methods: &mut Vec<MethodDef>, class: &ClassId) {
+    let attachment_ty = Ty::Class { id: ClassId(Symbol::from("ActionText::Attachment")), args: vec![] };
+    let slot_ty = Ty::Union { variants: vec![attachment_ty.clone(), Ty::Nil] };
+    let caption_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let has_writer =
+        methods.iter().any(|m| m.name.as_str() == "attachment=" && m.receiver == MethodReceiver::Instance);
+    let has_caption =
+        methods.iter().any(|m| m.name.as_str() == "caption" && m.receiver == MethodReceiver::Instance);
+    let sp = Span::synthetic();
+    let typed = |node: ExprNode, ty: Ty| {
+        let mut e = Expr::new(sp, node);
+        e.ty = Some(ty);
+        e
+    };
+    if !has_writer {
+        // def attachment=(value); @attachment = value; end
+        let value = typed(
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") },
+            attachment_ty.clone(),
+        );
+        let body = typed(
+            ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: Symbol::from("attachment") },
+                value,
+            },
+            attachment_ty.clone(),
+        );
+        methods.push(MethodDef {
+            name_span: sp,
+            name: Symbol::from("attachment="),
+            receiver: MethodReceiver::Instance,
+            params: vec![crate::dialect::Param {
+                name: Symbol::from("value"),
+                default: None,
+                keyword: false,
+                rest: false,
+                from_keyword: false,
+                from_kwrest: false,
+            }],
+            body,
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: Some(class.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        });
+    }
+    if !has_caption {
+        // def caption; a = @attachment; a.nil? ? nil : a.caption; end
+        let read = typed(ExprNode::Ivar { name: Symbol::from("attachment") }, slot_ty.clone());
+        let a_var = |ty: Ty| typed(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("a") }, ty);
+        let assign = typed(
+            ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("a") }, value: read },
+            slot_ty.clone(),
+        );
+        let is_nil = typed(
+            ExprNode::Send { recv: Some(a_var(slot_ty.clone())), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+            Ty::Bool,
+        );
+        let call = typed(
+            ExprNode::Send { recv: Some(a_var(attachment_ty.clone())), method: Symbol::from("caption"), args: vec![], block: None, parenthesized: false },
+            caption_ty.clone(),
+        );
+        let nil = typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil);
+        let branch = typed(ExprNode::If { cond: is_nil, then_branch: nil, else_branch: call }, caption_ty.clone());
+        let body = typed(ExprNode::Seq { exprs: vec![assign, branch] }, caption_ty.clone());
+        methods.push(MethodDef {
+            name_span: sp,
+            name: Symbol::from("caption"),
+            receiver: MethodReceiver::Instance,
+            params: vec![],
+            body,
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: Some(class.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+}

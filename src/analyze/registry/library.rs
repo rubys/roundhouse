@@ -105,6 +105,31 @@ pub(in crate::analyze) fn register(
         }
     }
 
+    // The Attachment's own readers, on the app's attachable classes.
+    // Action Text hands an attachable's partial the ATTACHMENT, which
+    // delegates what it lacks to the record — so campfire's
+    // `_opengraph_embed` reads `opengraph_embed.caption`, the node's
+    // caption, off a class that never defines it. The emitted partial
+    // takes the record, and `emit::ruby::library` synthesizes the
+    // delegation the other way onto the class: an `attachment=` slot
+    // the render seam fills, and `caption` reading through it. Typed
+    // here so the partial's body types; whether the methods EXIST is
+    // the emit seam's decision, the same split `attachable_sgid` has.
+    for binding in crate::lower::attachable::attachable_partial_bindings(app) {
+        // A model's partial reads the record; the delegation is for a
+        // class the node names by content type, built from the node.
+        if binding.content_type.is_none() {
+            continue;
+        }
+        let cls = classes.entry(binding.class.clone()).or_default();
+        cls.instance_methods
+            .entry(Symbol::from("attachment="))
+            .or_insert(Ty::Nil);
+        cls.instance_methods
+            .entry(Symbol::from("caption"))
+            .or_insert(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    }
+
     // `self.becomes_from(source)` on an STI subclass — the recast
     // constructor `lower::sti_scope` synthesizes for
     // `room.becomes!(Rooms::Closed)`. That pass runs AFTER analyze, so

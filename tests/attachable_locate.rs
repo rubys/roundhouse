@@ -259,3 +259,54 @@ fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
         "the layout wraps the rendered nodes:\n{runtime}"
     );
 }
+
+/// A class the node names by CONTENT TYPE — campfire's `OpengraphEmbed`,
+/// `attachable_content_type` + a class-side `from_node` + a partial
+/// path — gets the arm ahead of the sgid `case`, its partial's local is
+/// its `model_name.element`, and the Attachment's `caption` is
+/// delegated back onto it through the `attachment=` slot the arm fills.
+#[test]
+fn a_content_type_attachable_renders_through_its_own_from_node() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/rails_ext/actiontext_opengraph_embeds.rb",
+            "class ActionText::Attachment::OpengraphEmbed\n  include ActiveModel::Model\n\n  OPENGRAPH_EMBED_CONTENT_TYPE = \"application/vnd.actiontext.opengraph-embed\"\n\n  class << self\n    def from_node(node)\n      if node[\"content-type\"] == OPENGRAPH_EMBED_CONTENT_TYPE\n        new(href: node[\"href\"], url: node[\"url\"], filename: node[\"filename\"])\n      end\n    end\n  end\n\n  attr_accessor :href, :url, :filename\n\n  def attachable_content_type\n    OPENGRAPH_EMBED_CONTENT_TYPE\n  end\n\n  def to_partial_path\n    \"action_text/attachables/opengraph_embed\"\n  end\nend\n",
+        ),
+        (
+            "app/views/action_text/attachables/_opengraph_embed.html.erb",
+            "<figure><%= link_to_if opengraph_embed.href.present?, truncate(opengraph_embed.filename, length: 20), opengraph_embed.href %><span><%= opengraph_embed.caption %></span></figure>\n",
+        ),
+        ("app/views/layouts/action_text/contents/_content.html.erb", "<div class=\"trix-content\"><%= yield %></div>\n"),
+    ]);
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let text = |suffix: &str| {
+        files
+            .iter()
+            .find(|(p, _)| p.ends_with(suffix))
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| panic!("{suffix} in the tree"))
+    };
+    let runtime = text("runtime/action_text.rb");
+    assert!(
+        runtime.contains(
+            "    def self.render_attachment(attachment)\n      opengraph_embed = ::ActionText::Attachment::OpengraphEmbed.from_node(attachment)\n      unless opengraph_embed.nil?\n        opengraph_embed.attachment = attachment\n        return Views::ActionText::Attachables.opengraph_embed(opengraph_embed)\n      end\n"
+        ),
+        "generated content-type arm:\n{runtime}"
+    );
+    let partial = text("app/views/action_text/attachables/_opengraph_embed.rb");
+    assert!(
+        partial.contains("def self.opengraph_embed_into(io, opengraph_embed, notice, alert)"),
+        "the local is the class's element, not the directory's singular:\n{partial}"
+    );
+    // `link_to_if` is an `if` over the two `link_to` halves, the label
+    // escaped once in each.
+    assert!(partial.contains("if ! (opengraph_embed.href || \"\").empty?"), "{partial}");
+    assert!(partial.contains("ActionView::ViewHelpers.link_to(ActionView::ViewHelpers.truncate("), "{partial}");
+    assert!(!partial.contains("html_escape(ActionView::ViewHelpers.link_to"), "the link is not escaped:\n{partial}");
+    let class = text("app/models/action_text/attachment/opengraph_embed.rb");
+    assert!(class.contains("  def attachment=(value)\n    @attachment = value\n  end\n"), "{class}");
+    assert!(class.contains("  def caption\n    a = @attachment\n"), "{class}");
+}

@@ -29,6 +29,19 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
+    // The Attachment's readers on a content-type attachable (campfire's
+    // `OpengraphEmbed`): Rails hands the partial the Attachment, which
+    // delegates to the record; the emitted partial takes the record,
+    // so the record delegates the Attachment's own readers back
+    // through a slot the render seam fills.
+    for binding in crate::lower::attachable::attachable_partial_bindings(app) {
+        if binding.content_type.is_none() {
+            continue;
+        }
+        if let Some(lc) = lcs.iter_mut().find(|lc| lc.name == binding.class) {
+            crate::lower::attachable::push_attachment_delegation(&mut lc.methods, &binding.class);
+        }
+    }
     apply_helper_lowering(&mut lcs, app);
     // A bare `<x>_path` that `apply_helper_lowering` did not claim and
     // the route table DOES answer is a route helper called somewhere
@@ -2284,6 +2297,11 @@ fn is_framework_view_helper(name: &str) -> bool {
             // is a raising stub; unqualified it was a bare call NOTHING
             // defined, which stops a strict build outright.
             | "submit_tag"
+            // `link_to_if cond, name, url, opts` — `link_to` behind a
+            // condition, the name escaped bare otherwise. campfire's
+            // link-preview partial links the title only when the
+            // preview kept an href (`web_url` drops a non-web one).
+            | "link_to_if"
             // The bare (builder-less) hidden field, beside its
             // `label_tag`/`submit_tag` siblings in the same overlay
             // file. campfire's quick-boost forms carry the emoji this
@@ -2673,7 +2691,7 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
     if joined.ends_with("ViewHelpers") {
         return matches!(
             method.as_str(),
-            "raw" | "link_to" | "link_to_raw" | "button_to" | "mail_to" | "image_tag" | "content_tag"
+            "raw" | "link_to" | "link_to_if" | "link_to_raw" | "button_to" | "mail_to" | "image_tag" | "content_tag"
                 | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag" | "form_with"
                 // The rest of FormTagHelper — the BUILDER-LESS field
                 // tags, which return an element exactly the way
