@@ -96,11 +96,12 @@
     },
     {
       "slug": "proc-call-lost",
-      "title": "A Proc-held stub loses its `call` on the compiled lane \u2014 a regression on the 977cbcd bump",
-      "owner": "unknown",
+      "title": "A user `call` with more required params than a poly `.call` site supplies drops the site's Proc arm \u2014 spinel#4529",
+      "owner": "spinel",
       "match": "(undefined method 'call' for an instance of Proc|assert_difference failed: expected -2, got 0)",
       "match_test": "(Opengraph::FetchTest|Push::SubscriptionTest|Room::PushTest)#",
-      "note": "All four passed on campfire 94a48aac under the same roundhouse and spinel, and upstream did not touch these files between 94a48aac and 977cbcd. The message says a Proc landed in a slot whose dispatch has no `call` arm \u2014 the DNS-rebinding seam (TcpSocketStub + the Resolv sequence, see `socket-interception`) and the push-subscription endpoint resolver both hold their stub as a Proc, and `Room::PushTest#test_destroys_invalid_subscriptions` (`WebPush.expects(:payload_send).times(2).raises(ExpiredSubscription)` inside `perform_enqueued_jobs`, expecting two subscriptions destroyed) most likely fails downstream of the same lost call: the delivery worker resolves its endpoint through the Proc first, and a raise there is swallowed before `payload_send`, so nothing expires. Something new in the app \u2014 the `URI.parse`/`is_a?(URI::HTTP)` ladder and `Current.request_host` in `OpengraphEmbed` are the candidates \u2014 shifted whole-program typing enough to change the slot's shape. Not diagnosed; owner unknown until it is (ours, or a spinel issue). Ruby lane green."
+      "note": "All four passed on campfire 94a48aac and went red on 977cbcd in files upstream did not touch. Bisected on the emitted tree: the trigger is the new `LogScrubbingFormatter < Logger::Formatter` (upstream ef147d1, bot-key log redaction) and its one method, `call(severity, time, progname, message)`. spinel's pure-callable fast path for a poly `.call` steps aside whenever ANY user class defines `call`, expecting the poly method dispatch to carry the callable pre-arm (#4395) \u2014 but the dispatch counts a user `call` as a candidate only when `argc >= nrequired`, and with none it declines to the unresolved raise. A four-parameter `call` beside a two-argument `pred.call(host, port)` on the TcpSocketStub/Resolv seam lands exactly between the two guards, so the site compiles to an unconditional NoMethodError with no arm at all. `Room::PushTest#test_destroys_invalid_subscriptions` fails downstream of the same lost call (the endpoint resolver's Proc). Standalone 25-line repro and the arity discriminator (2 params passes; 3, 4, 5 fail) in the issue; the fix makes the fast path's guard arity-aware, the dispatch's own rule, and all four pass on the patched compiler (39/39 across the three files).",
+      "at_zero": "spinel#4529 fixed; the rule stays as the tripwire for the two guards disagreeing again."
     },
     {
       "slug": "fixture-accessors",
