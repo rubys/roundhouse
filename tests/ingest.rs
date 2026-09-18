@@ -1206,3 +1206,82 @@ fn exists_with_conditions_hash_desugars_to_where_chain() {
         "id form must stay a plain exists?(id); got: {id_form}"
     );
 }
+
+#[test]
+fn multi_write_with_attr_targets_ingests_and_round_trips() {
+    // `self.a, self.b = pair` — the writer-method form of a multi-write.
+    // Prism gives each target as a `CallTargetNode` named with the
+    // setter's `=`; the IR carries the reader name in `LValue::Attr`,
+    // and the Ruby emitter appends the assignment (#88).
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::expr::LValue;
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    // Names and receiver kinds of a MultiAssign's targets, so the
+    // comparison survives the span offsets moving between the source
+    // and the emitted text.
+    fn attr_targets(e: &Expr) -> Vec<(String, String)> {
+        match *e.node {
+            ExprNode::MultiAssign { ref targets, .. } => targets
+                .iter()
+                .map(|t| match t {
+                    LValue::Attr { recv, name } => {
+                        (emit_expr(recv), name.as_str().to_string())
+                    }
+                    other => panic!("expected an Attr target, got {other:?}"),
+                })
+                .collect(),
+            ref other => panic!("expected a MultiAssign, got {other:?}"),
+        }
+    }
+
+    // `self` receiver — the Sorbet `prop` writer shape from the report.
+    let on_self = ingest_first(b"self.left, self.right = compute");
+    assert_eq!(
+        attr_targets(&on_self),
+        vec![
+            ("self".to_string(), "left".to_string()),
+            ("self".to_string(), "right".to_string())
+        ],
+        "the trailing `=` belongs to the setter, not to the attribute name"
+    );
+
+    let emitted = emit_expr(&on_self);
+    assert_eq!(
+        attr_targets(&ingest_first(emitted.as_bytes())),
+        attr_targets(&on_self),
+        "emitted Ruby must re-ingest to the same targets; got:\n{emitted}"
+    );
+
+    // A receiver that is not `self`, and a mixed target list: the arm
+    // reads the receiver as an ordinary expression, so anything that
+    // ingests as one works.
+    let on_other = ingest_first(b"pairing.left, pairing.right = compute");
+    assert_eq!(
+        attr_targets(&on_other),
+        vec![
+            ("pairing".to_string(), "left".to_string()),
+            ("pairing".to_string(), "right".to_string())
+        ]
+    );
+    assert_eq!(
+        attr_targets(&ingest_first(emit_expr(&on_other).as_bytes())),
+        attr_targets(&on_other)
+    );
+
+    let mixed = ingest_first(b"a, self.b = pair");
+    match *mixed.node {
+        ExprNode::MultiAssign { ref targets, .. } => {
+            assert!(matches!(targets[0], LValue::Var { .. }));
+            assert!(matches!(targets[1], LValue::Attr { ref name, .. } if name.as_str() == "b"));
+        }
+        ref other => panic!("expected a MultiAssign, got {other:?}"),
+    }
+}
