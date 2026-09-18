@@ -1191,8 +1191,10 @@ jobs:
       # 'call' for an instance of Proc` — `proc-call-lost`, which was
       # matz/spinel#4529 (one 4-param user `call` shadowing the poly
       # `.call` fast path) and closed by #4530 the same day, 290/300
-      # on the merge — and one new test shows the two lanes sanitizing
-      # an attachment node differently (`javascript-href-served-on-spinel`).
+      # on the merge. The rooms tests it added are the first to assert
+      # on attachment RENDERING, and they found that @mentions and link
+      # previews never reach their partials on either lane
+      # (`attachable-partials-not-rendered`).
         env:
           FLOOR_TESTS: 256
           FLOOR_FILES: 42

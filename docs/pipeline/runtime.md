@@ -397,12 +397,22 @@ survey line naming the hook and the class, not a silent drop.
 rendering attachment previews into it, so an editor loads the text and
 shows attachment nodes bare — and `RichText#to_s` does the same on the
 serving side, so a link preview or an @mention in a message body
-reaches the room page as its bare `<action-text-attachment>` rather
-than through `_opengraph_embed` / `_mention`. The three room-page
-link-preview tests campfire added at 977cbcd are the first to assert
-on that (`attachable-partials-not-rendered` on the conformance page);
-the dispatch order is the one campfire's own `from_node` reopen
-states, `OpengraphEmbed.from_node` first, then the sgid.
+reaches `auto_link` as its bare `<action-text-attachment>` rather
+than through `_opengraph_embed` / `_mention`. What happens next
+differs by lane and is invisible either way: the ruby lane's
+`auto_link` is the real gem chain, whose default-list sanitize strips
+the tag with nothing inside it (`Hey @bender` is served as `Hey `,
+probed on the emitted tree); spinel's does not sanitize and serves
+the bare element, which a browser renders as nothing. Rails strips
+that same outer tag but has already rendered the partial's markup
+inside it. The three room-page link-preview tests campfire added at
+977cbcd are the first to assert on attachment rendering
+(`attachable-partials-not-rendered` on the conformance page); the
+dispatch order is the one campfire's own `from_node` reopen states,
+`OpengraphEmbed.from_node` first, then the sgid, and the render must
+land INSIDE the node so the ruby lane's sanitize keeps it as Rails
+does. Both lanes' safe-list sanitizers drop a `javascript:` href on
+the node; that was checked, and is not the gap.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
