@@ -304,27 +304,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         .into_iter()
         .filter(|ignored| !lib_dir_is_explicitly_required(vfs, dir, ignored))
         .collect();
-    for sub in [
-        "extras",
-        "lib",
-        "app/lib",
-        "app/jobs",
-        // `app/channels` is here for the half of a channel that needs no
-        // socket. `UnreadRoomsChannel.stream_name_for(user_id)` is a
-        // plain class method, and the MODEL doing the broadcasting is
-        // what calls it — so leaving channels uningested left a live
-        // call site pointing at nothing. The subscription half
-        // (`subscribed` / `stream_from`) is not dispatched yet; its
-        // bases live in `runtime/action_cable.rb` so these files load.
-        "app/channels",
-        "app/mailers",
-        "app/services",
-        "app/workers",
-        "app/serializers",
-        "app/policies",
-        "app/validators",
-        "app/presenters",
-    ] {
+    for sub in support_roots(vfs, dir, &lib_ignores) {
+        let sub = sub.as_str();
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
             continue;
@@ -3007,6 +2988,116 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
 /// are named in the comment Rails' own generator writes directly above
 /// the `autoload_lib` line, and a whole-file scan would read that as a
 /// load. Statement scope also keeps an unrelated `require` elsewhere in
+/// The support roots to walk for library classes: every `app/*`
+/// subdirectory that has no ingest pass of its own, plus `extras` and
+/// `lib`, plus whatever `config/application.rb` puts on the autoload or
+/// eager-load paths — minus the `autoload_lib(ignore:)` set. Paths are
+/// relative to the app root, deduplicated, and sorted so the walk order
+/// does not depend on directory-entry order.
+///
+/// Rails autoloads *every* `app/*` subdirectory, so a fixed list was a
+/// guess about what an app calls its layers. An app whose use cases live
+/// in `app/interactors/` registered none of them, and every call site
+/// into them reported `send_dispatch_failed` (#86). Discovery matches
+/// Rails rather than guessing, including for the trees that are only
+/// ever loaded in development: a RuboCop cop under `app/` is autoloaded
+/// by Rails too, and an app that does not want that says so itself —
+/// which is what the ignore list below is.
+///
+/// A LIST OF ROOTS on purpose: a Packwerk app puts the same layers under
+/// `packs/*/app/*`, which becomes one more source of roots here rather
+/// than a second walker.
+fn support_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lib_ignores: &[String]) -> Vec<String> {
+    // Directories under `app/` that another pass already ingests
+    // (models, controllers, views, helpers) or that hold no Ruby at all
+    // (assets, javascript).
+    const OWN_PASS: &[&str] =
+        &["models", "controllers", "views", "helpers", "assets", "javascript"];
+
+    let mut roots: Vec<String> = vec!["extras".to_string(), "lib".to_string()];
+    if let Ok(entries) = vfs.read_dir(&dir.join("app")) {
+        for entry in entries {
+            if !vfs.is_dir(&entry) {
+                continue;
+            }
+            let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if OWN_PASS.contains(&name) {
+                continue;
+            }
+            roots.push(format!("app/{name}"));
+        }
+    }
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        roots.extend(extract_autoload_path_roots(&source));
+    }
+    // `autoload_lib(ignore: %w[…])` names directories the app takes off
+    // the autoload paths; a root by that name is off the list for the
+    // same reason its `lib/` namesake is skipped below.
+    roots.retain(|root| !lib_ignores.iter().any(|ignored| ignored == root));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Roots an app adds to `config.autoload_paths` / `config.eager_load_paths`
+/// in `config/application.rb`, as paths relative to the app root:
+/// `config.eager_load_paths << Rails.root.join("extras")` → `extras`,
+/// `config.autoload_paths += %w[app/lib]` → `app/lib`.
+///
+/// Line-scanned rather than parsed, like the `autoload_lib` and
+/// `time_zone` readers next to it: the file is railtie soup ingest does
+/// not model, and the generator ships the `<<` form commented out, so
+/// comment lines have to stay unmatched.
+fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
+    let source = String::from_utf8_lossy(source);
+    let mut roots = Vec::new();
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        if !t.contains("config.autoload_paths") && !t.contains("config.eager_load_paths") {
+            continue;
+        }
+        // `Rails.root.join("a", "b")` — the segments, joined.
+        if let Some(rest) = t.split_once("Rails.root.join(").map(|(_, r)| r) {
+            let Some(end) = rest.find(')') else { continue };
+            let segments: Vec<&str> = rest[..end]
+                .split(',')
+                .filter_map(|seg| seg.trim().strip_prefix('"')?.strip_suffix('"'))
+                .collect();
+            if !segments.is_empty() {
+                roots.push(segments.join("/"));
+                continue;
+            }
+        }
+        // `%w[app/lib extras]` / `"extras"` — plain relative strings.
+        if let Some((_, rest)) = t.split_once("%w") {
+            let mut chars = rest.chars();
+            let close = match chars.next() {
+                Some('[') => ']',
+                Some('(') => ')',
+                Some('{') => '}',
+                _ => continue,
+            };
+            let inner = &rest[1..];
+            let Some(end) = inner.find(close) else { continue };
+            roots.extend(inner[..end].split_whitespace().map(str::to_string));
+            continue;
+        }
+        if let Some((_, rest)) = t.split_once('"') {
+            if let Some((value, _)) = rest.split_once('"') {
+                if !value.is_empty() {
+                    roots.push(value.to_string());
+                }
+            }
+        }
+    }
+    roots
+}
+
 /// the same initializer from vouching for a directory it never mentions.
 fn lib_dir_is_explicitly_required<V: Vfs + ?Sized>(vfs: &V, dir: &Path, subdir: &str) -> bool {
     let init_dir = dir.join("config/initializers");
