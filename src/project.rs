@@ -635,11 +635,50 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// path. Binary files (anything containing a NUL byte, or files that
 /// don't decode as UTF-8) are silently skipped — the archive payload
 /// is text-only by construction.
+/// A non-integer primary key (`create_table …, id: :uuid`,
+/// `primary_key: "identifier", id: :string`) is carried end to end by
+/// the ruby-shape emit: the analyzer types `id`/`ids`/the finders from
+/// the key column, and the synthesized `_adapter_*` primitives write,
+/// compare and answer it (#90). The compiled targets' runtimes still
+/// pin `id` as a 64-bit integer in their model structs, and the
+/// spinel lane's `base.rbs` pins `id: Integer` on the shared base —
+/// so for those the key is an unsupported construct, reported here
+/// per target rather than as an ingest gap that would be false of
+/// the ruby lane. `Severity::Error` fails the transpile on the CLI
+/// unless `--allow-unsupported`; the diagnostic names the table and
+/// the key so the inventory reads as a ledger.
+fn report_unsupported_keys(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    for table in app.schema.tables.values() {
+        let Some(key) = table.columns.iter().find(|c| c.primary_key) else { continue };
+        if matches!(
+            key.col_type,
+            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+        ) {
+            continue;
+        }
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            crate::span::Span::synthetic(),
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "non_integer_primary_key",
+            format!(
+                "table {}: key `{}` is {:?}; this target's model layer pins an integer id (the ruby emit carries it)",
+                table.name.as_str(),
+                key.name.as_str(),
+                key.col_type
+            ),
+        ));
+    }
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    report_unsupported_keys(app, target);
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),

@@ -75,11 +75,20 @@ error (a ledger line under `--survey`), never a silent drop — its
 index would still be emitted and the DDL would not apply. A
 non-integer primary key (`create_table …, id: :uuid` /
 `primary_key: "identifier", id: :string`) renders as `TEXT PRIMARY
-KEY`; the analyzer types `id`, `ids` and the key-taking finders from
-that column and the emitted `find`/`exists?`/`update`/`delete`
-primitives compare it with the key's type, but insert still reads
-`last_insert_rowid`, so the key stays ledgered until the write path
-carries it (#90).
+KEY` and is carried end to end by the ruby-shape emit: the analyzer
+types `id`, `ids` and the key-taking finders from that column; the
+emitted `find`/`exists?`/`update`/`delete`/`reload` primitives
+compare it with the key's type; insert writes it (minting a blank
+`uuid` key with `SecureRandom.uuid`, as the Postgres default would)
+and answers it instead of the rowid; a key not called `id` gets
+`id`/`id=` aliases; and a uuid foreign key's "no row" sentinel is
+`""`, not `0`. The targets whose model layer still pins an integer
+id — every compiled target, and spinel, whose `base.rbs` pins
+`id: Integer` on the shared base — report `non_integer_primary_key`
+as an unsupported construct at emit time, per target, rather than as
+an ingest gap that would be false of the ruby lane (#90;
+`fixtures/tiny-blog-uuid` + `tests/uuid_key_ruby.rs` run the shape
+on CRuby).
 
 ## `config/routes.rb` → `RouteTable` → `RouteHelpers.<x>_path`
 

@@ -1533,7 +1533,7 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "_adapter_insert",
-        fn_sig(vec![(Symbol::from("instance"), owner_ty.clone())], Ty::Int),
+        fn_sig(vec![(Symbol::from("instance"), owner_ty.clone())], key_ty.clone()),
     );
     insert_default(
         &mut info.class_methods,

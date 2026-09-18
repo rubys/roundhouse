@@ -76,10 +76,12 @@ end
         out[0],
         "CREATE TABLE IF NOT EXISTS widgets (\n  id TEXT PRIMARY KEY NOT NULL,\n  name TEXT NOT NULL\n)"
     );
-    // The DDL is right; the model layer still assumes an integer id,
-    // and that is ledgered rather than discovered at runtime.
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert!(gaps[0].to_string().contains("non-integer primary key `id` (uuid)"), "{}", gaps[0]);
+    // A non-integer key is a schema fact, not an ingest gap: the
+    // analyzer types `id` from it and the ruby emit's insert writes
+    // and answers it (#90). The targets whose model layer still pins
+    // an integer id report that per target at emit time
+    // (`tests/primary_key_type.rs`).
+    assert_eq!(gaps.len(), 0, "{gaps:?}");
 }
 
 #[test]
@@ -98,8 +100,8 @@ end
         out[0],
         "CREATE TABLE IF NOT EXISTS x (\n  identifier TEXT PRIMARY KEY NOT NULL,\n  name TEXT\n)"
     );
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert!(gaps[0].to_string().contains("`identifier` (string)"), "{}", gaps[0]);
+    // Not an ingest gap either (see the uuid case above).
+    assert_eq!(gaps.len(), 0, "{gaps:?}");
 }
 
 #[test]

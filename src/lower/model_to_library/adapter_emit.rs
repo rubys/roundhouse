@@ -191,12 +191,25 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
 /// reload comment for the underlying emit issue with
 /// `self.class.<async_method>`.
 fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    use crate::expr::{LValue, Literal};
+    use crate::schema::ColumnType;
+
+    // An integer key is the database's to assign: it stays out of the
+    // INSERT and comes back as `last_insert_rowid`. A non-integer key
+    // (`t.uuid`, `id: :string`) is a value the record already holds —
+    // set by the app, or minted just below — so it is written like any
+    // other column and answered from the ivar; the rowid says nothing
+    // about it (#90).
+    let key = key_column(table);
+    let supplied_key =
+        key.filter(|c| !matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt));
+
     // SQL column names are the PUBLIC names; the value reads the STORAGE
     // ivar (`@col_raw` for temporal — stored ISO-8601 text goes to disk).
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
-        .filter(|c| !c.primary_key)
+        .filter(|c| !c.primary_key || supplied_key.is_some())
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
@@ -209,15 +222,68 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     let op = ArelOp::Insert(Insert {
         table: TableRef(table.name.clone()),
         assignments,
+        returns_rowid: supplied_key.is_none(),
     });
+
+    let (body, ret_ty) = match supplied_key {
+        None => (SqliteVisitor.visit(&op, schema, owner), Ty::Int),
+        Some(k) => {
+            let key_ivar = || ivar_ref(&k.name);
+            let mut exprs = Vec::new();
+            // A uuid key left blank is minted here, as the
+            // `gen_random_uuid()` default the Postgres schema declares
+            // would have on insert — SQLite has no such default. A
+            // string key (`id: :string`) is the app's to supply, as in
+            // Rails, where a NULL one fails the NOT NULL constraint.
+            if matches!(k.col_type, ColumnType::Uuid) {
+                let blank = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(key_ivar()),
+                        method: Symbol::from("=="),
+                        args: vec![arel_lit_str(String::new())],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                let mint = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const { path: vec![Symbol::from("SecureRandom")] },
+                        )),
+                        method: Symbol::from("uuid"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                exprs.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: blank,
+                        then_branch: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Assign { target: LValue::Ivar { name: k.name.clone() }, value: mint },
+                        ),
+                        else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                    },
+                ));
+            }
+            exprs.push(SqliteVisitor.visit(&op, schema, owner));
+            exprs.push(key_ivar());
+            (Expr::new(Span::synthetic(), ExprNode::Seq { exprs }), ty_of_column(&k.col_type))
+        }
+    };
 
     MethodDef {
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_insert"),
         receiver: MethodReceiver::Instance,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![], Ty::Int)),
+        body,
+        signature: Some(fn_sig(vec![], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

@@ -236,6 +236,16 @@ pub(super) fn push_schema_methods(
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
     methods.push(synth_initialize(owner, table, model, models));
 
+    // def id; @identifier; end / def id=(value); @identifier = value; end
+    // — when the key column is not called `id`. Rails' `record.id`
+    // reads the primary-key attribute whatever its column is named,
+    // and the base's `attr_accessor :id` would answer the unsaved
+    // sentinel instead (#90).
+    if let Some(key) = table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id") {
+        methods.push(synth_key_alias_reader(owner, key));
+        methods.push(synth_key_alias_writer(owner, key));
+    }
+
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table));
 
@@ -849,6 +859,57 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// `def id; @<key>; end` for a model whose key column is not `id`.
+fn synth_key_alias_reader(owner: &ClassId, key: &Column) -> MethodDef {
+    let key_ty = super::ty_of_column_slot(key);
+    let body = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(key) }),
+        key_ty.clone(),
+    );
+    MethodDef {
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("id"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body,
+        signature: Some(fn_sig(vec![], key_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def id=(value); @<key> = value; end` — the writer half of the alias.
+fn synth_key_alias_writer(owner: &ClassId, key: &Column) -> MethodDef {
+    let value_param = Symbol::from("value");
+    let key_ty = super::ty_of_column_slot(key);
+    let rhs = with_ty(var_ref(value_param.clone()), key_ty.clone());
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Ivar { name: col_storage_name(key) }, value: rhs },
+        ),
+        key_ty.clone(),
+    );
+    MethodDef {
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("id="),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value_param.clone())],
+        body,
+        signature: Some(fn_sig(vec![(value_param, key_ty.clone())], key_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::AttributeWriter,
+        is_async: false,
+        mutates_self: false,
         block_param: None,
     }
 }

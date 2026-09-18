@@ -673,6 +673,9 @@ fn visit_insert(ins: &Insert, schema: &Schema) -> Expr {
     segments.push(lit_str(")".to_string()));
 
     let exec_call = db_call(&db, "exec", vec![concat_chain(segments)]);
+    if !ins.returns_rowid {
+        return exec_call;
+    }
     let last_id = db_call(&db, "last_insert_rowid", vec![]);
     seq(vec![exec_call, last_id])
 }
@@ -1276,6 +1279,7 @@ mod tests {
                     ty: ValueType::Str,
                 },
             }],
+            returns_rowid: true,
         });
         let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
         // exec ; last_insert_rowid

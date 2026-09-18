@@ -665,6 +665,12 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test framework_tests_ruby -- --ignored
         run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      # A uuid-keyed app (fixtures/tiny-blog-uuid) emitted to Ruby and
+      # driven on CRuby: minted + supplied keys, find/exists?/update/
+      # destroy by a string key, belongs_to/has_many across a uuid
+      # foreign key (#90). Same runtime, same gems, so it rides here.
+      - name: cargo test --test uuid_key_ruby -- --ignored
+        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
 
   # Per-target framework-test conformance gate for the spinel AOT
   # target. Same emit pipeline as framework-tests-ruby, but each

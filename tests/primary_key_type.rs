@@ -163,3 +163,99 @@ end
     let (_, body) = adapter_method(&app, "_adapter_delete");
     assert!(body.contains("WHERE identifier = ") && body.contains("@identifier"), "{body}");
 }
+
+// --- the write path (part 2a): a supplied key is written and answered ---
+
+#[test]
+fn a_uuid_key_is_minted_when_blank_written_and_answered_by_insert() {
+    let (app, _) = app(UUID_SCHEMA, MODEL, SHOW);
+    let (sig, body) = adapter_method(&app, "_adapter_insert");
+    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    assert_eq!(**ret, Ty::Str, "insert answers the key, not a rowid");
+    assert!(body.contains("INSERT INTO widgets (id, name)"), "the key is a column of the INSERT: {body}");
+    assert!(body.contains("SecureRandom.uuid"), "a blank uuid is minted: {body}");
+    assert!(body.contains("@id == \"\""), "…only when blank: {body}");
+    assert!(!body.contains("last_insert_rowid"), "{body}");
+    assert!(body.trim_end().ends_with("@id"), "the value answered is the key ivar: {body}");
+}
+
+#[test]
+fn a_string_key_is_the_apps_to_supply() {
+    let schema = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", primary_key: "identifier", id: :string, force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#;
+    let model = "class Widget < ApplicationRecord\n  self.primary_key = \"identifier\"\nend\n";
+    let (app, _) = app(schema, model, SHOW);
+    let (_, body) = adapter_method(&app, "_adapter_insert");
+    assert!(body.contains("INSERT INTO widgets (identifier, name)"), "{body}");
+    assert!(!body.contains("SecureRandom"), "a string key is not minted: {body}");
+    assert!(body.trim_end().ends_with("@identifier"), "{body}");
+    // …and `id` reads the key column, so `record.id` is the key.
+    let (sig, body) = adapter_method(&app, "id");
+    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    assert_eq!(**ret, Ty::Str);
+    assert_eq!(body.trim(), "@identifier");
+}
+
+#[test]
+fn an_integer_key_still_comes_back_as_the_rowid() {
+    let (app, _) = app(INT_SCHEMA, MODEL, SHOW);
+    let (sig, body) = adapter_method(&app, "_adapter_insert");
+    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    assert_eq!(**ret, Ty::Int);
+    assert!(body.contains("INSERT INTO widgets (name)"), "{body}");
+    assert!(body.contains("last_insert_rowid"), "{body}");
+}
+
+// --- the per-target ledger: the ruby emit carries a non-integer key, the rest say so ---
+
+#[test]
+fn a_non_integer_key_is_unsupported_per_target_not_at_ingest() {
+    use roundhouse::project::{target_files, BuildTarget};
+    let (app, _) = app(UUID_SCHEMA, MODEL, SHOW);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog");
+    let unsupported = |target: BuildTarget| -> Vec<String> {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| target_files(&app, &root, target));
+        diags
+            .into_iter()
+            .filter(|d| d.message.contains("non_integer_primary_key"))
+            .map(|d| d.message)
+            .collect()
+    };
+    assert_eq!(unsupported(BuildTarget::Ruby), Vec::<String>::new(), "the ruby emit carries the key");
+    let rust = unsupported(BuildTarget::Rust);
+    assert_eq!(rust.len(), 1, "{rust:?}");
+    assert!(rust[0].contains("table widgets: key `id` is Uuid"), "{}", rust[0]);
+    assert_eq!(unsupported(BuildTarget::Spinel).len(), 1, "spinel's base.rbs still pins id: Integer");
+}
+
+#[test]
+fn a_uuid_foreign_key_uses_a_string_sentinel() {
+    let schema = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", id: :uuid, force: :cascade do |t|
+    t.string "name", null: false
+  end
+  create_table "parts", force: :cascade do |t|
+    t.uuid "widget_id", null: false
+  end
+end
+"#;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), schema.as_bytes().to_vec());
+    tree.insert(PathBuf::from("app/models/widget.rb"), b"class Widget < ApplicationRecord\n  has_many :parts\nend\n".to_vec());
+    tree.insert(PathBuf::from("app/models/part.rb"), b"class Part < ApplicationRecord\n  belongs_to :widget\nend\n".to_vec());
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let part = app.models.iter().find(|m| m.name.0.as_str() == "Part").expect("Part");
+    let lc = roundhouse::lower::model_to_library::lower_model_to_library_class(part, &app.schema);
+    let body = |name: &str| {
+        roundhouse::emit::ruby::emit_expr(
+            &lc.methods.iter().find(|m| m.name.as_str() == name).unwrap_or_else(|| panic!("no {name}")).body,
+        )
+    };
+    assert!(body("widget").contains("@widget_id == \"\""), "reader: {}", body("widget"));
+    assert!(body("widget=").contains("@widget_id = \"\""), "writer: {}", body("widget="));
+    assert!(!body("widget=").contains("= 0"), "writer must not reset a uuid to 0: {}", body("widget="));
+}

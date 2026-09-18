@@ -75,6 +75,22 @@ pub(super) fn through_writer_join(
     }
 }
 
+/// The "no row" sentinel a foreign-key slot holds: `0` for the integer
+/// key every Rails default gives, `""` when the referenced key is a
+/// string or uuid (`t.uuid "post_id"`) — the same convention the
+/// unsaved record's own `id` uses, read off the owner's attribute row
+/// so a uuid foreign key is never compared with, or reset to, an
+/// integer it can't hold (#90).
+fn fk_sentinel(model: &Model, foreign_key: &Symbol) -> Expr {
+    let ty = model.attributes.fields.get(foreign_key);
+    let is_str = match ty {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Str)),
+        _ => false,
+    };
+    if is_str { super::lit_str(String::new()) } else { lit_int(0) }
+}
+
 pub(super) fn push_association_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -247,6 +263,7 @@ pub(super) fn push_association_methods(
                     polymorphic_targets,
                     foreign_key,
                 ));
+                let sentinel = fk_sentinel(model, foreign_key);
                 let writer_name = Symbol::from(format!("{}=", name.as_str()));
                 if !model_defines_instance_method(model, &writer_name)
                     && !methods
@@ -258,11 +275,13 @@ pub(super) fn push_association_methods(
                         name,
                         polymorphic_targets,
                         foreign_key,
+                        sentinel,
                     ));
                 }
             }
             Association::BelongsTo { name, target, foreign_key, .. } => {
-                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
+                let sentinel = fk_sentinel(model, foreign_key);
+                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, sentinel.clone()));
                 // Rails provides the writer alongside the reader
                 // (`comment.story = obj` stores the foreign key). A
                 // custom writer in the model body must win (Rails: the
@@ -277,7 +296,7 @@ pub(super) fn push_association_methods(
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
                 {
-                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key));
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, sentinel));
                 }
             }
             Association::HasOne { name, target, foreign_key, as_interface, .. } => {
@@ -904,10 +923,12 @@ fn synth_belongs_to_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    sentinel: Expr,
 ) -> MethodDef {
     // def article
     //   @article_id == 0 ? nil : Article.find_by(id: @article_id)
     // end
+    // (`== ""` when the referenced key is a string — `fk_sentinel`.)
     let cond = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -916,7 +937,7 @@ fn synth_belongs_to_reader(
                 ExprNode::Ivar { name: foreign_key.clone() },
             )),
             method: Symbol::from("=="),
-            args: vec![lit_int(0)],
+            args: vec![sentinel],
             block: None,
             parenthesized: false,
         },
@@ -1070,6 +1091,7 @@ fn synth_polymorphic_writer(
     name: &Symbol,
     targets: &[ClassId],
     foreign_key: &Symbol,
+    sentinel: Expr,
 ) -> MethodDef {
     // def notifiable=(value)
     //   if value.nil?
@@ -1142,7 +1164,7 @@ fn synth_polymorphic_writer(
         ExprNode::If {
             cond: nil_check,
             then_branch: seq(vec![
-                assign(foreign_key, lit_int(0)),
+                assign(foreign_key, sentinel),
                 assign(&type_col, lit_str("")),
             ]),
             else_branch: seq(vec![assign(foreign_key, id_read), type_switch]),
@@ -1186,6 +1208,7 @@ fn synth_belongs_to_writer(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    sentinel: Expr,
 ) -> MethodDef {
     // def story=(value)
     //   if value.nil?
@@ -1234,7 +1257,7 @@ fn synth_belongs_to_writer(
         Span::synthetic(),
         ExprNode::If {
             cond: nil_check,
-            then_branch: fk_assign(lit_int(0)),
+            then_branch: fk_assign(sentinel),
             else_branch: fk_assign(id_read),
         },
     );

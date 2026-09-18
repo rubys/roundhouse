@@ -103,14 +103,18 @@ pub struct PreloadDirective {
 
 /// `INSERT INTO <table> (<cols>) VALUES (<values>)`.
 ///
-/// `assignments` is in schema column order minus the primary key
-/// (matching today's `_adapter_insert` shape). Visitor composes
-/// CSV cols + escaped values; returns the Expr that calls
-/// `Db.exec(sql)` then `Db.last_insert_rowid`.
+/// `assignments` is in schema column order minus an integer primary
+/// key (the `_adapter_insert` shape); a non-integer key the app or the
+/// runtime supplies is an ordinary assignment. Visitor composes CSV
+/// cols + escaped values; returns the Expr that calls `Db.exec(sql)`
+/// then, when `returns_rowid`, `Db.last_insert_rowid` — the value of
+/// an integer key the database assigned. A supplied key has nothing
+/// to read back, so the caller appends the key it already holds.
 #[derive(Clone, Debug)]
 pub struct Insert {
     pub table: TableRef,
     pub assignments: Vec<Assignment>,
+    pub returns_rowid: bool,
 }
 
 /// `UPDATE <table> SET <col = val>, … WHERE <conditions>`.
