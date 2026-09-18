@@ -74,7 +74,14 @@ bindings with bindgen, which loads clang's own resource headers.
   `fatal error: 'stddef.h' file not found`, because clang's builtin
   headers ship in the `clang` package.
 
-Then:
+Then either install straight from the repository:
+
+```sh
+cargo install --git https://github.com/rubys/roundhouse --bin roundhouse
+roundhouse --version
+```
+
+or build in a checkout:
 
 ```sh
 git clone https://github.com/rubys/roundhouse

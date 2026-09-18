@@ -14,9 +14,9 @@ known gaps — so that a reader of a later snapshot can see what
 changed. The numbers are the ones CI asserts; where an entry and CI
 disagree, CI wins.
 
-## Unreleased
+## 2026.9.18
 
-The first snapshot is being prepared. What it will say:
+The first snapshot.
 
 **Analyze** (`check`, `lsp`, `mcp`, the browser IDE). Zero errors
 and zero ingest gaps on the Rails Guides store, the blog fixture, the

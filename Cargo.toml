@@ -1,6 +1,6 @@
 [package]
 name = "roundhouse"
-version = "0.1.0"
+version = "2026.9.18"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Sam Ruby <sam@rubyred.us>"]

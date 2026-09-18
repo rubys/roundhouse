@@ -1,6 +1,6 @@
 # Release build matrix for the `roundhouse` binary (cargo-dist). The
 # workflow this generates (.github/workflows/release.yml) publishes only
-# on a version tag push (`v0.1.0`), so nothing is released until one is
+# on a version tag push (`v2026.9.18`), so nothing is released until one is
 # pushed. To verify the matrix without releasing, open a pull request
 # that sets `pr-run-mode = "upload"` below: the PR then builds every
 # target and attaches the tarballs to its workflow run, and the PR is

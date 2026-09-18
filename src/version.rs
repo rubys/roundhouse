@@ -11,7 +11,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The short commit the binary was built from, when known.
 pub const COMMIT: Option<&str> = option_env!("ROUNDHOUSE_COMMIT");
 
-/// `0.1.0 (8050e0a6)`, or `0.1.0` when the build carried no commit.
+/// `2026.9.18 (8050e0a6)`, or `2026.9.18` when the build carried no commit.
 pub fn describe() -> String {
     match COMMIT {
         Some(c) => format!("{VERSION} ({c})"),

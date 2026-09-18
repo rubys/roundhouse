@@ -85,9 +85,14 @@ roundhouse check --continue /path/to/your/rails/app
 ```
 
 Releases are dated snapshots with binaries for macOS on Apple silicon
-and Linux x86-64; [`RELEASES.md`](RELEASES.md) says what each one
-contains. The binaries cover most needs, and `cargo build --release
---bin roundhouse` from a checkout is always there for the rest —
+and Linux x86-64 (plus untested macOS-Intel and Windows builds);
+[`RELEASES.md`](RELEASES.md) says what each one contains. With a Rust
+toolchain, a build from the current source is one line:
+
+```sh
+cargo install --git https://github.com/rubys/roundhouse --bin roundhouse
+```
+
 [`docs/guide/install.md`](docs/guide/install.md) has both paths and
 the prerequisites.
 
