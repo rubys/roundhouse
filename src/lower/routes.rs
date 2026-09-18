@@ -209,6 +209,10 @@ struct Nesting {
     /// only ever one. Getting this wrong put a phantom id in the middle
     /// of every path under a singular parent (`/account/:account_id/logo`).
     has_id: bool,
+    /// The parent's `param:` name (`id` by default). A child nests under
+    /// `/:<singular>_<param>` — `resources :tasks, param: :task_id`
+    /// gives its children `:task_task_id`, per Rails.
+    param: String,
 }
 
 impl Ctx {
@@ -465,6 +469,11 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 });
             }
         }
+        // A Root with no target is not a route (the ingester now
+        // refuses to build one, #82); skipping it here keeps a
+        // hand-built or deserialized table from emitting `:` as a
+        // controller symbol.
+        RouteSpec::Root { target } if target.is_empty() => {}
         RouteSpec::Root { target } => {
             let (controller_name, action_name) = target
                 .split_once('#')
@@ -498,8 +507,22 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 constraints: vec![],
             });
         }
-        RouteSpec::Resources { name, only, except, nested, singular, as_name, controller } => {
+        RouteSpec::Resources {
+            name,
+            only,
+            except,
+            nested,
+            singular,
+            as_name,
+            controller,
+            param,
+        } => {
             let resource_path = format!("/{name}");
+            // `param: :task_id` renames the member segment (#84). The
+            // action table is written with `:id`; substitute here so
+            // the path, the helper's param list and the controller's
+            // `params[:task_id]` all agree.
+            let id_param = param.as_ref().map(|p| p.as_str()).unwrap_or("id");
             // `resource :profile` still routes to the *plural*
             // controller (`ProfilesController`), per Rails.
             let controller_stem = if *singular {
@@ -560,7 +583,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 if except.iter().any(|s| s.as_str() == action_name) {
                     continue;
                 }
-                let path = format!("{resource_path}{suffix}");
+                let member = suffix.replace(":id", &format!(":{id_param}"));
+                let path = format!("{resource_path}{member}");
                 let (nested_path, nested_params) =
                     nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
@@ -574,8 +598,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 extract_path_params(&ctx.ns_path, &mut params);
                 params.retain(|p| !nested_params.iter().any(|q| q == p));
                 params.extend(nested_params);
-                if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
-                    params.push("id".to_string());
+                if suffix.contains(":id") && !params.iter().any(|p| p == id_param) {
+                    params.push(id_param.to_string());
                 }
                 let as_name = resource_as_name(
                     action_name,
@@ -633,6 +657,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         singular: singular_low.clone(),
                         plural: name.as_str().to_string(),
                         has_id: !*singular,
+                        param: id_param.to_string(),
                     });
                     p
                 },
@@ -769,8 +794,8 @@ fn nest_path(
         prefix.push('/');
         prefix.push_str(&frame.plural);
         if frame.has_id {
-            prefix.push_str(&format!("/:{}_id", frame.singular));
-            params.push(format!("{}_id", frame.singular));
+            prefix.push_str(&format!("/:{}_{}", frame.singular, frame.param));
+            params.push(format!("{}_{}", frame.singular, frame.param));
         }
     }
     let (parent, parent_plural) = (innermost.singular.as_str(), innermost.plural.as_str());
@@ -796,8 +821,8 @@ fn nest_path(
         // used verbatim, matching Rails' escape from the nesting.
         ResourceScope::Member => {
             if is_bare_child_segment(path) {
-                params.push("id".to_string());
-                (format!("{prefix}/{parent_plural}/:id{path}"), params)
+                params.push(innermost.param.clone());
+                (format!("{prefix}/{parent_plural}/:{}{path}", innermost.param), params)
             } else {
                 (path.to_string(), vec![])
             }
@@ -816,8 +841,8 @@ fn nest_path(
         ResourceScope::Nested => {
             let mut full = format!("{prefix}/{parent_plural}");
             if innermost.has_id {
-                full.push_str(&format!("/:{parent}_id"));
-                params.push(format!("{parent}_id"));
+                full.push_str(&format!("/:{parent}_{}", innermost.param));
+                params.push(format!("{parent}_{}", innermost.param));
             }
             full.push_str(path);
             (full, params)
@@ -945,6 +970,7 @@ mod tests {
             singular: singular.to_string(),
             plural: plural.to_string(),
             has_id: true,
+            param: "id".to_string(),
         }]
     }
 

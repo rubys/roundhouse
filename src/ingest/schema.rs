@@ -31,10 +31,15 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
     let root = result.node();
 
     let mut schema = Schema::default();
+    // Columns the walk could not model. A dropped column used to be
+    // silent, and its index was still emitted — so the DDL failed
+    // with `no such column` on the first uuid-keyed app (#83). Survey
+    // runs ledger every one; a strict run fails on the first.
+    let mut gaps: Vec<IngestError> = Vec::new();
     walk_calls(&root, &mut |call| {
         match constant_id_str(&call.name()) {
             "create_table" => {
-                if let Some((name, table)) = table_from_create_table(call) {
+                if let Some((name, table)) = table_from_create_table(call, file, &mut gaps) {
                     schema.tables.insert(name, table);
                 }
             }
@@ -77,6 +82,15 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
         }
     });
 
+    if !gaps.is_empty() {
+        if super::survey::is_active() {
+            for gap in &gaps {
+                super::survey::record(gap);
+            }
+        } else {
+            return Err(gaps.swap_remove(0));
+        }
+    }
     Ok(schema)
 }
 
@@ -174,7 +188,12 @@ fn apply_migration_verb(
 
     match verb {
         "create_table" => {
-            if let Some((name, table)) = table_from_create_table(call) {
+            let mut gaps: Vec<IngestError> = Vec::new();
+            let built = table_from_create_table(call, file, &mut gaps);
+            if let Some(gap) = gaps.into_iter().next() {
+                return Err(gap);
+            }
+            if let Some((name, table)) = built {
                 schema.tables.insert(name, table);
             }
         }
@@ -194,13 +213,12 @@ fn apply_migration_verb(
         "add_column" | "change_column" => {
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
                 let opts = parse_column_opts(args.iter().skip(3));
-                if let Some(col) = column_with_type(&ty, c, &opts) {
-                    if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
-                        // change_column replaces; add_column after a
-                        // replace-shaped history stays idempotent.
-                        table.columns.retain(|x| x.name != col.name);
-                        table.columns.push(col);
-                    }
+                let col = column_with_type(&ty, c, &opts, &t, file)?;
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    // change_column replaces; add_column after a
+                    // replace-shaped history stays idempotent.
+                    table.columns.retain(|x| x.name != col.name);
+                    table.columns.push(col);
                 }
             }
         }
@@ -421,7 +439,11 @@ fn build_index<'pr>(
 
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
 /// Shared by the schema.rb walker and the migration fold.
-fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, Table)> {
+fn table_from_create_table(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    gaps: &mut Vec<IngestError>,
+) -> Option<(Symbol, Table)> {
     let args = call.arguments()?;
     let first = args.arguments().iter().next();
     let table_name = first.as_ref().and_then(name_value)?;
@@ -430,16 +452,33 @@ fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
     // unless `id: false` is passed to `create_table`. We honor that here by
     // synthesizing the column; the Ruby emitter's `primary_key` skip keeps
     // schema.rb round-trip-equal to the source.
+    //
+    // `id: :uuid` / `id: :string` names the key's TYPE, and
+    // `primary_key: "identifier"` its NAME. Both used to be ignored, so
+    // the table got an `id INTEGER PRIMARY KEY AUTOINCREMENT` the app
+    // never declared and lost the column it did (#83).
     let mut has_id = true;
+    let mut id_type: Option<String> = None;
+    let mut id_name = "id".to_string();
     for arg in args.arguments().iter().skip(1) {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
             let Some(assoc) = el.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if key.as_str() == "id" {
-                if let Some(false) = bool_value(&assoc.value()) {
-                    has_id = false;
+            match key.as_str() {
+                "id" => {
+                    if let Some(false) = bool_value(&assoc.value()) {
+                        has_id = false;
+                    } else if let Some(t) = symbol_value(&assoc.value()) {
+                        id_type = Some(t);
+                    }
                 }
+                "primary_key" => {
+                    if let Some(n) = name_value(&assoc.value()) {
+                        id_name = n;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -447,13 +486,40 @@ fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
     if has_id {
-        columns.push(Column {
-            name: Symbol::from("id"),
-            col_type: ColumnType::BigInt,
-            nullable: false,
-            default: None,
-            primary_key: true,
-        });
+        let opts = ColumnOpts { nullable: Some(false), default: None, limit: None };
+        let key = match id_type.as_deref() {
+            None | Some("bigint") | Some("primary_key") => Ok(Column {
+                name: Symbol::from(id_name.as_str()),
+                col_type: ColumnType::BigInt,
+                nullable: false,
+                default: None,
+                primary_key: true,
+            }),
+            Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
+        };
+        match key {
+            Ok(mut col) => {
+                col.primary_key = true;
+                // The DDL for a non-integer key is right (`TEXT PRIMARY
+                // KEY`); the model layer is not — `find`, the `@id`
+                // slot and insert's last-rowid read all assume an
+                // integer. Ledgered so the hole is visible, not a
+                // runtime surprise.
+                if !matches!(col.col_type, ColumnType::Integer | ColumnType::BigInt) {
+                    gaps.push(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "table {table_name}: non-integer primary key `{}` ({}) — the DDL \
+                             carries it, but models assume an integer id",
+                            col.name.as_str(),
+                            id_type.as_deref().unwrap_or("?")
+                        ),
+                    });
+                }
+                columns.push(col);
+            }
+            Err(gap) => gaps.push(gap),
+        }
     }
     if let Some(block_node) = call.block() {
         if let Some(block) = block_node.as_block_node() {
@@ -469,8 +535,12 @@ fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
                             // Migration macro; schema.rb has these
                             // already materialized as two datetimes.
                             columns.extend(timestamp_columns());
-                        } else if let Some(col) = column_from_call(&call) {
-                            columns.push(col);
+                        } else {
+                            match column_from_call(&call, &table_name, file) {
+                                Ok(Some(col)) => columns.push(col),
+                                Ok(None) => {}
+                                Err(gap) => gaps.push(gap),
+                            }
                         }
                     }
                 }
@@ -735,27 +805,48 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
     opts
 }
 
-fn column_with_type(type_name: &str, col_name: String, opts: &ColumnOpts) -> Option<Column> {
+/// A column-type name (`t.<type>` / `add_column …, :<type>`) to its
+/// `ColumnType`. The Postgres-only types map to their SQLite storage:
+/// `uuid` is its own variant (TEXT, typed String); `jsonb` is `json`;
+/// `citext` is text; `timestamptz` is a datetime; the network types
+/// and a PG `enum` are strings. A type not listed is an error, not a
+/// silent drop — its index would still be emitted and the DDL would
+/// not apply (#83).
+fn column_with_type(
+    type_name: &str,
+    col_name: String,
+    opts: &ColumnOpts,
+    table: &str,
+    file: &str,
+) -> Result<Column, IngestError> {
     let col_type = match type_name {
         "integer" => ColumnType::Integer,
         "bigint" => ColumnType::BigInt,
         "float" => ColumnType::Float,
-        "decimal" => ColumnType::Decimal { precision: None, scale: None },
-        "string" => ColumnType::String { limit: opts.limit },
-        "text" => ColumnType::Text,
+        "decimal" | "numeric" => ColumnType::Decimal { precision: None, scale: None },
+        "string" | "inet" | "cidr" | "macaddr" | "enum" => ColumnType::String { limit: opts.limit },
+        "text" | "citext" => ColumnType::Text,
         "boolean" => ColumnType::Boolean,
         "date" => ColumnType::Date,
-        "datetime" => ColumnType::DateTime,
+        "datetime" | "timestamptz" => ColumnType::DateTime,
         "time" => ColumnType::Time,
         "binary" => ColumnType::Binary,
-        "json" => ColumnType::Json,
+        "json" | "jsonb" => ColumnType::Json,
+        "uuid" => ColumnType::Uuid,
         "references" | "belongs_to" => {
             ColumnType::Reference { table: TableRef(Symbol::from(col_name.as_str())) }
         }
-        _ => return None,
+        _ => {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "column dropped: {table}.{col_name} has unsupported type `{type_name}`"
+                ),
+            })
+        }
     };
 
-    Some(Column {
+    Ok(Column {
         name: Symbol::from(col_name),
         col_type,
         nullable: opts.nullable.unwrap_or(true),
@@ -764,19 +855,35 @@ fn column_with_type(type_name: &str, col_name: String, opts: &ColumnOpts) -> Opt
     })
 }
 
-fn column_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Column> {
+/// `Ok(None)` when the call is not a `t.<type> name` column line at
+/// all; `Err` when it is one whose type has no mapping.
+fn column_from_call(
+    call: &ruby_prism::CallNode<'_>,
+    table: &str,
+    file: &str,
+) -> Result<Option<Column>, IngestError> {
     // Expected: t.string "title", null: false  (schema.rb)
     //       or: t.string :title               (migration)
     // Receiver is a LocalVariableReadNode named "t".
-    let recv = call.receiver()?;
-    recv.as_local_variable_read_node()?;
+    let Some(recv) = call.receiver() else { return Ok(None) };
+    if recv.as_local_variable_read_node().is_none() {
+        return Ok(None);
+    }
 
     let col_type_name = constant_id_str(&call.name()).to_string();
-    let args_node = call.arguments()?;
+    // `t.<constraint>` lines are table-level declarations, not columns;
+    // the fold does not model them and they cost the DDL nothing.
+    if matches!(
+        col_type_name.as_str(),
+        "check_constraint" | "foreign_key" | "exclusion_constraint" | "unique_constraint"
+    ) {
+        return Ok(None);
+    }
+    let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
-    let col_name = args.first().and_then(name_value)?;
+    let Some(col_name) = args.first().and_then(name_value) else { return Ok(None) };
     let opts = parse_column_opts(args.iter().skip(1));
-    column_with_type(&col_type_name, col_name, &opts)
+    column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
 
 fn index_from_call(call: &ruby_prism::CallNode<'_>, table_name: &str) -> Option<Index> {

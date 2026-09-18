@@ -1,0 +1,158 @@
+//! `t.uuid` columns and non-default primary keys in `db/schema.rb`
+//! (#83).
+//!
+//! `t.uuid` had no `ColumnType` mapping, so `column_from_call` returned
+//! None and the column vanished — while `t.index ["owner_id"]` on it
+//! was still emitted, so the DDL failed with `no such column`. On the
+//! app that reported it, 15 of 39 tables lost a column that way, with
+//! no diagnostic. `create_table …, primary_key: "identifier", id:
+//! :string` was likewise ignored: the table got an `id INTEGER PRIMARY
+//! KEY AUTOINCREMENT` it never declared.
+
+use roundhouse::emit::shared::schema_sql::render_schema_statements;
+use roundhouse::ingest::ingest_schema;
+
+fn ddl(schema_rb: &str) -> Vec<String> {
+    let schema = ingest_schema(schema_rb.as_bytes(), "db/schema.rb").expect("ingest schema");
+    render_schema_statements(&schema)
+}
+
+#[test]
+fn uuid_column_is_text_and_its_index_applies() {
+    let out = ddl(
+        r#"ActiveRecord::Schema[8.1].define(version: 2026_09_18_000000) do
+  create_table "widgets", force: :cascade do |t|
+    t.uuid "owner_id", null: false
+    t.string "name", null: false
+    t.index ["owner_id"], name: "index_widgets_on_owner_id"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "CREATE TABLE IF NOT EXISTS widgets (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
+             owner_id TEXT NOT NULL,\n  name TEXT NOT NULL\n)",
+            "CREATE INDEX IF NOT EXISTS index_widgets_on_owner_id ON widgets (owner_id)",
+        ]
+    );
+    // And the DDL is applicable — the whole complaint. The crate has
+    // no sqlite binding; the system CLI is the oracle, skipped where
+    // there is none.
+    let Ok(mut child) = std::process::Command::new("sqlite3")
+        .arg(":memory:")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    use std::io::Write;
+    let script = out.iter().map(|s| format!("{s};\n")).collect::<String>();
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let done = child.wait_with_output().unwrap();
+    assert!(
+        done.status.success() && done.stderr.is_empty(),
+        "sqlite3 rejected the DDL: {}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+}
+
+#[test]
+fn uuid_primary_key_is_a_text_key_not_an_autoincrement() {
+    roundhouse::ingest::survey::activate();
+    let out = ddl(
+        r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#,
+    );
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(
+        out[0],
+        "CREATE TABLE IF NOT EXISTS widgets (\n  id TEXT PRIMARY KEY NOT NULL,\n  name TEXT NOT NULL\n)"
+    );
+    // The DDL is right; the model layer still assumes an integer id,
+    // and that is ledgered rather than discovered at runtime.
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].to_string().contains("non-integer primary key `id` (uuid)"), "{}", gaps[0]);
+}
+
+#[test]
+fn named_string_primary_key_is_the_declared_column() {
+    roundhouse::ingest::survey::activate();
+    let out = ddl(
+        r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "x", primary_key: "identifier", id: :string, force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+    );
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(
+        out[0],
+        "CREATE TABLE IF NOT EXISTS x (\n  identifier TEXT PRIMARY KEY NOT NULL,\n  name TEXT\n)"
+    );
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].to_string().contains("`identifier` (string)"), "{}", gaps[0]);
+}
+
+#[test]
+fn an_unknown_column_type_is_a_diagnostic_not_a_silent_drop() {
+    let err = ingest_schema(
+        br#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "geo", force: :cascade do |t|
+    t.st_point "location"
+    t.index ["location"], name: "index_geo_on_location"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect_err("strict ingest must fail on a column it cannot model");
+    assert!(err.to_string().contains("geo.location has unsupported type `st_point`"), "{err}");
+
+    // Survey mode: ledgered, the rest of the schema still lands.
+    roundhouse::ingest::survey::activate();
+    let schema = ingest_schema(
+        br#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "geo", force: :cascade do |t|
+    t.st_point "location"
+    t.string "label"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("survey ingest keeps going");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    let cols: Vec<&str> = schema.tables.values().next().unwrap().columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(cols, vec!["id", "label"]);
+}
+
+#[test]
+fn postgres_types_map_to_their_sqlite_storage() {
+    let out = ddl(
+        r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "accounts", force: :cascade do |t|
+    t.jsonb "fields"
+    t.inet "last_ip"
+    t.citext "username", null: false
+    t.timestamptz "seen_at"
+    t.check_constraint "length(username) > 0", name: "username_present"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        out[0],
+        "CREATE TABLE IF NOT EXISTS accounts (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
+         fields TEXT,\n  last_ip TEXT,\n  username TEXT NOT NULL,\n  seen_at TEXT\n)"
+    );
+}

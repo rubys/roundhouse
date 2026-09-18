@@ -42,6 +42,16 @@ pub(super) fn symbol_value(node: &Node<'_>) -> Option<String> {
     Some(String::from_utf8_lossy(loc.as_slice()).into_owned())
 }
 
+/// A symbol OR a string literal, for the DSL slots Rails normalizes
+/// with `to_sym` (`resources "tours"`, `only: %w[index show]`, `as:`,
+/// `controller:`, `param:`). Both spellings appear in real route
+/// files; accepting only the symbol dropped the whole resource for
+/// one and silently widened `only:` to all seven actions for the
+/// other (#85).
+pub(super) fn symbol_or_string_value(node: &Node<'_>) -> Option<String> {
+    symbol_value(node).or_else(|| string_value(node))
+}
+
 pub(super) fn bool_value(node: &Node<'_>) -> Option<bool> {
     if node.as_true_node().is_some() {
         Some(true)
@@ -462,16 +472,22 @@ pub(super) fn walk_calls<'pr, F: FnMut(&ruby_prism::CallNode<'pr>)>(node: &Node<
 
 // ---- Symbol-list parsing (shared by controller filters + routes) ------
 
+/// Accepts both `%i[a b]` and `%w[a b]` (and `:a` / `"a"`): every
+/// slot this feeds — `only:`/`except:` on a filter or a resource —
+/// is one Rails `to_sym`s, and both spellings appear in real apps.
+/// Matching only symbols returned an EMPTY list for `%w[index show]`,
+/// which the resource expander reads as "no restriction" and turned
+/// a two-action resource into seven routes (#85).
 pub(super) fn symbol_list_value(node: &Node<'_>) -> Vec<Symbol> {
     if let Some(arr) = node.as_array_node() {
         return arr
             .elements()
             .iter()
-            .filter_map(|n| symbol_value(&n))
+            .filter_map(|n| symbol_or_string_value(&n))
             .map(|s| Symbol::from(s.as_str()))
             .collect();
     }
-    if let Some(s) = symbol_value(node) {
+    if let Some(s) = symbol_or_string_value(node) {
         return vec![Symbol::from(s.as_str())];
     }
     vec![]

@@ -68,6 +68,11 @@ pub enum ColumnType {
     Time,
     Binary,
     Json,
+    /// `t.uuid` — a Postgres `uuid` column. SQLite has no uuid type, so
+    /// storage is TEXT (the 36-char canonical form); typing is a String.
+    /// Not modeled as `String` at ingest so a schema round-trip and a
+    /// per-dialect renderer can still tell the two apart.
+    Uuid,
     Reference { table: TableRef },
 }
 

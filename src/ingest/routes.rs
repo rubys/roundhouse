@@ -21,7 +21,7 @@ use crate::{ClassId, Symbol};
 
 use super::util::{
     constant_id_str, find_call_named, flatten_statements, string_value, symbol_list_value,
-    symbol_value,
+    symbol_or_string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -256,7 +256,7 @@ fn ingest_route_call(
         return ingest_explicit_route(call, http, file, parent);
     }
     match method {
-        "root" => ingest_root_route(call).map(Some),
+        "root" => ingest_root_route(call, file),
         "resources" => ingest_resources_route(call, file, draws, false).map(Some),
         "resource" => ingest_resources_route(call, file, draws, true).map(Some),
         "namespace" => ingest_namespace_route(call, file, draws).map(Some),
@@ -647,10 +647,18 @@ fn ingest_explicit_route(
     }
 
     if to_is_unsupported {
-        // Silent drop — survey-mode users still see the source file via
-        // the surrounding file-level ingest; nothing else hits this
-        // route. Bench targets (`/articles`, etc.) use the supported
-        // shapes exclusively.
+        // Dropped, with a ledger line: the route is not modeled
+        // (`RouteSpec` has no Redirect variant), and a drop nobody can
+        // see is how #82's `root to: redirect(...)` went unnoticed.
+        // Strict runs still pass — the hole is a missing route, not a
+        // miscompile — so this records rather than errors.
+        super::survey::record(&IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "route dropped: `{}` with a non-string target (`to: redirect(...)` is not modeled)",
+                path.as_deref().unwrap_or("?")
+            ),
+        });
         return Ok(None);
     }
 
@@ -695,35 +703,55 @@ fn ingest_explicit_route(
     }))
 }
 
-fn ingest_root_route(call: &ruby_prism::CallNode<'_>) -> IngestResult<RouteSpec> {
+fn ingest_root_route(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+) -> IngestResult<Option<RouteSpec>> {
     // Two forms:
     //   1. `root "c#a"` — single positional string arg.
     //   2. `root to: "c#a", as: "root"` — kwargs hash (modern or
     //      hashrocket `:to =>` style; both produce KeywordHashNode).
-    // Any non-string `to:` value (`root to: ->{...}`) leaves target
-    // empty — downstream emitters skip a Root with no target.
-    let Some(args_node) = call.arguments() else {
-        return Ok(RouteSpec::Root { target: String::new() });
-    };
+    // Any non-string `to:` (`root to: redirect("/scan")`, a lambda) is
+    // the same drop as an explicit verb's `to: redirect(...)`: the
+    // route is not modeled, so it is skipped with a ledger line. It
+    // used to come back as a Root with an EMPTY target, which the
+    // flattener turned into `Route.new("GET", "/", :, :index)` — the
+    // one file in the tree that failed `ruby -c`, and the entry point
+    // (#82).
     let mut target: Option<String> = None;
-    for arg in args_node.arguments().iter() {
-        if let Some(s) = string_value(&arg) {
-            if target.is_none() {
-                target = Some(s);
-            }
-        } else if let Some(kh) = arg.as_keyword_hash_node() {
-            for el in kh.elements().iter() {
-                let Some(assoc) = el.as_assoc_node() else { continue };
-                let Some(key_sym) = symbol_value(&assoc.key()) else { continue };
-                if key_sym.as_str() == "to" {
-                    if let Some(v) = string_value(&assoc.value()) {
-                        target = Some(v);
+    if let Some(args_node) = call.arguments() {
+        for arg in args_node.arguments().iter() {
+            if let Some(s) = string_value(&arg) {
+                if target.is_none() {
+                    target = Some(s);
+                }
+            } else if let Some(kh) = arg.as_keyword_hash_node() {
+                for el in kh.elements().iter() {
+                    let Some(assoc) = el.as_assoc_node() else { continue };
+                    let Some(key_sym) = symbol_value(&assoc.key()) else { continue };
+                    if key_sym.as_str() == "to" {
+                        if let Some(v) = string_value(&assoc.value()) {
+                            target = Some(v);
+                        }
                     }
                 }
             }
         }
     }
-    Ok(RouteSpec::Root { target: target.unwrap_or_default() })
+    match target {
+        Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root { target })),
+        // Same contract as `mount` and the explicit verbs' redirect
+        // drop: not an error, but never silent.
+        _ => {
+            super::survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: "route dropped: `root` with a non-string target \
+                          (`to: redirect(...)` is not modeled)"
+                    .into(),
+            });
+            Ok(None)
+        }
+    }
 }
 
 fn ingest_resources_route(
@@ -744,9 +772,11 @@ fn ingest_resources_route(
         file: file.into(),
         message: "resources call without a name".into(),
     })?;
-    let name_str = symbol_value(&first).ok_or_else(|| IngestError::Unsupported {
+    // `resources "tours"` is `resources :tours` — Rails `to_sym`s the
+    // name (#85).
+    let name_str = symbol_or_string_value(&first).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
-        message: "resources name must be a symbol".into(),
+        message: "resources name must be a symbol or string".into(),
     })?;
     let name = Symbol::from(name_str.as_str());
 
@@ -754,6 +784,7 @@ fn ingest_resources_route(
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
+    let mut param: Option<Symbol> = None;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -761,28 +792,46 @@ fn ingest_resources_route(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = assoc.value();
             match key.as_str() {
-                "only" => only = symbol_list_value(&value),
-                "except" => except = symbol_list_value(&value),
+                // An `only:`/`except:` that is written but does not
+                // parse to a literal list (a constant, a method call)
+                // must NOT come back empty: the expander reads an
+                // empty `only` as "all seven actions", which is the
+                // opposite of what a restriction means (#85).
+                "only" | "except" => {
+                    let list = symbol_list_value(&value);
+                    if list.is_empty() {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `{key}:` is not a literal list of actions"
+                            ),
+                        });
+                    }
+                    if key.as_str() == "only" {
+                        only = list;
+                    } else {
+                        except = list;
+                    }
+                }
                 // `as:` renames the HELPERS, not the path — lobsters'
                 // `namespace :mod { resources :mails, as: "mod_mails" }`
                 // is `/mod/mails` served by `mod_mod_mails_path`. Dropping
                 // it named those helpers `mod_mails_path`, which both
                 // missed every call site and collided with the top-level
                 // `resources :mod_mails`.
-                "as" => {
-                    as_name = string_value(&value)
-                        .or_else(|| symbol_value(&value))
-                        .map(|s| Symbol::from(s.as_str()))
-                }
+                "as" => as_name = symbol_or_string_value(&value).map(|s| Symbol::from(s.as_str())),
                 // `controller:` moves the CLASS and nothing else — the
                 // path still comes from the resource name and so do the
                 // helpers. campfire's bot API is `resources :messages,
                 // controller: "messages/by_bots"`, and dropping this
                 // pointed five routes at `MessagesController`, which
                 // answers them with the human HTML flow.
-                "controller" => {
-                    controller = string_value(&value).or_else(|| symbol_value(&value))
-                }
+                "controller" => controller = symbol_or_string_value(&value),
+                // `param: :task_id` renames the MEMBER SEGMENT: the
+                // path binds `:task_id` and the controller reads
+                // `params[:task_id]`. Dropped, the path bound `:id`
+                // and the lowered action read nil (#84).
+                "param" => param = symbol_or_string_value(&value).map(|s| Symbol::from(s.as_str())),
                 // `path:` and `shallow:` land when a fixture demands them.
                 _ => {}
             }
@@ -791,7 +840,16 @@ fn ingest_resources_route(
 
     let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;
 
-    Ok(RouteSpec::Resources { name, only, except, nested, singular, as_name, controller })
+    Ok(RouteSpec::Resources {
+        name,
+        only,
+        except,
+        nested,
+        singular,
+        as_name,
+        controller,
+        param,
+    })
 }
 
 /// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.

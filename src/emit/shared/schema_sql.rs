@@ -56,10 +56,21 @@ pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         for col in &table.columns {
             let mut line = String::new();
-            if col.primary_key {
+            if col.primary_key && is_integer(&col.col_type) {
                 line.push_str(&format!(
                     "  {} INTEGER PRIMARY KEY AUTOINCREMENT",
                     col.name.as_str()
+                ));
+            } else if col.primary_key {
+                // `create_table …, id: :uuid` / `id: :string`: a
+                // non-integer key has no rowid alias to autoincrement.
+                // The DDL is right; the VALUE is the app's to supply
+                // (the model layer still assumes an integer id — the
+                // ingester ledgers that).
+                line.push_str(&format!(
+                    "  {} {} PRIMARY KEY NOT NULL",
+                    col.name.as_str(),
+                    sqlite_type(&col.col_type)
                 ));
             } else {
                 line.push_str(&format!(
@@ -111,6 +122,10 @@ pub fn render_schema_sql(schema: &Schema) -> String {
 /// type system is looser than most SQL engines; these mappings follow
 /// what the Rails sqlite3 adapter emits so stored values round-trip
 /// through both stacks.
+fn is_integer(ct: &ColumnType) -> bool {
+    matches!(ct, ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. })
+}
+
 fn sqlite_type(ct: &ColumnType) -> &'static str {
     match ct {
         ColumnType::Integer | ColumnType::BigInt => "INTEGER",
@@ -122,7 +137,8 @@ fn sqlite_type(ct: &ColumnType) -> &'static str {
         | ColumnType::Date
         | ColumnType::DateTime
         | ColumnType::Time
-        | ColumnType::Json => "TEXT",
+        | ColumnType::Json
+        | ColumnType::Uuid => "TEXT",
         ColumnType::Reference { .. } => "INTEGER",
     }
 }

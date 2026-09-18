@@ -231,6 +231,7 @@ fn sequel_column_type(ty: &ColumnType) -> (&'static str, &'static str) {
         ColumnType::Binary => ("File", ""),
         // No 1:1 Sequel generic type; store as text and note it.
         ColumnType::Json => ("String", ", text: true # was json"),
+        ColumnType::Uuid => ("String", ", fixed: true, size: 36 # was uuid"),
         ColumnType::Reference { .. } => ("Integer", " # was t.references"),
     }
 }

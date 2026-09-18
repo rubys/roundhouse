@@ -1272,6 +1272,15 @@ pub enum RouteSpec {
         /// still `message`/`messages`; only the class changes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<String>,
+        /// `resources :tasks, param: :task_id` — the name of the
+        /// member segment. Rails binds `/tasks/:task_id` instead of
+        /// `/tasks/:id`, and the controller reads `params[:task_id]`;
+        /// a child nested under it sees `:task_task_id`
+        /// (`<singular>_<param>`, the same rule that makes the default
+        /// `:task_id`). Dropping it (#84) left the path binding `:id`
+        /// while the lowered action read a param nothing set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        param: Option<Symbol>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

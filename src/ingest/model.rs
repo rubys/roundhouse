@@ -1509,6 +1509,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // is modeled as typed per-key accessors over this text
         // (`lower::has_json`), not as a Hash the whole column decodes to.
         ColumnType::Json => Ty::Str,
+        ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

@@ -67,7 +67,16 @@ Schema.statements()` to the runtime's `startServer({ … })`.
 **Known shape limits.** SQLite-only today. When Postgres or MySQL
 demand per-engine DDL, a `Dialect` enum lands inside `schema_sql.rs`
 without changing the `Schema` IR itself (it's already dialect-
-neutral) or the lowerer.
+neutral) or the lowerer. Postgres column types map to their SQLite
+storage at ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` →
+json, `citext` → text, `timestamptz` → datetime, `inet`/`cidr`/
+`macaddr`/`enum` → string); a type with no mapping is an ingest
+error (a ledger line under `--survey`), never a silent drop — its
+index would still be emitted and the DDL would not apply. A
+non-integer primary key (`create_table …, id: :uuid` /
+`primary_key: "identifier", id: :string`) renders as `TEXT PRIMARY
+KEY`, and is ledgered because the model layer still assumes an
+integer id.
 
 ## `config/routes.rb` → `RouteTable` → `RouteHelpers.<x>_path`
 
@@ -82,11 +91,15 @@ renames; `Explicit` records its `member`/`collection` scope).
 **Ingest:** `src/ingest/routes.rs::ingest_routes`. Finds the outer
 `Rails.application.routes.draw do … end` and walks its statements.
 The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
-`root`, `resources`/`resource`, `namespace`/`scope`,
+`root`, `resources`/`resource` (with `only:`/`except:`/`as:`/
+`controller:`/`param:`, symbol or string spellings alike, as Rails
+`to_sym`s them), `namespace`/`scope`,
 `member`/`collection`/`constraints` blocks, `mount`, `draw(:name)`
 split files under `config/routes/`, and options like `defaults:`,
 `on:`, and `via:` — `src/ingest/routes.rs` is the authority on the
-current surface.
+current surface. A `redirect(...)` target — on a verb or on `root` —
+is not modeled: the route is dropped with a `route dropped:` ledger
+line, the same contract as `mount`.
 
 **Downstream consumers (analyze/lower):**
 
