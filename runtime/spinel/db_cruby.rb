@@ -21,11 +21,15 @@
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
 #
-# Stmt handles are opaque integers — under spinel FFI they're real `:ptr`
-# values, under this CRuby shim they're per-call ids that index into a
-# table that also caches the most recently stepped row (so column_int /
-# column_text can pick fields by index, mirroring the FFI column
-# accessors).
+# Stmt handles are opaque — under spinel FFI they're real `:ptr` values;
+# under this CRuby shim each is a per-call Hash carrying the statement and
+# its most recently stepped row (so column_int / column_text can pick
+# fields by index, mirroring the FFI column accessors). Callers only ever
+# hand it back to `Db.*`. It used to be an Integer indexing a process-wide
+# table with a shared counter, which only CRuby's GVL made safe: Puma's
+# worker threads run in parallel under JRuby and TruffleRuby, two of them
+# drew the same id, and one request read the other's (finalized, nil)
+# row. Like db_jruby.rb, there is now no shared mutable handle state.
 #
 # Per-database SQL dialect differences (placeholder syntax, RETURNING vs
 # last_insert_rowid, etc.) live inside each shim or in a separate dialect
@@ -45,8 +49,6 @@ module Db
   @owner_pid = nil
   @path      = nil
   @pool_size = 0
-  @rows    = {}
-  @next_id = 0
   @mutex   = nil
   @cv      = nil
   # Per-connection prepared-statement cache bound (roundhouse#12). The
@@ -291,9 +293,7 @@ module Db
       # A replay is not a round trip, and `capture_sql` does not count
       # it — the same rule as Rails' SQLCounter, which skips CACHE
       # events, and as the spinel lane's `Db.prepare`.
-      @next_id += 1
-      @rows[@next_id] = { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
-      return @next_id
+      return { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
     end
     record_query(sql)
     conn  = current_dbh
@@ -302,6 +302,15 @@ module Db
       cache = {}
       conn.instance_variable_set(:@rh_stmt_cache, cache)
     end
+    # Handles open on this connection whose stmt is the cached one —
+    # what the LRU eviction below must not close. Keyed by identity: a
+    # handle mutates (`:row`) while open, so its content hash cannot be
+    # the key. Like the stmt cache, only the leasing thread touches it.
+    open = conn.instance_variable_get(:@rh_open)
+    if open.nil?
+      open = {}.compare_by_identity
+      conn.instance_variable_set(:@rh_open, open)
+    end
     stmt   = cache[sql]
     cached = true
     if stmt.nil?
@@ -309,14 +318,14 @@ module Db
       if cache.size >= STMT_CACHE_CAP
         # Evict least-recently-used (Ruby Hash is insertion-ordered and
         # hits below re-insert, so the earliest key is the LRU). Skip
-        # any statement still held by an open @rows handle — closing it
+        # any statement still held by an open handle — closing it
         # under a live cursor would break nested prepare patterns. If
         # everything is somehow in use, insert past the cap (soft
         # bound) rather than close a live statement.
         live = nil
         cache.each_key do |k|
           candidate = cache[k]
-          next if @rows.any? { |_, e| e[:stmt].equal?(candidate) }
+          next if open.each_key.any? { |e| e[:stmt].equal?(candidate) }
           live = k
           break
         end
@@ -333,18 +342,18 @@ module Db
       cache[sql] = stmt
       stmt.reset!
     end
-    @next_id += 1
     capture = nil
     qcache = Fiber[:rh_qcache]
     unless qcache.nil? || parameterized
       capture = { rows: [], names: stmt.columns, eof: false, sql: sql }
     end
-    @rows[@next_id] = { stmt: stmt, row: nil, cached: cached, capture: capture }
-    @next_id
+    handle = { stmt: stmt, row: nil, cached: cached, capture: capture, open: open }
+    open[handle] = true
+    handle
   end
 
-  def self.step?(stmt_id)
-    entry = @rows[stmt_id]
+  def self.step?(handle)
+    entry = handle
     if (hit = entry[:replay])
       if entry[:pos] < hit[:rows].length
         entry[:row] = hit[:rows][entry[:pos]]
@@ -382,16 +391,16 @@ module Db
     !row.nil?
   end
 
-  def self.column_int(stmt_id, i)
-    @rows[stmt_id][:row][i].to_i
+  def self.column_int(handle, i)
+    handle[:row][i].to_i
   end
 
-  def self.column_float(stmt_id, i)
-    @rows[stmt_id][:row][i].to_f
+  def self.column_float(handle, i)
+    handle[:row][i].to_f
   end
 
-  def self.column_text(stmt_id, i)
-    v = @rows[stmt_id][:row][i]
+  def self.column_text(handle, i)
+    v = handle[:row][i]
     v.nil? ? "" : v.to_s
   end
 
@@ -402,23 +411,23 @@ module Db
   # match nothing. These are the reads the lowerer emits for those
   # columns; the non-`_opt` readers stay exactly as they were for
   # NOT NULL columns, which is most of them.
-  def self.column_int_opt(stmt_id, i)
-    v = @rows[stmt_id][:row][i]
+  def self.column_int_opt(handle, i)
+    v = handle[:row][i]
     v.nil? ? nil : v.to_i
   end
 
-  def self.column_float_opt(stmt_id, i)
-    v = @rows[stmt_id][:row][i]
+  def self.column_float_opt(handle, i)
+    v = handle[:row][i]
     v.nil? ? nil : v.to_f
   end
 
-  def self.column_text_opt(stmt_id, i)
-    v = @rows[stmt_id][:row][i]
+  def self.column_text_opt(handle, i)
+    v = handle[:row][i]
     v.nil? ? nil : v.to_s
   end
 
-  def self.column_bool_opt(stmt_id, i)
-    v = @rows[stmt_id][:row][i]
+  def self.column_bool_opt(handle, i)
+    v = handle[:row][i]
     v.nil? ? nil : v.to_i != 0
   end
 
@@ -429,18 +438,18 @@ module Db
   # and integer-column truthiness). Whole-row hydration
   # (SqliteAdapter.select_rows) reads through this so model attributes
   # carry real types, matching what ActiveRecord hands the app.
-  def self.column_value(stmt_id, i)
-    @rows[stmt_id][:row][i]
+  def self.column_value(handle, i)
+    handle[:row][i]
   end
 
-  def self.column_count(stmt_id)
-    e = @rows[stmt_id]
+  def self.column_count(handle)
+    e = handle
     return e[:replay][:names].length if e[:replay]
     e[:stmt].columns.length
   end
 
-  def self.column_name(stmt_id, i)
-    e = @rows[stmt_id]
+  def self.column_name(handle, i)
+    e = handle
     return e[:replay][:names][i] if e[:replay]
     e[:stmt].columns[i]
   end
@@ -452,10 +461,11 @@ module Db
   # cache on release — even a partial one (eof=false): the next
   # identical SELECT replays the consumed prefix and promotes past it
   # only if it wants more.
-  def self.finalize(stmt_id)
-    entry = @rows.delete(stmt_id)
-    return unless entry
+  def self.finalize(entry)
+    return if entry.nil?
     return if entry[:replay] # replay handle — nothing to release
+    o = entry[:open]
+    o.delete(entry) unless o.nil?
     if (c = entry[:capture])
       qcache = Fiber[:rh_qcache]
       qcache[c[:sql]] = c if !qcache.nil? && !qcache.key?(c[:sql])
@@ -475,20 +485,20 @@ module Db
   # them positionally — same param count for the same SQL shape). The
   # nil guard covers the replay-handle case, which `?` queries never take
   # (prepare skips replay for parameterized SQL).
-  def self.bind_int(stmt_id, idx, value)
-    st = @rows[stmt_id][:stmt]
+  def self.bind_int(handle, idx, value)
+    st = handle[:stmt]
     st.bind_param(idx, value) unless st.nil?
   end
 
-  def self.bind_text(stmt_id, idx, value)
-    st = @rows[stmt_id][:stmt]
+  def self.bind_text(handle, idx, value)
+    st = handle[:stmt]
     st.bind_param(idx, value) unless st.nil?
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline
   # form and the INTEGER affinity `t.boolean` columns get.
-  def self.bind_bool(stmt_id, idx, value)
-    st = @rows[stmt_id][:stmt]
+  def self.bind_bool(handle, idx, value)
+    st = handle[:stmt]
     st.bind_param(idx, value ? 1 : 0) unless st.nil?
   end
 
@@ -580,7 +590,7 @@ module Db
 
   # Read a boolean column. SQLite returns 0/1 (integer), we widen to
   # Ruby's bool. Nulls coerce to false.
-  def self.column_bool(stmt_id, idx)
-    column_int(stmt_id, idx) != 0
+  def self.column_bool(handle, idx)
+    column_int(handle, idx) != 0
   end
 end

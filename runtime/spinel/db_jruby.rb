@@ -23,14 +23,14 @@
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
 #
-# THREAD-SAFETY (the one place this diverges from db_cruby.rb): JRuby has
-# no GVL, so Puma's worker threads run truly in parallel. db_cruby.rb
-# keys statement handles into a single global `@rows` hash with a shared
-# `@next_id` counter — safe only under CRuby's GVL. Here the stmt handle
-# is instead an opaque `Stmt` wrapper object returned straight from
-# `prepare`; callers only ever pass it back to `Db.*` (verified against
-# `sqlite_adapter.rb`), so there is no shared mutable handle table to
-# race on. The per-connection prepared-statement cache lives on the
+# THREAD-SAFETY: JRuby has no GVL, so Puma's worker threads run truly in
+# parallel. db_cruby.rb once keyed statement handles into a single global
+# `@rows` hash with a shared `@next_id` counter — safe only under CRuby's
+# GVL, and it raced here and under TruffleRuby until it adopted this
+# file's design. Here the stmt handle is an opaque `Stmt` wrapper object
+# returned straight from `prepare`; callers only ever pass it back to
+# `Db.*` (verified against `sqlite_adapter.rb`), so there is no shared
+# mutable handle table to race on. The per-connection prepared-statement cache lives on the
 # leased `Conn` (one thread at a time via `with_connection`), so it needs
 # no lock either — same invariant db_cruby.rb relies on.
 #
