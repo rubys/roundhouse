@@ -635,20 +635,65 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// path. Binary files (anything containing a NUL byte, or files that
 /// don't decode as UTF-8) are silently skipped — the archive payload
 /// is text-only by construction.
+/// The base's key contract, as wide as the app's keys. `runtime/ruby/
+/// active_record/base.rbs` declares `id`, `id=` and `_adapter_insert`
+/// over `Integer` — Rails' default, and the only key the transpiled
+/// targets support. An app with a string or uuid key ships the sidecar
+/// with those three widened to `(Integer | String)`: Spinel types a
+/// Base-typed receiver's `id` from this declaration, and a String-keyed
+/// model's own `attr_reader id: String` has to be a member of it
+/// (roundhouse#90). Integer-only apps ship the sidecar byte-for-byte.
+/// The three lines are matched exactly so a drift in the sidecar is a
+/// build error here, not a silent narrowing.
+fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    let has_string_key = app.schema.tables.values().any(|t| {
+        t.columns.iter().any(|c| {
+            c.primary_key
+                && !matches!(
+                    c.col_type,
+                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+                )
+        })
+    });
+    if !has_string_key {
+        return Ok(());
+    }
+    let Some((_, text)) = files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/base.rbs")
+    else {
+        return Err("widen_key_contract: sig/runtime/active_record/base.rbs not in the tree".into());
+    };
+    for (narrow, wide) in [
+        ("    def id: () -> Integer\n", "    def id: () -> (Integer | String)\n"),
+        ("    def id=: (Integer) -> Integer\n", "    def id=: (Integer | String) -> (Integer | String)\n"),
+        ("    def _adapter_insert: () -> Integer\n", "    def _adapter_insert: () -> (Integer | String)\n"),
+    ] {
+        if !text.contains(narrow) {
+            return Err(format!("widen_key_contract: base.rbs no longer declares {narrow:?}"));
+        }
+        *text = text.replace(narrow, wide);
+    }
+    Ok(())
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
-/// the ruby-shape emit: the analyzer types `id`/`ids`/the finders from
-/// the key column, and the synthesized `_adapter_*` primitives write,
-/// compare and answer it (#90). The compiled targets' runtimes still
-/// pin `id` as a 64-bit integer in their model structs, and the
-/// spinel lane's `base.rbs` pins `id: Integer` on the shared base —
-/// so for those the key is an unsupported construct, reported here
-/// per target rather than as an ingest gap that would be false of
-/// the ruby lane. `Severity::Error` fails the transpile on the CLI
-/// unless `--allow-unsupported`; the diagnostic names the table and
-/// the key so the inventory reads as a ledger.
+/// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
+/// `id`/`ids`/the finders from the key column, the synthesized
+/// `_adapter_*` primitives write, compare and answer it, the base
+/// holds no `@id` slot, and the shipped sidecar's key contract is
+/// widened to the app's keys (`widen_key_contract`) (#90). The
+/// compiled targets' runtimes still pin `id` as a 64-bit integer in
+/// their model structs — so for those the key is an unsupported
+/// construct, reported here per target rather than as an ingest gap
+/// that would be false of the ruby family. `Severity::Error` fails
+/// the transpile on the CLI unless `--allow-unsupported`; the
+/// diagnostic names the table and the key so the inventory reads as
+/// a ledger.
 fn report_unsupported_keys(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel
+    ) {
         return;
     }
     for table in app.schema.tables.values() {
@@ -664,7 +709,7 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
             Some(crate::ident::Symbol::from(target.as_str())),
             "non_integer_primary_key",
             format!(
-                "table {}: key `{}` is {:?}; this target's model layer pins an integer id (the ruby emit carries it)",
+                "table {}: key `{}` is {:?}; this target's model layer pins an integer id (the ruby and spinel emits carry it)",
                 table.name.as_str(),
                 key.name.as_str(),
                 key.col_type
@@ -3062,6 +3107,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
             &mut files,
         )?;
     }
+    widen_key_contract(app, &mut files)?;
     for stem in [
         "rails",
         "active_record",

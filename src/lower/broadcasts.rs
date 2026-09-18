@@ -424,7 +424,7 @@ pub enum Streamable {
 /// passes a record, emits ruby and spinel. A fixture is what should
 /// force those twins into existence rather than eight speculative
 /// ports of a function nothing calls.
-/// `def to_gid_param; GlobalID.param("Room", @id); end` on every model.
+/// `def to_gid_param; GlobalID.param("Room", self.id); end` on every model.
 ///
 /// Rails puts this on every `GlobalID::Identification` includer, which
 /// is every Active Record model, and CODE IN THE WILD CALLS IT — not
@@ -461,11 +461,30 @@ pub fn push_to_gid_param(
         ExprNode::Lit { value: Literal::Str { value: model.name.0.as_str().to_string() } },
     );
     model_lit.ty = Some(crate::ty::Ty::Str);
+    // `self.id`, NOT `@id`: this method lands on every model INCLUDING
+    // the abstract `ApplicationRecord`, and an ivar read there makes
+    // the ancestor hold the `@id` slot — the union point that widens
+    // every model's key to poly under Spinel the moment one model's
+    // key is a String (roundhouse#90). The self-send resolves to each
+    // model's own synthesized `id`, typed from its key column.
     let mut id_read = Expr::new(
         crate::span::Span::synthetic(),
-        ExprNode::Ivar { name: crate::ident::Symbol::from("id") },
+        ExprNode::Send {
+            recv: Some(Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef)),
+            method: crate::ident::Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
     );
-    id_read.ty = Some(crate::ty::Ty::Int);
+    id_read.ty = Some(
+        model
+            .attributes
+            .fields
+            .get(&crate::ident::Symbol::from("id"))
+            .cloned()
+            .unwrap_or(crate::ty::Ty::Int),
+    );
     let mut body = Expr::new(
         crate::span::Span::synthetic(),
         ExprNode::Send {

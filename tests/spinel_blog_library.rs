@@ -221,7 +221,9 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
     );
 
     let base_methods: Vec<&str> = base.methods.iter().map(|m| m.name.as_str()).collect();
-    // attr_accessor :id lowered → id reader + id= writer.
+    // `id` / `id=` are the base's CONTRACT (raise-bodied arms for
+    // dispatch to land on); the slot and the typed accessors live on
+    // each model (roundhouse#90).
     assert!(base_methods.contains(&"id"), "expected id getter; methods: {base_methods:?}");
     assert!(base_methods.contains(&"id="), "expected id= setter; methods: {base_methods:?}");
     // A few key class methods.

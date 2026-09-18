@@ -82,13 +82,19 @@ compare it with the key's type; insert writes it (minting a blank
 `uuid` key with `SecureRandom.uuid`, as the Postgres default would)
 and answers it instead of the rowid; a key not called `id` gets
 `id`/`id=` aliases; and a uuid foreign key's "no row" sentinel is
-`""`, not `0`. The targets whose model layer still pins an integer
-id — every compiled target, and spinel, whose `base.rbs` pins
-`id: Integer` on the shared base — report `non_integer_primary_key`
+`""`, not `0`. Spinel carries it too: the shared `ActiveRecord::Base`
+holds no `@id` slot (under Spinel a base-class ivar is the union of
+every subclass's writes, so one String-keyed model would widen every
+model's key to poly), its `id`/`id=` are a raise-bodied contract each
+model's own typed accessors implement, and an app with a string key
+ships the runtime sidecar with that contract widened to
+`(Integer | String)` (`project::widen_key_contract`) while an
+integer-only app ships it byte for byte. The compiled targets' model
+layers still pin an integer id and report `non_integer_primary_key`
 as an unsupported construct at emit time, per target, rather than as
-an ingest gap that would be false of the ruby lane (#90;
+an ingest gap that would be false of the ruby family (#90;
 `fixtures/tiny-blog-uuid` + `tests/uuid_key_ruby.rs` run the shape
-on CRuby).
+on CRuby, and the same fixture compiles and serves under Spinel).
 
 ## `config/routes.rb` → `RouteTable` → `RouteHelpers.<x>_path`
 

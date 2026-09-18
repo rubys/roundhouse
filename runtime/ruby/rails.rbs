@@ -73,6 +73,8 @@ module Rails
 end
 
 module GlobalID
-  def self.param: (String model_name, Integer id) -> String
-  def self.uri: (String model_name, Integer id) -> String
+  # `id` is the record's key — an Integer by Rails' default, a String
+  # for a uuid-keyed model; the mint only ever calls `to_s` on it.
+  def self.param: (String model_name, Integer | String id) -> String
+  def self.uri: (String model_name, Integer | String id) -> String
 end

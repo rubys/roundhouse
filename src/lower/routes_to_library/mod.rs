@@ -549,16 +549,30 @@ fn model_overrides_to_param(controller: &str, helper_name: &str, app: &App) -> b
     named_model_overrides_to_param(&crate::naming::singularize(word), app)
 }
 
+/// Whether the resource's model fills its `:id` segment with a
+/// String: it overrides `to_param`, or its primary key is not an
+/// integer (`create_table id: :uuid`), where Rails' default
+/// `to_param` — `id.to_s` — is a uuid the helper must take as a
+/// String (roundhouse#90).
 fn named_model_overrides_to_param(resource: &str, app: &App) -> bool {
     let model_name = crate::naming::camelize(resource);
     app.models.iter().any(|m| {
         m.name.0.as_str() == model_name
-            && m.body.iter().any(|item| matches!(
+            && (m.body.iter().any(|item| matches!(
                 item,
                 crate::dialect::ModelBodyItem::Method { method, .. }
                     if method.name.as_str() == "to_param"
-            ))
+            )) || model_key_is_string(m, app))
     })
+}
+
+fn model_key_is_string(model: &crate::dialect::Model, app: &App) -> bool {
+    use crate::schema::ColumnType;
+    app.schema
+        .tables
+        .get(&model.table.0)
+        .and_then(|t| t.columns.iter().find(|c| c.primary_key))
+        .is_some_and(|c| !matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt))
 }
 
 fn build_helper_function(

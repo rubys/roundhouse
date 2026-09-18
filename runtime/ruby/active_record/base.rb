@@ -49,7 +49,29 @@ module ActiveRecord
   # delegates to the adapter + validations + lifecycle hooks — without
   # any reflective access to ivars.
   class Base
-    attr_accessor :id
+    # No `attr_accessor :id` and no `@id` here — the key lives on each
+    # model. Under Spinel a base-class ivar is a UNION POINT: the slot
+    # on the ancestor must hold every subclass's writes, so one
+    # String-keyed model (`create_table id: :uuid`) widened `@id` to
+    # poly for every model in the program and dropped each one's
+    # `--rbs` pin ("ancestor ApplicationRecord holds it as poly"). The
+    # lowerer synthesizes `id`/`id=` per model, typed from the key
+    # column; the base reaches the key only by self-send (`self.id =
+    # _adapter_insert`), the way it already reaches `_adapter_insert`
+    # itself. A hand-written subclass declares `attr_accessor :id` and
+    # its own unsaved sentinel (roundhouse#90).
+    #
+    # What the base DOES declare is the contract: `id`/`id=` exist on
+    # every record, with the key's type per model. The bodies raise, the
+    # `_adapter_insert` shape below — a base arm for dispatch to land on,
+    # never reached, touching no ivar.
+    def id
+      raise NotImplementedError, "id: subclasses must override"
+    end
+
+    def id=(_value)
+      raise NotImplementedError, "id=: subclasses must override"
+    end
 
     # Error message accumulator populated by the lowerer-emitted
     # `validate` method (one `errors << "..."` per failed rule). Lives
@@ -102,7 +124,10 @@ module ActiveRecord
       # below is. `form_with` picks its action from `persisted?`, and so
       # does `dom_id`; app code that reads `id` on an unsaved record is
       # where the divergence becomes visible.
-      @id = 0
+      #
+      # The sentinel is written by the MODEL's own `initialize`
+      # (`self.id = (attrs[:id] || 0)` — `|| ""` for a string key), not
+      # here: see the class comment on why the base holds no `@id`.
       @errors = []
       @id_previously_changed = false
       @persisted = false
@@ -510,7 +535,7 @@ module ActiveRecord
       if was_new
         before_create
         fill_timestamps(true)
-        @id = _adapter_insert
+        self.id = _adapter_insert
         @persisted = true
         __track_saved_changes(was_new)
         after_create

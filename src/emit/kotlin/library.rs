@@ -328,9 +328,17 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             // Constructor-param-backed: assigned in the `init` block, no
             // declaration initializer. Kotlin forbids `open` on a
             // backing-field property without an initializer, so these stay
-            // final (only the rare inherited case takes `override`).
-            let m = if inherited.contains(n) { "override " } else { "" };
-            out.push_str(&format!("    {m}var {n}: {}\n", kotlin_ty(ty)));
+            // final. The inherited case takes `override` — which is open,
+            // so it needs the initializer after all ("Property must be
+            // initialized, be final, or be abstract"); the `init` block
+            // then assigns the real value over the type's default. A test
+            // double's `attr_accessor :id` over the base's key contract is
+            // the case in hand (roundhouse#90).
+            if inherited.contains(n) {
+                out.push_str(&format!("    override var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
+            } else {
+                out.push_str(&format!("    var {n}: {}\n", kotlin_ty(ty)));
+            }
         } else {
             out.push_str(&format!("    {}\n", render_member(member_modifier(n), n, ty)));
         }

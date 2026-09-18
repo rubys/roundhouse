@@ -60,8 +60,16 @@ module ActiveRecord
   class Base
     EMPTY_ATTRS: Hash[Symbol, untyped]
 
-    # `attr_accessor :id` — instance-level, lowers at ingest to a
-    # getter/setter pair that the RBS must declare.
+    # The key's CONTRACT, not its slot: each model declares its own
+    # `attr_reader id: Integer` / `String` from its key column and holds
+    # the ivar; the base's arms raise. A base `@id` was the union point
+    # that widened every model's key the moment one had a string key
+    # (roundhouse#90). `Integer` here is Rails' default and what every
+    # transpiled target supports; for an app with a string key, the
+    # ruby-family emit ships this sidecar with `id`, `id=` and
+    # `_adapter_insert` widened to `(Integer | String)`
+    # (`project::widen_key_contract`), so the contract is as wide as
+    # the app's keys and no wider.
     def id: () -> Integer
     def id=: (Integer) -> Integer
 

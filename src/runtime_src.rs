@@ -456,6 +456,10 @@ pub fn parse_library_with_rbs(
             }
             m.signature = Some(sig);
         }
+        // With the signatures on, a raise-bodied reader/writer pair
+        // becomes the attribute it stands in for, plus its zero in
+        // `initialize` (see the fn).
+        reclassify_abstract_attributes(&mut lc.methods);
 
         // Drop abstract sigs from the orphan check. Subclass-overridden
         // contract methods declared `%a{abstract}` in the RBS have no
@@ -1047,6 +1051,119 @@ fn collect_from_stmt(
         return Ok(());
     }
     Ok(())
+}
+
+/// An ABSTRACT ATTRIBUTE: a `def x` / `def x=(v)` pair whose bodies do
+/// nothing but `raise`. The runtime base writes `id` that way — the
+/// contract that every record has a key, with the slot and the typed
+/// accessors on each model rather than on the base, because under
+/// Spinel a base-class ivar is the union of every subclass's writes
+/// (roundhouse#90). The property-typed targets (Kotlin, Swift, C#,
+/// Crystal) render an accessor pair as a property that subclasses
+/// override, and cannot override a base *function* with a subclass
+/// *property* — so here, on the transpile path only (the ruby family
+/// ships the source verbatim), the pair reads as the `attr_accessor`
+/// it stands in for, and `initialize` gains `@x = <zero>` for the
+/// declared scalar type, because those targets' constructors are
+/// where a field is initialised (Crystal makes an unassigned property
+/// nilable; Kotlin wants an initializer). What those targets get is,
+/// byte for byte, the base they had before it stopped holding the
+/// slot: an integer `id` with the unsaved sentinel `0`. Runs after the
+/// RBS signatures are married, so the zero follows the declared type.
+fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
+    fn raise_only(body: &Expr) -> bool {
+        match &*body.node {
+            ExprNode::Raise { .. } => true,
+            // A bare `raise NotImplementedError, "…"` in a runtime body
+            // arrives as the Kernel send, not the `Raise` node.
+            ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise" => true,
+            ExprNode::Seq { exprs } => exprs.len() == 1 && raise_only(&exprs[0]),
+            _ => false,
+        }
+    }
+    let names: Vec<Symbol> = methods
+        .iter()
+        .filter(|m| {
+            m.receiver == MethodReceiver::Instance
+                && m.kind == crate::dialect::AccessorKind::Method
+                && m.params.is_empty()
+                && !m.name.as_str().ends_with('=')
+                && raise_only(&m.body)
+        })
+        .map(|m| m.name.clone())
+        .collect();
+    for name in names {
+        let setter = Symbol::new(&format!("{}=", name.as_str()));
+        let has_setter = methods.iter().any(|m| {
+            m.receiver == MethodReceiver::Instance
+                && m.kind == crate::dialect::AccessorKind::Method
+                && m.name == setter
+                && m.params.len() == 1
+                && raise_only(&m.body)
+        });
+        if !has_setter {
+            continue;
+        }
+        let mut zero: Option<Expr> = None;
+        for m in methods.iter_mut() {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            if m.name == name {
+                let enclosing = m.enclosing_class.as_ref().map(|s| s.as_str().to_string());
+                let sig = m.signature.take();
+                if let Some(Ty::Fn { ret, .. }) = &sig {
+                    zero = zero_literal(ret);
+                }
+                *m = synthesize_reader(name.as_str(), enclosing.as_deref());
+                m.signature = sig;
+            } else if m.name == setter {
+                let enclosing = m.enclosing_class.as_ref().map(|s| s.as_str().to_string());
+                let sig = m.signature.take();
+                *m = synthesize_writer(name.as_str(), enclosing.as_deref());
+                m.signature = sig;
+            }
+        }
+        let Some(zero) = zero else { continue };
+        if let Some(init) = methods
+            .iter_mut()
+            .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize")
+        {
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Ivar { name: name.clone() }, value: zero },
+            );
+            let body = std::mem::replace(
+                &mut init.body,
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+            );
+            init.body = match *body.node {
+                ExprNode::Seq { exprs } => {
+                    let mut all = Vec::with_capacity(exprs.len() + 1);
+                    all.push(assign);
+                    all.extend(exprs);
+                    Expr::new(Span::synthetic(), ExprNode::Seq { exprs: all })
+                }
+                _ => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![assign, body] }),
+            };
+        }
+    }
+}
+
+/// The scalar zero for a declared type — the unsaved sentinel an
+/// abstract attribute's slot holds on the transpile path.
+fn zero_literal(ty: &Ty) -> Option<Expr> {
+    use crate::expr::Literal;
+    let value = match ty {
+        Ty::Int => Literal::Int { value: 0 },
+        Ty::Float => Literal::Float { value: 0.0 },
+        Ty::Bool => Literal::Bool { value: false },
+        Ty::Str => Literal::Str { value: String::new() },
+        _ => return None,
+    };
+    let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value });
+    e.ty = Some(ty.clone());
+    Some(e)
 }
 
 /// Synthesize `def <attr>; @<attr>; end`. Body is a single Ivar

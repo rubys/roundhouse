@@ -207,16 +207,27 @@ undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
 
-### `id` is `0` before save, not `nil`
+### `id` is `0` before save, not `nil` (`""` for a string key)
 
-`ActiveRecord::Base#initialize` seeds `@id = 0`. Rails answers
+Each model's own `initialize` seeds `self.id = attrs[:id] || 0` — `||
+""` when the key column is a string or uuid. Rails answers
 `Article.new.id == nil` (measured against Rails 8.1).
 
 **Why.** A nullable primary key means `Option<i64>` in Rust and `Int?`
 in Kotlin/Swift/C#, with an unwrap at every foreign-key comparison, path
 helper and join. The sentinel keeps ids plain machine integers across
 every target. Foreign keys follow the same convention — the
-synthesized `belongs_to` readers test `@creator_id == 0`.
+synthesized `belongs_to` readers test `@creator_id == 0` (`== ""` for
+a uuid foreign key).
+
+**Where the slot lives.** On the model, never on `ActiveRecord::Base`.
+The base's `id`/`id=` are a raise-bodied contract; under Spinel a
+base-class ivar is the union of every subclass's writes, so a base
+`@id` let one String-keyed model widen every model's key to poly and
+drop each one's `--rbs` pin (roundhouse#90). On the transpile path
+the property-typed targets see the contract as the `attr_accessor`
+plus `@id = 0` it stands in for (`runtime_src::
+reclassify_abstract_attributes`), so their base is unchanged.
 
 **What depends on it.** `ty_of_column_slot` excludes the primary key
 from nullability, so the RBS declares `id: Integer` (non-null) while a

@@ -34,7 +34,14 @@ class BaseTest < Minitest::Test
   # contract markers. Stores a small (id, title) row shape;
   # `attributes` returns the hash the adapter writes.
   class Item < ActiveRecord::Base
-    attr_accessor :title
+    # `id` is the subclass's, as it is on every lowered model: the base
+    # holds no `@id` (see the class comment on `ActiveRecord::Base`).
+    attr_accessor :id, :title
+
+    def initialize(_attrs = {})
+      super()
+      @id = 0
+    end
 
     def self.table_name = "items"
     def self.schema_columns = [:id, :title]
@@ -325,7 +332,12 @@ class BaseTest < Minitest::Test
   #   beyond pure-adapter passthrough) ──────────────────────────
 
   class Timestamped < ActiveRecord::Base
-    attr_accessor :title, :created_at, :updated_at
+    attr_accessor :id, :title, :created_at, :updated_at
+
+    def initialize(_attrs = {})
+      super()
+      @id = 0
+    end
 
     def self.table_name = "stamped"
     def self.schema_columns = [:id, :title, :created_at, :updated_at]

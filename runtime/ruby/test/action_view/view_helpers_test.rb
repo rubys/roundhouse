@@ -18,7 +18,9 @@ require_relative "../test_helper"
 # emit as a top-level class regardless of where the source
 # nested it.)
 class Article < ActiveRecord::Base
-  attr_accessor :title, :body
+  # `id` is the subclass's, as on every lowered model — the base holds
+  # no `@id` (roundhouse#90).
+  attr_accessor :id, :title, :body
 
   # String defaults (not nil) for `title`/`body` so Crystal's
   # strict-typing infers @title/@body as `String`. The nil-handling
@@ -27,8 +29,8 @@ class Article < ActiveRecord::Base
   # omits the `value` attribute for nil OR empty).
   def initialize(id = 0, title = +"", body = +"")
     super()
-    # Assign the inherited `id` field via the ivar directly (`@id`)
-    # rather than the inherited attr_accessor setter (`self.id = id`).
+    # Assign the `id` field via the ivar directly (`@id`) rather than
+    # the attr_accessor setter (`self.id = id`).
     # Both are equivalent here, but the setter form trips spinel's AOT
     # backend: the positional `id` param unifies with the Hash that the
     # inherited `ActiveRecord::Base.create(attrs={})` factory passes to

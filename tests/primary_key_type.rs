@@ -229,8 +229,40 @@ fn a_non_integer_key_is_unsupported_per_target_not_at_ingest() {
     let rust = unsupported(BuildTarget::Rust);
     assert_eq!(rust.len(), 1, "{rust:?}");
     assert!(rust[0].contains("table widgets: key `id` is Uuid"), "{}", rust[0]);
-    assert_eq!(unsupported(BuildTarget::Spinel).len(), 1, "spinel's base.rbs still pins id: Integer");
+    assert_eq!(unsupported(BuildTarget::Spinel), Vec::<String>::new(), "the spinel emit carries the key too");
 }
+
+/// The shipped `base.rbs` declares the key contract over `Integer`;
+/// an app with a string key ships it widened to `(Integer | String)`
+/// for `id`, `id=` and `_adapter_insert`, and an integer-only app
+/// ships it byte-for-byte.
+#[test]
+fn the_spinel_sidecars_key_contract_is_as_wide_as_the_apps_keys() {
+    use roundhouse::project::{target_files, BuildTarget};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog");
+    let sidecar = |app: &roundhouse::App| -> String {
+        let files = target_files(app, &root, BuildTarget::Spinel).expect("spinel files");
+        files
+            .into_iter()
+            .find(|(p, _)| p.ends_with("runtime/active_record/base.rbs"))
+            .map(|(_, c)| c)
+            .expect("base.rbs in the spinel tree")
+    };
+    let (uuid, _) = app(UUID_SCHEMA, MODEL, SHOW);
+    let wide = sidecar(&uuid);
+    assert!(wide.contains("def id: () -> (Integer | String)"), "{wide}");
+    assert!(wide.contains("def id=: (Integer | String) -> (Integer | String)"), "{wide}");
+    assert!(wide.contains("def _adapter_insert: () -> (Integer | String)"), "{wide}");
+    let (int, _) = app(INT_SCHEMA, MODEL, SHOW);
+    let narrow = sidecar(&int);
+    assert!(narrow.contains("def id: () -> Integer\n"), "{narrow}");
+    assert!(narrow.contains("def _adapter_insert: () -> Integer\n"), "{narrow}");
+    assert_eq!(
+        narrow,
+        std::fs::read_to_string("runtime/ruby/active_record/base.rbs").expect("source sidecar"),
+    );
+}
+
 
 #[test]
 fn a_uuid_foreign_key_uses_a_string_sentinel() {
@@ -258,4 +290,33 @@ end
     assert!(body("widget").contains("@widget_id == \"\""), "reader: {}", body("widget"));
     assert!(body("widget=").contains("@widget_id = \"\""), "writer: {}", body("widget="));
     assert!(!body("widget=").contains("= 0"), "writer must not reset a uuid to 0: {}", body("widget="));
+}
+
+/// The base's `id`/`id=` are raise-bodied — a contract, no slot — and
+/// on the transpile path a raise-bodied reader/writer pair reads as the
+/// attribute its subclasses override (`runtime_src::
+/// reclassify_abstract_attributes`), so a property-typed target renders
+/// `var id`, not a function pair no property can override.
+#[test]
+fn the_base_key_contract_transpiles_as_an_attribute() {
+    use roundhouse::dialect::AccessorKind;
+    let rb = std::fs::read_to_string("runtime/ruby/active_record/base.rb").expect("base.rb");
+    let rbs = std::fs::read_to_string("runtime/ruby/active_record/base.rbs").expect("base.rbs");
+    let classes = roundhouse::runtime_src::parse_library_with_rbs(
+        rb.as_bytes(),
+        &rbs,
+        "runtime/ruby/active_record/base.rb",
+    )
+    .expect("parse base");
+    let base = classes.iter().find(|c| c.name.0.as_str() == "ActiveRecord::Base").expect("Base");
+    let kind = |name: &str| base.methods.iter().find(|m| m.name.as_str() == name).map(|m| m.kind);
+    assert_eq!(kind("id"), Some(AccessorKind::AttributeReader));
+    assert_eq!(kind("id="), Some(AccessorKind::AttributeWriter));
+    // …and the source really has no slot: no `@id` outside comments.
+    let slot_reads = rb
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter(|l| l.contains("@id ") || l.contains("@id\n") || l.ends_with("@id") || l.contains("@id="))
+        .count();
+    assert_eq!(slot_reads, 0, "the base must not touch @id");
 }
