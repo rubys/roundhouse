@@ -152,6 +152,28 @@ fn ingest_multi_write(
     Ok(ExprNode::Seq { exprs })
 }
 
+/// The argument a sorbet-runtime assertion evaluates to, when `node`
+/// is one: `T.let(x, Type)` / `T.cast` / `T.must` / `T.must_because` /
+/// `T.unsafe` / `T.bind` / `T.assert_type!` → `x`. `T.nilable(...)` and
+/// friends are type expressions, not values, and are not listed.
+fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let call = node.as_call_node()?;
+    let method = call.name();
+    if !matches!(
+        constant_id_str(&method),
+        "let" | "cast" | "must" | "must_because" | "unsafe" | "bind" | "assert_type!"
+    ) {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let constant = receiver.as_constant_read_node()?;
+    let name = constant.name();
+    if constant_id_str(&name) != "T" {
+        return None;
+    }
+    call.arguments()?.arguments().iter().next()
+}
+
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -162,6 +184,23 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         start: loc.start_offset() as u32,
         end: loc.end_offset() as u32,
     };
+    // sorbet-runtime's value-level assertions evaluate to their first
+    // argument: `T.let(x, String)` IS `x` at run time, and so is
+    // `T.must(x)` / `T.cast(x, T)` / `T.bind(self, T)`. Unwrapping here
+    // keeps the wrapped expression's own type flowing downstream;
+    // without it the site dispatches a method on `T` — a module no gem
+    // in the catalog defines — and every use of the value below it is
+    // untyped from there on.
+    //
+    // Deliberately lossy: the declared type is discarded rather than
+    // read. Turning an annotation into a SEED is a separate question
+    // with its own policy (whether it wins over inference, what a
+    // contradiction means, what `T.untyped` does), and the unwrap has
+    // to be able to land without answering any of it.
+    if let Some(inner) = sorbet_assertion_argument(node) {
+        return ingest_expr_strict(&inner, file);
+    }
+
     let expr_node = match node {
         n if n.as_constant_read_node().is_some() => {
             let c = n.as_constant_read_node().unwrap();

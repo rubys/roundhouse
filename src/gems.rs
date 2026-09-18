@@ -468,6 +468,11 @@ pub fn namespace_of(gem: &str) -> String {
         ("rotp", "ROTP"),
         ("ruby-vips", "Vips"),
         ("rubyzip", "Zip"),
+        // sorbet-runtime's entire app-facing surface is `T` — `T.let`,
+        // `T::Enum`, `T::Struct` — which the name-derived namespace
+        // (`SorbetRuntime`) never matches, so nothing on `T` was
+        // attributed to the gem that owns it.
+        ("sorbet-runtime", "T"),
         ("sqlite3", "SQLite3"),
         ("twilio-ruby", "Twilio"),
         ("web-push", "WebPush"),
@@ -514,6 +519,7 @@ GEM
       activesupport (>= 3.0.0)
     rails (8.0.2)
     redcarpet (3.6.1)
+    sorbet-runtime (0.5.12374)
     will_paginate (4.0.1)
 
 PLATFORMS
@@ -523,6 +529,7 @@ DEPENDENCIES
   pundit
   rails (~> 8.0.2)
   redcarpet
+  sorbet-runtime
   will_paginate!
 
 BUNDLED WITH
@@ -532,7 +539,7 @@ BUNDLED WITH
     #[test]
     fn parses_specs_and_dependencies() {
         let lock = Lockfile::parse(LOCK);
-        assert_eq!(lock.dependencies, ["pundit", "rails", "redcarpet", "will_paginate"]);
+        assert_eq!(lock.dependencies, ["pundit", "rails", "redcarpet", "sorbet-runtime", "will_paginate"]);
         assert_eq!(lock.version_of("rails"), Some("8.0.2"));
         assert_eq!(lock.version_of("nokogiri"), Some("1.18.3-arm64-darwin"));
         assert!(lock.has("actionpack"), "transitive specs are resolved too");
@@ -549,11 +556,15 @@ BUNDLED WITH
                 ("pundit", GemFate::Unknown),
                 ("rails", GemFate::Framework),
                 ("redcarpet", GemFate::Unknown),
+                ("sorbet-runtime", GemFate::Unknown),
                 ("will_paginate", GemFate::Modeled),
             ]
         );
         assert_eq!(census.transitive, 2);
-        assert_eq!(census.summary(), "4 gems: 1 framework, 1 modeled, 2 unknown (pundit, redcarpet)");
+        assert_eq!(
+            census.summary(),
+            "5 gems: 1 framework, 1 modeled, 3 unknown (pundit, redcarpet, sorbet-runtime)"
+        );
     }
 
     #[test]
@@ -566,6 +577,12 @@ BUNDLED WITH
         assert_eq!(namespace_of("rubyzip"), "Zip");
         let census = GemCensus::of(&Lockfile::parse(LOCK));
         assert_eq!(gem_owning_constant(&census, "Redcarpet::Markdown"), Some("redcarpet"));
+        assert_eq!(namespace_of("sorbet-runtime"), "T");
+        assert_eq!(
+            gem_owning_constant(&census, "T::Enum"),
+            Some("sorbet-runtime"),
+            "a dispatch on `T::…` is the gem's, not the app's"
+        );
         assert_eq!(gem_owning_constant(&census, "Rails"), None, "framework gems don't claim");
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
