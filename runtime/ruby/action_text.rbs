@@ -24,15 +24,23 @@ module ActionText
     SALT: String
     PURPOSE: String
     def self.generate: (String model_name, Integer id) -> String
+    def self.uri: (String model_name, Integer id) -> String
     def self.model_of: (String sgid) -> String
     def self.id_of: (String sgid) -> Integer
-    def self.verified_value: (String sgid) -> String
+    def self.verified_uri: (String sgid) -> String
+    def self.unverified_uri: (String sgid) -> String
+    def self.model_in: (String uri) -> String
+    def self.id_in: (String uri) -> Integer
+    def self.gid_head: () -> String
+    def self.gid_in: (String bytes) -> String
+    def self.decode_base64: (String text) -> String
   end
 
   class Attachment
     ATTRIBUTES: Array[String]
     def self.tag_name: () -> String
     def self.from_node: (ActionText::Node node) -> ActionText::Attachment
+    def self.permitted_without_signature: () -> Array[String]
     def initialize: (Hash[String, String] attributes) -> void
     def attributes: () -> Hash[String, String]
     def []: (String name) -> String

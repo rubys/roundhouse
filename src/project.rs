@@ -1986,33 +1986,67 @@ fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
 ///
 /// A SPAN REPLACE between two markers, like `apply_global_id_locate`
 /// above it, and on the same file — both trees require it once.
+///
+/// And, in the same file, `ActionText::Attachment.permitted_without_signature`
+/// — the models whose sgid the app resolves with a FAILED signature
+/// (campfire's rotated-secret tolerance, read by
+/// `ingest::on_load_reopen` from its `from_node` reopen), as a literal
+/// array. Only written when the app has the list; the scaffold's empty
+/// default stands otherwise, and a tampered sgid is missing.
 fn apply_attachable_locate(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: attachable-locate\n";
     const TAIL: &str = "    # <<< generated: attachable-locate\n";
+    const UNSIGNED_HEAD: &str = "    # >>> generated: attachable-unsigned\n";
+    const UNSIGNED_TAIL: &str = "    # <<< generated: attachable-unsigned\n";
 
     let models = crate::lower::attachable::attachable_models(app);
-    if models.is_empty() {
-        return;
-    }
     let mut generated = String::from(HEAD);
-    generated.push_str("    def self.locate(model_name, id)\n      case model_name\n");
-    for model in &models {
-        let name = model.0.as_str();
-        generated.push_str(&format!(
-            "      when \"{name}\"\n        {name}.find_by({{ id: id }})\n"
+    if !models.is_empty() {
+        generated.push_str("    def self.locate(model_name, id)\n      case model_name\n");
+        for model in &models {
+            let name = model.0.as_str();
+            generated.push_str(&format!(
+                "      when \"{name}\"\n        {name}.find_by({{ id: id }})\n"
+            ));
+        }
+        generated.push_str("      end\n    end\n");
+    }
+    generated.push_str(TAIL);
+
+    let mut unsigned = String::from(UNSIGNED_HEAD);
+    if !app.attachable_unsigned_models.is_empty() {
+        let names: Vec<String> = app
+            .attachable_unsigned_models
+            .iter()
+            .map(|m| format!("\"{}\"", m.as_str()))
+            .collect();
+        unsigned.push_str(&format!(
+            "    def self.permitted_without_signature\n      [{}]\n    end\n",
+            names.join(", ")
         ));
     }
-    generated.push_str("      end\n    end\n");
-    generated.push_str(TAIL);
+    unsigned.push_str(UNSIGNED_TAIL);
 
     for (path, content) in files.iter_mut() {
         if !path.ends_with("global_id_locator.rb") {
             continue;
         }
-        let Some(start) = content.find(HEAD) else { continue };
-        let Some(rel_end) = content[start..].find(TAIL) else { continue };
-        let end = start + rel_end + TAIL.len();
-        content.replace_range(start..end, &generated);
+        if !models.is_empty() {
+            if let Some(start) = content.find(HEAD) {
+                if let Some(rel_end) = content[start..].find(TAIL) {
+                    let end = start + rel_end + TAIL.len();
+                    content.replace_range(start..end, &generated);
+                }
+            }
+        }
+        if !app.attachable_unsigned_models.is_empty() {
+            if let Some(start) = content.find(UNSIGNED_HEAD) {
+                if let Some(rel_end) = content[start..].find(UNSIGNED_TAIL) {
+                    let end = start + rel_end + UNSIGNED_TAIL.len();
+                    content.replace_range(start..end, &unsigned);
+                }
+            }
+        }
     }
 }
 

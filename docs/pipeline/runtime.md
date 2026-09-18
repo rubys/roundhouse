@@ -344,24 +344,45 @@ no `const_get`, nothing a crafted name can steer, and an app with no
 attachable model keeps a body that answers nil. A bare `attachables`
 has no such caller and keeps the `[]`.
 
-**The wire format is ours, not Rails'.** `ActionText::SignedGlobalId`
-signs `<Model>/<id>` through the same `MessageVerifier` envelope signed
-cookies and `ActiveRecord::SignedId` use, rather than Rails'
-`gid://<app>/<Model>/<id>` SignedGlobalID. One signing implementation
-instead of three, at the cost that an sgid minted by a real Rails
-process does not verify here and vice versa. Both ends of every round
-trip in a transpiled app are this runtime, and nothing in the corpus
-hands an sgid across that boundary.
+**The wire format is Rails'.** `ActionText::SignedGlobalId` mints
+the bytes `SignedGlobalID` mints: `gid://<app>/<Model>/<id>?expires_in`
+as the `data` of a `_rails` envelope, url-safe base64 WITH padding,
+HMAC-SHA1 under the key derived from the `signed_global_ids` salt —
+each of those a measurement against campfire under Rails 8.2, not a
+reading of the gem, and `runtime/ruby/test/action_text_test.rb` pins
+the literal that process produced so the two ends stay
+interoperable by test (`MessageVerifier.gid_envelope` holds the
+derivation). This is the third envelope the verifier writes, beside
+the cookie's and the signed id's, and the reason it matters is a
+database Rails wrote: every @mention in `action_text_rich_texts.body`
+is one of these sgids, and under the `<Model>/<id>` shape this
+runtime used to sign they all read as missing. (The `?expires_in` is
+globalid serializing `attachable_sgid`'s `expires_in: nil` as a bare
+key; it is inside the signed bytes, so the mint writes it and the
+readers strip any query.)
 
-**What is left.** campfire's `lib/rails_ext/action_text_attachables.rb`
-reopens `Attachment.from_node` to accept a `User` sgid whose signature
-FAILS (so rotating `SECRET_KEY_BASE` does not orphan every @mention),
-by decoding Rails' `_rails.data` envelope by hand. That reopen is an
-`ActiveSupport.on_load` block the ingest does not carry, and it reads
-an envelope this runtime does not mint, so stock Rails semantics answer
-here — a tampered sgid is missing — and the one test asserting the
-tolerant behaviour stays red (`sgid-wire-format` on the conformance
-page). `RichText#to_trix_html` hands back the stored markup instead of
+**The app's tolerance for a rotated secret.** campfire's
+`lib/rails_ext/action_text_attachables.rb` reopens
+`Attachment.from_node`, inside an `ActiveSupport.on_load` block, to
+accept a `User` sgid whose signature FAILS — so rotating
+`SECRET_KEY_BASE` does not orphan every @mention — by decoding the
+`_rails` envelope by hand. The class finder skips blocks, so that
+file was dropped without a word. `ingest::on_load_reopen` now reads
+the shape (the `ActionText::Attachment` reopen, a class-side
+`from_node`, the `"_rails"` key in its body) for the one fact it
+holds, the `%w[ User ]` list, and `project::apply_attachable_locate`
+writes it into `global_id_locator.rb` as
+`Attachment.permitted_without_signature`; the hand-decode — Rails'
+7.1+ `data` string and the Rails-7 Marshal shape behind it — is
+transcribed once, as `SignedGlobalId.unverified_uri`, and
+`Attachment#attachable` consults it only for the listed models and
+only after the signed read has failed. The thirty lines of
+`JSON.parse(…).dig`, `rescue`-chained base64 and a regex over Marshal
+bytes are not carried: the fact is the list, as the mint's fact is
+the model name. Any other declaration inside an `on_load` block is a
+survey line naming the hook and the class, not a silent drop.
+
+`RichText#to_trix_html` hands back the stored markup instead of
 rendering attachment previews into it, so an editor loads the text and
 shows attachment nodes bare.
 

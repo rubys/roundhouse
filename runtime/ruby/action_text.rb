@@ -82,64 +82,162 @@ module ActionText
     end
   end
 
-  # The signed GlobalID an `<action-text-attachment>` node carries.
-  #
-  # Rails signs a `gid://<app>/<Model>/<id>` URI with
-  # `SignedGlobalID`; the wire format here is `<Model>/<id>` through
-  # `MessageVerifier` — the same envelope signed cookies and
-  # `ActiveRecord::SignedId` use, so there is one signing
-  # implementation rather than three.
-  #
-  # DIVERGENCE, stated: an sgid minted by a real Rails process does not
-  # verify here and vice versa, because the payload differs. Both ends
-  # of every round trip in a transpiled app are this file, and nothing
-  # in the corpus hands an sgid across that boundary. Recorded in
-  # docs/pipeline/runtime.md.
+  # The signed GlobalID an `<action-text-attachment>` node carries —
+  # Rails' `SignedGlobalID` at the wire level: a `gid://<app>/<Model>/
+  # <id>` URI in the `data` envelope `GlobalID::Verifier` writes
+  # (`MessageVerifier.gid_envelope` holds the measurement). An sgid a
+  # real Rails process minted verifies here and one minted here
+  # verifies there, which is what a database written by Rails needs:
+  # every @mention in `action_text_rich_texts.body` is one of these,
+  # and under the `<Model>/<id>` shape this file used to sign they
+  # all read as missing.
   #
   # The MODEL NAME is a parameter, not `self.class.name`: the caller is
   # the per-model `attachable_sgid` that `lower::attachable`
   # synthesizes with the name baked in, which is the same rule
   # `ActiveRecord::SignedId` states for the purpose it is handed.
   module SignedGlobalId
-    SALT = "ActionText::Attachable"
+    # globalid's railtie: `GlobalID::Verifier.new(app.key_generator
+    # .generate_key('signed_global_ids'))`.
+    SALT = "signed_global_ids"
+    # `ActionText::Attachable::LOCATOR_NAME`, the `for:` every
+    # attachable sgid is minted and verified under.
     PURPOSE = "attachable"
 
     def self.generate(model_name, id)
-      ActionController::MessageVerifier.envelope(
+      ActionController::MessageVerifier.gid_envelope(
         Rails.application.secret_key_base,
         SALT,
-        ActionController::MessageVerifier.json_string(model_name + "/" + id.to_s),
+        ActionController::MessageVerifier.json_string(uri(model_name, id)),
         PURPOSE,
-        "null",
-        false
+        ""
       )
     end
 
+    # The URI as `attachable_sgid` signs it: `to_sgid(expires_in: nil,
+    # for: LOCATOR_NAME)` hands globalid an `expires_in: nil` param,
+    # and `URI::GID` serializes a nil param as a bare key — so the
+    # signed bytes carry `?expires_in`, and reproducing Rails' sgid
+    # means minting it too. The readers below strip any query.
+    def self.uri(model_name, id)
+      GlobalID.uri(model_name, id) + "?expires_in"
+    end
+
     # The model name `sgid` was minted for, or "" when it does not
-    # verify — a tampered sgid, one signed for another purpose, and a
-    # malformed one are all the same answer, matching what
-    # `MessageVerifier` does everywhere else.
+    # verify — a tampered sgid, one signed for another purpose, one
+    # naming another app, and a malformed one are all the same answer,
+    # matching what `MessageVerifier` does everywhere else.
     def self.model_of(sgid)
-      value = verified_value(sgid)
-      at = value.index("/")
-      return "" if at.nil?
-      value[0, at]
+      model_in(verified_uri(sgid))
     end
 
     # Its record id, or 0 — the same unsaved/absent sentinel
     # `ActiveRecord::SignedId.verified` answers with, and for the same
     # reason.
     def self.id_of(sgid)
-      value = verified_value(sgid)
-      at = value.index("/")
-      return 0 if at.nil?
-      value[at + 1, value.length - at - 1].to_i
+      id_in(verified_uri(sgid))
     end
 
-    def self.verified_value(sgid)
-      ActionController::MessageVerifier.verified(
-        Rails.application.secret_key_base, SALT, sgid, PURPOSE, false
+    # The gid URI `sgid` carries once its signature, purpose and expiry
+    # have been checked, or "".
+    def self.verified_uri(sgid)
+      json = ActionController::MessageVerifier.verified_data_json(
+        Rails.application.secret_key_base, SALT, sgid, PURPOSE, true
       )
+      return "" if json == ""
+      ActionController::MessageVerifier.json_value(json)
+    end
+
+    # The gid URI `sgid` carries WITHOUT checking its signature, or "".
+    # This is the read campfire's `lib/rails_ext/action_text_attachables.rb`
+    # does by hand so that rotating SECRET_KEY_BASE does not orphan
+    # every @mention; `Attachment#attachable` asks it only for the
+    # models that reopen names (`Attachment.permitted_without_signature`),
+    # and only after the signed read has failed. Both envelopes Rails
+    # has minted are read, as that file reads them:
+    #
+    #   * 7.1+: `{"_rails":{"data":"gid://…","pur":…}}` — the URI is
+    #     the `data` string;
+    #   * 7.0:  `{"_rails":{"message":<base64(Marshal)>,…}}` — the URI is
+    #     found inside the marshaled bytes by its `gid://<app>/` prefix,
+    #     since unmarshaling an unverified payload is what nobody does.
+    #
+    # Nothing here is trusted: the URI that comes back is a name, and
+    # `Attachable.locate` is a `find_by` on a model the app listed.
+    def self.unverified_uri(sgid)
+      sep = sgid.index("--")
+      payload = sep.nil? ? sgid : sgid[0, sep]
+      env = decode_base64(payload)
+      return "" if env == ""
+      data = ActionController::MessageVerifier.extract(env, "\"data\":\"")
+      return data if data != ""
+      message = ActionController::MessageVerifier.extract(env, "\"message\":\"")
+      return "" if message == ""
+      gid_in(decode_base64(message))
+    end
+
+    # `Model` in `gid://<app>/<Model>/<id>[?…]`, or "" for a URI that is
+    # not one this app mints — another app's gid is not a name here,
+    # the rule `GlobalID::Locator.parts_from` states.
+    def self.model_in(uri)
+      head = gid_head
+      return "" unless uri.start_with?(head)
+      rest = uri[head.length, uri.length - head.length]
+      slash = rest.index("/")
+      return "" if slash.nil?
+      rest[0, slash]
+    end
+
+    # `id` in the same, or 0. Digits only: a `?expires_in` (or any
+    # query) after them is dropped, and anything that is not an
+    # integer id reads as the absent sentinel.
+    def self.id_in(uri)
+      head = gid_head
+      return 0 unless uri.start_with?(head)
+      rest = uri[head.length, uri.length - head.length]
+      slash = rest.index("/")
+      return 0 if slash.nil?
+      tail = rest[slash + 1, rest.length - slash - 1]
+      q = tail.index("?")
+      tail = tail[0, q] unless q.nil?
+      tail.to_i
+    end
+
+    def self.gid_head
+      "gid://" + Rails.application.global_id_app + "/"
+    end
+
+    # The first `gid://<app>/<Model>/<digits>` inside `bytes` (a Marshal
+    # dump, where the URI is a plain string among binary tokens),
+    # rebuilt from just those parts, or "".
+    def self.gid_in(bytes)
+      head = gid_head
+      at = bytes.index(head)
+      return "" if at.nil?
+      rest = bytes[at + head.length, bytes.length - at - head.length]
+      slash = rest.index("/")
+      return "" if slash.nil?
+      model = rest[0, slash]
+      digits = +""
+      i = slash + 1
+      while i < rest.length
+        c = rest[i]
+        break if c < "0" || c > "9"
+        digits << c.to_s
+        i = i + 1
+      end
+      return "" if digits.empty?
+      head + model + "/" + digits
+    end
+
+    # Either base64 alphabet, padded or not, and "" rather than a
+    # raise for text that is neither — the same tolerance campfire's
+    # `decode_base64` (strict, then url-safe) gives, in one call:
+    # `urlsafe_decode64` maps `-`/`_` and leaves `+`/`/` alone.
+    def self.decode_base64(text)
+      Base64.urlsafe_decode64(text)
+    rescue ArgumentError
+      ""
     end
   end
 
@@ -194,23 +292,50 @@ module ActionText
     # node, a signature that does not verify (tampered, or minted under
     # another secret), a model no locator knows, a row since deleted.
     #
-    # STATED DIVERGENCE: campfire's `lib/rails_ext/action_text_attachables.rb`
-    # reopens this method to accept an sgid whose signature fails for
-    # `User` alone (so rotating SECRET_KEY_BASE does not orphan every
-    # @mention) by decoding Rails' `_rails.data` envelope by hand.
-    # That envelope is not the one `SignedGlobalId` mints here (see
-    # its note), so the reopen is not carried and a tampered sgid is
-    # missing here as it is in stock Rails.
+    # WITH ONE TOLERANCE, which is the app's, not this runtime's:
+    # campfire's `lib/rails_ext/action_text_attachables.rb` reopens
+    # `from_node` to accept a `User` sgid whose signature FAILS, so
+    # rotating SECRET_KEY_BASE does not orphan every @mention. The
+    # ingest reads that reopen for the list it holds
+    # (`ATTACHABLES_PERMITTED_WITH_INVALID_SIGNATURES = %w[ User ]`)
+    # and `permitted_without_signature` below is that list; the
+    # decoding the reopen does by hand is `SignedGlobalId.unverified_uri`.
+    # An app without the reopen keeps the empty default, and a tampered
+    # sgid is missing here as it is in stock Rails.
     def attachable
       sgid = self["sgid"]
       record = nil
       if sgid != ""
         model_name = ActionText::SignedGlobalId.model_of(sgid)
+        id = 0
         if model_name != ""
-          record = ActionText::Attachable.locate(model_name, ActionText::SignedGlobalId.id_of(sgid))
+          id = ActionText::SignedGlobalId.id_of(sgid)
+        else
+          uri = ActionText::SignedGlobalId.unverified_uri(sgid)
+          model_name = ActionText::SignedGlobalId.model_in(uri)
+          if Attachment.permitted_without_signature.include?(model_name)
+            id = ActionText::SignedGlobalId.id_in(uri)
+          else
+            model_name = ""
+          end
+        end
+        if model_name != ""
+          record = ActionText::Attachable.locate(model_name, id)
         end
       end
       record.nil? ? ActionText::Attachables::MissingAttachable.new(sgid) : record
+    end
+
+    # Model names whose sgid resolves even when its signature does not
+    # verify — EMPTY here, and REDEFINED per app the way
+    # `Attachable.locate` is: when the app's `lib/` reopens
+    # `Attachment.from_node` with such a list, `project::
+    # apply_attachable_locate` writes it into the emitted
+    # `global_id_locator.rb` as a literal, and the later definition
+    # wins on both boots. A model name, not a class: `Attachable.locate`
+    # is what turns it into a finder.
+    def self.permitted_without_signature
+      []
     end
 
     def sgid

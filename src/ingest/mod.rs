@@ -26,6 +26,7 @@ pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
 pub mod model;
+pub mod on_load_reopen;
 pub mod prism;
 pub mod rate_limit;
 pub mod roda_app;

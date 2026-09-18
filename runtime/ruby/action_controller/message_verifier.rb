@@ -20,10 +20,14 @@
 #   signed id      {"_rails":{"data":<json>,"pur":"<model>/<purpose>"}}
 #                  {"_rails":{"data":<json>,"exp":"<iso8601_ms>",
 #                             "pur":"<model>/<purpose>"}}
+#   signed gid     {"_rails":{"data":"gid://<app>/<Model>/<id>?expires_in",
+#                             "pur":"attachable"}}
 #
 # and they are base64'd differently too: a cookie is strict base64, a
 # signed id is URL-safe and unpadded (the verifier is `url_safe` because
-# the token goes in a path segment).
+# the token goes in a path segment), a signed GlobalID is URL-safe and
+# PADDED (`GlobalID::Verifier` overrides `encode` with the default
+# `urlsafe_encode64`) — see `gid_envelope` for the measurement.
 #
 # The cookie jar hands its verifier an already-serialized String, so
 # `Messages::Metadata` cannot nest the metadata inside the payload and
@@ -179,9 +183,7 @@ module ActionController
     # picked the wrong one would mint a token that verifies here and
     # nowhere else — which is exactly the bug this pair replaces.
     def self.data_envelope(secret, salt, data_json, purpose, exp, sha1)
-      env = "{\"_rails\":{\"data\":" + data_json
-      env = env + ",\"exp\":" + exp if exp != ""
-      env = env + ",\"pur\":\"" + purpose + "\"}}"
+      env = data_envelope_json(data_json, purpose, exp)
       # URL-SAFE AND UNPADDED, which is the other thing a signed id does
       # differently: `ActiveRecord::SignedId`'s verifier is `url_safe`,
       # because the token goes in a path segment (campfire's
@@ -192,8 +194,52 @@ module ActionController
       payload + "--" + digest_for(secret, salt, payload, sha1)
     end
 
+    # The SIGNED-GLOBALID form: the `data` envelope again, under the
+    # THIRD base64 and the OTHER digest. `GlobalID::Verifier` (globalid
+    # 1.4.0, `verifier.rb`) is `ActiveSupport::MessageVerifier` with
+    # `encode`/`decode` overridden to `Base64.urlsafe_encode64` — whose
+    # default KEEPS the padding the signed-id verifier strips — and the
+    # railtie constructs it with no `digest:`, so it signs with
+    # MessageVerifier's default SHA1 rather than the SHA256 a signed id
+    # passes explicitly. Salt is the railtie's `signed_global_ids`,
+    # through the same 1_000-iteration generator as everything else.
+    #
+    # MEASURED against campfire under Rails 8.2, `User.new(id: 7)
+    # .attachable_sgid` with `SECRET_KEY_BASE=test-secret`:
+    #
+    #   eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvNz9leHBpcmVzX2luIiwicHVyIjoiYXR0YWNoYWJsZSJ9fQ==--8c250383b1669d154e58c89f7b60a493c02aa10f
+    #   {"_rails":{"data":"gid://campfire/User/7?expires_in","pur":"attachable"}}
+    #
+    # reproduced bit for bit at PBKDF2(secret, "signed_global_ids",
+    # 1_000, 64) + HMAC-SHA1 over the PADDED url-safe payload, and not
+    # under SHA256. `runtime/ruby/test/action_text_test.rb` pins that
+    # literal, so the two ends stay interoperable by test rather than
+    # by reading. The `?expires_in` inside the gid is globalid's own
+    # doing (`attachable_sgid` passes `expires_in: nil` and the nil
+    # param is serialized as a bare key); it is part of the signed
+    # bytes, so the caller mints it and the reader ignores it.
+    def self.gid_envelope(secret, salt, data_json, purpose, exp)
+      env = data_envelope_json(data_json, purpose, exp)
+      payload = Base64.urlsafe_encode64(env)
+      payload + "--" + digest_for(secret, salt, payload, true)
+    end
+
+    # `{"_rails":{"data":<json>[,"exp":<json>],"pur":"<purpose>"}}` —
+    # the `Messages::Metadata` envelope a serializer that can nest
+    # writes, shared by the two url-safe forms above. `exp` is the JSON
+    # for the slot, or "" to omit the key entirely (an unexpiring signed
+    # id or sgid has NO `exp`, where a cookie has `"exp":null`).
+    def self.data_envelope_json(data_json, purpose, exp)
+      env = "{\"_rails\":{\"data\":" + data_json
+      env = env + ",\"exp\":" + exp if exp != ""
+      env + ",\"pur\":\"" + purpose + "\"}}"
+    end
+
     # The `data` a signed id carries, as JSON text, or "" for every
     # rejection — the mirror of `verified_json` for the other envelope.
+    # Also the reader for `gid_envelope` (with `sha1` true): the decoder
+    # skips padding, so the padded and unpadded url-safe forms read the
+    # same way, and the digest is over the payload text as sent.
     def self.verified_data_json(secret, salt, signed, purpose, sha1)
       sep = signed.index("--")
       return "" if sep.nil?

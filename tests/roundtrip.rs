@@ -136,6 +136,7 @@ fn tiny_blog_round_trips() {
         helper_method_index: std::collections::HashMap::new(),
         view_visible_controller_methods: std::collections::BTreeSet::new(),
         global_id_locate_models: std::collections::BTreeSet::new(),
+        attachable_unsigned_models: Vec::new(),
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),

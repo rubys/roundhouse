@@ -139,6 +139,18 @@ pub struct App {
     /// where the finder is spelled as a literal constant.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub global_id_locate_models: BTreeSet<Symbol>,
+    /// Model names whose attachment sgid the app resolves even when
+    /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
+    /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
+    /// in its `lib/rails_ext/`, so that rotating `SECRET_KEY_BASE`
+    /// does not orphan every @mention. In source order, as the app
+    /// wrote them. `project::apply_attachable_locate` writes the list
+    /// into the emitted `global_id_locator.rb` as
+    /// `ActionText::Attachment.permitted_without_signature`; empty for
+    /// every app without the reopen, where a tampered sgid is missing
+    /// as it is in stock Rails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachable_unsigned_models: Vec<Symbol>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -565,6 +577,7 @@ impl App {
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),
             global_id_locate_models: BTreeSet::new(),
+            attachable_unsigned_models: Vec::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

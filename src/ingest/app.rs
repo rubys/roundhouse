@@ -337,6 +337,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     }
                 }
             }
+            // A reopen deferred behind `ActiveSupport.on_load` is
+            // invisible to the class finder above (it skips blocks);
+            // this reads the one shape that is carried and says so
+            // for the rest.
+            super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
         }
     }
 

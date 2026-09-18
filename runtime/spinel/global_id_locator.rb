@@ -143,4 +143,23 @@ module ActionText
     end
     # <<< generated: attachable-locate
   end
+
+  # `ActionText::Attachment.permitted_without_signature` — the models
+  # whose sgid resolves even when its signature FAILS. campfire's
+  # `lib/rails_ext/action_text_attachables.rb` reopens `from_node` so
+  # that rotating SECRET_KEY_BASE does not orphan every @mention, for
+  # `%w[ User ]` alone; `ingest::on_load_reopen` reads that list off
+  # the reopen and `project::apply_attachable_locate` writes it here
+  # as a literal. The decode the reopen did by hand is
+  # `SignedGlobalId.unverified_uri` in the shared runtime, and
+  # `Attachment#attachable` consults this list only after the signed
+  # read has failed. Empty for an app without the reopen, where a
+  # tampered sgid is missing as it is in stock Rails.
+  class Attachment
+    # >>> generated: attachable-unsigned
+    def self.permitted_without_signature
+      []
+    end
+    # <<< generated: attachable-unsigned
+  end
 end

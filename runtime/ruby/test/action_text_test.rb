@@ -395,4 +395,123 @@ class ActionTextFragmentTest < Minitest::Test
       assert_kind_of ActionText::Attachables::MissingAttachable, attachable
     end
   end
+
+  # ── The wire format is Rails' ───────────────────────────────────
+  #
+  # `User.new(id: 7).attachable_sgid` under campfire on Rails 8.2 with
+  # `SECRET_KEY_BASE=test-secret`, copied from that process. Minting
+  # the same bytes and reading them back is what makes an sgid a real
+  # Rails wrote — every @mention in an existing database — resolve
+  # here, and the literal is the discriminator: a change to the salt,
+  # the digest, the padding or the `?expires_in` fails it.
+  RAILS_MINTED_SGID = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvNz9leHBpcmVzX2luIiwicHVyIjoiYXR0YWNoYWJsZSJ9fQ==--8c250383b1669d154e58c89f7b60a493c02aa10f"
+
+  # The app name is half the gid, and the shared default is "app";
+  # the emitted tree overrides it on the Application reopen from
+  # config/application.rb, which is what this stands in for
+  # (`Rails.application` is a fresh instance per call, so the class,
+  # not one instance, carries the override).
+  def as_campfire
+    Rails::Application.define_method(:global_id_app) { "campfire" }
+    yield
+  ensure
+    Rails::Application.define_method(:global_id_app) { "app" }
+  end
+
+  def test_generate_mints_the_bytes_rails_mints
+    as_campfire do
+      Rails.secret_key_base = "test-secret"
+      assert_equal RAILS_MINTED_SGID, ActionText::SignedGlobalId.generate("User", 7)
+    end
+  ensure
+    Rails.secret_key_base = nil
+  end
+
+  def test_an_sgid_rails_minted_verifies_here
+    as_campfire do
+      with_locator do
+        assert_equal "User", ActionText::SignedGlobalId.model_of(RAILS_MINTED_SGID)
+        assert_equal 7, ActionText::SignedGlobalId.id_of(RAILS_MINTED_SGID)
+        attachable = attachment_for(%(<action-text-attachment sgid="#{RAILS_MINTED_SGID}"></action-text-attachment>)).attachable
+        assert_equal 7, attachable.id
+      end
+    end
+  end
+
+  def test_an_sgid_under_another_secret_does_not_verify
+    as_campfire do
+      with_locator do
+        Rails.secret_key_base = "rotated"
+        assert_equal "", ActionText::SignedGlobalId.model_of(RAILS_MINTED_SGID)
+        assert_equal 0, ActionText::SignedGlobalId.id_of(RAILS_MINTED_SGID)
+      end
+    end
+  end
+
+  # ── The app's tolerance for a rotated secret ────────────────────
+  #
+  # `Attachment.permitted_without_signature` is REDEFINED per app from
+  # the reopen campfire's lib/ carries (see action_text.rb); the
+  # default is empty, and this stands in for the generated one.
+  def permitting(models)
+    ActionText::Attachment.define_singleton_method(:permitted_without_signature) { models }
+    yield
+  ensure
+    ActionText::Attachment.define_singleton_method(:permitted_without_signature) { [] }
+  end
+
+  def test_unverified_uri_reads_the_data_envelope
+    as_campfire do
+      message, _signature = RAILS_MINTED_SGID.split("--")
+      assert_equal "gid://campfire/User/7?expires_in", ActionText::SignedGlobalId.unverified_uri(message + "--invalid")
+      assert_equal "gid://campfire/User/7?expires_in", ActionText::SignedGlobalId.unverified_uri(message)
+    end
+  end
+
+  def test_unverified_uri_reads_the_marshal_envelope
+    as_campfire do
+      # Rails 7's shape: the gid is a String inside a Marshal dump,
+      # base64'd into `message`. The bytes around it are Marshal's
+      # own (`\x04\b` header, `I"` string, a length byte, the
+      # encoding ivar) — what an unverified read must not unmarshal.
+      marshaled = "\x04\bI\"\x1Agid://campfire/User/7\x06:\x06ET"
+      env = "{\"_rails\":{\"message\":\"" + Base64.strict_encode64(marshaled) + "\",\"exp\":null,\"pur\":\"attachable\"}}"
+      sgid = Base64.strict_encode64(env) + "--invalid"
+      assert_equal "gid://campfire/User/7", ActionText::SignedGlobalId.unverified_uri(sgid)
+    end
+  end
+
+  def test_unverified_uri_is_empty_for_noise
+    as_campfire do
+      assert_equal "", ActionText::SignedGlobalId.unverified_uri("")
+      assert_equal "", ActionText::SignedGlobalId.unverified_uri("not base64 at all--x")
+      assert_equal "", ActionText::SignedGlobalId.unverified_uri(Base64.strict_encode64("{}") + "--x")
+      other = "{\"_rails\":{\"data\":\"gid://elsewhere/User/7\",\"pur\":\"attachable\"}}"
+      assert_equal "", ActionText::SignedGlobalId.model_in(ActionText::SignedGlobalId.unverified_uri(Base64.urlsafe_encode64(other)))
+    end
+  end
+
+  def test_a_permitted_model_resolves_with_a_bad_signature
+    as_campfire do
+      with_locator do
+        permitting(["User"]) do
+          message, _signature = RAILS_MINTED_SGID.split("--")
+          attachable = attachment_for(%(<action-text-attachment sgid="#{message}--invalid"></action-text-attachment>)).attachable
+          assert_equal 7, attachable.id
+        end
+      end
+    end
+  end
+
+  def test_an_unlisted_model_is_missing_with_a_bad_signature
+    as_campfire do
+      with_locator do
+        permitting(["Room"]) do
+          message, _signature = RAILS_MINTED_SGID.split("--")
+          attachable = attachment_for(%(<action-text-attachment sgid="#{message}--invalid"></action-text-attachment>)).attachable
+          assert_kind_of ActionText::Attachables::MissingAttachable, attachable
+        end
+      end
+    end
+  end
 end
