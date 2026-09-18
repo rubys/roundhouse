@@ -66,7 +66,8 @@ every target on the list passes it on every push. →
 
 **Compile.** The Ruby shape compiled ahead of time to one native
 binary by [Spinel](https://github.com/matz/spinel), Matz's AOT Ruby
-compiler: one executable, one SQLite file, no interpreter. Among the
+compiler: one executable, no interpreter, a SQLite file beside it by
+default — the database is a build flag like the target. Among the
 compiled targets it has the closest behavior to Rails by a distance,
 and will for the foreseeable future, because it runs the framework
 runtime itself rather than a translation of it. Basecamp's Campfire

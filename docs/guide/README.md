@@ -37,8 +37,8 @@ or Ruby, with its own tests and no Rails at runtime.
 ## Compile
 
 The Ruby-shape emit compiled ahead of time to a native binary by
-[Spinel](https://github.com/matz/spinel). One executable, one SQLite
-file, no interpreter.
+[Spinel](https://github.com/matz/spinel). One executable, no
+interpreter, a SQLite file beside it by default.
 
 - [`spinel.md`](spinel.md) — building, running, tuning and deploying
   the binary.

@@ -1,7 +1,8 @@
 # Compile — Spinel
 
 The compile door produces one native executable from a Rails app: no
-interpreter, no gems, no Rails, one SQLite file beside it. Roundhouse
+interpreter, no gems, no Rails, and by default one SQLite file beside
+it — the database, like the target, is a build flag. Roundhouse
 emits the Ruby shape of the app — the same shape the `ruby` target
 runs on CRuby — as a [`spin`](https://github.com/matz/spinel/blob/master/docs/spin.md)
 project, and [Spinel](https://github.com/matz/spinel), Matz's
