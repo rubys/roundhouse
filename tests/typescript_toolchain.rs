@@ -159,7 +159,7 @@ fn dump_transpiled_blog_tsc_errors() {
 #[test]
 #[ignore]
 fn real_blog_tsc_passes() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-tsc");
     generate_project(fixture, &scratch);
     assert_tsc_passes("real-blog", &scratch);
@@ -175,7 +175,7 @@ fn real_blog_tsc_passes() {
 fn real_blog_libsql_tsc_passes() {
     use roundhouse::profile::DeploymentProfile;
 
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-libsql-tsc");
     generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
     assert_tsc_passes("real-blog (libsql)", &scratch);
@@ -229,7 +229,7 @@ fn real_blog_node_test_passes() {
     // tsx (for TS transpile) against the emitted spec files, assert
     // zero failures. Mirrors the Rust/Crystal Phase 2 bar —
     // Phase-3-dependent tests are marked `test.skip(...)`.
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-node");
     generate_project(fixture, &scratch);
     assert_node_test_passes("real-blog", &scratch);
@@ -250,7 +250,7 @@ fn real_blog_libsql_node_test_passes() {
     // libsql adapter's actual SQL execution.
     use roundhouse::profile::DeploymentProfile;
 
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-libsql-node");
     generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
     assert_node_test_passes("real-blog (libsql)", &scratch);

@@ -35,7 +35,7 @@ fn lowered_models(app: &roundhouse::App) -> Vec<roundhouse::dialect::LibraryClas
 
 #[test]
 fn lowered_model_bodies_carry_no_synthetic_spans() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let lcs = lowered_models(&app);
     assert!(!lcs.is_empty(), "fixture should have models");
     let mut saw_row_class = false;
@@ -98,7 +98,7 @@ fn lowered_model_bodies_carry_no_synthetic_spans() {
 /// attributes to the DSL line it came from, not the whole class.
 #[test]
 fn synthesized_methods_attribute_to_their_declarations() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let lcs = lowered_models(&app);
     let article = lcs
         .iter()

@@ -1025,7 +1025,7 @@ fn articles_index_view_ivar_resolves_from_controller_action() {
     // which types as Array<Article>. The corresponding view `articles/index` should see
     // @articles pre-typed when its own body is analyzed, so `@articles.any?` in the ERB
     // dispatches against an Array — not Ty::Var(0).
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     Analyzer::new(&app).analyze(&mut app);
 
     let view = app
@@ -1205,7 +1205,7 @@ fn article_partial_receives_article_local_from_collection_render() {
     // articles/index.html.erb contains `<%= render @articles %>`. With
     // @articles: Array<Article>, collection rendering dispatches to
     // articles/_article.html.erb binding local `article: Article`.
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
 
     let partial = app
@@ -1235,7 +1235,7 @@ fn form_partial_receives_article_local_from_named_render() {
     // articles/new.html.erb contains `<%= render "form", article: @article %>`.
     // @article: Article in the new action, so local `article: Article` should
     // flow into articles/_form.html.erb.
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
 
     let partial = app
@@ -1269,7 +1269,7 @@ fn form_partial_receives_article_local_from_named_render() {
 fn new_view_sees_article_from_new_action() {
     // ArticlesController#new binds `@article = Article.new`, type Article.
     // articles/new.html.erb references @article (in `render "form", article: @article`).
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     Analyzer::new(&app).analyze(&mut app);
 
     let view = app
@@ -1332,7 +1332,7 @@ fn before_action_seeds_dependent_action_ctx() {
     // action runs. Verify that the `update` action (which reads @article
     // via `@article.update(article_params)`) sees @article typed as
     // Article — not Ty::Var(0) — even though its body doesn't assign it.
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
 
     let ctrl = app
@@ -1364,7 +1364,7 @@ fn before_action_propagates_through_to_view() {
     // is empty — @article only exists in that action because of
     // `before_action :set_article`. The action→view ivar channel should
     // therefore deliver @article: Article into the view.
-    let mut app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
 
     let view = app

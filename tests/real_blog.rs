@@ -12,7 +12,7 @@ use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::ingest::ingest_app;
 
 fn fixture_path() -> &'static Path {
-    Path::new("fixtures/real-blog")
+    roundhouse::fixtures::real_blog()
 }
 
 #[test]

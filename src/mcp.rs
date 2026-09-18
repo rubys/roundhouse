@@ -670,7 +670,7 @@ mod tests {
     use std::path::Path;
 
     fn server() -> Server {
-        Server { root: PathBuf::from("fixtures/real-blog") }
+        Server { root: crate::fixtures::real_blog().to_path_buf() }
     }
 
     fn call(server: &Server, name: &str, args: Value) -> Value {
@@ -730,7 +730,7 @@ mod tests {
     fn traceroute_attributes_a_helper_n_plus_one_to_the_action() {
         let dir = std::env::temp_dir().join(format!("rh-mcp-helper-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        copy_dir(crate::fixtures::real_blog(), &dir);
         let ctl = dir.join("app/controllers/articles_controller.rb");
         let src = std::fs::read_to_string(&ctl).unwrap();
         let src = src
@@ -786,7 +786,7 @@ mod tests {
     fn unknown_gem_surface_is_attributed_not_accused() {
         let dir = std::env::temp_dir().join(format!("rh-mcp-gems-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        copy_dir(crate::fixtures::real_blog(), &dir);
         let lock = dir.join("Gemfile.lock");
         let text = std::fs::read_to_string(Path::new("fixtures/real-blog/Gemfile.lock")).unwrap();
         let text = text
@@ -890,7 +890,7 @@ mod tests {
     fn diagnostics_filters_by_severity_code_and_limit() {
         let dir = std::env::temp_dir().join(format!("rh-mcp-filters-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        copy_dir(crate::fixtures::real_blog(), &dir);
         let index = dir.join("app/views/articles/index.html.erb");
         let mut view = std::fs::read_to_string(&index).unwrap();
         view.push_str("<% Article.all.each do |article| %><%= article.comments.size %><% end %>\n");
@@ -1005,7 +1005,7 @@ mod tests {
         // stays empty, so the line disappears.
         let dir = std::env::temp_dir().join(format!("rh-mcp-slim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        copy_dir(Path::new("fixtures/real-blog"), &dir);
+        copy_dir(crate::fixtures::real_blog(), &dir);
         std::fs::write(dir.join("app/views/articles/extra.html.slim"), "h1 Extra\n").unwrap();
         let text = text_of(&call(&Server { root: dir.clone() }, "diagnostics", json!({})));
         let _ = std::fs::remove_dir_all(&dir);

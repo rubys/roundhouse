@@ -226,7 +226,7 @@ fn broadcasts_to_emits_turbo_callback_registrations() {
     // We ingest the real-blog fixture directly so the IR shape
     // matches the actual Rails source rather than a hand-built model.
     let mut app = roundhouse::ingest::ingest_app(
-        std::path::Path::new("fixtures/real-blog"),
+        roundhouse::fixtures::real_blog(),
     )
     .expect("ingest real-blog");
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
@@ -259,7 +259,7 @@ fn broadcasts_to_rewrites_lambda_param_to_record() {
     // template; in the Juntos callback it's named `record`. Emit must
     // rewrite the reference.
     let mut app = roundhouse::ingest::ingest_app(
-        std::path::Path::new("fixtures/real-blog"),
+        roundhouse::fixtures::real_blog(),
     )
     .expect("ingest real-blog");
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
@@ -811,7 +811,7 @@ fn routes_emit_router_method_calls() {
     // Use the real-blog fixture so we exercise `root` +
     // `resources` + nested resources — tiny-blog is all explicit verbs.
     let mut app = roundhouse::ingest::ingest_app(
-        std::path::Path::new("fixtures/real-blog"),
+        roundhouse::fixtures::real_blog(),
     )
     .expect("ingest real-blog");
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);

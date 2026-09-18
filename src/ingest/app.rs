@@ -36,7 +36,20 @@ use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
 /// Ingest an entire Rails app directory from disk.
+///
+/// A root that is not a directory is an error, not an empty app: the
+/// walker reads whatever `read_dir` yields, and for a missing path that
+/// is nothing — every model, controller and view "absent" with no
+/// diagnostic to say why. The `check` binary guards its own argument;
+/// this guard covers every other caller (the LSP and MCP servers, the
+/// test suites against a fixture that has not been generated).
 pub fn ingest_app(dir: &Path) -> IngestResult<App> {
+    if !dir.is_dir() {
+        return Err(IngestError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is not a directory", dir.display()),
+        )));
+    }
     ingest_app_with_vfs(&FsVfs::new(), dir)
 }
 

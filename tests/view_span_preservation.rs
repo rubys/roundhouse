@@ -19,7 +19,7 @@ fn for_each_expr(e: &mut Expr, f: &mut impl FnMut(&Expr)) {
 
 #[test]
 fn lowered_view_bodies_carry_no_synthetic_spans() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     assert!(!app.views.is_empty(), "fixture should have views");
     let mut saw_json = false;
     for view in &app.views {
@@ -88,7 +88,7 @@ fn lowered_view_bodies_carry_no_synthetic_spans() {
 /// table translates them with no drift.
 #[test]
 fn view_spans_index_the_raw_template_exactly() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     // Every registered .erb source is the on-disk template.
     let mut erb_sources = 0;
     for s in &app.sources {
@@ -135,7 +135,7 @@ fn view_spans_index_the_raw_template_exactly() {
 /// line/col precision (and the future source-map emit) would be gone.
 #[test]
 fn lowered_index_view_spans_are_statement_grain() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let view = app
         .views
         .iter()

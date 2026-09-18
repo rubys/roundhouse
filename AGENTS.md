@@ -71,8 +71,24 @@ defect even if the build is green.
 
 ## Workflow
 
-- **Commit to `main`. No feature branches.** Stage only files you changed.
-  End commit messages with the standard `Co-Authored-By` trailer.
+- **Committers commit to `main`. No feature branches.** Stage only files
+  you changed. End commit messages with the standard `Co-Authored-By`
+  trailer.
+- **Outside contributors: fork, and open a pull request against `main`.**
+  CI runs the full matrix on a PR — every toolchain lane, the DOM compare
+  against live Rails, the Spinel lanes — so you do not need every
+  toolchain locally; CI is the oracle for the lanes you cannot run.
+  Before opening one: `bin/rh fixture` (the test fixtures are generated,
+  not checked in — see below), `cargo test --lib` plus the targeted
+  integration test for what you touched, and a test that pins the fix.
+  A reported repro with a patch in the issue is welcome; the same patch
+  as a PR is better, because the lanes you cannot run will run.
+- **Fixtures are generated.** `fixtures/real-blog` and `fixtures/store`
+  are `.gitignore`d; a fresh clone has neither, and the tests that read
+  them fail until `bin/rh fixture` (~60s, needs Ruby and
+  `gem install rails`) and `scripts/create-store` have run. Tests reach
+  them through `roundhouse::fixtures::real_blog()` / `store()`, which
+  say so — with the command — when one is absent.
 - **Test cycle:** `cargo build --tests` + the targeted test for what you
   touched + a round-trip check (`roundhouse-ast --round-trip`). Use
   `cargo test --all-targets` at milestones. Real-toolchain tests are

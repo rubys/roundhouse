@@ -83,7 +83,7 @@ fn assert_kotlin_compiles(fixture: &str, scratch: &Path) {
 #[test]
 #[ignore]
 fn real_blog_kotlin_compiles() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
     assert_kotlin_compiles("real-blog", &scratch);
@@ -100,7 +100,7 @@ fn real_blog_kotlin_compiles() {
 #[test]
 #[ignore]
 fn real_blog_kotlin_tests_pass() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
 

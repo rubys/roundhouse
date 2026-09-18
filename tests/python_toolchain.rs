@@ -76,7 +76,7 @@ fn tiny_blog_python_compile_passes() {
 #[test]
 #[ignore]
 fn real_blog_python_compile_passes() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
     assert_python_compiles("real-blog", &scratch);
@@ -88,7 +88,7 @@ fn real_blog_python_unittest_passes() {
     // Phase 2 forcing function: emit real-blog, run `python -m
     // unittest discover tests`, assert zero failures. Phase-3 tests
     // are @unittest.skip'd.
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
 

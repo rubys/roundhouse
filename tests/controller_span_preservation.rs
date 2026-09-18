@@ -37,7 +37,7 @@ fn lowered_controllers(app: &roundhouse::App) -> Vec<LibraryClass> {
 
 #[test]
 fn lowered_controller_bodies_carry_no_synthetic_spans() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let lcs = lowered_controllers(&app);
     assert!(!lcs.is_empty(), "fixture should have controllers");
     let mut saw_params_class = false;

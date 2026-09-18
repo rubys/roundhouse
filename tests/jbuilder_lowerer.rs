@@ -4,7 +4,6 @@
 //! checkpoint — if the IR shape regresses, this fires before the
 //! external compare-tool catches it.
 
-use std::path::Path;
 
 use roundhouse::dialect::LibraryClass;
 use roundhouse::emit::ruby::emit_method;
@@ -12,7 +11,7 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::lower::lower_jbuilder_to_library_classes;
 
 fn lowered_articles() -> Vec<LibraryClass> {
-    let app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
     lower_jbuilder_to_library_classes(&app.views, &app, Vec::new())
 }
 

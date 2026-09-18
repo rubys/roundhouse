@@ -122,7 +122,7 @@ fn generate_project(fixture: &Path, scratch: &Path) {
 #[test]
 #[ignore]
 fn real_blog_spinel_tests_pass() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
 

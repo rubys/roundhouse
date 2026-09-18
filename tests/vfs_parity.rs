@@ -30,7 +30,7 @@ fn load_tree_from_disk(root: &Path) -> HashMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn fs_and_map_vfs_emit_identical_typescript() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
 
     let mut fs_app = ingest_app(fixture).expect("fs ingest");
     Analyzer::new(&fs_app).analyze(&mut fs_app);

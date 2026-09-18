@@ -2,13 +2,12 @@
 //! during whole-app ingest with `format == "json"` and the expected
 //! names.
 
-use std::path::Path;
 
 use roundhouse::ingest::ingest_app;
 
 #[test]
 fn real_blog_jbuilder_views_ingested() {
-    let app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
 
     // `pwa/manifest.json.erb` is a json-format view too, ingested for
     // the analyzer only; the jbuilder templates are the ones lowered.

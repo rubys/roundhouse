@@ -36,7 +36,7 @@ fn the_locator_is_a_case_over_the_attachable_models() {
         ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
     ]);
     let _ = roundhouse::session::analyze_and_lower(&mut app);
-    let files = roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let files = roundhouse::project::spinel_base_files(&app, roundhouse::fixtures::real_blog()).expect("spinel tree");
     let locator = files
         .iter()
         .find(|(p, _)| p.ends_with("global_id_locator.rb"))
@@ -140,7 +140,7 @@ end
 "#;
 
 fn locator_of(app: &roundhouse::App) -> String {
-    let files = roundhouse::project::spinel_base_files(app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let files = roundhouse::project::spinel_base_files(app, roundhouse::fixtures::real_blog()).expect("spinel tree");
     files
         .iter()
         .find(|(p, _)| p.ends_with("global_id_locator.rb"))

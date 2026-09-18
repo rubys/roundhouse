@@ -120,7 +120,7 @@ fn a_resolvable_mixin_reaches_the_end_of_boot() {
     use roundhouse::ident::Symbol;
     use roundhouse::project::{target_files, BuildTarget};
 
-    let fixture = PathBuf::from("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
     let mut app = roundhouse::ingest::ingest_app(&fixture).expect("ingest real-blog");
     roundhouse::session::analyze_and_lower(&mut app);
     app.module_mixins.push(ModuleMixin {

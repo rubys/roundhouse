@@ -165,8 +165,16 @@ its predecessors; [`WHY.md`](WHY.md) is why do it at all.
 
 ## Contributing
 
-Issues and discussion are welcome. Architecture is still forming —
-a quick conversation before a PR is usually the most helpful path.
+Issues and pull requests are both welcome, and a PR does not need a
+conversation first: CI runs the whole matrix on every pull request —
+the unit suite, each target's toolchain, the DOM compare against live
+Rails, the Spinel lanes — so a change you can only test partially on
+your machine is tested fully there. The `unit` job gates; the Spinel
+and Campfire jobs marked `continue-on-error` track moving toolchains,
+and red there is a signal to read, not a check to make pass. Setup,
+the test cycle, and what a PR should carry are in
+[`DEVELOPMENT.md`](DEVELOPMENT.md); the invariants not to break are in
+[`AGENTS.md`](AGENTS.md).
 
 ## License
 

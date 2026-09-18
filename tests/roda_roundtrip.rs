@@ -41,7 +41,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 /// contract; lowering rewrites controller bodies into runtime
 /// vocabulary, see `emit::roda`).
 fn ingest_rails() -> App {
-    roundhouse::ingest::ingest_app(Path::new("fixtures/real-blog")).expect("ingest real-blog")
+    roundhouse::ingest::ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog")
 }
 
 fn write_conversion(scratch: &Path) {

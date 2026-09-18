@@ -89,7 +89,7 @@ fn assert_swift_builds(fixture: &str, scratch: &Path) {
 #[test]
 #[ignore]
 fn real_blog_swift_builds() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
     assert_swift_builds("real-blog", &scratch);
@@ -111,7 +111,7 @@ fn real_blog_swift_builds() {
 #[test]
 #[ignore]
 fn real_blog_swift_tests_pass() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
 

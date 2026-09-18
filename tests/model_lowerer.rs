@@ -25,7 +25,7 @@ use roundhouse::lower::{
 };
 
 fn fixture_path() -> &'static Path {
-    Path::new("fixtures/real-blog")
+    roundhouse::fixtures::real_blog()
 }
 
 fn lower(name: &str) -> LibraryClass {

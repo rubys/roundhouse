@@ -111,7 +111,7 @@ fn tiny_blog_mix_compile_passes() {
 #[ignore]
 fn real_blog_mix_compile_passes() {
     let _g = mix_guard();
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-compile");
     generate_project(fixture, &scratch);
     assert_mix_compile_passes("real-blog", &scratch);
@@ -123,7 +123,7 @@ fn real_blog_mix_test_passes() {
     // Phase 2 forcing function: emit real-blog, run `mix test`,
     // assert zero failures. Phase-3 tests are tagged `:skip`.
     let _g = mix_guard();
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
     mix_deps_get(&scratch);

@@ -83,7 +83,7 @@ fn assert_go_passes(fixture: &str, scratch: &Path) {
 #[test]
 #[ignore]
 fn real_blog_go_vet_passes() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-vet");
     generate_project(fixture, &scratch);
     assert_go_passes("real-blog", &scratch);
@@ -106,7 +106,7 @@ fn real_blog_go_test_passes() {
     // is now the default emit; the legacy `app/` package goes away
     // in Phase 6 step 3). Asserts zero failures across 21 fixture
     // + model + controller tests.
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
     go_mod_tidy(&scratch);

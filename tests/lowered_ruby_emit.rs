@@ -13,27 +13,27 @@ use roundhouse::emit::{ruby, EmittedFile};
 use roundhouse::ingest::ingest_app;
 
 fn lowered_real_blog() -> Vec<EmittedFile> {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     ruby::emit_lowered_models(&app)
 }
 
 fn lowered_real_blog_schema() -> String {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     ruby::emit_lowered_schema(&app).content
 }
 
 fn lowered_real_blog_routes() -> String {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     ruby::emit_lowered_routes(&app).content
 }
 
 fn lowered_real_blog_controllers() -> Vec<EmittedFile> {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     ruby::emit_lowered_controllers(&app)
 }
 
 fn lowered_real_blog_views() -> Vec<EmittedFile> {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     ruby::emit_lowered_views(&app)
 }
 
@@ -57,7 +57,7 @@ fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
 /// there is nothing held to reload.
 #[test]
 fn a_fixture_accessor_is_memoized_and_the_loader_clears_it() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let files = ruby::emit_spinel(&app);
     let src = find(&files, "test/fixtures/articles.rb");
     assert!(
@@ -481,7 +481,7 @@ fn comment_block_callbacks_render_as_methods() {
 
 #[test]
 fn schema_emits_module_wrapper_at_config_path() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let f = ruby::emit_lowered_schema(&app);
     assert_eq!(f.path.to_string_lossy(), "config/schema.rb");
     assert!(f.content.starts_with("module Schema\n"), "{}", f.content);
@@ -550,7 +550,7 @@ fn schema_drops_foreign_key_constraints() {
 
 #[test]
 fn routes_emits_module_wrapper_at_config_path() {
-    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let f = ruby::emit_lowered_routes(&app);
     assert_eq!(f.path.to_string_lossy(), "config/routes.rb");
     assert!(f.content.contains("module RouteTable"), "{}", f.content);

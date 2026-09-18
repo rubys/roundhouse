@@ -131,7 +131,7 @@ fn assert_test_passes(scratch: &Path, gemfile: &Path, test_path: &str) {
 #[test]
 #[ignore]
 fn real_blog_spinel_tests_pass() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
 

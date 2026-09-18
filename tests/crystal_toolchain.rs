@@ -102,7 +102,7 @@ fn tiny_blog_crystal_build_passes() {
 #[test]
 #[ignore]
 fn real_blog_crystal_build_passes() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-build");
     generate_project(fixture, &scratch);
     assert_crystal_passes("real-blog", &scratch);
@@ -115,7 +115,7 @@ fn real_blog_crystal_spec_passes() {
     // against the generated project, assert zero failures. A subset
     // of tests are marked `pending` because they need persistence
     // runtime (Phase 3); the rest should pass.
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-spec");
     generate_project(fixture, &scratch);
     shards_install(&scratch);

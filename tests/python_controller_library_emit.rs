@@ -248,7 +248,7 @@ fn tiny_blog_overlay_serves_index() {
 #[test]
 fn real_blog_overlay_serves_index() {
     overlay_request_driver(
-        Path::new("fixtures/real-blog"),
+        roundhouse::fixtures::real_blog(),
         "tmp/rh-py-overlay-drive-real",
         "articles",
     );
@@ -259,5 +259,5 @@ fn real_blog_overlay_serves_index() {
 /// tests/real_blog.rs).
 #[test]
 fn real_blog_overlay_emits_and_compiles() {
-    overlay_gate(Path::new("fixtures/real-blog"), "tmp/rh-py-overlay-real");
+    overlay_gate(roundhouse::fixtures::real_blog(), "tmp/rh-py-overlay-real");
 }

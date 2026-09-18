@@ -103,7 +103,7 @@ fn assert_require_graph_closed(files: &[(String, String)], label: &str) {
 }
 
 fn blog() -> (roundhouse::App, PathBuf) {
-    let fixture = PathBuf::from("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
     let mut app = ingest_app(&fixture).expect("ingest real-blog");
     Analyzer::new(&app).analyze(&mut app);
     (app, fixture)

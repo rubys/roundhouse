@@ -63,7 +63,7 @@ fn real_blog_cargo_test_passes() {
     // against the generated project, assert the non-ignored model
     // tests pass. Two tests are marked #[ignore] because they need
     // persistence runtime (Phase 3); the rest should pass cleanly.
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
 
@@ -112,7 +112,7 @@ fn real_blog_cargo_test_passes() {
 #[test]
 #[ignore]
 fn real_blog_articles_index_is_two_queries() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-query-count");
     generate_project(fixture, &scratch);
 

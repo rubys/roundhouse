@@ -3421,10 +3421,9 @@ mod tests {
     use crate::analyze::Analyzer;
     use crate::expr::Literal;
     use crate::ingest::ingest_app;
-    use std::path::Path;
 
     fn real_blog() -> App {
-        let (ir, _) = crate::ingest::prism::scope(|| ingest_app(Path::new("fixtures/real-blog")));
+        let (ir, _) = crate::ingest::prism::scope(|| ingest_app(crate::fixtures::real_blog()));
         let mut app = ir.expect("real-blog should ingest");
         Analyzer::new(&app).analyze(&mut app);
         app

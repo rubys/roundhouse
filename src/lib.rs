@@ -16,6 +16,10 @@ pub mod emit;
 pub mod erb;
 pub mod expr;
 pub mod facades;
+/// The generated Rails fixtures (`fixtures/real-blog`, `fixtures/store`)
+/// the test suites read, resolved with the generating command in the
+/// panic when one is absent.
+pub mod fixtures;
 /// The app's gem census: `Gemfile.lock` parsed and each direct
 /// dependency classified (framework / stdlib / modeled / infrastructure /
 /// unknown). Shared by every analysis skin; the unknown list feeds

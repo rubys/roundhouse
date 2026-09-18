@@ -64,7 +64,7 @@ fn assert_dotnet_build_passes(fixture: &str, scratch: &Path) {
 #[test]
 #[ignore]
 fn real_blog_dotnet_build_passes() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
     assert_dotnet_build_passes("real-blog", &scratch);
@@ -84,7 +84,7 @@ fn real_blog_dotnet_build_passes() {
 #[test]
 #[ignore]
 fn real_blog_csharp_tests_pass() {
-    let fixture = Path::new("fixtures/real-blog");
+    let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-tests");
     generate_project(fixture, &scratch);
 

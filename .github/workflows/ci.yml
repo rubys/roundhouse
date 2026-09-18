@@ -11,11 +11,6 @@ permissions:
   pages: write
   id-token: write
 
-# Only one Pages deployment at a time.
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 env:
   CARGO_TERM_COLOR: always
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
@@ -2562,6 +2557,14 @@ jobs:
       - build-site
       - unit
     if: github.ref == 'refs/heads/main'
+    # Only one Pages deployment at a time. Scoped to this job, not the
+    # workflow: at the workflow level the same group serialised every
+    # run — a pull request queued behind a push to main and the next
+    # push behind that PR, at 20-40 minutes a run — for a lock only the
+    # deployment needs.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:

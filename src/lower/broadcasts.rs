@@ -566,7 +566,6 @@ pub fn stream_name(parts: &[Streamable]) -> Expr {
 mod tests {
     use super::*;
     use crate::ingest::ingest_app;
-    use std::path::Path;
 
     fn model_named<'a>(app: &'a crate::App, name: &str) -> &'a Model {
         app.models
@@ -577,7 +576,7 @@ mod tests {
 
     #[test]
     fn real_blog_article_broadcasts_to_prepend() {
-        let app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+        let app = ingest_app(crate::fixtures::real_blog()).expect("ingest");
         let article = model_named(&app, "Article");
         let lowered = lower_broadcasts(article);
         // One save (prepend) and one destroy (remove).
@@ -595,7 +594,7 @@ mod tests {
 
     #[test]
     fn real_blog_comment_has_broadcasts_to_and_commit_hooks() {
-        let app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+        let app = ingest_app(crate::fixtures::real_blog()).expect("ingest");
         let comment = model_named(&app, "Comment");
         let lowered = lower_broadcasts(comment);
         // broadcasts_to + after_create_commit → two save calls.
@@ -634,7 +633,7 @@ mod tests {
     #[test]
     fn model_without_broadcasts_lowers_to_empty() {
         // ApplicationRecord in any fixture has no broadcast decls.
-        let app = ingest_app(Path::new("fixtures/real-blog")).expect("ingest");
+        let app = ingest_app(crate::fixtures::real_blog()).expect("ingest");
         for m in &app.models {
             if m.name.0.as_str() == "ApplicationRecord" {
                 let lowered = lower_broadcasts(m);

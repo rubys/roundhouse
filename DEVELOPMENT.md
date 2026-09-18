@@ -90,6 +90,15 @@ bin/rh fixture          # regenerate into fixtures/real-blog/
 bin/rh clean fixture    # remove it
 ```
 
+The fixture is `.gitignore`d, so a fresh clone does not have it, and
+neither `fixtures/store` (the Rails Guides store:
+`cd fixtures && ../scripts/create-store store`). Tests reach both
+through `roundhouse::fixtures::real_blog()` / `store()`, which panic
+with the generating command when the directory is absent; and
+`ingest_app` refuses a root that is not a directory rather than
+returning an empty app, so a wrong path fails at the path, not at the
+first model it cannot find.
+
 CI regenerates the fixture once per run in the `generate-fixture` job
 and shares the artifact across the unit job and every per-target
 job — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
