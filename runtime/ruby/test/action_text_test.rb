@@ -27,6 +27,59 @@ require_relative "test_helper"
 # literal and an unknown, which the strict target refuses. Spelling the
 # call out keeps both lanes on the same file.
 class ActionTextContentTest < Minitest::Test
+  # ── to_s renders attachments, then the layout ─────────────────────
+  #
+  # `Content.render_attachment` is GENERATED per app (one arm per
+  # attachable model with a partial); the shared default answers "".
+  # A test-local redefinition stands in for the generated one, the
+  # same way the locator tests do, and the default is put back.
+  def with_render(render)
+    ActionText::Content.define_singleton_method(:render_attachment, &render)
+    yield
+  ensure
+    ActionText::Content.define_singleton_method(:render_attachment) { |_attachment| "" }
+  end
+
+  def test_to_s_renders_each_attachment_node_inside_its_tag
+    with_render(->(a) { "<b>#{a["filename"]}</b>" }) do
+      html = %(<div>Hey <action-text-attachment sgid="x" filename="one"></action-text-attachment> and <action-text-attachment filename="two"></action-text-attachment>!</div>)
+      assert_equal %(<div>Hey <action-text-attachment sgid="x" filename="one"><b>one</b></action-text-attachment> and <action-text-attachment filename="two"><b>two</b></action-text-attachment>!</div>),
+        ActionText::Content.new(html).to_s
+    end
+  end
+
+  def test_to_s_replaces_children_a_node_already_carries
+    with_render(->(_a) { "NEW" }) do
+      html = %(<action-text-attachment sgid="x"><figure>old</figure></action-text-attachment>)
+      assert_equal %(<action-text-attachment sgid="x">NEW</action-text-attachment>), ActionText::Content.new(html).to_s
+    end
+  end
+
+  def test_to_s_leaves_a_self_closing_node_and_plain_markup_alone
+    with_render(->(_a) { "NEW" }) do
+      html = %(<div><action-text-attachment sgid="x"/> <p>text</p></div>)
+      assert_equal html, ActionText::Content.new(html).to_s
+      assert_equal "<div>no nodes</div>", ActionText::Content.new("<div>no nodes</div>").to_s
+    end
+  end
+
+  # campfire's own tests write a mention node with the rendered
+  # mention in its `content` attribute — a `>` inside a quoted value.
+  def test_a_quoted_gt_inside_an_attribute_does_not_end_the_tag
+    with_render(->(a) { "[#{a["sgid"]}]" }) do
+      html = %(<div>Hey <action-text-attachment sgid="x" content="<div class=&quot;mention&quot;>y</div>"></action-text-attachment></div>)
+      assert_equal %(<div>Hey <action-text-attachment sgid="x" content="<div class=&quot;mention&quot;>y</div>">[x]</action-text-attachment></div>),
+        ActionText::Content.new(html).to_s
+      assert_equal ["x"], ActionText::Content.new(html).attachments.map { |a| a["sgid"] }
+    end
+  end
+
+  def test_the_default_render_is_the_bare_node
+    html = %(<action-text-attachment sgid="x"></action-text-attachment>)
+    assert_equal html, ActionText::Content.new(html).to_s
+    assert_equal html, ActionText::Content.new(html).to_html
+  end
+
   def test_plain_div_is_its_text
     assert_equal "Hello world", ActionText::Content.new("<div>Hello world</div>").to_plain_text
   end

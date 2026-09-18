@@ -147,3 +147,72 @@ pub(crate) fn push_attachable_sgid(
         block_param: None,
     });
 }
+
+/// Each attachable model paired with the partial its
+/// `to_attachable_partial_path` names — `(User, "users/mention")` for
+/// campfire — for `project::apply_content_layout` to write
+/// `Content.render_attachment`'s arms from. In model order.
+///
+/// The method is looked for on the model itself and then on every
+/// library class the model includes, transitively (campfire defines it
+/// in `User::Mentionable`, the same concern that carries the marker),
+/// and only a body that is one String literal counts: that is the
+/// shape Rails' `to_attachable_partial_path` contract expects (a path,
+/// fixed per class), and the only one a generator can spell as a
+/// constant. A model with the marker and no such method falls back,
+/// as Rails does, to `to_partial_path` — `users/user` — which is not a
+/// partial an app has for an attachment, so it gets no arm and its
+/// node keeps an empty inner.
+pub fn attachable_partials(app: &App) -> Vec<(ClassId, String)> {
+    let models = attachable_models(app);
+    let mut out = Vec::new();
+    for m in &app.models {
+        if !models.contains(&m.name) {
+            continue;
+        }
+        if let Some(path) = m.methods().find_map(partial_path_literal) {
+            out.push((m.name.clone(), path));
+            continue;
+        }
+        // The include chain, breadth first, matching on the include's
+        // last segment as `attachable_models` does for the marker.
+        let mut queue: Vec<Symbol> =
+            crate::analyze::model_includes(m).into_iter().map(|c| c.0).collect();
+        let mut seen: BTreeSet<Symbol> = BTreeSet::new();
+        let mut found = None;
+        while let Some(inc) = queue.pop() {
+            if !seen.insert(inc.clone()) {
+                continue;
+            }
+            let last = inc.as_str().rsplit("::").next().unwrap_or("");
+            for lc in &app.library_classes {
+                let lc_last = lc.name.0.as_str().rsplit("::").next().unwrap_or("");
+                if lc.name.0 != inc && lc_last != last {
+                    continue;
+                }
+                if let Some(path) = lc.methods.iter().find_map(partial_path_literal) {
+                    found = Some(path);
+                    break;
+                }
+                queue.extend(lc.includes.iter().map(|i| i.0.clone()));
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        if let Some(path) = found {
+            out.push((m.name.clone(), path));
+        }
+    }
+    out
+}
+
+fn partial_path_literal(m: &MethodDef) -> Option<String> {
+    if m.name.as_str() != "to_attachable_partial_path" || m.receiver != MethodReceiver::Instance {
+        return None;
+    }
+    match &*m.body.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    }
+}

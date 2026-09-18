@@ -220,3 +220,42 @@ fn another_on_load_reopen_is_reported_not_dropped() {
         "the unfingerprinted from_node reopen is named: {messages:?}"
     );
 }
+
+/// `Content.render_attachment` is generated beside the layout: one arm
+/// per attachable model whose `to_attachable_partial_path` names a
+/// partial the tree carries, dispatched on the resolved model NAME with
+/// the finder and the view module spelled as literals.
+#[test]
+fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  include Mentionable\nend\n"),
+        (
+            "app/models/user/mentionable.rb",
+            "module User::Mentionable\n  include ActionText::Attachable\n\n  def to_attachable_partial_path\n    \"users/mention\"\n  end\nend\n",
+        ),
+        // attachable through the marker, but names no partial: no arm.
+        ("app/models/room.rb", "class Room < ApplicationRecord\n  include ActionText::Attachable\nend\n"),
+        ("app/views/users/_mention.html.erb", "<div class=\"mention\"><%= user.name %></div>\n"),
+        ("app/views/layouts/action_text/contents/_content.html.erb", "<div class=\"trix-content\"><%= yield %></div>\n"),
+    ]);
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::project::spinel_base_files(&app, std::path::Path::new("fixtures/real-blog")).expect("spinel tree");
+    let runtime = files
+        .iter()
+        .find(|(p, _)| p.ends_with("runtime/action_text.rb"))
+        .map(|(_, c)| c.clone())
+        .expect("runtime/action_text.rb in the tree");
+    assert!(
+        runtime.contains(
+            "    def self.render_attachment(attachment)\n      case attachment.resolved_model_name\n      when \"User\"\n        user = User.find_by({ id: attachment.resolved_id })\n        user.nil? ? \"\" : Views::Users.mention(user)\n      else\n        \"\"\n      end\n    end\n"
+        ),
+        "generated render:\n{runtime}"
+    );
+    assert!(!runtime.contains("when \"Room\""), "Room names no partial:\n{runtime}");
+    assert!(
+        runtime.contains("Views::Layouts::ActionText::Contents.content(render_attachments)"),
+        "the layout wraps the rendered nodes:\n{runtime}"
+    );
+}

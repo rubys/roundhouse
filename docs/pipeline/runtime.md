@@ -395,24 +395,41 @@ survey line naming the hook and the class, not a silent drop.
 
 `RichText#to_trix_html` hands back the stored markup instead of
 rendering attachment previews into it, so an editor loads the text and
-shows attachment nodes bare — and `RichText#to_s` does the same on the
-serving side, so a link preview or an @mention in a message body
-reaches `auto_link` as its bare `<action-text-attachment>` rather
-than through `_opengraph_embed` / `_mention`. What happens next
-differs by lane and is invisible either way: the ruby lane's
-`auto_link` is the real gem chain, whose default-list sanitize strips
-the tag with nothing inside it (`Hey @bender` is served as `Hey `,
-probed on the emitted tree); spinel's does not sanitize and serves
-the bare element, which a browser renders as nothing. Rails strips
-that same outer tag but has already rendered the partial's markup
-inside it. The three room-page link-preview tests campfire added at
-977cbcd are the first to assert on attachment rendering
-(`attachable-partials-not-rendered` on the conformance page); the
-dispatch order is the one campfire's own `from_node` reopen states,
-`OpengraphEmbed.from_node` first, then the sgid, and the render must
-land INSIDE the node so the ruby lane's sanitize keeps it as Rails
-does. Both lanes' safe-list sanitizers drop a `javascript:` href on
-the node; that was checked, and is not the gap.
+shows attachment nodes bare.
+
+**Attachment nodes ARE rendered on the serving side.** `Content#to_s`
+is Rails' `render_action_text_attachments` then the layout: each
+`<action-text-attachment>` gets its attachable's partial as its inner
+html — the node stays, the markup goes inside — through
+`Content.render_attachment`, GENERATED per app beside the layout
+(`project::apply_content_layout`): one arm per attachable model whose
+`to_attachable_partial_path` names a partial the tree carries, keyed on
+the node's resolved model name with the finder and the view module as
+literals (`when "User" … Views::Users.mention(user)`). The order is
+load-bearing for what an app does next: campfire hands the result to
+`auto_link`, whose safe-list pass strips the attachment tag it does not
+allow and keeps the children, so a mention reaches the page as
+`users/_mention` — with no render that strip left `Hey @bender` served
+as `Hey `, and a lane that does not strip served a bare element a
+browser draws as nothing. The scanner is quote-aware, because
+campfire's own mention nodes carry the rendered mention in a `content`
+attribute with a `>` inside the quotes; `scan_tags` took the first `>`
+as the end of the tag and read past the `sgid` by luck.
+
+**What is still bare: link previews.** An opengraph embed is not an
+sgid but a content-type (`application/vnd.actiontext.opengraph-embed`)
+that campfire's `from_node` reopen dispatches FIRST, building an
+`OpengraphEmbed` from the node's attributes with `web_url` dropping any
+`href`/`url` that is not a web URL on another host. That arm is not
+generated yet, and the emitted `_opengraph_embed` partial is not yet
+callable: Rails names its local after the attachable's
+`model_name.element` (`opengraph_embed`) while the view lowering named
+it after the directory (`attachable`), and the partial reads `caption`
+through the Attachment's delegation. The three room-page link-preview
+tests campfire added at 977cbcd assert on exactly this
+(`attachable-partials-not-rendered` on the conformance page). Both
+lanes' safe-list sanitizers drop a `javascript:` href on the node; that
+was checked, and is not the gap.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,

@@ -89,11 +89,19 @@ module ActionText
     # ships no `_content` template has no wrapper to apply, which is
     # also Rails' behaviour (Action Text falls back to rendering the
     # fragment bare).
+    #
+    # Over `render_attachments`, not `@html`: Rails renders each
+    # attachment node's partial into the node BEFORE the layout wraps
+    # it (`render_action_text_attachments`), and the shared runtime's
+    # `Content#render_attachments` is that step, dispatching through the
+    # generated `Content.render_attachment`. This reopen shadows the
+    # shared `rendered_html` on the CRuby lane, so it has to take the
+    # same step or a mention never reaches `users/_mention` here.
     def rendered_html
       if defined?(::Views::Layouts::ActionText::Contents)
-        ::Views::Layouts::ActionText::Contents.content(@html)
+        ::Views::Layouts::ActionText::Contents.content(render_attachments)
       else
-        @html
+        render_attachments
       end
     end
 

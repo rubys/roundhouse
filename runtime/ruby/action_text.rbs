@@ -45,6 +45,8 @@ module ActionText
     def attributes: () -> Hash[String, String]
     def []: (String name) -> String
     def attachable: () -> untyped
+    def resolved_model_name: () -> String
+    def resolved_id: () -> Integer
     def sgid: () -> String
     def content_type: () -> String
     def caption: () -> String?
@@ -96,6 +98,8 @@ module ActionText
     def to_html: () -> String
     def to_s: () -> String
     def rendered_html: () -> String
+    def render_attachments: () -> String
+    def self.render_attachment: (ActionText::Attachment attachment) -> String
     def as_json: () -> String
     def blank?: () -> bool
     def empty?: () -> bool
@@ -111,6 +115,7 @@ module ActionText
     def self.first_non_space_index: (String text) -> Integer
     def self.last_non_space_index: (String text) -> Integer
     def self.scan_tags: (String html) -> Array[Hash[String, String]]
+    def self.tag_end: (String html, Integer at) -> Integer
     def self.tag_name_of: (String raw) -> String
     def self.parse_attributes: (String raw) -> Hash[String, String]
     def self.space_at: (String text, Integer index) -> bool

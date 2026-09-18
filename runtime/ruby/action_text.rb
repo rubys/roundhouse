@@ -303,27 +303,39 @@ module ActionText
     # An app without the reopen keeps the empty default, and a tampered
     # sgid is missing here as it is in stock Rails.
     def attachable
-      sgid = self["sgid"]
+      model_name = resolved_model_name
       record = nil
-      if sgid != ""
-        model_name = ActionText::SignedGlobalId.model_of(sgid)
-        id = 0
-        if model_name != ""
-          id = ActionText::SignedGlobalId.id_of(sgid)
-        else
-          uri = ActionText::SignedGlobalId.unverified_uri(sgid)
-          model_name = ActionText::SignedGlobalId.model_in(uri)
-          if Attachment.permitted_without_signature.include?(model_name)
-            id = ActionText::SignedGlobalId.id_in(uri)
-          else
-            model_name = ""
-          end
-        end
-        if model_name != ""
-          record = ActionText::Attachable.locate(model_name, id)
-        end
+      if model_name != ""
+        record = ActionText::Attachable.locate(model_name, resolved_id)
       end
-      record.nil? ? ActionText::Attachables::MissingAttachable.new(sgid) : record
+      record.nil? ? ActionText::Attachables::MissingAttachable.new(self["sgid"]) : record
+    end
+
+    # The model NAME the node's sgid resolves to, or "" — the signed
+    # read first, then the app's tolerance for a failed signature. A
+    # String rather than a class so a generated caller can `case` on
+    # it: `Content.render_attachment` picks the attachable's partial
+    # this way, with the finder spelled as a literal constant, the
+    # same shape `Attachable.locate` takes.
+    def resolved_model_name
+      sgid = self["sgid"]
+      return "" if sgid == ""
+      model_name = ActionText::SignedGlobalId.model_of(sgid)
+      return model_name if model_name != ""
+      uri = ActionText::SignedGlobalId.unverified_uri(sgid)
+      model_name = ActionText::SignedGlobalId.model_in(uri)
+      Attachment.permitted_without_signature.include?(model_name) ? model_name : ""
+    end
+
+    # Its id, by the same two reads, or 0 when neither answers.
+    def resolved_id
+      sgid = self["sgid"]
+      return 0 if sgid == ""
+      model_name = ActionText::SignedGlobalId.model_of(sgid)
+      return ActionText::SignedGlobalId.id_of(sgid) if model_name != ""
+      uri = ActionText::SignedGlobalId.unverified_uri(sgid)
+      model_name = ActionText::SignedGlobalId.model_in(uri)
+      Attachment.permitted_without_signature.include?(model_name) ? ActionText::SignedGlobalId.id_in(uri) : 0
     end
 
     # Model names whose sgid resolves even when its signature does not
@@ -789,9 +801,90 @@ module ActionText
 
     # >>> generated: content-layout
     def rendered_html
-      @html
+      render_attachments
     end
     # <<< generated: content-layout
+
+    # Rails' `render_action_text_attachments`: every
+    # `<action-text-attachment>` node gets its attachable's partial as
+    # its INNER html — the node stays, the partial's markup goes inside
+    # it — before the layout wraps the whole. That order is
+    # load-bearing for what happens next in an app: campfire hands the
+    # result to `auto_link`, whose safe-list pass strips the attachment
+    # tag it does not allow but keeps the children, so a mention
+    # arrives on the page as `users/_mention` and a preview as its
+    # figure. With no render, that strip left NOTHING — `Hey @bender`
+    # served as `Hey ` — and a lane that does not strip served a bare
+    # element a browser draws as nothing.
+    #
+    # A scanner over the stored markup rather than a parse: the nodes
+    # are Trix's own output, never nested, and always spelled
+    # `<action-text-attachment …>…</action-text-attachment>`. A node
+    # that already carries children (a stored gallery, an editor's
+    # round trip) has them REPLACED, as Rails' `inner_html=` does.
+    # The partial itself is per app, so what goes inside is
+    # `Content.render_attachment` below — generated, like the layout.
+    def render_attachments
+      html = @html
+      open_tag = "<" + ActionText::Attachment.tag_name
+      close_tag = "</" + ActionText::Attachment.tag_name + ">"
+      out = +""
+      i = 0
+      n = html.length
+      while i < n
+        at = html.index(open_tag, i)
+        if at.nil?
+          out << html[i, n - i].to_s
+          break
+        end
+        gt = Content.tag_end(html, at)
+        if gt < 0
+          out << html[i, n - i].to_s
+          break
+        end
+        close_at = html.index(close_tag, gt + 1)
+        if close_at.nil?
+          out << html[i, n - i].to_s
+          break
+        end
+        out << html[i, at - i].to_s
+        raw = html[at + 1, gt - at - 1].to_s
+        # `<action-text-attachment …/>` — the self-closing spelling has
+        # no children to replace and no close tag of its own.
+        if raw[raw.length - 1, 1].to_s == "/"
+          out << html[at, gt - at + 1].to_s
+          i = gt + 1
+          next
+        end
+        attrs = Content.parse_attributes(raw)
+        attrs["__name"] = ActionText::Attachment.tag_name
+        inner = Content.render_attachment(ActionText::Attachment.new(attrs))
+        out << html[at, gt - at + 1].to_s
+        out << inner
+        out << close_tag
+        i = close_at + close_tag.length
+      end
+      out
+    end
+
+    # The inner html for ONE attachment node — its attachable's
+    # partial, rendered. GENERATED per app by `project::
+    # apply_content_layout`, beside the layout: one arm per model that
+    # mixes `ActionText::Attachable` in and names a partial through
+    # `to_attachable_partial_path` (campfire's `User::Mentionable`
+    # answers "users/mention"), dispatched on the node's resolved
+    # model NAME with the finder and the view module spelled as
+    # literals. Rails passes the partial the Attachment, which
+    # delegates to the record; the emitted partial takes the record,
+    # which is what campfire's `_mention` reads (`user.name`,
+    # `user.attachable_sgid`). A node whose sgid resolves to nothing,
+    # or to a model with no partial, keeps an empty inner — the bare
+    # node, which is what it was before.
+    # >>> generated: attachment-render
+    def self.render_attachment(attachment)
+      ""
+    end
+    # <<< generated: attachment-render
 
     def as_json
       @html
@@ -1067,10 +1160,8 @@ module ActionText
       n = html.length
       while i < n
         if html[i, 1].to_s == "<"
-          j = i + 1
-          while j < n && html[j, 1].to_s != ">"
-            j = j + 1
-          end
+          j = Content.tag_end(html, i)
+          j = n if j < 0
           raw = html[i + 1, j - i - 1].to_s
           if raw[0, 1].to_s != "/" && raw[0, 1].to_s != "!"
             attrs = parse_attributes(raw)
@@ -1087,6 +1178,32 @@ module ActionText
 
     # The element name from a tag's inner text ("a href=…" → "a"),
     # downcased. `raw` may still carry a leading "/" for a close tag.
+    # The index of the `>` that closes the tag opening at `at`, or -1
+    # — skipping any `>` inside a quoted attribute value. A mention
+    # node as campfire's own tests write it carries the rendered
+    # mention in its `content` attribute (`content="<div
+    # class=&quot;mention&quot;…>"`), and the first `>` in that tag is
+    # inside the quotes: a scan that stopped there read the tag as
+    # ending mid-attribute, and a render spliced there landed inside
+    # the value.
+    def self.tag_end(html, at)
+      n = html.length
+      j = at + 1
+      quote = ""
+      while j < n
+        c = html[j, 1].to_s
+        if quote != ""
+          quote = "" if c == quote
+        elsif c == "\"" || c == "'"
+          quote = c
+        elsif c == ">"
+          return j
+        end
+        j = j + 1
+      end
+      -1
+    end
+
     def self.tag_name_of(raw)
       text = raw
       text = text[1, text.length - 1].to_s if text[0, 1].to_s == "/"

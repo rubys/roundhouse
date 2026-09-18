@@ -1895,26 +1895,74 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// this (guarded on `defined?`, which a static target has no lane
 /// for), so the binary rendered every message body one div short of
 /// both Rails and the ruby lane.
-fn apply_content_layout(files: &mut [(String, String)], _app: &App) {
+///
+/// And, in the same file, `Content.render_attachment` — Rails'
+/// `render_action_text_attachments`, per app: one arm per attachable
+/// model whose `to_attachable_partial_path` names a partial the tree
+/// carries (`lower::attachable::attachable_partials`), dispatched on
+/// the node's resolved model NAME with the finder and the view module
+/// spelled as literals — the shape `apply_attachable_locate` writes,
+/// for the same reason. The partial receives the RECORD: Rails hands it
+/// the Attachment, which delegates to the record, and campfire's
+/// `users/_mention` reads only record methods. A model whose partial
+/// the tree does not have gets no arm.
+fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: content-layout\n";
     const TAIL: &str = "    # <<< generated: content-layout\n";
     const VIEW: &str = "app/views/layouts/action_text/contents/_content.rb";
+    const RENDER_HEAD: &str = "    # >>> generated: attachment-render\n";
+    const RENDER_TAIL: &str = "    # <<< generated: attachment-render\n";
 
-    if !files.iter().any(|(path, _)| path.ends_with(VIEW)) {
-        return;
-    }
-    let generated = format!(
+    let has_layout = files.iter().any(|(path, _)| path.ends_with(VIEW));
+    let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(@html)\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.content(render_attachments)\n    end\n{TAIL}"
     );
+
+    let mut arms = String::new();
+    for (model, partial) in crate::lower::attachable::attachable_partials(app) {
+        let (dir, stem) = crate::lower::view_to_library::split_view_name(&partial);
+        let view_path = format!("app/views/{dir}/_{stem}.rb");
+        if !files.iter().any(|(path, _)| path.ends_with(&view_path)) {
+            continue;
+        }
+        let module = crate::lower::view_to_library::view_module_id(dir);
+        let name = model.0.as_str();
+        let local = crate::naming::safe_local(&crate::naming::snake_case(name));
+        arms.push_str(&format!(
+            "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
+             {local}.nil? ? \"\" : {module}.{stem}({local})\n",
+            module = module.0.as_str(),
+        ));
+    }
+    let render = if arms.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{RENDER_HEAD}    def self.render_attachment(attachment)\n      case attachment.resolved_model_name\n{arms}      else\n        \"\"\n      end\n    end\n{RENDER_TAIL}"
+        ))
+    };
+
     for (path, content) in files.iter_mut() {
         if !path.ends_with("runtime/action_text.rb") {
             continue;
         }
-        let Some(start) = content.find(HEAD) else { continue };
-        let Some(rel_end) = content[start..].find(TAIL) else { continue };
-        let end = start + rel_end + TAIL.len();
-        content.replace_range(start..end, &generated);
+        if has_layout {
+            if let Some(start) = content.find(HEAD) {
+                if let Some(rel_end) = content[start..].find(TAIL) {
+                    let end = start + rel_end + TAIL.len();
+                    content.replace_range(start..end, &layout);
+                }
+            }
+        }
+        if let Some(render) = &render {
+            if let Some(start) = content.find(RENDER_HEAD) {
+                if let Some(rel_end) = content[start..].find(RENDER_TAIL) {
+                    let end = start + rel_end + RENDER_TAIL.len();
+                    content.replace_range(start..end, render);
+                }
+            }
+        }
     }
 }
 
@@ -6190,15 +6238,24 @@ mod tests {
         ];
         apply_content_layout(&mut files, &App::new());
         let out = &files[0].1;
+        // Over `render_attachments`, not `@html`: the attachment
+        // nodes are rendered before the layout wraps them, as Rails'
+        // `render_action_text_attachments` runs first.
         assert!(
             out.contains(
-                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(@html)\n    end\n"
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments)\n    end\n"
             ),
             "generated dispatch not written:\n{out}"
         );
         assert!(
-            !out.contains("    def rendered_html\n      @html\n    end\n"),
+            !out.contains("    def rendered_html\n      render_attachments\n    end\n"),
             "default body survived alongside the generated one:\n{out}"
+        );
+        // No attachable model in this App: the render seam keeps its
+        // empty default rather than an empty `case`.
+        assert!(
+            out.contains("    def self.render_attachment(attachment)\n      \"\"\n    end\n"),
+            "the render default was rewritten with no attachable:\n{out}"
         );
         // Re-appliable: a second pass must not nest or duplicate.
         let once = files[0].1.clone();
