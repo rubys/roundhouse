@@ -75,8 +75,11 @@ error (a ledger line under `--survey`), never a silent drop — its
 index would still be emitted and the DDL would not apply. A
 non-integer primary key (`create_table …, id: :uuid` /
 `primary_key: "identifier", id: :string`) renders as `TEXT PRIMARY
-KEY`, and is ledgered because the model layer still assumes an
-integer id.
+KEY`; the analyzer types `id`, `ids` and the key-taking finders from
+that column and the emitted `find`/`exists?`/`update`/`delete`
+primitives compare it with the key's type, but insert still reads
+`last_insert_rowid`, so the key stays ledgered until the write path
+carries it (#90).
 
 ## `config/routes.rb` → `RouteTable` → `RouteHelpers.<x>_path`
 

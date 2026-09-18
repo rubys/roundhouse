@@ -1316,11 +1316,18 @@ fn build_class_info(
 
     // ApplicationRecord declares `id` and `id=` (the schema synthesizers
     // skip the id column because it's inherited from the base class).
-    insert_default(&mut info.instance_methods, "id", fn_sig(vec![], Ty::Int));
+    // Their type is the primary key's: `Ty::Int` for Rails' default
+    // bigint, `Ty::Str` for a `t.uuid` / `id: :string` key, and every
+    // finder that takes or answers a key follows it, so a uuid-keyed
+    // app's `Thing.find(params[:id])` and `thing.id` type as what the
+    // schema says (#90). The RUNTIME write path still reads
+    // `last_insert_rowid`; that half stays ledgered at ingest.
+    let key_ty = primary_key_ty(model, table);
+    insert_default(&mut info.instance_methods, "id", fn_sig(vec![], key_ty.clone()));
     insert_default(
         &mut info.instance_methods,
         "id=",
-        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+        fn_sig(vec![(Symbol::from("value"), key_ty.clone())], key_ty.clone()),
     );
     insert_default(&mut info.instance_methods, "save", fn_sig(vec![], Ty::Bool));
     // `save!` answers the RECORD, not a bool: `runtime/ruby/active_record/
@@ -1436,7 +1443,7 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "find",
-        fn_sig(vec![(Symbol::from("id"), Ty::Int)], owner_ty.clone()),
+        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], owner_ty.clone()),
     );
     insert_default(
         &mut info.class_methods,
@@ -1461,7 +1468,7 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "exists?",
-        fn_sig(vec![(Symbol::from("id"), Ty::Int)], Ty::Bool),
+        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Bool),
     );
     insert_default(
         &mut info.class_methods,
@@ -1514,7 +1521,7 @@ fn build_class_info(
         &mut info.class_methods,
         "_adapter_find_by_id",
         fn_sig(
-            vec![(Symbol::from("id"), Ty::Int)],
+            vec![(Symbol::from("id"), key_ty.clone())],
             Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] },
         ),
     );
@@ -1533,7 +1540,7 @@ fn build_class_info(
         "_adapter_update",
         fn_sig(
             vec![
-                (Symbol::from("id"), Ty::Int),
+                (Symbol::from("id"), key_ty.clone()),
                 (Symbol::from("instance"), owner_ty.clone()),
             ],
             Ty::Nil,
@@ -1542,7 +1549,7 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "_adapter_delete",
-        fn_sig(vec![(Symbol::from("id"), Ty::Int)], Ty::Nil),
+        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Nil),
     );
     insert_default(
         &mut info.class_methods,
@@ -1552,7 +1559,7 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "_adapter_exists_by_id?",
-        fn_sig(vec![(Symbol::from("id"), Ty::Int)], Ty::Bool),
+        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Bool),
     );
     insert_default(
         &mut info.class_methods,
@@ -1627,6 +1634,26 @@ fn build_class_info(
             .insert(Symbol::from(field_name), AccessorKind::AttributeReader);
     }
     info
+}
+
+/// The type of a model's key as the emitted adapter binds it: the
+/// schema column marked `primary_key: true` (`id`, or the column
+/// `create_table primary_key:` names), else Rails' default integer.
+/// The SCHEMA decides rather than `Model::primary_key`, because the
+/// synthesized `_adapter_*` bodies bind that column — lobsters'
+/// `Keystore` (`self.primary_key = "key"` over a table that still has
+/// an integer `id`) keeps its integer `id` here, which is the column
+/// those bodies read; its `key` identity is served by `find_by` and
+/// the upsert conflict target, not by `find`.
+pub(super) fn primary_key_column(table: &Table) -> Option<&crate::schema::Column> {
+    table.columns.iter().find(|c| c.primary_key)
+}
+
+fn primary_key_ty(_model: &Model, table: Option<&Table>) -> Ty {
+    table
+        .and_then(primary_key_column)
+        .map(|c| ty_of_column(&c.col_type))
+        .unwrap_or(Ty::Int)
 }
 
 fn insert_default(map: &mut HashMap<Symbol, Ty>, name: &str, sig: Ty) {

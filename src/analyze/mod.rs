@@ -181,6 +181,19 @@ impl Analyzer {
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
             cls.attributes = model.attributes.clone();
+            // The key's type as the schema declares it (#90): the
+            // attribute row already carries it under the key column's
+            // name — `id`, or the column `create_table primary_key:`
+            // named — and `ids` / `id` follow it rather than assuming
+            // an integer. No key in the row (a schema-less test model)
+            // keeps Rails' default.
+            let key_ty = app
+                .schema
+                .tables
+                .get(&model.table.0)
+                .and_then(|t| t.columns.iter().find(|c| c.primary_key))
+                .and_then(|c| model.attributes.fields.get(&c.name).cloned())
+                .unwrap_or(Ty::Int);
 
             // AR class-method signatures sourced from the shared
             // catalog (`crate::catalog::AR_CATALOG`). Each entry
@@ -304,8 +317,17 @@ impl Analyzer {
                 }
                 cls.class_methods
                     .entry(Symbol::from("ids"))
-                    .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Int) });
+                    .or_insert_with(|| Ty::Array { elem: Box::new(key_ty.clone()) });
             } // end `if is_ar_model` — class-side query surface
+
+            // Rails' `id` reads the primary-key attribute whatever the
+            // column is called: a `create_table primary_key: "identifier"`
+            // model has no `id` column, and `record.id` is still the
+            // key. The row registered below carries the key under its
+            // own name; `id` is aliased to it here.
+            if is_ar_model {
+                cls.instance_methods.entry(Symbol::from("id")).or_insert(key_ty.clone());
+            }
 
             // Instance methods from schema-derived attributes.
             // These are per-model (column names differ across

@@ -501,16 +501,17 @@ fn table_from_create_table(
             Ok(mut col) => {
                 col.primary_key = true;
                 // The DDL for a non-integer key is right (`TEXT PRIMARY
-                // KEY`); the model layer is not — `find`, the `@id`
-                // slot and insert's last-rowid read all assume an
-                // integer. Ledgered so the hole is visible, not a
-                // runtime surprise.
+                // KEY`) and the analyzer types `id` and the finders
+                // from this column; the RUNTIME write path is not —
+                // insert reads `last_insert_rowid`, which has no meaning
+                // for a key the app or a default supplies. Ledgered so
+                // the hole is visible, not a runtime surprise (#90).
                 if !matches!(col.col_type, ColumnType::Integer | ColumnType::BigInt) {
                     gaps.push(IngestError::Unsupported {
                         file: file.into(),
                         message: format!(
                             "table {table_name}: non-integer primary key `{}` ({}) — the DDL \
-                             carries it, but models assume an integer id",
+                             and the typed `id` carry it, but insert still reads the last rowid",
                             col.name.as_str(),
                             id_type.as_deref().unwrap_or("?")
                         ),

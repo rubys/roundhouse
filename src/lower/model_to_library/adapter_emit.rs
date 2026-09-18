@@ -79,6 +79,7 @@ pub(super) fn push_adapter_methods(
 
 fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let id = Symbol::from("id");
+    let key_ty = key_ty(table);
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
 
@@ -99,7 +100,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(id.clone())],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(id, Ty::Int)], nilable_owner)),
+        signature: Some(fn_sig(vec![(id, key_ty)], nilable_owner)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -157,7 +158,7 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
         orders: vec![Order {
             column: ColRef {
                 table: TableRef(table.name.clone()),
-                column: Symbol::from("id"),
+                column: key_column_name(table),
             },
             direction: Direction::Desc,
         }],
@@ -319,6 +320,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
 
 fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let id = Symbol::from("id");
+    let key_ty = key_ty(table);
 
     let op = ArelOp::Select(Select {
         single_record: false, // _adapter_exists_by_id — a Bool
@@ -337,7 +339,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(id.clone())],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(id, Ty::Int)], Ty::Bool)),
+        signature: Some(fn_sig(vec![(id, key_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -470,31 +472,40 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     // step with the visitor-emitted find/exists paths. Gate off ⇒
     // inline-escape, byte-identical to before.
     let param = crate::lower::arel::visitor::param_binds_enabled();
-    let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
+    // The key column and its ivar, bound with the key's type — the same
+    // column the visitor-emitted find/exists paths compare.
+    let key = key_column_name(table);
+    let (bind_method, escape_method) = match key_value_type(table) {
+        ValueType::Str => ("bind_text", "escape_string"),
+        _ => ("bind_int", "escape_int"),
+    };
+    let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: key.clone() });
     let (sql_concat, bind_id) = if param {
-        // SQL: "SELECT <cols> FROM <table> WHERE id = ?" + " LIMIT 1"
+        // SQL: "SELECT <cols> FROM <table> WHERE <key> = ?" + " LIMIT 1"
         let sql = arel_concat(vec![
             arel_lit_str(format!(
-                "SELECT {} FROM {} WHERE id = ",
+                "SELECT {} FROM {} WHERE {} = ",
                 cols_csv,
-                table.name.as_str()
+                table.name.as_str(),
+                key.as_str()
             )),
             arel_lit_str("?".to_string()),
             arel_lit_str(" LIMIT 1".to_string()),
         ]);
-        // Db.bind_int(stmt, 1, @id)
+        // Db.bind_int(stmt, 1, @id) — or bind_text for a string key
         let bind = arel_db_call(
             &db,
-            "bind_int",
+            bind_method,
             vec![var_ref(&stmt), arel_lit_int(1), id_ivar],
         );
         (sql, Some(bind))
     } else {
-        // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
+        // SQL: "SELECT <cols> FROM <table> WHERE <key> = " + Db.escape_int(@id) + " LIMIT 1"
         let sql_prefix = arel_lit_str(format!(
-            "SELECT {} FROM {} WHERE id = ",
+            "SELECT {} FROM {} WHERE {} = ",
             cols_csv,
-            table.name.as_str()
+            table.name.as_str(),
+            key.as_str()
         ));
         let escape_id = Expr::new(
             Span::synthetic(),
@@ -503,7 +514,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
                     Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("Db")] },
                 )),
-                method: Symbol::from("escape_int"),
+                method: Symbol::from(escape_method),
                 args: vec![id_ivar],
                 block: None,
                 parenthesized: true,
@@ -768,25 +779,47 @@ use crate::lower::arel::visitor::concat_chain as arel_concat;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// `Eq(<table>.id, Runtime(<id-param>, Int))` — find_by_id /
+/// The table's key column: the one marked `primary_key: true`, which is
+/// `id` unless `create_table primary_key:` named another. Every
+/// key-taking primitive binds THIS column with THIS type — a uuid key
+/// is `WHERE id = <str>`, not an integer compare against text (#90).
+/// A table with no key column (a join table) keeps `id`/Int, the
+/// shape the primitives always assumed.
+fn key_column(table: &Table) -> Option<&crate::schema::Column> {
+    super::primary_key_column(table)
+}
+
+fn key_column_name(table: &Table) -> Symbol {
+    key_column(table).map(|c| c.name.clone()).unwrap_or_else(|| Symbol::from("id"))
+}
+
+fn key_ty(table: &Table) -> Ty {
+    key_column(table).map(|c| ty_of_column(&c.col_type)).unwrap_or(Ty::Int)
+}
+
+fn key_value_type(table: &Table) -> ValueType {
+    key_column(table).map(value_type_for_column).unwrap_or(ValueType::Int)
+}
+
+/// `Eq(<table>.<key>, Runtime(<id-param>, <key type>))` — find_by_id /
 /// exists_by_id? shape (id arrives as a method param).
 fn eq_id_param(table: &Table, id_param: &Symbol) -> Predicate {
     Predicate::Eq(
-        ColRef { table: TableRef(table.name.clone()), column: Symbol::from("id") },
-        Value::Runtime { expr: var_ref(id_param), ty: ValueType::Int },
+        ColRef { table: TableRef(table.name.clone()), column: key_column_name(table) },
+        Value::Runtime { expr: var_ref(id_param), ty: key_value_type(table) },
     )
 }
 
-/// `Eq(<table>.id, Runtime(@id, Int))` — instance-method update /
-/// delete shape (id is read from the instance ivar). Used so save /
-/// destroy can dispatch to `_adapter_update` / `_adapter_delete` via
-/// implicit-self (`_adapter_update`) instead of the
-/// `self.class._adapter_update(@id, self)` chain that the TS emitter
-/// mishandles under the libsql async profile.
+/// `Eq(<table>.<key>, Runtime(@<key>, <key type>))` — instance-method
+/// update / delete shape (the key is read from the instance ivar).
+/// Used so save / destroy can dispatch to `_adapter_update` /
+/// `_adapter_delete` via implicit-self (`_adapter_update`) instead of
+/// the `self.class._adapter_update(@id, self)` chain that the TS
+/// emitter mishandles under the libsql async profile.
 fn eq_id_ivar(table: &Table) -> Predicate {
     Predicate::Eq(
-        ColRef { table: TableRef(table.name.clone()), column: Symbol::from("id") },
-        Value::Runtime { expr: ivar_ref(&Symbol::from("id")), ty: ValueType::Int },
+        ColRef { table: TableRef(table.name.clone()), column: key_column_name(table) },
+        Value::Runtime { expr: ivar_ref(&key_column_name(table)), ty: key_value_type(table) },
     )
 }
 
