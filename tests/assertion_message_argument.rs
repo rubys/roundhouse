@@ -136,3 +136,27 @@ fn assert_throws_inlines_to_a_catch_with_a_flag() {
         "no dispatched assert_throws survives:\n{src}"
     );
 }
+
+/// `assert_match` with a STRING matcher is `include?` (Minitest wraps
+/// the string in `Regexp.escape`), and that form IS lowered — the
+/// Regexp form is left to each target's helper, whose `pattern` is
+/// typed Regexp and would take a String as a TypeError. campfire's
+/// rooms test writes `assert_match "Free cookies", response.body`
+/// beside `assert_no_match /javascript:alert/, response.body`.
+#[test]
+fn a_string_matcher_lowers_to_include() {
+    let src = emitted("assert_match \"Free cookies\", Post.first.body");
+    assert!(src.contains("include?(\"Free cookies\")"), "{src}");
+    assert!(src.contains("assert_match failed"), "{src}");
+    let src = emitted("assert_no_match \"javascript:\", Post.first.body");
+    assert!(src.contains("include?(\"javascript:\")"), "{src}");
+    assert!(src.contains("assert_no_match failed"), "{src}");
+}
+
+/// The Regexp form stays a dispatch to the helper, for both spellings.
+#[test]
+fn a_regexp_matcher_stays_a_helper_call() {
+    let src = emitted("assert_no_match /javascript:alert/, Post.first.body");
+    assert!(src.contains("assert_no_match(/javascript:alert/"), "{src}");
+    assert!(!src.contains("assert_no_match failed"), "{src}");
+}

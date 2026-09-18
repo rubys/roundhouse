@@ -50,6 +50,59 @@
       "at_zero": "the family landed over several commits, `fixture_file_upload` last in f86ac0b6; the rule stays as a regression tripwire."
     },
     {
+      "slug": "attachable-partials-not-rendered",
+      "title": "A rich-text attachment node is served bare, not rendered through its attachable's partial",
+      "owner": "compiler",
+      "match": "assert_match failed",
+      "match_test": "RoomsControllerTest#test_show_renders_(a_link_preview|an_unfurled_link_preview)",
+      "note": "Rails renders every `<action-text-attachment>` in a stored body through the attachable's partial before serving it \u2014 `action_text/attachables/_opengraph_embed` for a link preview (the `<img>`/`<a>` these tests assert on), `users/_mention` for an @mention, a blob preview for a file. `RichText#to_s` here hands back the stored markup as-is (stated in docs/pipeline/runtime.md under `to_trix_html`), so a message with a link preview or a mention shows the node bare on the room page. The three tests upstream added on 977cbcd (PR #276, link-preview hardening) are the first to assert server-side attachment rendering; nothing in the seed the compare walks carries an attachment node, which is why the room page reads equivalent. Closing it means a `canonicalize`/render pass over attachment nodes keyed on content-type and sgid \u2014 campfire's own `from_node` reopen names the dispatch order (`OpengraphEmbed.from_node` first, then the sgid) \u2014 and the partials it reaches are already in the tree."
+    },
+    {
+      "slug": "test-helper-kwarg-defaults",
+      "title": "A test-local helper with keyword defaults, called with a subset of its keywords",
+      "owner": "compiler",
+      "match": "(URI should be a String, Regexp, Addressable::Template, a callable object, or respond to #to_str\\. Got: Hash|unexpected end of input)",
+      "match_test": "UnfurlLinksControllerTest#test_create_strips_markup_from_the_title_and_description",
+      "note": "`def stub_successful_request(url: \"https://www.example.com/\", title: \"Hey!\", description: \"desc..\")` called as `stub_successful_request title: \"…\", description: \"…\"`: the caller's keywords arrive as one Hash in the first positional slot, so `url` IS the hash and WebMock (ruby) refuses it while the compiled lane stubs nothing and the controller answers an empty body (`unexpected end of input` from the test's `JSON.parse`). The other callers pass no keywords and take every default, which is why the helper worked until 977cbcd added this test. Keyword parameters with defaults on a test-module method need the same call-site fill-in the app-side lowering does."
+    },
+    {
+      "slug": "direct-uploads-not-served",
+      "title": "Active Storage's direct-upload controllers are not mounted, so their guard cannot be asserted",
+      "owner": "compiler",
+      "match": "(active_storage_authentication_test\\.rb:|undefined method 'rails_direct_uploads_path'|uninitialized constant ActiveStorage::Current|undefined method 'count' for class ActiveStorage::Blob)",
+      "note": "Upstream 79eb9a5 (#267) requires a Campfire session on `ActiveStorage::DirectUploadsController` and the disk service's PUT \u2014 framework controllers campfire never calls (it uploads through MessagesController) but which Rails mounts on every app. The four tests drive those routes (`rails_direct_uploads_path`, `ActiveStorage::Blob.count`, `ActiveStorage::Current`) and expect 401 for an anonymous caller and 200 for a signed-in one. This emit mounts neither endpoint, so an anonymous caller gets a 404 rather than a 401: guarded by absence, which satisfies the intent and fails the assertion. DEFERRED rather than declined \u2014 serving the direct-upload endpoints only to guard them is not a feature anyone asked for, and the honest fix, if the routes ever land, is to land the guard with them. On spinel the file does not link (`Blob.count` on a class the runtime types differently), so all four count against the build."
+    },
+    {
+      "slug": "javascript-href-served-on-spinel",
+      "title": "A `javascript:` attachment href reaches the room page on the compiled lane, and not on CRuby",
+      "owner": "unknown",
+      "match": "assert_no_match failed",
+      "match_test": "RoomsControllerTest#test_show_renders_a_link_preview_written_by_hand_without_its_off_scheme_image_and_link",
+      "note": "The test posts a hand-written link-preview node with `href=\"javascript:alert(1)\"` and asserts the room page does not contain `javascript:alert`. Same emitted Ruby on both lanes, two different pages: under CRuby neither `javascript:alert` nor the node's `filename=\"Free cookies\"` reaches the page (the test goes on to fail on the missing preview, `attachable-partials-not-rendered`, and its sibling `…without_its_image_pointed_at_this_campfire` fails the same way); compiled, the page carries both, and that sibling PASSES. So the lanes sanitize the stored body differently \u2014 the CRuby overlay's sanitizer (`ruby_overlay/runtime/action_view_sanitize.rb`) appears to drop more of the attachment node than Rails would, and the compiled port (`view_helpers_ext.rb`'s Loofah-ported protocol check) less: Rails keeps the node, its `filename`, and strips the `javascript:` href. Rails' own defence for the rendered link is the partial (`web_url`), which neither lane renders yet. A wrong answer with a security shape on the compiled lane, so it ranks above its count; undiagnosed on both lanes, hence `unknown`."
+    },
+    {
+      "slug": "mocha-stub-raises",
+      "title": "mocha's `.raises` on a class-method stub",
+      "owner": "compiler",
+      "match": "undefined method 'raises' for unknown",
+      "note": "`ActionCable.server.stubs(:remote_connections).raises(RuntimeError.new(\"cable down\"))` (upstream 9dd19d0's sessions test): the MochaBridge shapes answer `stubs(...).returns(v)` on a served row or a class; `.raises(e)` is the same slot with a raise in the arm, not a value. Spinel lane only; CRuby replays through the bridge."
+    },
+    {
+      "slug": "mocha-bare-mock",
+      "title": "mocha's bare `mock` \u2014 an anonymous expectation object",
+      "owner": "compiler",
+      "match": "undefined local variable or method 'mock'",
+      "note": "`mock` with no receiver builds an anonymous Mocha::Mock the test then hands to the code under test (upstream 9dd19d0's sessions test: `remote_connections = mock; remote_connections.expects(:disconnect).with(reconnect: true)`, then a second `mock.tap { |m| m.expects(:where)… }` returned from `ActionCable.server.stubs(:remote_connections)`). The MochaBridge shapes cover `stubs`/`expects` on an existing object and on a class; a free-standing mock is a new shape \u2014 an object whose whole interface is the expectations set on it. Spinel lane only; CRuby replays through the bridge."
+    },
+    {
+      "slug": "proc-call-lost",
+      "title": "A Proc-held stub loses its `call` on the compiled lane \u2014 a regression on the 977cbcd bump",
+      "owner": "unknown",
+      "match": "(undefined method 'call' for an instance of Proc|assert_difference failed: expected -2, got 0)",
+      "match_test": "(Opengraph::FetchTest|Push::SubscriptionTest|Room::PushTest)#",
+      "note": "All four passed on campfire 94a48aac under the same roundhouse and spinel, and upstream did not touch these files between 94a48aac and 977cbcd. The message says a Proc landed in a slot whose dispatch has no `call` arm \u2014 the DNS-rebinding seam (TcpSocketStub + the Resolv sequence, see `socket-interception`) and the push-subscription endpoint resolver both hold their stub as a Proc, and `Room::PushTest#test_destroys_invalid_subscriptions` (`WebPush.expects(:payload_send).times(2).raises(ExpiredSubscription)` inside `perform_enqueued_jobs`, expecting two subscriptions destroyed) most likely fails downstream of the same lost call: the delivery worker resolves its endpoint through the Proc first, and a raise there is swallowed before `payload_send`, so nothing expires. Something new in the app \u2014 the `URI.parse`/`is_a?(URI::HTTP)` ladder and `Current.request_host` in `OpengraphEmbed` are the candidates \u2014 shifted whole-program typing enough to change the slot's shape. Not diagnosed; owner unknown until it is (ours, or a spinel issue). Ruby lane green."
+    },
+    {
       "slug": "fixture-accessors",
       "title": "A fixture accessor the emitted loader never defined",
       "owner": "compiler",

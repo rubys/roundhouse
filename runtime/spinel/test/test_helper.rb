@@ -801,6 +801,16 @@ class TestBase
     raise(msg || "assert_match failed: expected #{value.inspect} to match #{pattern.inspect}")
   end
 
+  # The negation, same nil rule: Minitest's `assert_no_match` calls
+  # `assert_respond_to matcher, :=~` first, so a nil value fails there
+  # rather than passing as "did not match". campfire's rooms test
+  # asserts a link preview's off-host image is NOT on the page.
+  def assert_no_match(pattern, value, msg = nil)
+    raise(msg || "assert_no_match: expected non-nil") if value.nil?
+    return unless value =~ pattern
+    raise(msg || "assert_no_match failed: expected #{value.inspect} not to match #{pattern.inspect}")
+  end
+
   # ---- ActiveSupport::Testing::Assertions ------------------------
   #
   # Methods rather than emit-time rewrites, because each one has to

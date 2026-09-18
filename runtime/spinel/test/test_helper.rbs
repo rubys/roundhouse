@@ -158,6 +158,7 @@ class TestBase
   # contract. (`assert_operator` retired — Class-subclass `<` rewritten
   # to direct `assert <Class> < <Class>` form.)
   def assert_match: (Regexp pattern, String? value, ?String? msg) -> void
+  def assert_no_match: (Regexp pattern, String? value, ?String? msg) -> void
 
   # ---- Declared because an UNDECLARED body is not a free pass -----
   #

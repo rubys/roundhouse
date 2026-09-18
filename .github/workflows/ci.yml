@@ -27,7 +27,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 94a48aacb65af0fe25c7b850d4ced055e27077a7
+  CAMPFIRE_SHA: 977cbcd135783e09d631301bc39cbb4e7961ec4e
 
 jobs:
   # -------------------------------------------------------------------
@@ -1178,6 +1178,18 @@ jobs:
       # rather than let it ride: while it sat at 255, the test
       # `9d10511b` had just won was free to break again without failing
       # this step. A ratchet that lags is a ratchet with slack in it.
+      #
+      # 287/53 of 288/54 -> 291/51 of 300/55 on the CAMPFIRE_SHA bump to
+      # `977cbcd1` (2026-09-11: link-preview hardening, direct-upload
+      # auth, cable disconnect on sign-out, bot-key log redaction). No
+      # test that passed on `94a48aac` fails on the ruby lane; the nine
+      # short are all NEW tests, each a named cause in
+      # bench/campfire/suite-causes.json. The spinel lane is the one
+      # that regressed on the bump (287 -> 286/300): four tests in
+      # files upstream did not touch now fail with `undefined method
+      # 'call' for an instance of Proc` — `proc-call-lost` there — and
+      # one new test shows the two lanes sanitizing an attachment node
+      # differently (`javascript-href-served-on-spinel`).
         env:
           FLOOR_TESTS: 256
           FLOOR_FILES: 42

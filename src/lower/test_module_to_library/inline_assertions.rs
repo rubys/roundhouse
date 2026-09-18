@@ -338,6 +338,25 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
         //     method natively; Ruby's TestBase provides one too.
         //   - `assert_operator` can use Class-subclass `<` checks which
         //     TS has no equivalent for. Same story — left as a Send.
+        //
+        // EXCEPT the String-matcher form. Minitest turns a String
+        // matcher into `Regexp.new(Regexp.escape(str))`, which on a
+        // String value is `include?` — and that IS lowerable, where the
+        // Regexp form is not: the helpers' `pattern` is typed Regexp
+        // and `value =~ "str"` is a TypeError. campfire's rooms test
+        // writes `assert_match "Free cookies", response.body`.
+        "assert_match" | "assert_no_match"
+            if args.len() >= 2 && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) =>
+        {
+            let needle = args[0].clone();
+            let val = args[1].clone();
+            let found = send_method(span, val, "include?", vec![needle]);
+            Some(if method.as_str() == "assert_match" {
+                raise_if(span, not_expr(span, found), "assert_match failed".to_string())
+            } else {
+                raise_if(span, found, "assert_no_match failed".to_string())
+            })
+        }
         "assert_predicate" if args.len() >= 2 => {
             // `assert_predicate obj, :sym` — Symbol literal gives us the
             // method name at lowering time. Emit `obj.<sym>()` directly.
