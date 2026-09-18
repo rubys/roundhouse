@@ -1187,10 +1187,12 @@ jobs:
       # short are all NEW tests, each a named cause in
       # bench/campfire/suite-causes.json. The spinel lane is the one
       # that regressed on the bump (287 -> 286/300): four tests in
-      # files upstream did not touch now fail with `undefined method
-      # 'call' for an instance of Proc` — `proc-call-lost` there — and
-      # one new test shows the two lanes sanitizing an attachment node
-      # differently (`javascript-href-served-on-spinel`).
+      # files upstream did not touch failed with `undefined method
+      # 'call' for an instance of Proc` — `proc-call-lost`, which was
+      # matz/spinel#4529 (one 4-param user `call` shadowing the poly
+      # `.call` fast path) and closed by #4530 the same day, 290/300
+      # on the merge — and one new test shows the two lanes sanitizing
+      # an attachment node differently (`javascript-href-served-on-spinel`).
         env:
           FLOOR_TESTS: 256
           FLOOR_FILES: 42
