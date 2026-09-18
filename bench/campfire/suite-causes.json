@@ -100,7 +100,8 @@
       "owner": "compiler",
       "match": "Resolv.stubs\\(:getaddresses\\) with 2 chained link",
       "match_test": "dns_rebinding",
-      "note": "campfire's two DNS-rebinding tests stub `Resolv.getaddresses` with SEQUENTIAL answers (`.returns([a], [b])` — first call, then every later one), set `TCPSocket.expects(:open).with { |*args, **| … }` to `.never` for the hostname and `.throws(:dns_not_rebound)` for the resolved IP, and `assert_throws` around the fetch: the proof is which ADDRESS the client opened a socket to. Serving it means a socket seam inside the ruby-family `Net::HTTP` the double can intercept (the client resolves and connects natively today), sequential return values on the Resolv slot, and `throw`/`catch`. A body of work of its own; deferred, not declined."
+      "note": "campfire's two DNS-rebinding tests stub `Resolv.getaddresses` with SEQUENTIAL answers (`.returns([a], [b])` — first call, then every later one), set `TCPSocket.expects(:open).with { |*args, **| … }` to `.never` for the hostname and `.throws(:dns_not_rebound)` for the resolved IP, and `assert_throws` around the fetch: the proof is which ADDRESS the client opened a socket to. Served since 2026-09-17: the Resolv slot files a sequence (`stub_getaddresses_seq`), `TcpSocketStub` (runtime/spinel/tcp_socket_stub.rb) holds the predicate expectations, and the client asks it about the address it is about to connect to \u2014 spinel's reopened `connect_with_timeout`, the ruby family's reopened `TCPSocket.open`. The `ipaddr:` pin itself had held on both lanes since matz/spinel#4420 closed; this is its proof.",
+      "at_zero": "served 2026-09-17 (sequential Resolv answers + the TcpSocketStub seam); the rule stays as a regression tripwire."
     },
     {
       "slug": "object-extend",

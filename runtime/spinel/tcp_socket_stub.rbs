@@ -1,0 +1,15 @@
+# The `TCPSocket.open` expectation table — see tcp_socket_stub.rb. The
+# predicate takes what the seam passes: the address and port the client
+# is about to connect to. Declared so the slot is typed from its
+# contract rather than from a test file's first push.
+module TcpSocketStub
+  EXPECT_PREDS: Array[^(String, Integer) -> bool]
+  EXPECT_COUNTS: Array[Integer]
+  EXPECT_THROWS: Array[String]
+  EXPECT_CALLS: Array[Integer]
+  def self.expect_open_where: (Integer count, ^(String, Integer) -> bool pred) -> nil
+  def self.expect_open_throws_where: (String tag, ^(String, Integer) -> bool pred) -> nil
+  def self.check: (String host, Integer port) -> nil
+  def self.verify_open_expectations: () -> nil
+  def self.clear_open_expectations: () -> nil
+end

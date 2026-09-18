@@ -38,13 +38,13 @@
 # `open_connection` connects to it while `Host:` and the TLS name stay
 # `address`. Probed 2026-09-17: `Net::HTTP.start("example.com", 80,
 # ipaddr: "127.0.0.1")` from a spinel binary fails with ECONNREFUSED on
-# 127.0.0.1, exactly as CRuby does, so the pin holds on this lane. What
-# is still not served is the TEST's proof of it — `TCPSocket.expects
-# (:open).with { … }.throws`, sequential `Resolv` answers, `assert_throws`
-# — which is the `socket-interception` cause on the conformance page,
-# not a hole in the client. (#4416 and #4419, the reopened-yielding-
-# class-method and dropped-keyword bugs this comment used to describe,
-# closed the same day.)
+# 127.0.0.1, exactly as CRuby does, so the pin holds on this lane. The
+# TEST's proof of it — `TCPSocket.expects(:open).with { … }.throws` —
+# is served by `connect_with_timeout` below asking `TcpSocketStub` about
+# the address it is about to connect to, which is where CRuby's mocha
+# would have intercepted `TCPSocket.open`. (#4416 and #4419, the
+# reopened-yielding-class-method and dropped-keyword bugs this comment
+# used to describe, closed the same day.)
 #
 # Last definition wins under spinel, and a redefined method sees the
 # class's other methods and ivars — `transport_request` below is the
@@ -52,6 +52,7 @@
 # `write_request`/`read_response`, which this file leaves alone.
 require "net/http"
 require_relative "http_stub"
+require_relative "tcp_socket_stub"
 
 module Net
   class HTTPResponse
@@ -137,6 +138,35 @@ module Net
         end
       blk.call(res) unless blk.nil?
       res
+    end
+
+    # The package's `connect_with_timeout`, re-stated over one question
+    # to the socket seam: `TcpSocketStub.check` on the address this
+    # connection is about to open — `ipaddr:` when the caller pinned one,
+    # the hostname otherwise — and the port. With nothing filed it
+    # answers nil and the connect proceeds exactly as the package wrote
+    # it; a test's `TCPSocket.expects(:open)` throws or fails here, the
+    # way mocha's replacement of `TCPSocket.open` does under CRuby.
+    def connect_with_timeout
+      limit = @open_timeout.nil? ? 0 : @open_timeout
+      target = @ipaddr.empty? ? @address : @ipaddr
+      TcpSocketStub.check(target, @port)
+      return TCPSocket.new(target, @port) if limit <= 0
+      s = Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0)
+      begin
+        s.connect_nonblock(target, @port)
+      rescue IO::WaitWritable
+        if IO.select(nil, [s], nil, limit).nil?
+          s.close
+          raise OpenTimeout
+        end
+        begin
+          s.connect_nonblock(target, @port)
+        rescue Errno::EISCONN
+          # already connected: the wait above is what completed it
+        end
+      end
+      s
     end
 
     # The package's `#request`, re-stated: a request on an unstarted

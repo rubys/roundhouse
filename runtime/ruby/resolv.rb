@@ -94,6 +94,12 @@ class Resolv
   # block over as a one-parameter lambda; an empty list is "none".
   STUB_WHERE = []
   STUB_WHERE_ADDRS = [ [ "" ] ]
+  # `.returns(a, b)` — a sequence per host: consecutive calls answer
+  # consecutive values and the last repeats, which is mocha's contract
+  # and what campfire's DNS-rebinding tests lean on (the second answer
+  # is the private address a re-resolve would have connected to).
+  STUB_SEQ_HOSTS = [ "" ]
+  STUB_SEQ_ADDRS = [ [ [ "" ] ] ]
 
   # Install or REPLACE one host's answer. Replacement matters: a single
   # test re-stubs the same host with a second value
@@ -111,6 +117,20 @@ class Resolv
     end
     STUB_HOSTS << host
     STUB_ADDRS << addrs
+    nil
+  end
+
+  def self.stub_getaddresses_seq(host, answers)
+    i = 0
+    while i < STUB_SEQ_HOSTS.length
+      if STUB_SEQ_HOSTS[i] == host
+        STUB_SEQ_ADDRS[i] = answers
+        return nil
+      end
+      i += 1
+    end
+    STUB_SEQ_HOSTS << host
+    STUB_SEQ_ADDRS << answers
     nil
   end
 
@@ -144,6 +164,10 @@ class Resolv
     STUB_ADDRS.clear
     STUB_HOSTS << ""
     STUB_ADDRS << [ "" ]
+    STUB_SEQ_HOSTS.clear
+    STUB_SEQ_ADDRS.clear
+    STUB_SEQ_HOSTS << ""
+    STUB_SEQ_ADDRS << [ [ "" ] ]
     STUB_ANY_ON[0] = false
     STUB_RAISE_NAME[0] = ""
     STUB_WHERE.clear
@@ -156,6 +180,14 @@ class Resolv
     if failure != ""
       raise ResolvError, failure if failure == "Resolv::ResolvError"
       raise failure
+    end
+    i = 0
+    while i < STUB_SEQ_HOSTS.length
+      if STUB_SEQ_HOSTS[i] == host
+        q = STUB_SEQ_ADDRS[i]
+        return q.length > 1 ? q.shift : q[0]
+      end
+      i += 1
     end
     i = 0
     while i < STUB_HOSTS.length

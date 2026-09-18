@@ -100,6 +100,9 @@ struct Stubbable {
     method: &'static str,
     /// `.with(a).returns(v)` — files an answer under `a`.
     keyed: Option<&'static str>,
+    /// `.with(a).returns(v1, v2, …)` — files a SEQUENCE under `a`:
+    /// consecutive calls answer consecutive values, the last repeating.
+    keyed_seq: Option<&'static str>,
     /// A bare `.returns(v)` — answers for every argument.
     any: Option<&'static str>,
     /// `stubs(:m)` with nothing chained — answers the row's default.
@@ -115,6 +118,13 @@ struct Stubbable {
     /// `expects(:m)[.times(n)].with(has_entry(k: v))` — files the count
     /// against calls carrying that option, as `(n, :k, v)`.
     expect_entry: Option<&'static str>,
+    /// `expects(:m).with { |*a| … }[.never/.times(n)]` — files the count
+    /// against the calls the block admits, as `(n, pred)`.
+    expect_where: Option<&'static str>,
+    /// `expects(:m).with { |*a| … }.throws(:tag)` — the calls the block
+    /// admits `throw` the tag, as `("tag", pred)`: the tag travels as a
+    /// String and the slot throws `tag.to_sym` (matz/spinel#4523).
+    expect_throws_where: Option<&'static str>,
     /// `expects(:m)[.times(n)].raises(e)` — files the count and makes
     /// every call raise, as `(n, "<Class>")`: the exception travels by
     /// CLASS NAME, whether the test wrote the class or an instance of
@@ -151,17 +161,44 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "Resolv",
         method: "getaddresses",
         keyed: Some("stub_getaddresses"),
+        keyed_seq: Some("stub_getaddresses_seq"),
         any: Some("stub_getaddresses_any"),
         bare: None,
         raises: Some("stub_getaddresses_raises"),
         where_: Some("stub_getaddresses_where"),
         expect: None,
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_getaddresses_stubs",
         verify: None,
         require: "../runtime/resolv",
         slot_on: None,
+    },
+    // The socket the HTTP client opens. campfire's DNS-rebinding tests
+    // put block-predicate expectations on it — `.never` for the
+    // hostname, `.throws(:dns_not_rebound)` for the resolved address —
+    // and the table (`runtime/spinel/tcp_socket_stub.rb`) is asked by
+    // the client just before it connects, on both families.
+    Stubbable {
+        konst: "TCPSocket",
+        method: "open",
+        keyed: None,
+        keyed_seq: None,
+        any: None,
+        bare: None,
+        raises: None,
+        where_: None,
+        expect: None,
+        expect_entry: None,
+        expect_where: Some("expect_open_where"),
+        expect_throws_where: Some("expect_open_throws_where"),
+        expect_raises: None,
+        clear: "clear_open_expectations",
+        verify: Some("verify_open_expectations"),
+        require: "../runtime/tcp_socket_stub",
+        slot_on: Some("TcpSocketStub"),
     },
     // The stdlib's CSPRNG (spinel: `packages/securerandom`). campfire's
     // bot and user tests pin `alphanumeric` / `uuid` to a literal and
@@ -172,12 +209,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "SecureRandom",
         method: "alphanumeric",
         keyed: None,
+        keyed_seq: None,
         any: Some("stub_alphanumeric"),
         bare: None,
         raises: None,
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
@@ -188,12 +228,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "SecureRandom",
         method: "uuid",
         keyed: None,
+        keyed_seq: None,
         any: Some("stub_uuid"),
         bare: None,
         raises: None,
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
@@ -207,12 +250,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "Random",
         method: "uuid",
         keyed: None,
+        keyed_seq: None,
         any: Some("stub_uuid"),
         bare: None,
         raises: None,
         where_: None,
         expect: None,
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_secure_random_stubs",
         verify: None,
@@ -227,12 +273,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "WebPush",
         method: "payload_send",
         keyed: None,
+        keyed_seq: None,
         any: Some("stub_payload_send_any"),
         bare: Some("stub_payload_send"),
         raises: None,
         where_: None,
         expect: Some("expect_payload_send"),
         expect_entry: Some("expect_payload_send_with_entry"),
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: Some("expect_payload_send_raising"),
         clear: "clear_payload_send_stubs",
         verify: Some("verify_payload_send_expectations"),
@@ -246,12 +295,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "Turbo::StreamsChannel",
         method: "broadcast_replace_to",
         keyed: None,
+        keyed_seq: None,
         any: None,
         bare: None,
         raises: None,
         where_: None,
         expect: Some("expect_broadcast_replace_to"),
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
@@ -262,12 +314,15 @@ const STUBBABLE: &[Stubbable] = &[
         konst: "Turbo::StreamsChannel",
         method: "broadcast_remove_to",
         keyed: None,
+        keyed_seq: None,
         any: None,
         bare: None,
         raises: None,
         where_: None,
         expect: Some("expect_broadcast_remove_to"),
         expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
         expect_raises: None,
         clear: "clear_broadcast_expectations",
         verify: Some("verify_broadcast_expectations"),
@@ -875,6 +930,11 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
             [with, ret] if plain(with, "with", 1) && plain(ret, "returns", 1) => {
                 row.keyed.map(|keyed| call(span, konst, keyed, vec![with.args[0].clone(), ret.args[0].clone()]))
             }
+            // `.with(a).returns(v1, v2, …)`: the values as ONE Array, in
+            // order — the slot answers them consecutively.
+            [with, ret] if plain(with, "with", 1) && ret.name.as_str() == "returns" && ret.args.len() > 1 && ret.block.is_none() => {
+                row.keyed_seq.map(|seq| call(span, konst, seq, vec![with.args[0].clone(), array_lit(span, ret.args.clone())]))
+            }
             // `.with { |*| … }.returns(v)`: the block is the predicate,
             // handed to the slot as a one-parameter LAMBDA (the host) —
             // a value the runtime's `Array[^(String) -> bool]` can hold,
@@ -891,8 +951,23 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
             // most one count.
             let entries: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "with").collect();
             let raises: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "raises").collect();
-            let counts: Vec<&Op> =
-                ops.iter().filter(|op| op.name.as_str() != "with" && op.name.as_str() != "raises").collect();
+            let throws: Vec<&Op> = ops.iter().filter(|op| op.name.as_str() == "throws").collect();
+            let counts: Vec<&Op> = ops
+                .iter()
+                .filter(|op| !matches!(op.name.as_str(), "with" | "raises" | "throws"))
+                .collect();
+            // `.with { |*a| … }.throws(:tag)`: no count — the throw leaves
+            // the call before anything could be counted.
+            if let ([with], [], [thr]) = (entries.as_slice(), raises.as_slice(), throws.as_slice()) {
+                if with.name.as_str() == "with" && with.args.is_empty() && with.block.is_some() && plain(thr, "throws", 1) && counts.is_empty() {
+                    let ExprNode::Lit { value: Literal::Sym { value: tag } } = &*thr.args[0].node else { return None };
+                    let pred = predicate_lambda(with.block.clone()?)?;
+                    return Some(call(span, konst, row.expect_throws_where?, vec![str_lit(span, tag.as_str()), pred]));
+                }
+            }
+            if !throws.is_empty() {
+                return None;
+            }
             let n = match counts.as_slice() {
                 // mocha reads a bare `expects` as exactly once.
                 [] => int_lit(span, 1),
@@ -904,6 +979,13 @@ fn lower_known(span: crate::span::Span, chain: &Chain, row: &Stubbable) -> Optio
                 ([with], []) if plain(with, "with", 1) => {
                     let (key, value) = has_entry_pair(&with.args[0])?;
                     Some(call(span, konst, row.expect_entry?, vec![n, sym_lit(span, key.as_str()), value]))
+                }
+                // `.with { |*a| … }[.never]`: the block is the predicate,
+                // handed to the slot as a lambda over what the seam
+                // passes.
+                ([with], []) if with.name.as_str() == "with" && with.args.is_empty() && with.block.is_some() => {
+                    let pred = predicate_lambda(with.block.clone()?)?;
+                    Some(call(span, konst, row.expect_where?, vec![n, pred]))
                 }
                 ([], [raises]) if plain(raises, "raises", 1) => {
                     let name = exception_class_name(&raises.args[0])?;
@@ -1083,6 +1165,57 @@ mod tests {
         assert_eq!(const_path(recv), "Resolv");
         assert_eq!(m, "stub_getaddresses");
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn a_keyed_returns_with_several_values_files_a_sequence() {
+        // Resolv.stubs(:getaddresses).with("h").returns([a], [b])
+        let mut e = send(
+            Some(send(Some(send(Some(konst(&["Resolv"])), "stubs", vec![sym("getaddresses")])), "with", vec![str_lit(sp(), "h")])),
+            "returns",
+            vec![array_lit(sp(), vec![str_lit(sp(), "1.2.3.4")]), array_lit(sp(), vec![str_lit(sp(), "127.0.0.1")])],
+        );
+        rewrite(&mut e, &mut AppMethods::empty());
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "Resolv");
+        assert_eq!(m, "stub_getaddresses_seq");
+        assert_eq!(args.len(), 2, "the host, then the answers as one Array");
+        assert!(matches!(&*args[1].node, ExprNode::Array { elements, .. } if elements.len() == 2));
+    }
+
+    #[test]
+    fn a_socket_expectation_with_a_block_and_never_files_a_count_on_the_seam() {
+        // TCPSocket.expects(:open).with { |*args| … }.never
+        let head = send(Some(konst(&["TCPSocket"])), "expects", vec![sym("open")]);
+        let with = send_blk(head, "with", lambda());
+        let mut e = send(Some(with), "never", vec![]);
+        rewrite(&mut e, &mut AppMethods::empty());
+        let (recv, m, args, block) = as_send(&e);
+        assert_eq!(const_path(recv), "TcpSocketStub", "the slot lives on the seam, not the stdlib class");
+        assert_eq!(m, "expect_open_where");
+        assert_eq!(args.len(), 2);
+        assert_eq!(int_of(&args[0]), 0);
+        assert!(matches!(&*args[1].node, ExprNode::Lambda { .. }));
+        assert!(block.is_none());
+    }
+
+    #[test]
+    fn a_socket_expectation_that_throws_carries_the_tag_by_name() {
+        // TCPSocket.expects(:open).with { |*args| … }.throws(:dns_not_rebound)
+        let head = send(Some(konst(&["TCPSocket"])), "expects", vec![sym("open")]);
+        let with = send_blk(head, "with", lambda());
+        let mut e = send(Some(with), "throws", vec![sym("dns_not_rebound")]);
+        rewrite(&mut e, &mut AppMethods::empty());
+        let (recv, m, args, _) = as_send(&e);
+        assert_eq!(const_path(recv), "TcpSocketStub");
+        assert_eq!(m, "expect_open_throws_where");
+        assert_eq!(args.len(), 2);
+        assert!(
+            matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == "dns_not_rebound"),
+            "the tag travels as a String (matz/spinel#4523): {:?}",
+            args[0].node
+        );
+        assert!(matches!(&*args[1].node, ExprNode::Lambda { .. }));
     }
 
     #[test]

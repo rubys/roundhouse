@@ -37,6 +37,17 @@
 > the double. One unreduced finding: reading an element of an
 > `Array[Hash[String, String]]` constant cost every test binary's
 > analysis ~4 minutes, so the table stores headers as one String per stub.
+>
+> **2026-09-17.** The two DNS-rebinding tests §2's "Out" list left to mocha
+> are served: `lower::mocha` has a `TCPSocket.open` row whose block-predicate
+> `expects` (`.never`, `.throws(:tag)`) fill `TcpSocketStub`
+> (`runtime/spinel/tcp_socket_stub.rb`), the Resolv slot files a sequence
+> for `.returns([a], [b])`, and the client asks the seam about the address
+> it is about to connect to — spinel's reopened `connect_with_timeout`,
+> the ruby family's reopened `TCPSocket.open`. `disable_net_connect!(allow:)`
+> stays the no-op §2 describes: an unstubbed request already goes to the
+> transport, and the seam is what intercepts it. `opengraph_fetch_test`
+> 11/11 on both lanes.
 
 
 Replace campfire's WebMock usage with a roundhouse-owned HTTP double that

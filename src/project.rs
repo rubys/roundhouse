@@ -1275,6 +1275,8 @@ class Resolv
   STUB_RAISE_ON = [ false ]
   STUB_WHERE = []
   STUB_WHERE_ADDRS = [ [ "" ] ]
+  STUB_SEQ_HOSTS = [ "" ]
+  STUB_SEQ_ADDRS = [ [ [ "" ] ] ]
 
   class << self
     alias_method :getaddresses_without_stub, :getaddresses
@@ -1286,6 +1288,19 @@ class Resolv
         STUB_ADDRS << addrs
       else
         STUB_ADDRS[i] = addrs
+      end
+      nil
+    end
+
+    # `.returns(a, b)`: consecutive calls answer consecutive values, the
+    # last repeating — mocha's sequence.
+    def stub_getaddresses_seq(host, answers)
+      i = STUB_SEQ_HOSTS.index(host)
+      if i.nil?
+        STUB_SEQ_HOSTS << host
+        STUB_SEQ_ADDRS << answers
+      else
+        STUB_SEQ_ADDRS[i] = answers
       end
       nil
     end
@@ -1313,6 +1328,8 @@ class Resolv
     def clear_getaddresses_stubs
       STUB_HOSTS.replace([ "" ])
       STUB_ADDRS.replace([ [ "" ] ])
+      STUB_SEQ_HOSTS.replace([ "" ])
+      STUB_SEQ_ADDRS.replace([ [ [ "" ] ] ])
       STUB_ANY_ON[0] = false
       STUB_RAISE_ON[0] = false
       STUB_WHERE.clear
@@ -1322,10 +1339,37 @@ class Resolv
     def getaddresses(host)
       return STUB_WHERE_ADDRS[0] if !STUB_WHERE.empty? && STUB_WHERE[0].call(host)
       raise STUB_RAISE[0] if STUB_RAISE_ON[0]
+      i = STUB_SEQ_HOSTS.index(host)
+      unless i.nil?
+        q = STUB_SEQ_ADDRS[i]
+        return q.length > 1 ? q.shift : q[0]
+      end
       i = STUB_HOSTS.index(host)
       return STUB_ADDRS[i] unless i.nil?
       return STUB_ANY[0] if STUB_ANY_ON[0]
       getaddresses_without_stub(host)
+    end
+  end
+end
+"##;
+
+/// The ruby family's socket seam: `TcpSocketStub` (the strict file, kept
+/// as written — it is our own module, no stdlib class to collide with)
+/// with `TCPSocket.open` reopened to ask it first. That is the method
+/// CRuby's `Net::HTTP#connect` opens its socket with, and the one mocha
+/// replaced when the test was written; the strict lane asks from the
+/// reopened client instead (`runtime/spinel/net_http.rb`).
+const TCP_SOCKET_OPEN_REOPEN: &str = r##"
+# The ruby family's seam — see `project::TCP_SOCKET_OPEN_REOPEN`.
+require "socket"
+
+class TCPSocket
+  class << self
+    alias_method :open_without_stub, :open
+
+    def open(*args, **kw, &blk)
+      TcpSocketStub.check(args[0].to_s, args[1].to_i)
+      open_without_stub(*args, **kw, &blk)
     end
   end
 end
@@ -1514,6 +1558,12 @@ fn ruby_runtime_files(
         // it. The spinel file re-renders because it has no alias.
         if path == "runtime/secure_random_stub.rb" {
             *content = SECURE_RANDOM_STUB_REOPEN.to_string();
+        }
+        // `TcpSocketStub`: the table as written, and `TCPSocket.open`
+        // reopened to consult it — the seam the strict client asks from
+        // inside `connect_with_timeout`.
+        if path == "runtime/tcp_socket_stub.rb" {
+            content.push_str(TCP_SOCKET_OPEN_REOPEN);
         }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
@@ -2541,6 +2591,10 @@ fn jruby_runtime_files(
         if path == "runtime/secure_random_stub.rb" {
             *content = SECURE_RANDOM_STUB_REOPEN.to_string();
         }
+        // …and `TCPSocket.open`, reopened over the socket seam.
+        if path == "runtime/tcp_socket_stub.rb" {
+            content.push_str(TCP_SOCKET_OPEN_REOPEN);
+        }
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
         }
@@ -2816,6 +2870,16 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/mocha_stub.rbs")
             .map_err(|e| format!("read runtime/spinel/mocha_stub.rbs: {e}"))?;
         files.push(("sig/runtime/mocha_stub.rbs".to_string(), rbs));
+    }
+
+    // `TcpSocketStub` sidecar — the `TCPSocket.open` expectation table
+    // the lowered DNS-rebinding tests fill and the reopened client asks;
+    // the .rbs types the predicate array from its contract, not from a
+    // test's first push.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/tcp_socket_stub.rbs")
+            .map_err(|e| format!("read runtime/spinel/tcp_socket_stub.rbs: {e}"))?;
+        files.push(("sig/runtime/tcp_socket_stub.rbs".to_string(), rbs));
     }
 
     // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib
