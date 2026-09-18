@@ -46,6 +46,7 @@ const REPO_ROOTS: &[&str] = &[
 /// from a fresh checkout.
 const EXEMPT_PREFIXES: &[&str] = &[
     "fixtures/real-blog",
+    "fixtures/store",
     "build/",
     "downloads/",
     "_site",

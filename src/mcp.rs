@@ -788,7 +788,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(crate::fixtures::real_blog(), &dir);
         let lock = dir.join("Gemfile.lock");
-        let text = std::fs::read_to_string(Path::new("fixtures/real-blog/Gemfile.lock")).unwrap();
+        let text = std::fs::read_to_string(crate::fixtures::real_blog().join("Gemfile.lock")).unwrap();
         let text = text
             .replacen("  specs:\n", "  specs:\n    pundit (2.4.0)\n", 1)
             .replacen("DEPENDENCIES\n", "DEPENDENCIES\n  pundit\n", 1);
@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn references_lists_ivar_uses() {
         let content =
-            std::fs::read_to_string("fixtures/real-blog/app/controllers/articles_controller.rb")
+            std::fs::read_to_string(crate::fixtures::real_blog().join("app/controllers/articles_controller.rb"))
                 .unwrap();
         let byte = content.find("@article =").unwrap() + 1;
         let before = &content[..byte];
@@ -950,7 +950,7 @@ mod tests {
         // The `broadcasts_to ->(_a){ "articles" }` lambda in article.rb —
         // exercises both the MCP path and the class-body DSL coverage.
         let content =
-            std::fs::read_to_string("fixtures/real-blog/app/models/article.rb").unwrap();
+            std::fs::read_to_string(crate::fixtures::real_blog().join("app/models/article.rb")).unwrap();
         let byte = content.find("\"articles\"").unwrap() + 2;
         let before = &content[..byte];
         let line = before.matches('\n').count() as u64 + 1;
