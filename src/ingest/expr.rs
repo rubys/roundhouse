@@ -33,8 +33,8 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
 }
 
 
-/// Extract one multi-write target — `a`, `@a`, or `recv[i]`
-/// (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
+/// Extract one multi-write target — `a`, `@a`, `recv.attr`, or
+/// `recv[i]` (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
 /// leading targets and the trailing splat target of a `MultiAssign`.
 fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::LValue> {
     if let Some(lvt) = node.as_local_variable_target_node() {
@@ -46,6 +46,16 @@ fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::
         let raw = constant_id_str(&ivt.name());
         let name = raw.strip_prefix('@').unwrap_or(raw);
         Ok(crate::expr::LValue::Ivar { name: Symbol::from(name) })
+    } else if let Some(ct) = node.as_call_target_node() {
+        // `self.a, self.b = pair` / `obj.a, obj.b = pair` — the
+        // writer-method target. Prism names the node with the setter's
+        // `=` (`a=`); `LValue::Attr` carries the reader name and the
+        // emitters append the assignment themselves. `&.` cannot reach
+        // here: Ruby rejects it in a multiple-assignment destination.
+        let recv = ingest_expr(&ct.receiver(), file)?;
+        let raw = constant_id_str(&ct.name());
+        let name = raw.strip_suffix('=').unwrap_or(raw);
+        Ok(crate::expr::LValue::Attr { recv, name: Symbol::from(name) })
     } else if let Some(it) = node.as_index_target_node() {
         let recv = ingest_expr(&it.receiver(), file)?;
         let index = ingest_index_argument(it.arguments(), file)?;
