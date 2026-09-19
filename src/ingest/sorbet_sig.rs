@@ -58,11 +58,12 @@ fn walk(
             if let Some(body) = class.body() {
                 if let Some(body) = body.as_statements_node() {
                     let statements = body.body().iter().collect::<Vec<_>>();
-                    if class
-                        .superclass()
-                        .is_some_and(|s| is_struct_superclass(&constant_path_name(&s)))
-                    {
+                    let superclass = class.superclass().map(|s| constant_path_name(&s));
+                    if superclass.as_deref().is_some_and(is_struct_superclass) {
                         collect_struct_properties(&statements, &name, out);
+                    }
+                    if superclass.as_deref() == Some("T::Enum") {
+                        collect_enum_surface(&statements, &name, out);
                     }
                     walk(&statements, Some(&name), out);
                 }
@@ -156,6 +157,87 @@ fn collect_struct_properties(
             );
         }
     }
+}
+
+/// `T::Enum`'s own surface: the members are constants holding
+/// instances (the library ingest reads those), and every instance
+/// answers `serialize` with the value it was constructed from.
+///
+/// The value type comes from the members themselves rather than being
+/// assumed to be String: `new("fill")` says String, `new(1)` says
+/// Integer, and an enum whose members disagree says nothing.
+fn collect_enum_surface(
+    statements: &[Node<'_>],
+    class_name: &str,
+    out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
+) {
+    let mut value_ty: Option<Ty> = None;
+    for statement in statements {
+        let Some(call) = statement.as_call_node() else { continue };
+        let method = call.name();
+        if constant_id_str(&method) != "enums" || call.receiver().is_some() {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { continue };
+        for member in body.body().iter() {
+            let Some(write) = member.as_constant_write_node() else { continue };
+            let Some(new_call) = write.value().as_call_node() else { continue };
+            let name = new_call.name();
+            if constant_id_str(&name) != "new" {
+                continue;
+            }
+            let ty = new_call
+                .arguments()
+                .and_then(|a| a.arguments().iter().next())
+                .and_then(|a| literal_ty(&a));
+            match (&value_ty, ty) {
+                (None, Some(ty)) => value_ty = Some(ty),
+                (Some(seen), Some(ty)) if *seen == ty => {}
+                // Members that disagree, or a member built from
+                // something that is not a literal: say nothing.
+                _ => return,
+            }
+        }
+    }
+    let Some(value_ty) = value_ty else { return };
+    let enum_ty = Ty::Class { id: ClassId(Symbol::new(class_name)), args: Vec::new() };
+    let nullary = |ret: Ty| Ty::Fn {
+        params: Vec::new(),
+        block: None,
+        ret: Box::new(ret),
+        effects: EffectSet::pure(),
+    };
+    let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
+    class.insert(Symbol::new("serialize"), nullary(value_ty.clone()));
+    class.insert(
+        Symbol::new("deserialize"),
+        Ty::Fn {
+            params: vec![Param {
+                name: Symbol::new("value"),
+                ty: value_ty,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(enum_ty.clone()),
+            effects: EffectSet::pure(),
+        },
+    );
+    class.insert(Symbol::new("values"), nullary(Ty::Array { elem: Box::new(enum_ty) }));
+}
+
+/// The type of a literal in a member's constructor call.
+fn literal_ty(node: &Node<'_>) -> Option<Ty> {
+    if node.as_string_node().is_some() {
+        return Some(Ty::Str);
+    }
+    if node.as_integer_node().is_some() {
+        return Some(Ty::Int);
+    }
+    if node.as_symbol_node().is_some() {
+        return Some(Ty::Sym);
+    }
+    None
 }
 
 fn symbol_name(node: &Node<'_>) -> Option<String> {
