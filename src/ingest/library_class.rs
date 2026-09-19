@@ -413,6 +413,70 @@ type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>, Vec<Expr>);
 /// emitted tree builds its own require graph (spinel's AOT stage
 /// resolves it statically), so replaying a source require inside a
 /// class body would point at a path that doesn't exist in the output.
+/// `extend T::Sig` and its siblings — the mixins whose whole surface is
+/// the annotations dropped above. `T::Sig` provides `sig`, `T::Helpers`
+/// provides `abstract!`/`interface!`, `T::Generic` provides
+/// `type_member`; with none of those left in the emit, the mixin is a
+/// `NameError` waiting at load time and nothing more.
+///
+/// `include T::Struct::ActsAsComparable` is deliberately NOT here: it
+/// gives a struct its `==`, which is behavior, and it goes when the
+/// struct itself is lowered.
+fn is_sorbet_annotation_mixin(call: &ruby_prism::CallNode<'_>) -> bool {
+    let name = call.name();
+    if !matches!(constant_id_str(&name), "extend" | "include") {
+        return false;
+    }
+    let Some(arguments) = call.arguments() else { return false };
+    let args: Vec<_> = arguments.arguments().iter().collect();
+    let [only] = args.as_slice() else { return false };
+    let Some(path) = only.as_constant_path_node() else { return false };
+    let written = constant_path_written(&path);
+    matches!(written.as_str(), "T::Sig" | "T::Helpers" | "T::Generic")
+}
+
+/// `T::Sig` — the constant path as written.
+fn constant_path_written(path: &ruby_prism::ConstantPathNode<'_>) -> String {
+    let mut out = match path.parent() {
+        Some(parent) => match parent.as_constant_read_node() {
+            Some(read) => format!("{}::", constant_id_str(&read.name())),
+            None => match parent.as_constant_path_node() {
+                Some(inner) => format!("{}::", constant_path_written(&inner)),
+                None => String::new(),
+            },
+        },
+        None => String::new(),
+    };
+    if let Some(name) = path.name() {
+        out.push_str(constant_id_str(&name));
+    }
+    out
+}
+
+/// sorbet-runtime's pure ANNOTATIONS: they carry types and nothing
+/// else, and roundhouse has already read them (`ingest::sorbet_sig`)
+/// by the time a class body is walked.
+///
+/// Dropped from the emit rather than round-tripped, because keeping
+/// them would be the one thing this project exists not to do: a `sig`
+/// makes sorbet-runtime wrap the method and re-check its types on
+/// every call, which is per-request work whose answer cannot differ
+/// between requests. The emitted tree carries no sorbet-runtime, so a
+/// surviving `sig` is also a `NameError` waiting at load time.
+///
+/// `T::Struct` and `T::Enum` are NOT here: `const :name, String` is a
+/// constructor and a reader, not an annotation, and deleting it would
+/// leave a class that cannot be built. Those need lowering, not
+/// dropping.
+const SORBET_ANNOTATIONS: &[&str] = &[
+    "sig",
+    "abstract!",
+    "interface!",
+    "final!",
+    "sealed!",
+    "type_parameters",
+];
+
 const POSITION_SENSITIVE_MARKERS: &[&str] = &[
     "private",
     "public",
@@ -717,7 +781,10 @@ fn walk_decl_body<'pr>(
                         // side reports the gap. That keeps a single
                         // exotic call in one library class from taking
                         // the app's ingest down.
-                        if !POSITION_SENSITIVE_MARKERS.contains(&kw) {
+                        if !POSITION_SENSITIVE_MARKERS.contains(&kw)
+                            && !SORBET_ANNOTATIONS.contains(&kw)
+                            && !is_sorbet_annotation_mixin(&call)
+                        {
                             if let Ok(e) = ingest_expr(&stmt, file) {
                                 unknown_calls.push(e);
                             }
