@@ -288,6 +288,29 @@ const STUBBABLE: &[Stubbable] = &[
         require: "../runtime/gem_facades",
         slot_on: None,
     },
+    // The cable server singleton (`runtime/spinel/action_cable.rb` and
+    // the overlay sibling, both `ActionCable::Server`). campfire's
+    // sign-out test makes `remote_connections` raise to prove the
+    // session still ends when the realtime service is down.
+    Stubbable {
+        konst: "ActionCable.server",
+        method: "remote_connections",
+        keyed: None,
+        keyed_seq: None,
+        any: None,
+        bare: None,
+        raises: Some("stub_remote_connections_raises"),
+        where_: None,
+        expect: None,
+        expect_entry: None,
+        expect_where: None,
+        expect_throws_where: None,
+        expect_raises: None,
+        clear: "clear_remote_connections_stubs",
+        verify: None,
+        require: "../runtime/action_cable",
+        slot_on: None,
+    },
     // Our own channel class (`runtime/spinel/turbo_streams.rb`, every
     // ruby-family tree carries it). campfire's messages controller
     // tests expect one replace / one remove per update / destroy.
@@ -623,6 +646,18 @@ fn parse_chain(expr: &Expr, ctx: &AppMethods) -> Option<Chain> {
                 {
                     (k.clone(), true, None)
                 }
+                // A singleton reached through a constant's reader —
+                // `ActionCable.server.stubs(:remote_connections)`. The
+                // head is the call as spelled, and the row is keyed by
+                // that spelling (`ActionCable.server`); the slot is a
+                // method on the object it answers.
+                ExprNode::Send { recv: Some(k), args: a, block: None, .. }
+                    if a.is_empty()
+                        && matches!(&*k.node, ExprNode::Const { .. })
+                        && row_for(&head_path(recv), stubbed.as_str()).is_some() =>
+                {
+                    (recv.clone(), false, None)
+                }
                 // An object head: the class is whatever the analyzer
                 // typed the receiver as (`@membership.user` — `User?`,
                 // the nil arm stripped). Untyped, and this is not a
@@ -636,8 +671,10 @@ fn parse_chain(expr: &Expr, ctx: &AppMethods) -> Option<Chain> {
                     (konst, false, Some(recv.clone()))
                 }
             };
-            let ExprNode::Const { path } = &*konst.node else { return None };
-            let path = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            let path = head_path(&konst);
+            if path.is_empty() {
+                return None;
+            }
             ops.reverse();
             return Some(Chain { konst, path, any_instance, instance, kind: method.clone(), method: stubbed.clone(), ops });
         }
@@ -649,14 +686,39 @@ fn parse_chain(expr: &Expr, ctx: &AppMethods) -> Option<Chain> {
     }
 }
 
+/// A chain head as the table spells it: a constant `::`-joined, or a
+/// constant's zero-argument reader as `Const.reader`. Anything else is
+/// `""`, which no row matches.
+fn head_path(head: &Expr) -> String {
+    match &*head.node {
+        ExprNode::Const { path } => path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        ExprNode::Send { recv: Some(k), method, args, block: None, .. } if args.is_empty() => {
+            match &*k.node {
+                ExprNode::Const { path } => {
+                    format!("{}.{}", path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"), method.as_str())
+                }
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 /// The row for a chain's head, if the table has one. A row spelled
 /// without `::` matches on the constant's last segment (`::Resolv` and
-/// `Resolv` both hit); one spelled with it wants the whole path.
+/// `Resolv` both hit); one spelled with it wants the whole path. A row
+/// naming a reader (`ActionCable.server`) wants the whole spelling.
 fn row_for(path: &str, method: &str) -> Option<&'static Stubbable> {
     let last = path.rsplit("::").next().unwrap_or(path);
     STUBBABLE.iter().find(|s| {
         s.method == method
-            && if s.konst.contains("::") { s.konst == path || path.ends_with(&format!("::{}", s.konst)) } else { s.konst == last }
+            && if s.konst.contains('.') {
+                s.konst == path
+            } else if s.konst.contains("::") {
+                s.konst == path || path.ends_with(&format!("::{}", s.konst))
+            } else {
+                s.konst == last
+            }
     })
 }
 
@@ -1216,6 +1278,22 @@ mod tests {
             args[0].node
         );
         assert!(matches!(&*args[1].node, ExprNode::Lambda { .. }));
+    }
+
+    #[test]
+    fn a_singleton_reached_through_a_constants_reader_is_a_head() {
+        // ActionCable.server.stubs(:remote_connections).raises(RuntimeError.new("down"))
+        let server = send(Some(konst(&["ActionCable"])), "server", vec![]);
+        let head = send(Some(server), "stubs", vec![sym("remote_connections")]);
+        let err = send(Some(konst(&["RuntimeError"])), "new", vec![str_lit(sp(), "down")]);
+        let mut e = send(Some(head), "raises", vec![err]);
+        rewrite(&mut e, &mut AppMethods::empty());
+        let (recv, m, args, _) = as_send(&e);
+        let (k, reader, _, _) = as_send(recv);
+        assert_eq!(const_path(k), "ActionCable");
+        assert_eq!(reader, "server", "the slot is a method on the object the reader answers");
+        assert_eq!(m, "stub_remote_connections_raises");
+        assert_eq!(args.len(), 1);
     }
 
     #[test]

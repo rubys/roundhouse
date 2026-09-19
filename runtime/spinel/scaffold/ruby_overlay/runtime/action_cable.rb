@@ -117,7 +117,28 @@ module ActionCable
     # disconnect that forces it is not. Recorded in
     # docs/pipeline/runtime.md rather than left as a silent no-op.
     def remote_connections
+      raise STUB_RAISE[0] if STUB_RAISE_ON[0]
       RemoteConnections.new
+    end
+
+    # Test stub slot — `lower::mocha` rewrites `ActionCable.server
+    # .stubs(:remote_connections).raises(e)` to `stub_remote_connections
+    # _raises(e)`: every `remote_connections` then raises `e`, the
+    # exception object the test wrote, until the helper's setup clears
+    # it. campfire's sign-out test proves the session still ends when
+    # the realtime service is down.
+    STUB_RAISE = [ StandardError.new("") ]
+    STUB_RAISE_ON = [ false ]
+
+    def stub_remote_connections_raises(error)
+      STUB_RAISE[0] = error
+      STUB_RAISE_ON[0] = true
+      nil
+    end
+
+    def clear_remote_connections_stubs
+      STUB_RAISE_ON[0] = false
+      nil
     end
 
     # `ActionCable.server.pubsub` — the queue an app's OWN test asks what

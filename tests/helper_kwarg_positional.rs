@@ -156,3 +156,62 @@ fn an_unknown_key_declines() {
     let src = emit(NAMED_KWARG, "<%= label_for(@rooms.first, bogus: 1) %>\n");
     assert!(src.contains("bogus:"), "left alone:\n{src}");
 }
+
+/// A caller may name the later keywords and leave an earlier one to its
+/// default: the skipped slot takes the parameter's own default, the
+/// value Ruby binds. campfire's `stub_successful_request(title:,
+/// description:)` is the shape.
+#[test]
+fn a_skipped_keyword_takes_its_own_default() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br##"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "later keywords only" do
+    assert_equal "https://a.example/ T D", stubbed(title: "T", description: "D")
+  end
+
+  test "context-bound default declines" do
+    assert_equal "x", relative(b: "x")
+  end
+
+  private
+    def stubbed(url: "https://a.example/", title: "Hey!", description: "desc..")
+      "#{url} #{title} #{description}"
+    end
+
+    def relative(a = Room.count, b: "y")
+      "#{a}#{b}"
+    end
+end
+"##
+        .to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains(r#"stubbed("https://a.example/", "T", "D")"#),
+        "the skipped `url:` must take the definition's default:\n{src}"
+    );
+    assert!(
+        src.contains("relative(b: \"x\")"),
+        "a default that reads the callee's context is not moved to the call site:\n{src}"
+    );
+}

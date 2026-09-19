@@ -37,6 +37,18 @@
 //! Silent where it does not crash: a keyword whose value happens to be
 //! usable as a hash would simply produce wrong results. That is why
 //! this is a correctness pass rather than a convenience.
+//!
+//! A GAP IS FILLED WITH THE PARAMETER'S OWN DEFAULT. Keywords are
+//! unordered, so a caller may name the second and third and leave the
+//! first to its default — campfire's `stub_successful_request(title:,
+//! description:)` beside a `def stub_successful_request(url: "…",
+//! title: "…", description: "…")`. The slot in between is filled with
+//! the default the definition wrote, which is not an invention: it is
+//! what Ruby binds. Only a CONTEXT-FREE default is moved — a literal, a
+//! constant, an array or hash of those — because the default is now
+//! evaluated at the call site rather than in the callee; one that reads
+//! an earlier parameter (`def f(a, b = a)`) or the callee's `self` means
+//! something different there, and such a call is left alone.
 
 use std::collections::HashMap;
 
@@ -78,7 +90,7 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
 /// because then the call site genuinely does not say which.
 fn apply_to_test_modules(app: &mut App) {
     for tm in &mut app.test_modules {
-        let mut params: HashMap<Symbol, Vec<Symbol>> = HashMap::new();
+        let mut params: HashMap<Symbol, Vec<Slot>> = HashMap::new();
         let mut ambiguous: Vec<Symbol> = Vec::new();
         for m in &tm.helpers {
             // Same two exclusions as the module path: a `rest` parameter
@@ -87,7 +99,7 @@ fn apply_to_test_modules(app: &mut App) {
             if m.params.iter().any(|p| p.rest || p.keyword) {
                 continue;
             }
-            let names: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
+            let names: Vec<Slot> = m.params.iter().map(slot_of).collect();
             if params.insert(m.name.clone(), names).is_some() {
                 ambiguous.push(m.name.clone());
             }
@@ -110,14 +122,25 @@ fn apply_to_test_modules(app: &mut App) {
     }
 }
 
-/// Helper name → its parameter names, in declaration order.
+/// One positional slot of a helper: its name, and its default when it
+/// has one.
+struct Slot {
+    name: Symbol,
+    default: Option<Expr>,
+}
+
+fn slot_of(p: &crate::dialect::Param) -> Slot {
+    Slot { name: p.name.clone(), default: p.default.clone() }
+}
+
+/// Helper name → its parameter slots, in declaration order.
 ///
 /// Only helpers whose name is UNIQUE across modules are registered: a
 /// name two modules define is one this pass cannot resolve from the
 /// call site alone, and binding it to the wrong signature is exactly
 /// the failure being fixed.
-fn helper_param_names(app: &App) -> HashMap<Symbol, Vec<Symbol>> {
-    let mut out: HashMap<Symbol, Vec<Symbol>> = HashMap::new();
+fn helper_param_names(app: &App) -> HashMap<Symbol, Vec<Slot>> {
+    let mut out: HashMap<Symbol, Vec<Slot>> = HashMap::new();
     let mut ambiguous: Vec<Symbol> = Vec::new();
     for (name, owner) in &app.helper_method_index {
         let Some(lc) = app.library_classes.iter().find(|c| &c.name == owner) else {
@@ -135,7 +158,7 @@ fn helper_param_names(app: &App) -> HashMap<Symbol, Vec<Symbol>> {
         if m.params.iter().any(|p| p.rest || p.keyword) {
             continue;
         }
-        let names: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
+        let names: Vec<Slot> = m.params.iter().map(slot_of).collect();
         if out.insert(name.clone(), names).is_some() {
             ambiguous.push(name.clone());
         }
@@ -146,7 +169,7 @@ fn helper_param_names(app: &App) -> HashMap<Symbol, Vec<Symbol>> {
     out
 }
 
-fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Symbol>>) {
+fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Slot>>) {
     e.node.for_each_child_mut(&mut |c| rewrite_calls(c, params));
     let ExprNode::Send { recv, method, args, .. } = &mut *e.node else { return };
     // Receiverless only: the bare spelling a view writes, before
@@ -154,37 +177,58 @@ fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Symbol>>) {
     if recv.is_some() {
         return;
     }
-    let Some(names) = params.get(method) else { return };
+    let Some(slots) = params.get(method) else { return };
     let Some(last) = args.last() else { return };
     let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return };
     if entries.is_empty() {
         return;
     }
-    // Every key must be a Symbol naming a parameter, and the parameters
-    // it names must be exactly the ones this call has not already filled
-    // positionally. Anything else and the call means something this pass
-    // cannot prove, so it is left alone.
+    // Every key must be a Symbol naming a parameter this call has not
+    // already filled positionally. Anything else and the call means
+    // something this pass cannot prove, so it is left alone.
     let filled = args.len() - 1;
     let mut supplied: Vec<(usize, Expr)> = Vec::new();
     for (k, v) in entries {
         let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else { return };
-        let Some(pos) = names.iter().position(|n| n == value) else { return };
+        let Some(pos) = slots.iter().position(|s| s.name == *value) else { return };
         if pos < filled {
             return;
         }
         supplied.push((pos, v.clone()));
     }
     supplied.sort_by_key(|(pos, _)| *pos);
-    // Contiguous from the first unfilled slot: a gap would need the
-    // parameter's own default in between, which is not something to
-    // invent here.
-    if supplied
-        .iter()
-        .enumerate()
-        .any(|(i, (pos, _))| *pos != filled + i)
-    {
-        return;
+    // From the first unfilled slot up to the last one named: a slot the
+    // call skipped takes the parameter's own default — the value Ruby
+    // binds — when that default means the same thing at the call site.
+    // A required parameter, or a default that reads the callee's
+    // context, is a gap this pass cannot fill.
+    let last_pos = supplied.last().map(|(pos, _)| *pos).unwrap_or(filled);
+    let mut moved: Vec<Expr> = Vec::new();
+    let mut supplied = supplied.into_iter().peekable();
+    for pos in filled..=last_pos {
+        if let Some((p, _)) = supplied.peek() {
+            if *p == pos {
+                moved.push(supplied.next().map(|(_, v)| v).expect("peeked"));
+                continue;
+            }
+        }
+        let Some(default) = slots[pos].default.as_ref() else { return };
+        if !is_context_free(default) {
+            return;
+        }
+        moved.push(default.clone());
     }
     args.pop();
-    args.extend(supplied.into_iter().map(|(_, v)| v));
+    args.extend(moved);
+}
+
+/// An expression that evaluates to the same thing wherever it is
+/// written: a literal, a constant, or an array or hash of those.
+fn is_context_free(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } | ExprNode::Const { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_context_free),
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| is_context_free(k) && is_context_free(v)),
+        _ => false,
+    }
 }

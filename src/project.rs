@@ -1214,7 +1214,15 @@ module MochaBridge
   CONST_NAME = /\A[A-Z]\w*(::[A-Z]\w*)*\z/
 
   def self.chain(konst, kind, meth, ops, &blk)
-    target = Object.const_get(konst)
+    # A head spelled `Const.reader` (`ActionCable.server`) is the object
+    # that reader answers, not a constant of that name.
+    target =
+      if konst.include?(".")
+        name, reader = konst.split(".", 2)
+        Object.const_get(name).public_send(reader)
+      else
+        Object.const_get(konst)
+      end
     expectation =
       case kind.to_s
       when "stubs" then target.stubs(meth)

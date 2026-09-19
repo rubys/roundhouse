@@ -64,7 +64,8 @@
       "owner": "compiler",
       "match": "(URI should be a String, Regexp, Addressable::Template, a callable object, or respond to #to_str\\. Got: Hash|unexpected end of input)",
       "match_test": "UnfurlLinksControllerTest#test_create_strips_markup_from_the_title_and_description",
-      "note": "`def stub_successful_request(url: \"https://www.example.com/\", title: \"Hey!\", description: \"desc..\")` called as `stub_successful_request title: \"…\", description: \"…\"`: the caller's keywords arrive as one Hash in the first positional slot, so `url` IS the hash and WebMock (ruby) refuses it while the compiled lane stubs nothing and the controller answers an empty body (`unexpected end of input` from the test's `JSON.parse`). The other callers pass no keywords and take every default, which is why the helper worked until 977cbcd added this test. Keyword parameters with defaults on a test-module method need the same call-site fill-in the app-side lowering does."
+      "note": "`def stub_successful_request(url: \"https://www.example.com/\", title: \"Hey!\", description: \"desc..\")` called as `stub_successful_request title: \"…\", description: \"…\"`: the caller's keywords arrive as one Hash in the first positional slot, so `url` IS the hash and WebMock (ruby) refuses it while the compiled lane stubs nothing and the controller answers an empty body (`unexpected end of input` from the test's `JSON.parse`). The other callers pass no keywords and take every default, which is why the helper worked until 977cbcd added this test. Keyword parameters with defaults on a test-module method need the same call-site fill-in the app-side lowering does. Served 2026-09-19: `lower::helper_kwargs` fills a skipped slot with the parameter's own default when that default is context-free (a literal, a constant, an array or hash of those) \u2014 the value Ruby binds \u2014 and still declines a default that reads the callee's context.",
+      "at_zero": "the skipped-slot fill landed 2026-09-19 (unfurl 7/7 both lanes); the rule stays as a regression tripwire."
     },
     {
       "slug": "direct-uploads-not-served",
@@ -78,7 +79,8 @@
       "title": "mocha's `.raises` on a class-method stub",
       "owner": "compiler",
       "match": "undefined method 'raises' for unknown",
-      "note": "`ActionCable.server.stubs(:remote_connections).raises(RuntimeError.new(\"cable down\"))` (upstream 9dd19d0's sessions test): the MochaBridge shapes answer `stubs(...).returns(v)` on a served row or a class; `.raises(e)` is the same slot with a raise in the arm, not a value. Spinel lane only; CRuby replays through the bridge."
+      "note": "`ActionCable.server.stubs(:remote_connections).raises(RuntimeError.new(\"cable down\"))` (upstream 9dd19d0's sessions test): the MochaBridge shapes answer `stubs(...).returns(v)` on a served row or a class; `.raises(e)` is the same slot with a raise in the arm, not a value. Served 2026-09-19: the chain parser accepts a `Const.reader` head, the table has a row for `ActionCable.server`/`remote_connections`, and both `ActionCable::Server` definitions carry the raise slot; the ruby family's replay resolves a reader head too.",
+      "at_zero": "served 2026-09-19 (sessions 9/10 spinel, 10/10 ruby); the rule stays as a regression tripwire."
     },
     {
       "slug": "mocha-bare-mock",
