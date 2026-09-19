@@ -220,7 +220,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         unwrap_or_record(ingest_model(&source, &path_str, &app.schema, &table_prefixes))?
                     {
                         if let Some(model) = maybe_model {
+                            // Classes nested in the model's body are
+                            // classes of their own — the model walk
+                            // skips them, and the same library ingest
+                            // that serves `app/services` registers them
+                            // here, under the qualified name Ruby gives
+                            // them.
+                            let outer = model.name.clone();
                             app.models.push(model);
+                            if let Some(classes) =
+                                unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                            {
+                                app.library_classes
+                                    .extend(nested_under(&outer, classes));
+                            }
                         }
                     }
                 }
@@ -804,7 +817,16 @@ end
                     // picked up at the module branch below.
                     app.view_visible_controller_methods
                         .extend(ingest_helper_method_names(&source));
+                    let outer = controller.name.clone();
                     app.controllers.push(controller);
+                    // Same as the models above: a class nested in the
+                    // controller's body is its own class, registered
+                    // from this file by the library ingest.
+                    if let Some(classes) =
+                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                    {
+                        app.library_classes.extend(nested_under(&outer, classes));
+                    }
                 } else {
                     // No class in the file — a module: a concern under
                     // app/controllers/concerns/ (`AccountOwnedConcern`)
@@ -2983,6 +3005,17 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
     collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+/// The classes from `classes` that are NESTED under `outer` — the ones
+/// a model's or controller's own body walk skipped. The outer class
+/// itself is ingested by its own pass and must not be registered twice.
+fn nested_under(
+    outer: &crate::ident::ClassId,
+    classes: Vec<crate::dialect::LibraryClass>,
+) -> Vec<crate::dialect::LibraryClass> {
+    let prefix = format!("{}::", outer.0.as_str());
+    classes.into_iter().filter(|c| c.name.0.as_str().starts_with(&prefix)).collect()
 }
 
 /// Extract the `ignore:` list from a `config.autoload_lib(ignore:

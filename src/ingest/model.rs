@@ -215,6 +215,16 @@ pub fn ingest_model(
             // gate, one such item silently dropped the entire model
             // (Mastodon lost `Status` to a single spelled-out scope
             // lambda). Strict mode still aborts.
+            // A nested class or module is a class of its own, not a body
+            // item: `class Row < T::Struct` inside a model or controller
+            // is the same declaration it would be in `app/services`, and
+            // the library-class pass over this very file registers it
+            // under its qualified name. Reaching the expression ingester
+            // with it aborted the whole file.
+            if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             let items = match ingest_model_body_items(&stmt, &owner, file, leading) {
                 Ok(items) => items,
                 Err(err) if super::survey::is_active() => {

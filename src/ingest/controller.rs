@@ -147,6 +147,16 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             // Survey mode: an unsupported item costs itself, not the whole
             // controller — record the gap and keep walking (same gate as
             // the model walk; see ingest/model.rs). Strict mode aborts.
+            // A nested class or module is a class of its own, not a body
+            // item: `class Row < T::Struct` inside a model or controller
+            // is the same declaration it would be in `app/services`, and
+            // the library-class pass over this very file registers it
+            // under its qualified name. Reaching the expression ingester
+            // with it aborted the whole file.
+            if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             let mut item = match ingest_controller_body_item(&stmt, file, leading) {
                 Ok(item) => item,
                 Err(err) if super::survey::is_active() => {
