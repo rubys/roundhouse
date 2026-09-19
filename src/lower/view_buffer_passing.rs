@@ -114,6 +114,18 @@ fn const_call(path: &[Symbol], method: &str, args: Vec<Expr>) -> Expr {
     )
 }
 
+/// The type the `_into` variant declares for a wrapper parameter: a
+/// model, or an Array of one, as declared; anything else `untyped` (the
+/// wrapper's `String?` is the view lowerer's guess for a partial local,
+/// see `split`).
+fn into_param_ty(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Class { .. } => ty.clone(),
+        Ty::Array { elem } if matches!(**elem, Ty::Class { .. }) => ty.clone(),
+        _ => Ty::Untyped,
+    }
+}
+
 /// Split one view method into a buffer-taking variant plus a wrapper
 /// that allocates a buffer, calls it and returns the string. The
 /// wrapper keeps the original name, arity and signature, so no call
@@ -146,16 +158,23 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
     // variant on value semantics and its appends would land in a copy.
     into_params.extend(m.params.iter().map(|p| Param { default: None, ..p.clone() }));
 
-    // `io` is declared, everything else is `untyped`. Declaring `io` is
-    // what keeps spinel's by-reference parameter ABI — the mechanism
-    // that makes the callee's appends visible to the caller — and an
-    // `untyped` there would put the parameter back on value semantics
-    // and lose them. Not carrying the wrapper's other declared types is
-    // deliberate: a partial's extra local is typed `String?` by the view
-    // lowerer whatever the caller passes, which is inert while the
-    // parameter is optional and a type error once it is required (a
-    // `Message` handed to `?String? message`). The wrapper still
-    // declares the public shape; this one is an internal ABI.
+    // `io` is declared, and so is a parameter the wrapper declares as a
+    // model or a collection of them; everything else is `untyped`.
+    // Declaring `io` is what keeps spinel's by-reference parameter ABI —
+    // the mechanism that makes the callee's appends visible to the
+    // caller — and an `untyped` there would put the parameter back on
+    // value semantics and lose them. A model parameter's declared type
+    // comes from what the callers pass and is what keeps the variant's
+    // reads direct: spinel trusts an RBS seed, so `untyped article`
+    // pinned the partial's `article` boxed and every `article.body` in
+    // it became a switch over every class with a `body` (spinel #4562's
+    // chains showed this on the blog: 4 such switches to 1 once typed).
+    // The wrapper's `String?` parameters are NOT carried: a partial's
+    // extra local is typed `String?` by the view lowerer whatever the
+    // caller passes, which is inert while the parameter is optional and
+    // a type error once it is required (a `Message` handed to `?String?
+    // message`). The wrapper still declares the public shape; this one
+    // is an internal ABI.
     let into_signature = match &m.signature {
         Some(Ty::Fn { params, block, effects, .. }) => {
             let mut ps = vec![crate::ty::Param {
@@ -165,7 +184,7 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
             }];
             ps.extend(params.iter().map(|p| crate::ty::Param {
                 name: p.name.clone(),
-                ty: Ty::Untyped,
+                ty: into_param_ty(&p.ty),
                 kind: ParamKind::Required,
             }));
             Some(Ty::Fn {
