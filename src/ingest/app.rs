@@ -1118,6 +1118,29 @@ end
             .extend(methods);
     }
 
+    // The app's own sorbet-runtime `sig` blocks, read from the trees
+    // that hold its classes. Same table, same consumers as the `sig/`
+    // sidecar above — and the sidecar wins where both declare a method,
+    // because it is written for this analyzer while a `sig` is written
+    // for Sorbet. A `sig` outside the grammar the reader models is
+    // dropped whole and the method is inferred as before.
+    for root in ["app", "lib"] {
+        let tree = dir.join(root);
+        if !vfs.is_dir(&tree) {
+            continue;
+        }
+        let Ok(entries) = read_rb_files(vfs, &tree) else { continue };
+        for entry in entries {
+            let Ok(source) = vfs.read(&entry) else { continue };
+            for (class_id, methods) in super::sorbet_sig::ingest_sorbet_signatures(&source) {
+                let declared = app.rbs_signatures.entry(class_id).or_default();
+                for (name, ty) in methods {
+                    declared.entry(name).or_insert(ty);
+                }
+            }
+        }
+    }
+
     app.sources = super::sources::drain();
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
