@@ -1163,6 +1163,29 @@ pub struct RouteTable {
     /// variant can hold a body, and the flattener must not see it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct_helpers: Vec<DirectHelper>,
+    /// `root to: redirect("/scan")` / `get "/admin", to: redirect("/x")`
+    /// — the routes that answer a literal redirect.
+    ///
+    /// Kept beside `entries` because `RouteSpec` needs no Redirect
+    /// variant for them and a dozen emitters need no new route kind: a
+    /// synthesized controller action serves the redirect with an
+    /// ordinary `redirect_to`, and the entry beside it is an ordinary
+    /// `Explicit` route pointing at that action. It is the shape an app
+    /// writes by hand when it wants the same thing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<RedirectRoute>,
+}
+
+/// One `to: redirect(...)` route, as the action synthesized for it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RedirectRoute {
+    /// The action name on the synthesized controller, derived from the
+    /// path so the emitted method reads as what it serves.
+    pub action: Symbol,
+    /// Where it sends the client: the literal path as written.
+    pub location: String,
+    /// Rails' `redirect` answers 301 unless the call says otherwise.
+    pub status: u16,
 }
 
 /// A `direct` custom URL helper.
