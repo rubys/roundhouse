@@ -30,8 +30,15 @@ fn paths(routes_rb: &str) -> Vec<String> {
     routes(routes_rb).into_iter().map(|(m, p, _)| format!("{m} {p}")).collect()
 }
 
+/// #82's guard, kept: whatever a `root to: redirect(...)` becomes, it
+/// is never a `Root` with an empty target — that is the entry the
+/// flattener turned into `Route.new("GET", "/", :, :index)`.
+///
+/// What it becomes CHANGED with the redirect lowering: the literal
+/// redirect is served now, by an `Explicit` route to the synthesized
+/// redirect controller, where #82 dropped it and ledgered the drop.
 #[test]
-fn root_redirect_is_dropped_not_emitted_with_an_empty_controller() {
+fn root_redirect_never_produces_an_empty_target_root() {
     let table = ingest_routes(
         br#"Rails.application.routes.draw do
   root to: redirect("/scan")
@@ -41,25 +48,31 @@ end
         "config/routes.rb",
     )
     .expect("ingest routes");
-    // No Root entry at all — an empty-target Root is what became `:`.
     assert!(
         !table.entries.iter().any(|e| matches!(e, roundhouse::dialect::RouteSpec::Root { .. })),
         "root redirect must not produce a Root entry: {:?}",
         table.entries
     );
+    assert_eq!(table.redirects.len(), 1, "{:?}", table.redirects);
+    assert_eq!(table.redirects[0].location, "/scan");
+    assert_eq!(table.redirects[0].status, 301);
+
     let mut app = App::default();
     app.routes = table;
     let flat = flatten_routes(&app);
-    assert_eq!(flat.len(), 1, "{flat:?}");
-    assert_eq!(flat[0].path, "/scan");
+    assert_eq!(flat.len(), 2, "the redirect is a route of its own now: {flat:?}");
+    assert!(flat.iter().any(|r| r.path == "/"), "{flat:?}");
+    assert!(flat.iter().any(|r| r.path == "/scan"), "{flat:?}");
 }
 
+/// The ledger line #82 added is for the redirects that STILL cannot be
+/// served: a block redirect has no literal to send anyone to.
 #[test]
-fn root_redirect_records_a_survey_line() {
+fn a_block_redirect_records_a_survey_line() {
     roundhouse::ingest::survey::activate();
     ingest_routes(
         br#"Rails.application.routes.draw do
-  root to: redirect("/scan")
+  get "/old", to: redirect { |params, request| "/scan" }
 end
 "#,
         "config/routes.rb",
@@ -67,7 +80,7 @@ end
     .expect("ingest routes");
     let gaps = roundhouse::ingest::survey::drain();
     assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert!(gaps[0].to_string().contains("`root` with a non-string target"), "{}", gaps[0]);
+    assert!(gaps[0].to_string().contains("non-string target"), "{}", gaps[0]);
 }
 
 #[test]

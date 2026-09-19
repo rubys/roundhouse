@@ -111,6 +111,7 @@ fn tiny_blog_round_trips() {
             scope: roundhouse::ResourceScope::Nested,
         }],
         direct_helpers: vec![],
+        redirects: vec![],
     };
 
     let app = App {
