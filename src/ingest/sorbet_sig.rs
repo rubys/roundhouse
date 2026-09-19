@@ -57,7 +57,14 @@ fn walk(
             let name = qualify(scope, &constant_path_name(&class.constant_path()));
             if let Some(body) = class.body() {
                 if let Some(body) = body.as_statements_node() {
-                    walk(&body.body().iter().collect::<Vec<_>>(), Some(&name), out);
+                    let statements = body.body().iter().collect::<Vec<_>>();
+                    if class
+                        .superclass()
+                        .is_some_and(|s| is_struct_superclass(&constant_path_name(&s)))
+                    {
+                        collect_struct_properties(&statements, &name, out);
+                    }
+                    walk(&statements, Some(&name), out);
                 }
             }
             pending = None;
@@ -88,6 +95,72 @@ fn walk(
             _ => None,
         };
     }
+}
+
+/// `T::Struct` / `T::ImmutableStruct` — sorbet-runtime's typed value
+/// object. `const :name, String` declares a reader whose type the app
+/// has written down, and a domain-heavy app keeps most of its types in
+/// exactly these classes.
+fn is_struct_superclass(name: &str) -> bool {
+    matches!(name, "T::Struct" | "T::ImmutableStruct" | "T::InexactStruct")
+}
+
+/// The readers (and, for `prop`, writers) a struct body declares.
+///
+/// `default:` / `factory:` / `extra:` ride along on the same call and
+/// say nothing about the type, so they are skipped rather than read.
+/// A declaration whose type is outside the grammar drops on its own,
+/// leaving the others — unlike a method signature, where a half-read
+/// `params` would mistype the method.
+fn collect_struct_properties(
+    statements: &[Node<'_>],
+    class_name: &str,
+    out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
+) {
+    for statement in statements {
+        let Some(call) = statement.as_call_node() else { continue };
+        if call.receiver().is_some() {
+            continue;
+        }
+        let method = call.name();
+        let writable = match constant_id_str(&method) {
+            "const" => false,
+            "prop" => true,
+            _ => continue,
+        };
+        let Some(arguments) = call.arguments() else { continue };
+        let mut arguments = arguments.arguments().iter();
+        let Some(name) = arguments.next().and_then(|n| symbol_name(&n)) else { continue };
+        let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n)) else { continue };
+        let reader = Ty::Fn {
+            params: Vec::new(),
+            block: None,
+            ret: Box::new(ty.clone()),
+            effects: EffectSet::pure(),
+        };
+        let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
+        class.insert(Symbol::new(&name), reader);
+        if writable {
+            class.insert(
+                Symbol::new(&format!("{name}=")),
+                Ty::Fn {
+                    params: vec![Param {
+                        name: Symbol::new("value"),
+                        ty: ty.clone(),
+                        kind: ParamKind::Required,
+                    }],
+                    block: None,
+                    ret: Box::new(ty),
+                    effects: EffectSet::pure(),
+                },
+            );
+        }
+    }
+}
+
+fn symbol_name(node: &Node<'_>) -> Option<String> {
+    let symbol = node.as_symbol_node()?;
+    Some(String::from_utf8_lossy(symbol.value_loc()?.as_slice()).into_owned())
 }
 
 fn is_sig_call(call: &ruby_prism::CallNode<'_>) -> bool {

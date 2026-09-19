@@ -216,3 +216,59 @@ end
          with the Integer body is silent today; diagnostics = {diagnostics:?}"
     );
 }
+
+/// A `T::Struct` lives in a library class — nested inside the
+/// interactor or query that answers it, which is where an app puts its
+/// DTOs. (A nested class in a CONTROLLER body is a separate ingest gap
+/// and not what this reads.)
+fn app_with_library(source: &str) -> roundhouse::App {
+    let mut files = tree("class ReportsController < ApplicationController\n  def show; end\nend\n");
+    files.insert(PathBuf::from("app/services/rows.rb"), source.as_bytes().to_vec());
+    ingest_app_from_tree(files).expect("ingest")
+}
+
+#[test]
+fn a_struct_declares_its_readers_and_writers() {
+    // `const :name, String` is a reader declaration as surely as a
+    // `sig` is, and a domain-heavy app keeps most of its types in
+    // exactly these classes.
+    let source = r#"class Rows
+  class Row < T::Struct
+    const :name, String
+    const :count, Integer
+    prop :note, T.nilable(String)
+    const :tags, T::Array[String], default: []
+  end
+end
+"#;
+    let app = app_with_library(source);
+    let row = |m: &str| signature(&app, "Rows::Row", m);
+    assert_eq!(returns_of(&row("name").expect("name")), Some(Ty::Str));
+    assert_eq!(returns_of(&row("count").expect("count")), Some(Ty::Int));
+    assert_eq!(
+        returns_of(&row("note").expect("note")),
+        Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+    );
+    assert_eq!(
+        returns_of(&row("tags").expect("a `default:` rides along and says nothing about the type")),
+        Some(Ty::Array { elem: Box::new(Ty::Str) })
+    );
+    // `prop` is writable, `const` is not.
+    assert!(row("note=").is_some(), "a prop declares its writer");
+    assert!(row("name=").is_none(), "a const does not");
+}
+
+#[test]
+fn an_immutable_struct_declares_readers_too() {
+    let source = r#"class Rows
+  class Row < T::ImmutableStruct
+    const :name, String
+  end
+end
+"#;
+    let app = app_with_library(source);
+    assert_eq!(
+        returns_of(&signature(&app, "Rows::Row", "name").expect("name")),
+        Some(Ty::Str)
+    );
+}
