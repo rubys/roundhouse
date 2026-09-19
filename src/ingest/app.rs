@@ -878,6 +878,14 @@ end
             &routes_path.display().to_string(),
             &draw_files,
         ))? {
+            // `to: redirect("/x")` routes point at actions nobody
+            // wrote, so write them: one controller, one action per
+            // redirect, each a `redirect_to <literal>, status: …`. It
+            // is the shape an app uses by hand for the same thing, and
+            // it keeps the redirect out of every emitter's route kind.
+            if !routes.redirects.is_empty() {
+                app.controllers.push(synthesize_redirect_controller(&routes.redirects));
+            }
             app.routes = routes;
         }
     }
@@ -3126,6 +3134,90 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
         }
     }
     roots
+}
+
+/// The controller the `to: redirect(...)` routes dispatch to: one
+/// action per redirect, each answering the location Rails' routing
+/// redirect would.
+///
+/// One deliberate divergence, and it is the reason the routing form
+/// exists at all: Rails' `redirect("/x")` carries the request's query
+/// string over to the target. A `redirect_to "/x"` does not, and
+/// nothing in the synthesized action can see the query string to pass
+/// on.
+fn synthesize_redirect_controller(
+    redirects: &[crate::dialect::RedirectRoute],
+) -> crate::dialect::Controller {
+    use crate::dialect::{Action, ControllerBodyItem, RenderTarget};
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::span::Span;
+
+    let body = redirects
+        .iter()
+        .map(|redirect| {
+            let location = Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: redirect.location.clone() } },
+            );
+            let location_for_target = location.clone();
+            let status = Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: i64::from(redirect.status) } },
+            );
+            let kwargs = Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("status") } },
+                        ),
+                        status,
+                    )],
+                    kwargs: true,
+                },
+            );
+            ControllerBodyItem::Action {
+                action: Action {
+                    name: redirect.action.clone(),
+                    params: crate::ty::Row::default(),
+                    opt_params: Vec::new(),
+                    block_param: None,
+                    name_span: Span::synthetic(),
+                    body: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: None,
+                            method: Symbol::from("redirect_to"),
+                            args: vec![location, kwargs],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    ),
+                    // The action IS the redirect, which is what the
+                    // render target says.
+                    renders: RenderTarget::Redirect { to: location_for_target },
+                    effects: crate::effect::EffectSet::pure(),
+                },
+                leading_comments: Vec::new(),
+                leading_blank_line: false,
+            }
+        })
+        .collect();
+
+    crate::dialect::Controller {
+        name: crate::ident::ClassId(Symbol::from(super::routes::REDIRECT_CONTROLLER)),
+        // `ActionController::Base`, not the app's `ApplicationController`:
+        // a routing redirect never enters the app's controller stack, so
+        // the synthesized action must not pick up its filters either. An
+        // app that authenticates in `ApplicationController` would
+        // otherwise start challenging a redirect Rails answers
+        // unconditionally.
+        parent: Some(crate::ident::ClassId(Symbol::from("ActionController::Base"))),
+        body,
+        layout: crate::dialect::LayoutDecl::default(),
+        sibling_classes: Vec::new(),
+    }
 }
 
 /// Does an initializer load this lib subdirectory itself?

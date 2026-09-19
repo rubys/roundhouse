@@ -767,6 +767,12 @@ fn prefix_path(ns: &str, path: &str) -> String {
 /// `Admin::` + `UsersController` → the module-qualified class the
 /// scoped route dispatches to.
 fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
+    // The synthesized redirect controller is one class for the whole
+    // app: a `to: redirect(...)` written inside a `namespace` would
+    // otherwise be qualified into a class nobody defines.
+    if controller.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER {
+        return controller.clone();
+    }
     if module_prefix.is_empty() {
         controller.clone()
     } else {

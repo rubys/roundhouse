@@ -67,7 +67,7 @@ pub fn ingest_routes_with_draws(
         None => Vec::new(),
     };
 
-    Ok(RouteTable { entries, direct_helpers })
+    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain() })
 }
 
 /// Every `direct :name do |…| … end` in the draw block, at any nesting
@@ -239,6 +239,117 @@ fn ingest_route_stmts<'pr>(
         }
     }
     Ok(entries)
+}
+
+/// Redirect routes collected during the entry walk.
+///
+/// A thread-local sink rather than an accumulator threaded through
+/// nine recursive signatures, and rather than the second walk
+/// `direct_helpers` uses: the action name has to be unique across the
+/// whole table, and only the walk that sees every route in order can
+/// say that. Same shape as `survey`'s collector, same reason.
+mod redirect_sink {
+    use std::cell::RefCell;
+
+    use crate::dialect::RedirectRoute;
+    use crate::ident::Symbol;
+
+    thread_local! {
+        static SINK: RefCell<Vec<RedirectRoute>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Record one redirect and answer the action name synthesized for
+    /// it: the path, made into an identifier, with a counter appended
+    /// if an earlier route already took that name.
+    pub(super) fn push(path: &str, location: String, status: u16) -> Symbol {
+        SINK.with(|sink| {
+            let mut sink = sink.borrow_mut();
+            let base = action_name(path);
+            let mut name = base.clone();
+            let mut n = 1;
+            while sink.iter().any(|r| r.action.as_str() == name) {
+                n += 1;
+                name = format!("{base}_{n}");
+            }
+            let action = Symbol::from(name.as_str());
+            sink.push(RedirectRoute { action: action.clone(), location, status });
+            action
+        })
+    }
+
+    pub(super) fn drain() -> Vec<RedirectRoute> {
+        SINK.with(|sink| std::mem::take(&mut *sink.borrow_mut()))
+    }
+
+    /// `/` → `root`, `/admin` → `admin`, `/a/b` → `a_b`, `/x/:id` →
+    /// `x_id`. A leading digit cannot start a method name, so it gets a
+    /// prefix rather than being dropped.
+    fn action_name(path: &str) -> String {
+        let mut name: String = path
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        name = name.trim_matches('_').to_string();
+        while name.contains("__") {
+            name = name.replace("__", "_");
+        }
+        if name.is_empty() {
+            return "root".to_string();
+        }
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            return format!("redirect_{name}");
+        }
+        name
+    }
+}
+
+/// The controller the synthesized redirect actions live on. Named for
+/// what it is so an emitted tree reads honestly; an app that happens to
+/// define this class would collide, which is why the name is one no
+/// generator produces.
+pub const REDIRECT_CONTROLLER: &str = "RoundhouseRedirectsController";
+
+/// `redirect("/path")` / `redirect("/path", status: 302)` — the literal
+/// form, which is all that can be served without running Rails'
+/// redirect block. Answers the location and the status Rails would use.
+fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
+    let call = node.as_call_node()?;
+    if call.receiver().is_some() {
+        return None;
+    }
+    let name = call.name();
+    if constant_id_str(&name) != "redirect" {
+        return None;
+    }
+    // A block form (`redirect { |params, req| … }`) has no literal to
+    // carry and stays dropped.
+    if call.block().is_some() {
+        return None;
+    }
+    let arguments = call.arguments()?;
+    let mut location = None;
+    let mut status = 301;
+    for argument in arguments.arguments().iter() {
+        if let Some(s) = string_value(&argument) {
+            location.get_or_insert(s);
+            continue;
+        }
+        let Some(hash) = argument.as_keyword_hash_node() else { return None };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else { continue };
+            let Some(key) = symbol_value(&assoc.key()) else { continue };
+            if key.as_str() != "status" {
+                return None;
+            }
+            let value = assoc.value();
+            let code = value
+                .as_integer_node()
+                .and_then(|i| super::util::integer_i64(&i.value()))
+                .and_then(|i| u16::try_from(i).ok())?;
+            status = code;
+        }
+    }
+    Some((location?, status))
 }
 
 fn ingest_route_call(
@@ -517,6 +628,7 @@ fn ingest_explicit_route(
     let mut path: Option<String> = None;
     let mut to: Option<String> = None;
     let mut to_is_unsupported = false;
+    let mut redirect_target: Option<(String, u16)> = None;
     let mut as_name: Option<Symbol> = None;
     let mut action_kwarg: Option<String> = None;
     // The INLINE spelling of `member do … end` / `collection do … end`.
@@ -566,11 +678,13 @@ fn ingest_explicit_route(
                         if let Some(v) = string_value(value) {
                             to = Some(v);
                         } else {
-                            // `get "/p" => redirect(...)` style. Mark
-                            // unsupported so we drop the whole route
-                            // gracefully (it's not bench-critical and
-                            // RouteSpec has no Redirect variant yet).
-                            to_is_unsupported = true;
+                            // `get "/p" => redirect("/q")` — the
+                            // hashrocket spelling of the same literal
+                            // redirect the kwarg form takes below.
+                            match redirect_literal(value) {
+                                Some(r) => redirect_target = Some(r),
+                                None => to_is_unsupported = true,
+                            }
                         }
                         continue;
                     }
@@ -582,9 +696,12 @@ fn ingest_explicit_route(
                     "to" => {
                         if let Some(v) = string_value(value) {
                             to = Some(v);
+                        } else if let Some(r) = redirect_literal(value) {
+                            redirect_target = Some(r);
                         } else {
-                            // `to: redirect(...)` — non-string target.
-                            // Drop the route (see above).
+                            // A block redirect (`redirect { |p, req| … }`)
+                            // carries no literal to serve, so it stays
+                            // dropped — with the ledger line #82 added.
                             to_is_unsupported = true;
                         }
                     }
@@ -646,6 +763,22 @@ fn ingest_explicit_route(
         }
     }
 
+    if let Some((location, status)) = redirect_target {
+        // Served by a synthesized action rather than dropped: the app
+        // gets the 301 it asked for, and no emitter learns a new route
+        // kind for it.
+        let path = path.clone().unwrap_or_else(|| "/".to_string());
+        let action = redirect_sink::push(&path, location, status);
+        return Ok(Some(RouteSpec::Explicit {
+            method,
+            path,
+            controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
+            action,
+            as_name,
+            constraints: IndexMap::new(),
+            scope: ResourceScope::default(),
+        }));
+    }
     if to_is_unsupported {
         // Dropped, with a ledger line: the route is not modeled
         // (`RouteSpec` has no Redirect variant), and a drop nobody can
@@ -719,6 +852,7 @@ fn ingest_root_route(
     // one file in the tree that failed `ruby -c`, and the entry point
     // (#82).
     let mut target: Option<String> = None;
+    let mut redirect_target: Option<(String, u16)> = None;
     if let Some(args_node) = call.arguments() {
         for arg in args_node.arguments().iter() {
             if let Some(s) = string_value(&arg) {
@@ -732,11 +866,29 @@ fn ingest_root_route(
                     if key_sym.as_str() == "to" {
                         if let Some(v) = string_value(&assoc.value()) {
                             target = Some(v);
+                        } else if let Some(r) = redirect_literal(&assoc.value()) {
+                            redirect_target = Some(r);
                         }
                     }
                 }
             }
         }
+    }
+    if let Some(redirect) = redirect_target {
+        // `root to: redirect("/scan")` — served by a synthesized action
+        // rather than dropped, so the emitted app answers `/` the way
+        // Rails does (#82 recorded the drop; this lowers it).
+        let (location, status) = redirect;
+        let action = redirect_sink::push("/", location, status);
+        return Ok(Some(RouteSpec::Explicit {
+            method: HttpMethod::Get,
+            path: "/".to_string(),
+            controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
+            action,
+            as_name: Some(Symbol::from("root")),
+            constraints: IndexMap::new(),
+            scope: ResourceScope::default(),
+        }));
     }
     match target {
         Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root { target })),

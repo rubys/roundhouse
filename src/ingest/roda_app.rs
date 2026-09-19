@@ -826,7 +826,7 @@ impl<'f> RouteWalker<'f> {
                 scope: Default::default(),
             });
         }
-        app.routes = RouteTable { entries, direct_helpers: Vec::new() };
+        app.routes = RouteTable { entries, direct_helpers: Vec::new(), redirects: Vec::new() };
 
         // Controllers — group leaves by controller stem, first-seen
         // order.
