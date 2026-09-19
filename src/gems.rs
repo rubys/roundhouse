@@ -481,6 +481,32 @@ pub fn namespace_of(gem: &str) -> String {
     if let Some((_, ns)) = IRREGULAR.iter().find(|(g, _)| *g == gem) {
         return (*ns).to_string();
     }
+    camelize(gem)
+}
+
+/// The top-level constants a gem might define, best guess first: the
+/// whole name camelized, then — for a dashed name — its first segment
+/// alone.
+///
+/// The second candidate is what an org- or suite-prefixed gem needs.
+/// `aws-sdk-s3` defines `Aws`, not `AwsSdkS3`; `rack-attack` extends
+/// `Rack`; a house gem called `<org>-<thing>` defines `<Org>::<Thing>`.
+/// The four entries in `IRREGULAR` that say exactly this were the
+/// hand-written version of the rule, and every private gem that follows
+/// the same convention needed its own entry to be attributable at all —
+/// which, by definition, it cannot have here.
+fn namespace_candidates(gem: &str) -> Vec<String> {
+    let mut candidates = vec![namespace_of(gem)];
+    if let Some((head, _)) = gem.split_once('-') {
+        let first = camelize(head);
+        if !candidates.contains(&first) {
+            candidates.push(first);
+        }
+    }
+    candidates
+}
+
+fn camelize(gem: &str) -> String {
     gem.split(['-', '_'])
         .filter(|s| !s.is_empty())
         .map(|s| {
@@ -497,9 +523,17 @@ pub fn namespace_of(gem: &str) -> String {
 /// under, if any: `Redcarpet::Markdown` → `redcarpet`.
 pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
     let head = constant_path.split("::").next().unwrap_or(constant_path);
+    // Two passes, so a full-name match always beats a first-segment
+    // one: two house gems under the same prefix both answer to `Acme`,
+    // and the one that spells the whole constant is the better claim.
     census
         .unknown()
         .find(|g| namespace_of(&g.name) == head)
+        .or_else(|| {
+            census
+                .unknown()
+                .find(|g| namespace_candidates(&g.name).iter().any(|c| c == head))
+        })
         .map(|g| g.name.as_str())
 }
 
@@ -518,6 +552,8 @@ GEM
     pundit (2.4.0)
       activesupport (>= 3.0.0)
     rails (8.0.2)
+    acme-core (2.1.0)
+    acme-telemetry (1.0.0)
     redcarpet (3.6.1)
     sorbet-runtime (0.5.12374)
     will_paginate (4.0.1)
@@ -526,6 +562,8 @@ PLATFORMS
   arm64-darwin-24
 
 DEPENDENCIES
+  acme-core
+  acme-telemetry
   pundit
   rails (~> 8.0.2)
   redcarpet
@@ -539,7 +577,10 @@ BUNDLED WITH
     #[test]
     fn parses_specs_and_dependencies() {
         let lock = Lockfile::parse(LOCK);
-        assert_eq!(lock.dependencies, ["pundit", "rails", "redcarpet", "sorbet-runtime", "will_paginate"]);
+        assert_eq!(
+            lock.dependencies,
+            ["acme-core", "acme-telemetry", "pundit", "rails", "redcarpet", "sorbet-runtime", "will_paginate"]
+        );
         assert_eq!(lock.version_of("rails"), Some("8.0.2"));
         assert_eq!(lock.version_of("nokogiri"), Some("1.18.3-arm64-darwin"));
         assert!(lock.has("actionpack"), "transitive specs are resolved too");
@@ -553,6 +594,8 @@ BUNDLED WITH
         assert_eq!(
             fates,
             [
+                ("acme-core", GemFate::Unknown),
+                ("acme-telemetry", GemFate::Unknown),
                 ("pundit", GemFate::Unknown),
                 ("rails", GemFate::Framework),
                 ("redcarpet", GemFate::Unknown),
@@ -563,7 +606,8 @@ BUNDLED WITH
         assert_eq!(census.transitive, 2);
         assert_eq!(
             census.summary(),
-            "5 gems: 1 framework, 1 modeled, 3 unknown (pundit, redcarpet, sorbet-runtime)"
+            "7 gems: 1 framework, 1 modeled, 5 unknown \
+             (acme-core, acme-telemetry, pundit, redcarpet, sorbet-runtime)"
         );
     }
 
@@ -582,6 +626,14 @@ BUNDLED WITH
             gem_owning_constant(&census, "T::Enum"),
             Some("sorbet-runtime"),
             "a dispatch on `T::…` is the gem's, not the app's"
+        );
+        // A dashed gem answers to its first segment as well as to its
+        // whole name, which is what `aws-sdk-s3 → Aws` says by hand.
+        assert_eq!(gem_owning_constant(&census, "Acme::Client"), Some("acme-core"));
+        assert_eq!(
+            gem_owning_constant(&census, "AcmeTelemetry::Span"),
+            Some("acme-telemetry"),
+            "the whole name still wins where a gem spells it out"
         );
         assert_eq!(gem_owning_constant(&census, "Rails"), None, "framework gems don't claim");
         let lock = Lockfile::parse(LOCK);
