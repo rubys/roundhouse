@@ -1,5 +1,18 @@
 source "https://rubygems.org"
 
+# Bundled gems, not default ones, since Ruby 3.4: they ship with the
+# interpreter but are NOT on the load path under bundler unless a
+# Gemfile names them. `boot.rb` requires bigdecimal, and the runtime
+# requires base64 and resolv, so an emitted tree that leaves them
+# unnamed cannot load at all.
+#
+# Unconditional, and above the trimmed blocks on purpose: the asset
+# group's Rails gems depend on all three, which is why an app WITH an
+# asset pipeline never noticed, and an app without one could not boot.
+gem "bigdecimal"
+gem "base64"
+gem "resolv"
+
 # SQLite backend. CRuby/Spinel use the `sqlite3` C-ext gem (swapped in
 # as runtime/db.rb at transpile time). The JRuby target has no C-ext
 # build, so `bin/rh transpile jruby` rewrites this line to `jdbc-sqlite3`
