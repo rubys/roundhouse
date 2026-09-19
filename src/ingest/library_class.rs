@@ -1154,6 +1154,39 @@ fn includes_active_model(class: &ruby_prism::ClassNode<'_>) -> bool {
     })
 }
 
+/// Is `parent` one of Rails' own subclassable bases that the runtime
+/// does NOT port? A subclass of one is app code the analyzer can read
+/// — `check` still types a mailbox's `process` — but no emitted tree
+/// can load it: there is no `ActionMailbox` to name, so the file
+/// raises `NameError` at require time and, through the `app/models.rb`
+/// aggregator, takes the whole app down with it. That is what
+/// lobsters' `ApplicationMailbox < ActionMailbox::Base` did the day
+/// `app/mailboxes/` became a support root: the tree emitted, then
+/// would not boot. `lower::unported_rails_subclasses` drops the class
+/// after analysis, out loud.
+///
+/// Spelled out, and Rails' own only. The ported bases — the ones
+/// `runtime/ruby/` defines and the ruby emitter's
+/// `require_path_for_parent` anchors — are simply not on it. A gem's
+/// base is not on it either, even one parked under a Rails namespace
+/// (`ActiveModel::Serializer`, Mastodon's 160 serializers): that is
+/// the gem-DSL path, where the class body replays for the gem to run
+/// on the ruby lane. An unlisted Rails base is the old behavior, a
+/// replay that fails at load; add it here when it turns up.
+pub fn is_unported_rails_base(parent: &str) -> bool {
+    matches!(
+        parent,
+        "ActionMailbox::Base"
+            | "ActiveModel::Validator"
+            | "ActiveModel::EachValidator"
+            | "ActiveRecord::Migration"
+            | "Rails::Generators::Base"
+            | "Rails::Generators::NamedBase"
+            | "Rails::Railtie"
+            | "Rails::Engine"
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassKind {
     Model,

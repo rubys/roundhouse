@@ -154,10 +154,26 @@ pub fn bucket_key(err: &IngestError) -> String {
     let trimmed = msg.split('(').next().unwrap_or(&msg);
     // Strip trailing whitespace introduced by the split + truncate to
     // a reasonable display width.
+    // By CHARACTERS, not bytes: a byte slice through a multi-byte
+    // character panics, and the ledger lines carry em dashes.
     let key = trimmed.trim_end();
-    if key.len() > 120 {
-        key[..120].to_string()
-    } else {
-        key.to_string()
+    key.chars().take(120).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key is the first 120 CHARACTERS: a byte slice through a
+    /// multi-byte character panicked on the first ledger line whose em
+    /// dash straddled the cut.
+    #[test]
+    fn bucket_key_cuts_on_a_character_boundary() {
+        let pad = "x".repeat(119);
+        let err = IngestError::Unsupported {
+            file: "a.rb".into(),
+            message: format!("{pad}— tail"),
+        };
+        assert_eq!(bucket_key(&err), format!("{pad}—"));
     }
 }

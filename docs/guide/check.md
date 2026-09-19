@@ -32,6 +32,20 @@ is off the walk as well, which is where a RuboCop cop or a test-support
 tree under `app/` goes if you do not want it analyzed. Packwerk's
 `packs/*/app/*` layout is not walked yet.
 
+One thing the walk carries that no emitted tree can: a class extending
+a Rails base the runtime does not port. `ApplicationMailbox <
+ActionMailbox::Base` (and every mailbox under it), an
+`ActiveModel::EachValidator`, a `Rails::Generators::NamedBase` — `check`
+types their bodies like any other app code, but there is no such
+constant in an emitted tree to subclass, so the transpile drivers drop
+the class, its subclasses with it, and report a `class dropped:` warning
+naming the base. The bases that *are* ported — `ActiveRecord::Base`,
+`ActionController::Base`/`API`, `ActionMailer::Base`, `ActiveJob::Base`,
+the two ActionCable roots, `ActiveSupport::CurrentAttributes` — carry as
+before, and so does a gem's own base (`SVG::Graph::TimeSeries`,
+`ActiveModel::Serializer`): that class is kept and its body replayed for
+the gem to run.
+
 Inference goes as far as the conventions carry it. Where they run out —
 a value handed back from a gem the census does not model, a method
 whose return type depends on a branch the analyzer cannot follow — the

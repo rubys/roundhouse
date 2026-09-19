@@ -801,7 +801,10 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
 /// `ColumnType`. The Postgres-only types map to their SQLite storage:
 /// `uuid` is its own variant (TEXT, typed String); `jsonb` is `json`;
 /// `citext` is text; `timestamptz` is a datetime; the network types
-/// and a PG `enum` are strings. A type not listed is an error, not a
+/// and a PG `enum` are strings. `timestamp` is Rails' own alias for
+/// `datetime` (`TableDefinition#timestamp`), which a MySQL-backed
+/// app's `schema.rb` dumps for a `TIMESTAMP` column — lobsters'
+/// `story_texts.created_at`. A type not listed is an error, not a
 /// silent drop — its index would still be emitted and the DDL would
 /// not apply (#83).
 fn column_with_type(
@@ -820,7 +823,7 @@ fn column_with_type(
         "text" | "citext" => ColumnType::Text,
         "boolean" => ColumnType::Boolean,
         "date" => ColumnType::Date,
-        "datetime" | "timestamptz" => ColumnType::DateTime,
+        "datetime" | "timestamp" | "timestamptz" => ColumnType::DateTime,
         "time" => ColumnType::Time,
         "binary" => ColumnType::Binary,
         "json" | "jsonb" => ColumnType::Json,

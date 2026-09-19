@@ -158,3 +158,24 @@ end
          fields TEXT,\n  last_ip TEXT,\n  username TEXT NOT NULL,\n  seen_at TEXT\n)"
     );
 }
+
+/// `t.timestamp` is Rails' alias for `datetime`, and what a MySQL
+/// `TIMESTAMP` column dumps as (lobsters' `story_texts.created_at`).
+/// It was not in the type table, so the #83 contract — an unlisted
+/// type is an error — turned every lobsters lane red at ingest.
+#[test]
+fn timestamp_is_a_datetime() {
+    let out = ddl(
+        r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "story_texts", force: :cascade do |t|
+    t.timestamp "created_at", default: -> { "DATETIME('now')" }, null: false
+  end
+end
+"#,
+    );
+    assert_eq!(
+        out[0],
+        "CREATE TABLE IF NOT EXISTS story_texts (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
+         created_at TEXT NOT NULL\n)"
+    );
+}

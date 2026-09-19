@@ -55,6 +55,7 @@ pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
 pub mod spliced_concern_bodies;
+pub mod unported_rails_subclasses;
 pub mod pathname_ctor;
 pub mod assoc_pluck;
 pub mod try_guard;
@@ -245,6 +246,10 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // Deletes every class extending a Rails base the runtime does not
+    // port (`ApplicationMailbox < ActionMailbox::Base`) before any pass
+    // ledgers residue for a body that is not going to emit.
+    ("unported_rails_subclasses", &[]),
     // Deletes a spliced controller concern's own copy of its instance
     // methods — bodies with no caller and no includer — before any pass
     // rewrites inside them or ledgers residue for them.
@@ -634,11 +639,13 @@ pub fn apply_post_analyze_lowerings(
     macro_rules! ran {
         ($name:expr) => {};
     }
+    let mut diags = unported_rails_subclasses::apply_unported_rails_subclass_drop(app);
+    ran!("unported_rails_subclasses");
     spliced_concern_bodies::apply_spliced_concern_body_prune(app);
     ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
-    let mut diags = blank::apply_blank_lowering(app);
+    diags.extend(blank::apply_blank_lowering(app));
     ran!("blank");
     time_current::apply_time_current_lowering(app);
     ran!("time_current");
