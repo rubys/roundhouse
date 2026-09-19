@@ -11,10 +11,11 @@
 //! Dropped from the EMIT, not from the analysis: the same test checks
 //! that the declared types are still in `rbs_signatures`.
 //!
-//! `T::Enum` is not an annotation — `enums do … end` declares the
-//! members other code names — so it stays until it is lowered, and
-//! this test pins that boundary too. (`T::Struct` was the other one;
-//! it is lowered in `sorbet_struct_lowering`.)
+//! `T::Struct` and `T::Enum` are not annotations — they generate
+//! classes — and are lowered in `sorbet_struct_lowering` and
+//! `sorbet_enum_lowering`. What this test still pins is the edge the
+//! filter must not cross: a declaration on a base class the tree does
+//! not contain.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -112,29 +113,23 @@ fn what_the_annotations_declared_is_kept_where_it_belongs() {
 }
 
 #[test]
-fn an_enum_is_not_an_annotation_and_stays_until_it_is_lowered() {
-    // A member declares a CONSTANT and the serialized value other
-    // code round-trips through. Dropping that would leave a class
-    // whose members do not exist, so it is a lowering job, not a
-    // filter job — and this pins that the filter does not reach for
-    // it. (`T::Struct` was the
-    // other one; it is lowered now, see `sorbet_struct_lowering`.)
-    let source = r#"class Phase < T::Enum
-  enums do
-    New = new("new")
-    Done = new("done")
-  end
+fn a_declaration_on_an_unknown_base_class_is_left_alone() {
+    // `T::Struct` and `T::Enum` are both lowered now, so what this
+    // pins is the other edge of the same rule: a `const` whose base
+    // class is NOT in the tree. Nothing there says it is a typed prop
+    // rather than some other DSL, so it is neither dropped nor
+    // lowered — guessing from the method name would rewrite calls that
+    // were never props.
+    let source = r#"class Row < Vendor::Base
+  const :name, String
 end
 "#;
     let app = app_with(source);
     // The emitted file is named for the class, not for the source file.
     let emitted = ruby::emit_library(&app)
         .into_iter()
-        .find(|f| f.path.display().to_string().ends_with("phase.rb"))
+        .find(|f| f.path.display().to_string().ends_with("row.rb"))
         .map(|f| f.content)
-        .expect("the enum class is emitted");
-    // The members survive as the constants they are (#102); what is
-    // still owed is the base class they call `new` on.
-    assert!(emitted.contains("New = Phase.new"), "got:\n{emitted}");
-    assert!(emitted.contains("T::Enum"), "got:\n{emitted}");
+        .expect("the class is emitted");
+    assert!(emitted.contains("const :name"), "got:\n{emitted}");
 }
