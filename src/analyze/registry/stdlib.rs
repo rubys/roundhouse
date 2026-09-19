@@ -82,6 +82,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
         cls.class_methods.insert(Symbol::from("today"), Ty::Untyped);
         cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
+        // The parse family has a concrete answer where `current` /
+        // `today` / `now` above do not yet: `Ty::Time` is roundhouse's
+        // temporal type and covers Date. Upgrading the three older
+        // entries would move types in every app that calls them, so it
+        // is deliberately not part of this change.
+        for parser in ["parse", "strptime", "iso8601", "civil"] {
+            cls.class_methods.insert(Symbol::from(parser), Ty::Time);
+        }
         classes.insert(ClassId(Symbol::from(name)), cls);
     }
 
@@ -114,6 +122,40 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
+    // `ENV` — a Rails app's configuration seam, and the one stdlib
+    // object whose values have a single concrete type: every entry is
+    // a String. `fetch` narrows to that, which is right for the two
+    // forms an app writes (`fetch(key)` and `fetch(key, "default")`)
+    // and a narrowing for the rarer `fetch(key, 3000)` / block forms —
+    // the same trade the neighbours above make.
+    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    register_stdlib_class(classes, "ENV", &[
+        ("fetch", Ty::Str), ("[]", str_or_nil()), ("[]=", Ty::Str),
+        ("key?", Ty::Bool), ("has_key?", Ty::Bool), ("include?", Ty::Bool),
+        ("member?", Ty::Bool), ("key", str_or_nil()), ("delete", str_or_nil()),
+        ("keys", str_arr()), ("values", str_arr()),
+        ("to_h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+        ("replace", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+    ], &[]);
+    // `Pathname` — `Rails.root.join(...)` territory. The path-returning
+    // methods answer a Pathname so a chain stays typed to its `to_s`.
+    let pathname = || Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![] };
+    register_stdlib_class(classes, "Pathname", &[
+        ("new", pathname()), ("pwd", pathname()), ("getwd", pathname()),
+    ], &[
+        ("relative_path_from", pathname()), ("join", pathname()),
+        ("basename", pathname()), ("dirname", pathname()), ("expand_path", pathname()),
+        ("parent", pathname()), ("realpath", pathname()),
+        ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
+        ("read", Ty::Str), ("write", Ty::Int),
+        ("exist?", Ty::Bool), ("file?", Ty::Bool), ("directory?", Ty::Bool),
+        ("children", Ty::Array { elem: Box::new(pathname()) }),
+    ]);
+    // `ActiveSupport::SecurityUtils.secure_compare` — the constant-time
+    // comparison every hand-rolled token or basic-auth check calls.
+    register_stdlib_class(classes, "ActiveSupport::SecurityUtils", &[
+        ("secure_compare", Ty::Bool), ("fixed_length_secure_compare", Ty::Bool),
+    ], &[]);
     register_stdlib_class(classes, "File", &[
         ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
