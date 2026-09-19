@@ -414,9 +414,14 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         }
         _ => false,
     };
+    // `x&.to_s`, not `(x).nil? ? nil : (x).to_s`: the same value on every
+    // Ruby, and the one spelling spinel types as a nullable primitive --
+    // nil met with a String at a ternary is untyped there (spinel#4567),
+    // while `&.` is a NULL-able `const char *`. The receiver is a name or
+    // a one-hop read off a name (`pure_read`), so it needs no parentheses.
     let coerce = |m: &str| {
         if pure_read {
-            format!("({inner}).nil? ? nil : ({inner}).{m}")
+            format!("{inner}&.{m}")
         } else {
             format!("({inner}).{m}")
         }

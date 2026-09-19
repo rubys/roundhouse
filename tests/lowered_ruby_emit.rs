@@ -1279,11 +1279,11 @@ fn setter_send_renders_with_space_around_equals() {
     // `recv.x = v` form.
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
-    // `title` is a string column, so the value carries Rails' String
-    // cast (`lower::model_to_library::schema`); the setter form is
-    // what this test pins.
+    // `title` is a nullable string column, so the value carries Rails'
+    // String cast (`lower::model_to_library::schema`) as the nil-safe
+    // `attrs[:title]&.to_s`; the setter form is what this test pins.
     assert!(
-        src.contains("self.title = (attrs[:title]"),
+        src.contains("self.title = attrs[:title]&."),
         "expected `self.title = ...` setter form; got:\n{src}",
     );
     assert!(

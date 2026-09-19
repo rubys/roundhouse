@@ -4676,9 +4676,13 @@ pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) 
 }
 
 /// Inside a `from_raw` body, rewrite `instance.<col> = <coercion>` for
-/// nullable cols to `instance.<col> = (row["col"].nil? ? nil :
-/// <coercion-sans-|| default>)`. The lookup is a pure Hash read, so the
-/// duplicated evaluation in the guard is safe.
+/// nullable cols to `instance.<col> = <coercion-sans-|| default>`: the
+/// `|| 0` an id-shaped column carries is stripped so NULL reaches the
+/// coercion, and the coercion itself keeps it alive -- a Cast to a
+/// nilable target off a pure read emits `row["col"]&.to_i` (see
+/// `emit_cast`). The `if row["col"].nil? then nil else … end` this once
+/// wrapped around that was a second guard on the same read, and the
+/// `if` was the shape spinel could not type (spinel#4567).
 fn nil_guard_from_raw_slots(body: &mut Expr, nullable: &BTreeSet<Symbol>) {
     let ExprNode::Seq { exprs } = &mut *body.node else { return };
     for stmt in exprs.iter_mut() {
@@ -4701,28 +4705,10 @@ fn nil_guard_from_raw_slots(body: &mut Expr, nullable: &BTreeSet<Symbol>) {
             }
             _ => inner.clone(),
         };
-        let nil_check = Expr::new(
+        *value = Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(lookup.clone()),
-                method: Symbol::from("nil?"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
+            ExprNode::Cast { value: lookup, target_ty: target_ty.clone() },
         );
-        let guarded = Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: nil_check,
-                then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                else_branch: Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Cast { value: lookup, target_ty: target_ty.clone() },
-                ),
-            },
-        );
-        *value = guarded;
     }
 }
 
