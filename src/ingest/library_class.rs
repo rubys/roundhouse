@@ -221,8 +221,30 @@ pub(super) fn library_class_and_struct_base(
         None => parent,
     };
 
-    let (includes, methods, constants, unknown_calls) =
+    let (mut includes, mut methods, constants, mut unknown_calls) =
         walk_decl_body(class.body(), &owner, file, false)?;
+
+    // A `T::Struct` is a class GENERATOR, not an annotation: `const
+    // :name, String` IS the constructor and the reader. Lower it into
+    // the plain Ruby it stands for, so the emitted tree needs no
+    // sorbet-runtime to build one.
+    let parent = if parent.as_ref().is_some_and(is_sorbet_struct_parent) {
+        let members = sorbet_struct_members(class.body(), file);
+        let comparable = includes
+            .iter()
+            .any(|i| i.0.as_str() == "T::Struct::ActsAsComparable");
+        // The declarations become methods, so they must not also be
+        // emitted as calls; the sorbet mixins have nothing left to
+        // provide.
+        unknown_calls.retain(|call| !is_struct_declaration(call));
+        includes.retain(|i| !i.0.as_str().starts_with("T::"));
+        let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable);
+        synthesized.append(&mut methods);
+        methods = synthesized;
+        None
+    } else {
+        parent
+    };
     let base = struct_members
         .as_ref()
         .map(|members| struct_base_class(&owner, members));
@@ -240,6 +262,225 @@ pub(super) fn library_class_and_struct_base(
         },
         base,
     ))
+}
+
+/// A `const` / `prop` call in the collected class-body calls, which
+/// the struct lowering replaces with methods.
+fn is_struct_declaration(call: &Expr) -> bool {
+    matches!(
+        &*call.node,
+        ExprNode::Send { recv: None, method, .. }
+            if matches!(method.as_str(), "const" | "prop")
+    )
+}
+
+/// One `const` / `prop` in a `T::Struct` body.
+struct SorbetStructMember {
+    name: Symbol,
+    /// `prop` is writable, `const` is not.
+    writable: bool,
+    /// The value an omitted keyword takes: `default:` verbatim, and a
+    /// `factory: -> { … }`'s body, which Ruby evaluates per call just
+    /// as sorbet evaluates the factory per instance.
+    default: Option<Expr>,
+}
+
+/// `T::Struct` and its variants in superclass position. `T::Struct` is
+/// a class GENERATOR, not an annotation: `const :name, String` is the
+/// constructor and the reader, so the class is lowered into the plain
+/// Ruby it stands for rather than dropped or carried.
+fn is_sorbet_struct_parent(parent: &ClassId) -> bool {
+    matches!(
+        parent.0.as_str(),
+        "T::Struct" | "T::ImmutableStruct" | "T::InexactStruct"
+    )
+}
+
+/// The `const` / `prop` declarations in a class body, in source order —
+/// which is the order the keyword constructor takes them in.
+fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<SorbetStructMember> {
+    let mut members = Vec::new();
+    let Some(body) = body else { return members };
+    for stmt in flatten_statements(body) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if call.receiver().is_some() {
+            continue;
+        }
+        let method = call.name();
+        let writable = match constant_id_str(&method) {
+            "const" => false,
+            "prop" => true,
+            _ => continue,
+        };
+        let Some(arguments) = call.arguments() else { continue };
+        let mut args = arguments.arguments().iter();
+        let Some(name) = args.next().and_then(|n| {
+            let symbol = n.as_symbol_node()?;
+            Some(Symbol::from(
+                String::from_utf8_lossy(symbol.value_loc()?.as_slice()).as_ref(),
+            ))
+        }) else {
+            continue;
+        };
+        // The type is the second argument and belongs to the analyzer,
+        // not to the emit: `ingest::sorbet_sig` has already read it.
+        let _ty = args.next();
+        let mut default = None;
+        for arg in args {
+            let Some(hash) = arg.as_keyword_hash_node() else { continue };
+            for element in hash.elements().iter() {
+                let Some(assoc) = element.as_assoc_node() else { continue };
+                let Some(key) = symbol_value(&assoc.key()) else { continue };
+                match key.as_str() {
+                    "default" => default = ingest_expr(&assoc.value(), file).ok(),
+                    "factory" => {
+                        // `factory: -> { expr }` — the body is the
+                        // default, evaluated per call.
+                        default = assoc
+                            .value()
+                            .as_lambda_node()
+                            .and_then(|l| l.body())
+                            .and_then(|b| b.as_statements_node())
+                            .and_then(|b| b.body().iter().next())
+                            .and_then(|e| ingest_expr(&e, file).ok());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        members.push(SorbetStructMember { name, writable, default });
+    }
+    members
+}
+
+/// The plain Ruby a `T::Struct` stands for: a reader per member, a
+/// writer per `prop`, and the keyword constructor sorbet generates.
+///
+/// Keyword rather than positional, because that is the constructor
+/// sorbet builds and therefore the one every call site in the app
+/// already passes.
+fn synth_sorbet_struct_methods(
+    owner: &ClassId,
+    members: &[SorbetStructMember],
+    comparable: bool,
+) -> Vec<MethodDef> {
+    let mut methods = Vec::new();
+    for member in members {
+        methods.push(synth_attr_reader(owner, &member.name, MethodReceiver::Instance));
+        if member.writable {
+            methods.push(synth_attr_writer(owner, &member.name, MethodReceiver::Instance));
+        }
+    }
+    let params: Vec<Param> = members
+        .iter()
+        .map(|m| Param::keyword(m.name.clone(), m.default.clone()))
+        .collect();
+    let assigns: Vec<Expr> = members
+        .iter()
+        .map(|m| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: m.name.clone() },
+                    value: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: VarId(0), name: m.name.clone() },
+                    ),
+                },
+            )
+        })
+        .collect();
+    methods.push(MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        params,
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: assigns }),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
+    if comparable {
+        methods.push(synth_struct_equality(owner, members));
+    }
+    methods
+}
+
+/// `include T::Struct::ActsAsComparable` gives a struct value equality.
+/// Dropping the include without this would leave object identity in its
+/// place — the same expression answering differently, silently.
+fn synth_struct_equality(owner: &ClassId, members: &[SorbetStructMember]) -> MethodDef {
+    let other = || Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from("other") });
+    let self_class = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: Symbol::from("class"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let mut condition = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(other()),
+            method: Symbol::from("is_a?"),
+            args: vec![self_class],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    for member in members {
+        let mine = Expr::new(Span::synthetic(), ExprNode::Ivar { name: member.name.clone() });
+        let theirs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(other()),
+                method: member.name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let same = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(mine),
+                method: Symbol::from("=="),
+                args: vec![theirs],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        condition = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::And,
+                surface: crate::expr::BoolOpSurface::default(),
+                left: condition,
+                right: same,
+            },
+        );
+    }
+    MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from("=="),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(Symbol::from("other"))],
+        body: condition,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
 }
 
 /// `Struct.new(:a, :b, :c)` in SUPERCLASS position → its member names.
