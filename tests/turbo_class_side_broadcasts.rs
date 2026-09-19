@@ -119,3 +119,46 @@ end
     );
     assert!(!emitted.contains("Broadcasts.update"), "got:\n{emitted}");
 }
+
+/// The stream and the target are taken only as literals. A record
+/// streamable is named by `stream_name_from` and an array target is
+/// `dom_id(*array)`; the record-side pass spells both because it
+/// knows the model, and this pass has none. Passed through raw, the
+/// record is a stream key nobody is subscribed to — and on crystal a
+/// `stream : String` that does not compile.
+#[test]
+fn a_record_stream_or_array_target_is_left_alone() {
+    let source = r#"class StatusBroadcaster
+  def self.refresh(report, html)
+    Turbo::StreamsChannel.broadcast_update_to(report, target: "status_panel", html: html)
+  end
+
+  def self.refresh_unread(report, html)
+    Turbo::StreamsChannel.broadcast_update_to("internal", target: [report, :unread], html: html)
+  end
+
+  def self.refresh_symbol(html)
+    Turbo::StreamsChannel.broadcast_update_to(:internal, target: "status_panel", html: html)
+  end
+end
+"#;
+    let app = app_with(source);
+    let emitted = emitted_broadcaster(&app);
+    assert!(
+        emitted.contains("broadcast_update_to(report, target: \"status_panel\""),
+        "a record stream leaves the call verbatim; got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("target: [report, :unread]"),
+        "an array target leaves the call verbatim; got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("Broadcasts.update(stream: \"internal\", target: \"status_panel\""),
+        "a symbol stream is its own name, as `stream_name_from(:internal)` says; got:\n{emitted}"
+    );
+    assert_eq!(
+        emitted.matches("Broadcasts.update").count(),
+        1,
+        "only the literal form lowers; got:\n{emitted}"
+    );
+}

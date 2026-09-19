@@ -3018,32 +3018,6 @@ fn nested_under(
     classes.into_iter().filter(|c| c.name.0.as_str().starts_with(&prefix)).collect()
 }
 
-/// Extract the `ignore:` list from a `config.autoload_lib(ignore:
-/// %w[assets tasks])` call in config/application.rb. Same textual
-/// line-scan contract as `extract_config_time_zone` (railtie soup is
-/// deliberately not parsed); commented lines don't match. Absent call
-/// or unrecognized shape → empty list (walk everything, the prior
-/// behavior).
-/// Does an initializer load this lib subdirectory itself?
-///
-/// The shape campfire writes, in `config/initializers/extensions.rb`:
-///
-/// ```ruby
-/// %w[ rails_ext ].each do |extensions_dir|
-///   Dir["#{Rails.root}/lib/#{extensions_dir}/*"].each { |path| require "#{extensions_dir}/#{File.basename(path)}" }
-/// end
-/// ```
-///
-/// The directory name and the `require` are both there, but neither is
-/// reachable by matching a require's ARGUMENT — the path is built by
-/// interpolation from a glob. So the test is per-STATEMENT and textual:
-/// a top-level statement that both names the directory and calls
-/// `require` is loading it.
-///
-/// Per-statement rather than per-file on purpose. `assets` and `tasks`
-/// are named in the comment Rails' own generator writes directly above
-/// the `autoload_lib` line, and a whole-file scan would read that as a
-/// load. Statement scope also keeps an unrelated `require` elsewhere in
 /// The support roots to walk for library classes: every `app/*`
 /// subdirectory that has no ingest pass of its own, plus `extras` and
 /// `lib`, plus whatever `config/application.rb` puts on the autoload or
@@ -3154,6 +3128,26 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
     roots
 }
 
+/// Does an initializer load this lib subdirectory itself?
+///
+/// The shape campfire writes, in `config/initializers/extensions.rb`:
+///
+/// ```ruby
+/// %w[ rails_ext ].each do |extensions_dir|
+///   Dir["#{Rails.root}/lib/#{extensions_dir}/*"].each { |path| require "#{extensions_dir}/#{File.basename(path)}" }
+/// end
+/// ```
+///
+/// The directory name and the `require` are both there, but neither is
+/// reachable by matching a require's ARGUMENT — the path is built by
+/// interpolation from a glob. So the test is per-STATEMENT and textual:
+/// a top-level statement that both names the directory and calls
+/// `require` is loading it.
+///
+/// Per-statement rather than per-file on purpose. `assets` and `tasks`
+/// are named in the comment Rails' own generator writes directly above
+/// the `autoload_lib` line, and a whole-file scan would read that as a
+/// load. Statement scope also keeps an unrelated `require` elsewhere in
 /// the same initializer from vouching for a directory it never mentions.
 fn lib_dir_is_explicitly_required<V: Vfs + ?Sized>(vfs: &V, dir: &Path, subdir: &str) -> bool {
     let init_dir = dir.join("config/initializers");
@@ -3182,6 +3176,12 @@ fn lib_dir_is_explicitly_required<V: Vfs + ?Sized>(vfs: &V, dir: &Path, subdir: 
     false
 }
 
+/// Extract the `ignore:` list from a `config.autoload_lib(ignore:
+/// %w[assets tasks])` call in config/application.rb. Same textual
+/// line-scan contract as `extract_config_time_zone` (railtie soup is
+/// deliberately not parsed); commented lines don't match. Absent call
+/// or unrecognized shape → empty list (walk everything, the prior
+/// behavior).
 fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
     let source = String::from_utf8_lossy(source);
     for line in source.lines() {

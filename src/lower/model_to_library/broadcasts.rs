@@ -401,6 +401,17 @@ fn try_rewrite_channel_call(expr: &Expr) -> Option<Expr> {
         [stream, kwargs] => (stream, kwargs),
         _ => return None,
     };
+    // The stream is taken only as a literal. A record streamable is
+    // named by `Turbo::StreamsChannel.stream_name_from` — the
+    // record-side pass spells that through `stream_name` because it
+    // knows the model; here there is none, and a record passed through
+    // raw is a stream key nobody is subscribed to. Same for the target
+    // below: `[room, :unread]` is `dom_id(*array)`, not the array.
+    let stream = match &*stream.node {
+        ExprNode::Lit { value: Literal::Str { value } } => lit_str(value.clone()),
+        ExprNode::Lit { value: Literal::Sym { value } } => lit_str(value.as_str().to_string()),
+        _ => return None,
+    };
     let ExprNode::Hash { entries, kwargs: true } = &*kwargs.node else { return None };
     let mut target = None;
     let mut html = None;
@@ -409,7 +420,10 @@ fn try_rewrite_channel_call(expr: &Expr) -> Option<Expr> {
             return None;
         };
         match name.as_str() {
-            "target" => target = Some(value.clone()),
+            "target" => match &*value.node {
+                ExprNode::Lit { value: Literal::Str { .. } } => target = Some(value.clone()),
+                _ => return None,
+            },
             "html" => html = Some(value.clone()),
             // `partial:`/`locals:`/`renderable:` render through Rails
             // rather than carrying markup, and `attributes:` is not
@@ -426,7 +440,7 @@ fn try_rewrite_channel_call(expr: &Expr) -> Option<Expr> {
     } else {
         html.as_ref()?;
     }
-    let mut call = broadcasts_call(action, stream.clone(), target, html);
+    let mut call = broadcasts_call(action, stream, target, html);
     call.inherit_span(expr.span);
     Some(call)
 }
