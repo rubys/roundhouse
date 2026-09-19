@@ -1257,17 +1257,25 @@ measure_one() {
 
     # Warmup wrk run — discarded. Runs before EVERY measurement, so run
     # N of a cell has seen N warmups: the 20s default gives the median
-    # run 40s, enough for the JVM cells (JRuby plateaus inside 30s).
-    # Two lanes need more, measured 2026-09-18: the emit under
-    # TruffleRuby plateaus at ~60s, and stock Rails under it at ~120s
-    # (its first 30s slice reads a third of steady state). A lane floor
-    # here rather than a bigger global default, so 15 other lanes do not
-    # pay for one; --warmup above the floor still wins, and the record
-    # carries the value used.
+    # run 40s, enough for the emit under JRuby (plateaus inside 30s).
+    # Three lanes need more. Floors were first set from an M4 laptop
+    # (60s/120s for the TruffleRuby lanes, 2026-09-18); the box's first
+    # night on them (2026-09-19, Ryzen 5 3600, six cores shared with
+    # Graal's compiler threads) said they were short — its own
+    # stability section flagged the cells: rails-truffleruby /articles
+    # 979 -> 1,756 -> 1,874 across runs warmed 120/240/360s, so the
+    # median was a run still climbing; truffleruby 7,864 -> 9,121 ->
+    # 9,036 at 60/120/180s, flat from 120s; rails-jruby 588 -> 1,007 ->
+    # 1,021 at 20/40/60s, flat from 40s. Floors are set where each
+    # curve went flat ON THE BOX, so the median run is steady state. A
+    # lane floor rather than a bigger global default, so the other
+    # lanes do not pay for these; --warmup above the floor still wins,
+    # and the record carries the value used.
     local warm="$WARMUP"
     case "$target" in
-        truffleruby)       (( warm < 60 ))  && warm=60 ;;
-        rails-truffleruby) (( warm < 120 )) && warm=120 ;;
+        truffleruby)       (( warm < 120 )) && warm=120 ;;
+        rails-truffleruby) (( warm < 240 )) && warm=240 ;;
+        rails-jruby)       (( warm < 60 ))  && warm=60 ;;
     esac
     wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${warm}s" "$url" \
         >/dev/null 2>&1 || true
