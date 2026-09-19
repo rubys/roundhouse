@@ -4682,7 +4682,10 @@ pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) 
 /// nilable target off a pure read emits `row["col"]&.to_i` (see
 /// `emit_cast`). The `if row["col"].nil? then nil else … end` this once
 /// wrapped around that was a second guard on the same read, and the
-/// `if` was the shape spinel could not type (spinel#4567).
+/// `if` was the shape spinel could not type (spinel#4567). A BOOLEAN
+/// column keeps the `if`: its cast is `!["0", "", "false"].include?(…)`,
+/// not a method on the value, so `&.` has nothing to attach to and NULL
+/// would read as false.
 fn nil_guard_from_raw_slots(body: &mut Expr, nullable: &BTreeSet<Symbol>) {
     let ExprNode::Seq { exprs } = &mut *body.node else { return };
     for stmt in exprs.iter_mut() {
@@ -4705,10 +4708,33 @@ fn nil_guard_from_raw_slots(body: &mut Expr, nullable: &BTreeSet<Symbol>) {
             }
             _ => inner.clone(),
         };
-        *value = Expr::new(
+        let cast = Expr::new(
             Span::synthetic(),
-            ExprNode::Cast { value: lookup, target_ty: target_ty.clone() },
+            ExprNode::Cast { value: lookup.clone(), target_ty: target_ty.clone() },
         );
+        let is_bool = matches!(target_ty.peel_nilable(), crate::ty::Ty::Bool);
+        *value = if is_bool {
+            let nil_check = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(lookup),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: nil_check,
+                    then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                    else_branch: cast,
+                },
+            )
+        } else {
+            cast
+        };
     }
 }
 

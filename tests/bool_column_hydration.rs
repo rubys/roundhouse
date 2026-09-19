@@ -126,8 +126,9 @@ fn a_nullable_integer_column_coerces_rather_than_passing_the_raw_value() {
         .unwrap_or_else(|| panic!("no to_i coercion for a nullable integer:\n{src}"));
     // NULL survives: nil.to_i is 0, which would make a nil FK look like
     // a real row and (worse) make `group_by(&:fk)[nil]` find no roots.
+    // The guard is the `&.` on the cast itself (`row["domain_id"]&.to_i`).
     assert!(
-        line.contains("nil?"),
+        line.contains("&.to_i"),
         "the coercion must stay nil-safe:\n{line}"
     );
 }
@@ -136,11 +137,11 @@ fn a_nullable_integer_column_coerces_rather_than_passing_the_raw_value() {
 fn nullable_string_and_float_columns_coerce_too() {
     let src = emitted_row_class(NULLABLE_SCALARS);
     assert!(
-        src.lines().any(|l| l.contains("row[\"about\"]") && l.contains("to_s") && l.contains("nil?")),
+        src.lines().any(|l| l.contains("row[\"about\"]&.to_s")),
         "nullable string coerces nil-safely:\n{src}"
     );
     assert!(
-        src.lines().any(|l| l.contains("row[\"score\"]") && l.contains("to_f") && l.contains("nil?")),
+        src.lines().any(|l| l.contains("row[\"score\"]&.to_f")),
         "nullable float coerces nil-safely:\n{src}"
     );
 }
