@@ -128,8 +128,9 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|spinel-fiber|go|elixir|python|kotlin|swift|csharp|csharp-aot) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|truffleruby|rails-truffleruby|typescript|crystal|rust|spinel|spinel-fiber|go|elixir|python|kotlin|swift|csharp|csharp-aot) NORMALIZED+=("$t") ;;
         jr) NORMALIZED+=(jruby) ;;
+        tr) NORMALIZED+=(truffleruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
@@ -141,7 +142,7 @@ for t in "${TARGETS[@]}"; do
         cs) NORMALIZED+=(csharp) ;;
         cs-aot) NORMALIZED+=(csharp-aot) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel spinel-fiber go elixir python kotlin swift csharp csharp-aot" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby truffleruby rails-truffleruby typescript crystal rust spinel spinel-fiber go elixir python kotlin swift csharp csharp-aot" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -514,6 +515,58 @@ build_target() {
                 fi
             fi
             ;;
+        truffleruby)
+            # The ruby tree, UNMODIFIED, under TruffleRuby: it compiles the
+            # sqlite3 gem (and nokogiri, puma, nio4r) itself, so it needs
+            # neither jruby's JDBC db.rb nor a target of its own — the
+            # published ruby.tgz is what a TruffleRuby user runs. Shares
+            # RUBY_OUT with the ruby lane; assets are built there under MRI
+            # (`rake assets` shells `bundle exec ruby`, MRI-only, the same
+            # reason the jruby lane copies them). Bundles like jruby does:
+            # the interpreter's own gem home, against the EMITTED tree's
+            # Gemfile — the committed scaffold lock is MRI-only, and
+            # `bin/rh transpile` wipes the tree, so a bundle inside it
+            # would not survive a nightly. No `fork` on TruffleRuby:
+            # WEB_CONCURRENCY=0, threads only, like the JVM cells.
+            TARGET_BUILD_DIR="$RUBY_OUT"
+            TARGET_GEMFILE="$RUBY_OUT/Gemfile"
+            if (( SKIP_EMIT == 0 )) || [[ ! -d "$RUBY_OUT" ]]; then
+                step "regenerating ruby target (bin/rh transpile ruby)"
+                (cd "$REPO_ROOT" && bin/rh transpile ruby) || return 1
+            fi
+            if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
+                step "building ruby assets (MRI) for the truffleruby lane"
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" bundle check >/dev/null 2>&1 \
+                    || BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" bundle install) || return 1
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" bundle exec rake assets) || return 1
+            fi
+            if ! (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" truffleruby -S bundle check >/dev/null 2>&1); then
+                step "installing truffleruby bundle (compiles the C extensions)"
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" truffleruby -S bundle install) || return 1
+            fi
+            ;;
+        rails-truffleruby)
+            # Stock Rails under TruffleRuby — the SAME 8.1 fixture the rails
+            # lane serves, not a sibling: TruffleRuby builds the sqlite3 C
+            # extension, so there is no JDBC adapter pinning it to an older
+            # Rails the way rails-jruby is pinned to 8.0. The C extensions
+            # must be compiled BY truffleruby, so it bundles into its own
+            # path in the fixture (which `bin/rh fixture` only regenerates
+            # when the DB is missing), like rails-jruby does.
+            TARGET_BUILD_DIR="$FIXTURE"
+            TARGET_GEMFILE=""
+            if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
+                step "regenerating fixtures/real-blog"
+                (cd "$REPO_ROOT" && bin/rh fixture) || return 1
+            fi
+            if ! (cd "$FIXTURE" && BUNDLE_PATH="$FIXTURE/.bundle-truffleruby" BUNDLE_WITHOUT="development:test" truffleruby -S bundle check >/dev/null 2>&1); then
+                step "installing truffleruby bundle (rails 8.1; compiles the C extensions)"
+                (cd "$FIXTURE" && \
+                    BUNDLE_PATH="$FIXTURE/.bundle-truffleruby" \
+                    BUNDLE_WITHOUT="development:test" \
+                    truffleruby -S bundle install) || return 1
+            fi
+            ;;
         typescript)
             TARGET_BUILD_DIR="$TS_OUT"
             TARGET_GEMFILE=""
@@ -724,7 +777,7 @@ build_target() {
 stage_db() {
     local target="$1"
     case "$target" in
-        rails|rails-int)
+        rails|rails-int|rails-truffleruby)
             # Production Rails reads storage/production.sqlite3 — clone
             # the seeded dev DB into place so the fixture serves real
             # rows. SQLite3's `.backup` produces a clean copy without
@@ -741,7 +794,7 @@ stage_db() {
             rm -f "$prod" "$prod-wal" "$prod-shm"
             sqlite3 "$dev" ".backup $prod"
             ;;
-        ruby|ruby-int)
+        ruby|ruby-int|truffleruby)
             local db="$RUBY_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
@@ -933,6 +986,47 @@ start_target() {
                 PORT="$port" \
                 JRUBY_OPTS="-J-Xmx512m -J-Xms512m" \
                 jruby -S bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        truffleruby)
+            # The ruby tree under TruffleRuby's native standalone (the
+            # `truffleruby` build; the JVM standalone is a separate
+            # download and led it by nothing this lane needs to publish —
+            # env.json records `truffleruby --version`, which names the
+            # mode). Single process, WEB_CONCURRENCY=0: no `fork`. Heap
+            # pinned to 512 MB like the jruby cell — measured at -3%
+            # against the default, which otherwise grows to ~3.7 GB.
+            (cd "$RUBY_OUT" && \
+                BUNDLE_GEMFILE="$RUBY_OUT/Gemfile" \
+                BLOG_DB=storage/development.sqlite3 \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY=0 \
+                RAILS_ENV=production \
+                PORT="$port" \
+                TRUFFLERUBYOPT="--vm.Xmx512m" \
+                truffleruby -S bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        rails-truffleruby)
+            # Stock Rails 8.1 under TruffleRuby, the rails lane's fixture
+            # and env minus YJIT (an MRI flag). Heap pinned to 1 GB, not
+            # the 512 MB the other managed cells get: stock Rails OOMs at
+            # 512 MB under TruffleRuby within a minute of load (measured
+            # 2026-09-18); 1 GB serves at -9% against the default.
+            (cd "$FIXTURE" && \
+                RAILS_ENV=production \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY=0 \
+                RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
+                SECRET_KEY_BASE=bench-secret-key \
+                BUNDLE_PATH="$FIXTURE/.bundle-truffleruby" \
+                BUNDLE_WITHOUT="development:test" \
+                TRUFFLERUBYOPT="--vm.Xmx1g" \
+                truffleruby -S bundle exec rails server -p "$port" -e production \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
@@ -1161,8 +1255,21 @@ measure_one() {
 
     local url="http://localhost:$port$endpoint"
 
-    # Warmup wrk run — discarded
-    wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${WARMUP}s" "$url" \
+    # Warmup wrk run — discarded. Runs before EVERY measurement, so run
+    # N of a cell has seen N warmups: the 20s default gives the median
+    # run 40s, enough for the JVM cells (JRuby plateaus inside 30s).
+    # Two lanes need more, measured 2026-09-18: the emit under
+    # TruffleRuby plateaus at ~60s, and stock Rails under it at ~120s
+    # (its first 30s slice reads a third of steady state). A lane floor
+    # here rather than a bigger global default, so 15 other lanes do not
+    # pay for one; --warmup above the floor still wins, and the record
+    # carries the value used.
+    local warm="$WARMUP"
+    case "$target" in
+        truffleruby)       (( warm < 60 ))  && warm=60 ;;
+        rails-truffleruby) (( warm < 120 )) && warm=120 ;;
+    esac
+    wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${warm}s" "$url" \
         >/dev/null 2>&1 || true
 
     # Measurement window — RSS sampler in parallel
@@ -1192,7 +1299,7 @@ measure_one() {
 
     # Emit one JSON record
     cat <<EOF
-{"target":"$target","workers":$workers,"endpoint":"$endpoint","run":$run_n,"rss_kb":$rss_median_kb,$(echo "$wrk_json" | sed 's/^{//;s/}$//')}
+{"target":"$target","workers":$workers,"endpoint":"$endpoint","run":$run_n,"warmup_sec":$warm,"rss_kb":$rss_median_kb,$(echo "$wrk_json" | sed 's/^{//;s/}$//')}
 EOF
 }
 

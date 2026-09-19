@@ -90,7 +90,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python ruby ruby-1p ruby-int jruby rails rails-nocache rails-1p rails-int rails-jruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python ruby ruby-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # A lane the palette has never seen still needs a bar. Prefer its
@@ -127,10 +127,12 @@ COLOR = {
   'ruby-1p'    => '#e08079',
   'ruby-int'   => '#e89c93',
   'jruby'      => '#5382a1',
+  'truffleruby' => '#d35400',
   'rails'      => '#666666',
   'rails-1p'   => '#9a9a9a',
   'rails-int'  => '#aaaaaa',
   'rails-jruby' => '#46707f',
+  'rails-truffleruby' => '#8e5a3a',
 }
 
 GROUP_LABEL = {
@@ -209,6 +211,16 @@ run_tally = Hash.new { |h, k| h[k] = { measured: 0, total: 0 } }
   t = row['target'] or next
   run_tally[t][:total] += 1
   run_tally[t][:measured] += 1 unless row['req_sec'].nil?
+end
+
+# Lanes that warmed longer than the harness default (a floor per lane in
+# scripts/bench measure_one — the TruffleRuby cells). Each record carries
+# the warmup it got, so the page can say so instead of printing the
+# global default as if every cell had it.
+lane_warmups = {}
+(per_run || []).each do |row|
+  next unless row['target'] && row['warmup_sec']
+  (lane_warmups[row['target']] ||= []) << row['warmup_sec'].to_i
 end
 
 # What the harness actually ran, straight from its own record. Anything
@@ -520,6 +532,8 @@ if env
   harness_name = h['command'].to_s.split.first
   harness = "workers=#{Array(h['workers']).join('/')}#{concurrency ? ", c=#{concurrency}" : ''}, " \
             "#{h['runs']}×#{h['duration_sec']}s runs per cell after #{h['warmup_sec']}s warmup"
+  longer = lane_warmups.map { |t, ws| [t, ws.max] }.select { |_, w| w > h['warmup_sec'].to_i }
+  harness << " (#{longer.map { |t, w| "<code>#{t}</code> #{w}s" }.join(', ')} — those lanes plateau later)" unless longer.empty?
   appendix_ref = ' Full hardware, toolchain versions, and the exact invocation are in the <a href="#environment">environment appendix</a> below.'
 else
   harness_name = 'scripts/bench'
@@ -536,15 +550,17 @@ end
 # A clause about managed heaps belongs on a page that measured one. The
 # blog bench always does; campfire runs five Ruby lanes and would have
 # published a paragraph about the JVM and .NET anyway.
-managed   = %w[jruby kotlin csharp csharp-aot rails-jruby] & measured_targets
+managed   = %w[jruby kotlin csharp csharp-aot rails-jruby truffleruby rails-truffleruby] & measured_targets
 # Name only the budgeted cells that are ON the page: a run without kotlin
 # or csharp must not describe their heap caps as if they were measured.
 jvm_cells = %w[jruby kotlin] & measured_targets
 net_cells = %w[csharp csharp-aot] & measured_targets
+tr_cells  = %w[truffleruby rails-truffleruby] & measured_targets
 code_list = ->(ts) { ts.map { |t| "<code>#{t}</code>" }.join(', ') }
 budget_clauses = []
 budget_clauses << "the JVM #{jvm_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(jvm_cells)}) via <code>-Xmx512m=-Xms512m</code>" unless jvm_cells.empty?
 budget_clauses << "the .NET #{net_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(net_cells)}) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB)" unless net_cells.empty?
+budget_clauses << "the TruffleRuby #{tr_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(tr_cells)}) via <code>--vm.Xmx</code> — 512&nbsp;MB for the emitted tree, 1&nbsp;GB for stock Rails, which runs out of a 512&nbsp;MB heap under TruffleRuby within a minute of load" unless tr_cells.empty?
 heap_note = budget_clauses.empty? ? '' : " The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: #{budget_clauses.join(', and ')}."
 
 # #16 is about the BLOG fixture specifically. Pointing campfire's readers
@@ -573,6 +589,7 @@ html << <<~METHOD
     <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>#{harness_name}</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout.#{heap_note}#{appendix_ref}
     #{fixture_caveat}#{harness_notes}
     #{(measured_targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
+    #{(measured_targets.include?('rails-truffleruby') ? %(<p class="caveat"><code>rails-truffleruby</code> is the stock-Rails-on-TruffleRuby baseline — the <strong>same Rails 8.1 fixture</strong> the <code>rails</code> lane serves, since TruffleRuby compiles the <code>sqlite3</code> C extension and needs no JDBC adapter; <code>truffleruby</code> is the <code>ruby</code> lane's tree, unmodified, under the same interpreter. Both run the native standalone, single process, threads only (no <code>fork</code>).</p>) : '')}
     #{(measured_targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but compiled by <a href="https://github.com/matz/spinel">Spinel</a> behind its thread-per-connection server (a green thread per connection on the runtime's autodetected OS worker count) rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
     #{(measured_targets.include?('spinel-fiber') ? %(<p class="caveat"><code>spinel-fiber</code> is the <em>same spinel binary</em> started with <code>TEP_SERVER=fiber</code>: its previous fiber-per-connection server, one poll loop on one thread. Nothing else differs — same compiler, same emitted tree, same database and pool — so the <code>spinel</code> / <code>spinel-fiber</code> pair measures the scheduler design alone (<a href="https://github.com/matz/spinel/issues/4306">matz/spinel#4306</a>).</p>) : '')}
   </div>
@@ -702,16 +719,22 @@ if (%w[ruby rails] - measured_targets).empty?
   end
   html << grouped_bars(groups, series: %w[ruby rails])
 
-  # The same swap on the JVM, reported as the measured ratio when both
-  # JRuby cells ran.
-  if (%w[jruby rails-jruby] - measured_targets).empty?
-    jr   = by['/articles']['jruby']&.dig('req_sec').to_f
-    rjr  = by['/articles']['rails-jruby']&.dig('req_sec').to_f
-    rb   = by['/articles']['ruby']&.dig('req_sec').to_f
-    rl   = by['/articles']['rails']&.dig('req_sec').to_f
-    if rjr > 0 && rl > 0
-      html << %(<p>The same comparison <em>on the JVM</em>: emitted <code>jruby</code> beats stock <code>rails-jruby</code> by <strong>#{fmt_dec(jr / rjr, 0)}×</strong> on <code>/articles</code>, against <strong>#{fmt_dec(rb / rl, 0)}×</strong> for <code>ruby</code> over <code>rails</code> on CRuby.</p>\n)
-    end
+  # The same swap on each JIT runtime that ran both its cells, as the
+  # measured ratio. One sentence per runtime: the JRuby one says the
+  # emit is what HotSpot wanted (it rewards the emit more than Rails);
+  # the TruffleRuby one has read the other way since it was first
+  # measured (2026-09-18) — Graal's partial evaluation gets through
+  # Rails' metaprogramming on its own, so stock Rails gains MORE from
+  # the runtime swap than the emit does. The page states the ratio it
+  # measured either way; the interpretation belongs to the post.
+  rb = by['/articles']['ruby']&.dig('req_sec').to_f
+  rl = by['/articles']['rails']&.dig('req_sec').to_f
+  { 'jruby' => ['rails-jruby', 'on the JVM'], 'truffleruby' => ['rails-truffleruby', 'on TruffleRuby'] }.each do |emit_t, (rails_t, where)|
+    next unless ([emit_t, rails_t] - measured_targets).empty?
+    e = by['/articles'][emit_t]&.dig('req_sec').to_f
+    r = by['/articles'][rails_t]&.dig('req_sec').to_f
+    next unless e > 0 && r > 0 && rl > 0 && rb > 0
+    html << %(<p>The same comparison <em>#{where}</em>: emitted <code>#{emit_t}</code> beats stock <code>#{rails_t}</code> by <strong>#{fmt_dec(e / r, 1)}×</strong> on <code>/articles</code>, against <strong>#{fmt_dec(rb / rl, 1)}×</strong> for <code>ruby</code> over <code>rails</code> on CRuby — and the runtime swap alone is worth <strong>#{fmt_dec(r / rl, 1)}×</strong> to stock Rails, <strong>#{fmt_dec(e / rb, 1)}×</strong> to the emit.</p>\n)
   end
 end
 
@@ -839,8 +862,8 @@ mem_rows.each_with_index do |row, i|
   html << t(110 + bar + 6, y + 14, "#{fmt_int(v)} MB", fill: '#444')
 end
 html << svg_close
-if targets.include?('jruby')
-  html << %(<p class="caveat">The JVM cells run under a fixed <code>-Xmx512m</code> heap, so the heap can't grab a host-dependent share of RAM; the rest is metaspace and code-cache, bounded by the app's class count rather than the box. Read the JVM bars as a pinned budget, not an organically-grown working set like the other cells.</p>\n)
+if targets.include?('jruby') || targets.include?('truffleruby')
+  html << %(<p class="caveat">The JVM cells run under a fixed <code>-Xmx512m</code> heap (the TruffleRuby cells under <code>--vm.Xmx</code>: 512&nbsp;MB for the emit, 1&nbsp;GB for stock Rails), so the heap can't grab a host-dependent share of RAM; the rest is metaspace and code-cache, bounded by the app's class count rather than the box. Read the JVM bars as a pinned budget, not an organically-grown working set like the other cells.</p>\n)
 end
 if targets.include?('csharp') || targets.include?('csharp-aot')
   html << %(<p class="caveat">The .NET cells are capped the same way — <code>DOTNET_GCHeapHardLimit</code> at 512&nbsp;MB, the <code>-Xmx</code> analog — so their RSS is a budget the GC collects within, not the host-proportional reservation Server GC takes by default. NativeAOT (<code>csharp-aot</code>) carries no JIT or warmup, so its working set is the leanest of the managed-heap cells.</p>\n)
