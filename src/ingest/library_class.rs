@@ -118,6 +118,9 @@ fn file_level_constants(
     };
     for stmt in prog.statements().body().iter() {
         let Some(cw) = stmt.as_constant_write_node() else { continue };
+        if is_sorbet_type_alias(&cw.value()) {
+            continue;
+        }
         out.push((
             Symbol::from(constant_id_str(&cw.name())),
             ingest_expr(&cw.value(), file)?,
@@ -287,6 +290,22 @@ pub(super) fn library_class_and_struct_base(
         },
         base,
     ))
+}
+
+/// `NAME = T.type_alias { … }` — a constant holding a TYPE. Unlike
+/// `T::Struct` and `T::Enum` it generates nothing and answers nothing:
+/// the only thing that ever reads it is a `sig`, and those are read
+/// before they are dropped. So the constant goes with them rather than
+/// being carried into an emitted tree that has no sorbet-runtime to
+/// build the type object with.
+pub(super) fn is_sorbet_type_alias(value: &ruby_prism::Node<'_>) -> bool {
+    let Some(call) = value.as_call_node() else { return false };
+    if constant_id_str(&call.name()) != "type_alias" {
+        return false;
+    }
+    call.receiver()
+        .and_then(|r| r.as_constant_read_node())
+        .is_some_and(|c| constant_id_str(&c.name()) == "T")
 }
 
 /// `T::Enum` in superclass position. Like `T::Struct` it is a class
@@ -1107,6 +1126,9 @@ fn walk_decl_body<'pr>(
         }
         // Class-level constant `NAME = <expr>` (e.g. `STORIES_PER_PAGE = 25`).
         if let Some(cw) = stmt.as_constant_write_node() {
+            if is_sorbet_type_alias(&cw.value()) {
+                continue;
+            }
             let name = Symbol::from(constant_id_str(&cw.name()));
             let value = ingest_expr(&cw.value(), file)?;
             constants.push((name, value));
