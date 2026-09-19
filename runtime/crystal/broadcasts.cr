@@ -47,6 +47,9 @@ module Broadcasts
   def self.replace(*, stream : String, target : String, html : String, attributes : String = "") : Nil
     record("replace", stream, target, html, attributes)
   end
+  def self.update(*, stream : String, target : String, html : String, attributes : String = "") : Nil
+    record("update", stream, target, html, attributes)
+  end
 
   def self.remove(*, stream : String, target : String, attributes : String = "") : Nil
     record("remove", stream, target, "", attributes)

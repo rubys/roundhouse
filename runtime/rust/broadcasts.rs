@@ -88,6 +88,10 @@ impl Broadcasts {
         Self::record("replace", &attrs);
     }
 
+    pub fn update(attrs: HashMap<String, Value>) {
+        Self::record("update", &attrs);
+    }
+
     pub fn remove(attrs: HashMap<String, Value>) {
         Self::record("remove", &attrs);
     }

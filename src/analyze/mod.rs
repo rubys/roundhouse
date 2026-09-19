@@ -570,6 +570,7 @@ impl Analyzer {
                 ("broadcast_append_to", Ty::Nil),
                 ("broadcast_prepend_to", Ty::Nil),
                 ("broadcast_replace_to", Ty::Nil),
+                ("broadcast_update_to", Ty::Nil),
                 ("broadcast_remove_to", Ty::Nil),
             ] {
                 cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);

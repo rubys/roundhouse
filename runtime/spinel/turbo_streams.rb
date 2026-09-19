@@ -222,6 +222,14 @@ module Turbo
       Broadcasts.record(action: :replace, stream: stream, target: target, html: html, attributes: attributes)
     end
 
+    # Turbo's `update` replaces a target's CONTENTS where `replace`
+    # replaces the element itself. No call counter beside it: the
+    # counters above exist for the replace/remove assertions the
+    # broadcast tests make, and nothing asserts on update yet.
+    def self.broadcast_update_to(stream, target:, html:, attributes: "")
+      Broadcasts.record(action: :update, stream: stream, target: target, html: html, attributes: attributes)
+    end
+
     def self.broadcast_remove_to(stream, target:, attributes: "")
       if REMOVE_EXPECTED[0] >= 0
         REMOVE_CALLS[0] = REMOVE_CALLS[0] + 1
