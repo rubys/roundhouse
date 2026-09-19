@@ -157,6 +157,17 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
                 prev_end = Some(stmt.location().end_offset());
                 continue;
             }
+            // `Failures = T.type_alias { … }` in a controller body is
+            // the same type-only constant it is in a class body, and
+            // goes the same way — here rather than in the item
+            // ingester, which has no variant for "nothing".
+            if stmt
+                .as_constant_write_node()
+                .is_some_and(|cw| super::library_class::is_sorbet_type_alias(&cw.value()))
+            {
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             let mut item = match ingest_controller_body_item(&stmt, file, leading) {
                 Ok(item) => item,
                 Err(err) if super::survey::is_active() => {

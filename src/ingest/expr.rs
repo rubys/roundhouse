@@ -174,6 +174,73 @@ fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
     call.arguments()?.arguments().iter().next()
 }
 
+/// The argument of a `T.absurd(x)`, which raises rather than
+/// evaluating to it. See the call site in `ingest_expr_strict`.
+fn sorbet_absurd_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let call = node.as_call_node()?;
+    let method = call.name();
+    if constant_id_str(&method) != "absurd" {
+        return None;
+    }
+    let constant = call.receiver()?.as_constant_read_node()?;
+    if constant_id_str(&constant.name()) != "T" {
+        return None;
+    }
+    call.arguments()?.arguments().iter().next()
+}
+
+/// `raise TypeError.new("Control flow reached T.absurd. Got value: " +
+/// value.to_s)` — sorbet's own message, including the value, because a
+/// bare "unreachable" at the point it is reached says nothing about
+/// what got there.
+fn absurd_raise(span: Span, value: Expr) -> ExprNode {
+    let message = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Lit {
+                    value: crate::expr::Literal::Str {
+                        value: "Control flow reached T.absurd. Got value: ".to_string(),
+                    },
+                },
+            )),
+            method: Symbol::from("+"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(value),
+                    method: Symbol::from("to_s"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    ExprNode::Send {
+        recv: None,
+        method: Symbol::from("raise"),
+        args: vec![Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![Symbol::from("TypeError")] },
+                )),
+                method: Symbol::from("new"),
+                args: vec![message],
+                block: None,
+                parenthesized: true,
+            },
+        )],
+        block: None,
+        parenthesized: true,
+    }
+}
+
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -199,6 +266,17 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // to be able to land without answering any of it.
     if let Some(inner) = sorbet_assertion_argument(node) {
         return ingest_expr_strict(&inner, file);
+    }
+
+    // `T.absurd(x)` is NOT an assertion that evaluates to its argument:
+    // it RAISES. It sits in the branch a case analysis is supposed to
+    // have made unreachable, so dropping it would turn "this cannot
+    // happen" into "this returns nil" — the one branch where a wrong
+    // answer travels furthest before anything notices. Lowered to the
+    // raise sorbet performs, message included.
+    if let Some(inner) = sorbet_absurd_argument(node) {
+        let value = ingest_expr_strict(&inner, file)?;
+        return Ok(Expr::new(span, absurd_raise(span, value)));
     }
 
     let expr_node = match node {
