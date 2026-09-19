@@ -16,6 +16,54 @@ from Rails' own conventions what was never written down: which class
 `has_many :comments` returns, what a column deserializes to, whether a
 `find_by` can come back nil.
 
+## What is read, and what you can write down
+
+Ingest walks `db/schema.rb` (or the migrations), `config/routes.rb`,
+`Gemfile.lock`, and the whole of `app/`: models, controllers, views,
+helpers and concerns each have a pass of their own, and every other
+directory under `app/` — `services`, `jobs`, `interactors`,
+`presenters`, whatever the app calls its layers — is walked for the
+classes it holds. Rails autoloads all of `app/*`, so the list is
+discovered rather than guessed. `lib/` and `extras/` are walked too,
+plus anything `config/application.rb` adds to `config.autoload_paths`
+or `config.eager_load_paths`. `config.autoload_lib(ignore: %w[assets
+tasks])` is honored: a directory the app takes off its own load path
+is off the walk as well, which is where a RuboCop cop or a test-support
+tree under `app/` goes if you do not want it analyzed. Packwerk's
+`packs/*/app/*` layout is not walked yet.
+
+Inference goes as far as the conventions carry it. Where they run out —
+a value handed back from a gem the census does not model, a method
+whose return type depends on a branch the analyzer cannot follow — the
+app can write the answer down, in either of two places that feed the
+same table:
+
+- **`sig/**/*.rbs`** — RBS written for roundhouse, keyed by class and
+  method. This is the sidecar the analyzer has always read; it wins
+  wherever both sources declare the same method.
+- **Sorbet `sig` blocks** — annotations an app on sorbet-runtime has
+  already written, read in place from `app/` and `lib/`. A
+  `sig { params(user: User).returns(T.nilable(String)) }` above a `def`
+  becomes that method's signature; `const` and `prop` in a `T::Struct`
+  declare typed readers (and, for `prop`, writers). The grammar read is
+  `params` / `returns` / `void`, the modifiers (`override`, `abstract`,
+  `checked`, …), and for types `T.nilable`, `T.any`, `T.untyped`,
+  `T::Boolean`, `T::Array[…]`, `T::Hash[…, …]` and class constants. A
+  `sig` outside that — `type_parameters`, `T.attached_class`,
+  `T.self_type`, shapes, proc types, a parameter name the `def` does
+  not have — is dropped whole and the method is inferred as before; a
+  `sig` above `attr_reader`, above `private def`, or inside
+  `class << self` is not paired. `T.let`, `T.cast`, `T.must`, `T.bind`,
+  `T.unsafe` and `T.assert_type!` unwrap to the value they wrap so its
+  own inferred type flows on; the annotation on those is discarded, so
+  `T.must(x)` does not narrow `x` past what inference already knows.
+
+Where an annotation and inference disagree, the annotation wins, and
+silently — today. The seeds feed the analyzer's dispatch table, which
+is what `check`, the editor, the MCP server and the emitters' typing
+read; the Spinel lane's own `.rbs` sidecar is typed from the lowered
+code rather than from them.
+
 ## The two modes
 
 `--continue` is the mode you want on a real app. Constructs the

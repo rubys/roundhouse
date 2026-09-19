@@ -47,7 +47,8 @@ analyzes a folder on your disk without uploading it. Static, deep and
 annotation-free is a cell of the Ruby tooling space nobody else
 occupies: ruby-lsp is static but stops at names; ruby-lsp-rails and
 Tidewave are deep but need a running app; Sorbet and Steep are static
-and deep but you pay in annotations. →
+and deep but you pay in annotations — and if you already have,
+roundhouse reads your `sig`s as seeds. →
 [`check`](docs/guide/check.md) · [editor](docs/guide/editor.md) ·
 [agent](docs/guide/mcp.md) · [IDE](docs/guide/ide.md)
 
