@@ -70,6 +70,19 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// The class's own constants, by name, typed from their value
+    /// expressions — `Vote::COMMENT_REASONS`, and every `T::Enum`
+    /// member.
+    ///
+    /// Beside the global by-bare-name registry rather than replacing
+    /// it: a QUALIFIED read (`Types::Completeness::Done`) names the
+    /// class that owns the constant, so it can be answered exactly,
+    /// while the global map is what a bare read in lexical scope
+    /// needs. The global map also has to give up on a name two classes
+    /// both define; a per-class one never faces that question, which
+    /// is what an app with fifty enums (`Success` in three of them)
+    /// runs into.
+    pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
     /// Instance-state shape (columns + attr_accessor).
@@ -156,6 +169,61 @@ pub struct ClassInfo {
 /// `ActionController::Base`) leave the ref bare too — body-typer
 /// can't disambiguate without lexical scope, and the bare form
 /// still types via the registry's last-segment alias entry.
+/// The class a written owner path names, resolved the way Ruby
+/// resolves a constant: the enclosing scopes from the inside out, then
+/// the top level.
+///
+/// `DEFAULT_MODE = Mode::Fill` inside `UI::Selector` means
+/// `UI::Selector::Mode`, and nothing else does — which matters in an
+/// app where a dozen components each declare their own `Mode`. Walking
+/// the nesting is what tells them apart; a suffix match over the class
+/// registry cannot, and gives up on the ambiguity instead.
+fn resolve_owner_path(
+    written: &str,
+    ctx: &Ctx,
+    classes: &HashMap<ClassId, ClassInfo>,
+) -> Option<ClassId> {
+    if let Some(Ty::Class { id, .. }) = &ctx.self_ty {
+        let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
+        while !scope.is_empty() {
+            let candidate = ClassId(Symbol::from(
+                format!("{}::{written}", scope.join("::")).as_str(),
+            ));
+            if classes.contains_key(&candidate) {
+                return Some(candidate);
+            }
+            scope.pop();
+        }
+    }
+    let written_id = ClassId(Symbol::from(written));
+    if classes.contains_key(&written_id) {
+        return Some(written_id);
+    }
+    expand_qualified_const(written, classes).map(ClassId)
+}
+
+/// The fully-qualified class a written owner path names, when exactly
+/// one registered class ends with it. The single-match rule is
+/// `expand_bare_const`'s, for the same reason — more than one match is
+/// not a guess worth making.
+fn expand_qualified_const(
+    written: &str,
+    classes: &HashMap<ClassId, ClassInfo>,
+) -> Option<Symbol> {
+    let suffix = format!("::{written}");
+    let mut found: Option<&str> = None;
+    for key in classes.keys() {
+        let raw = key.0.as_str();
+        if raw.ends_with(&suffix) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(raw);
+        }
+    }
+    found.map(Symbol::from)
+}
+
 fn expand_bare_const(
     name: &Symbol,
     classes: &HashMap<ClassId, ClassInfo>,
@@ -239,13 +307,42 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Const { path } => {
                 let last = path.last().cloned().unwrap_or_else(|| Symbol::from("?"));
+                // A qualified read names its owner, so ask the owner
+                // first: the global map below is keyed by bare name and
+                // gives up on one two classes both define.
+                if path.len() > 1 {
+                    let written = path[..path.len() - 1]
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    // As written, then expanded: an app writes the
+                    // owner relative to its own nesting
+                    // (`Mode::Fill` inside the class that declares
+                    // `Mode`), the same reason `expand_bare_const`
+                    // exists for single-segment reads.
+                    let owner = resolve_owner_path(&written, ctx, self.classes());
+                    if let Some(ty) = owner
+                        .and_then(|owner| self.classes().get(&owner).cloned())
+                        .and_then(|c| c.constants.get(&last).cloned())
+                    {
+                        return ty;
+                    }
+                }
                 // Module/class-level constants seeded by the registry
                 // builder. `STATUS_CODES = { ok: 200, ... }` lands here
                 // typed `Hash[Sym, Int]` (not `Class { STATUS_CODES }`),
                 // so subsequent dispatch on `STATUS_CODES.fetch(...)`
                 // resolves through hash_method.
-                if let Some(ty) = ctx.constants.get(&last) {
-                    return ty.clone();
+                // Bare reads only. `A::B::Name` names its own
+                // namespace, and Ruby resolves it there — consulting a
+                // global by-bare-name map for it lets one constant
+                // capture every qualified read that ends in its name,
+                // including the class of that name.
+                if path.len() == 1 {
+                    if let Some(ty) = ctx.constants.get(&last) {
+                        return ty.clone();
+                    }
                 }
                 // Build a Ty::Class ClassId from the path. For multi-
                 // segment writes (`ActiveSupport::HashWithIndifferentAccess`)

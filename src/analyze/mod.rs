@@ -1123,7 +1123,10 @@ impl Analyzer {
     /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
     /// `Ty::Var` results are skipped — uninformative, and registering them
     /// would only mask the `Const` fallback without adding signal.
-    fn build_constant_registry(&self, app: &App) -> HashMap<Symbol, Ty> {
+    fn build_constant_registry(
+        &self,
+        app: &App,
+    ) -> (HashMap<Symbol, Ty>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
         // (defining class's self_ty, last-segment name, cloned value expr).
         let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
@@ -1207,7 +1210,30 @@ impl Analyzer {
             }
             map = next;
         }
-        map
+        // The same types, kept per owning class as well: a qualified
+        // read can then be answered exactly, including for a name two
+        // classes both define — which the map above has to drop.
+        let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+        for (self_ty, name, value) in entries.iter_mut() {
+            let owner = match &self_ty {
+                Ty::Class { id, .. } => id.clone(),
+                _ => continue,
+            };
+            let ctx = Ctx {
+                self_ty: Some(self_ty.clone()),
+                ivar_bindings: HashMap::new(),
+                local_bindings: HashMap::new(),
+                constants: map.clone(),
+                annotate_self_dispatch: false,
+                in_view: false,
+            };
+            let ty = self.body_typer().analyze_expr(value, &ctx);
+            if matches!(ty, Ty::Var { .. }) {
+                continue;
+            }
+            per_class.entry(owner).or_default().insert(name.clone(), ty);
+        }
+        (map, per_class)
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -1223,7 +1249,10 @@ impl Analyzer {
         // value's type instead of the `Ty::Class { id: ConstName }`
         // fallback. Seeded under each class's own constants (own shadows
         // global on a name clash).
-        let global_constants = self.build_constant_registry(app);
+        let (global_constants, class_constants) = self.build_constant_registry(app);
+        for (id, constants) in class_constants {
+            self.classes.entry(id).or_default().constants.extend(constants);
+        }
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
