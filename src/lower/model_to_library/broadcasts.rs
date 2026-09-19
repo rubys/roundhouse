@@ -108,6 +108,9 @@ enum BroadcastAct {
     Append,
     Prepend,
     Replace,
+    // Turbo's `update` replaces a target's CONTENTS where `replace`
+    // replaces the element itself; both carry html.
+    Update,
     Remove,
 }
 
@@ -117,6 +120,7 @@ impl BroadcastAct {
             Self::Append => "append",
             Self::Prepend => "prepend",
             Self::Replace => "replace",
+            Self::Update => "update",
             Self::Remove => "remove",
         }
     }
@@ -359,6 +363,74 @@ pub(crate) fn rewrite_rails_broadcast_calls(expr: Expr, model: &Model) -> Expr {
     walk(expr, model)
 }
 
+/// `Turbo::StreamsChannel.broadcast_update_to(stream, target: …,
+/// html: …)` → `Broadcasts.update(stream: …, target: …, html: …)`.
+///
+/// The CLASS-side broadcast API, which carries its stream, target and
+/// markup explicitly and so belongs to no record. That is what an app
+/// reaches for when the payload is not a model's partial — a rendered
+/// component, a counter, a status panel — and it is the reason this
+/// rewrite needs no owning model, unlike the record-side one above.
+///
+/// The target-neutral `Broadcasts.<action>` is the point: the ruby and
+/// spinel runtimes define `Turbo::StreamsChannel` and would serve the
+/// call as written, but no other target's runtime has that class, and
+/// every one of them has `Broadcasts`.
+pub(crate) fn rewrite_channel_broadcast_calls(expr: &mut Expr) {
+    if let Some(rewritten) = try_rewrite_channel_call(expr) {
+        *expr = rewritten;
+        return;
+    }
+    expr.node.for_each_child_mut(&mut rewrite_channel_broadcast_calls);
+}
+
+fn try_rewrite_channel_call(expr: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    let ExprNode::Const { path } = &*recv.node else { return None };
+    let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if written != "Turbo::StreamsChannel" {
+        return None;
+    }
+    let action = broadcast_action(method.as_str())?;
+    // `(stream, target: …, html: …)` — the stream positionally, the
+    // rest in one kwargs hash, which is the only form turbo-rails
+    // documents and the only one the runtimes implement.
+    let (stream, kwargs) = match args.as_slice() {
+        [stream, kwargs] => (stream, kwargs),
+        _ => return None,
+    };
+    let ExprNode::Hash { entries, kwargs: true } = &*kwargs.node else { return None };
+    let mut target = None;
+    let mut html = None;
+    for (key, value) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &*key.node else {
+            return None;
+        };
+        match name.as_str() {
+            "target" => target = Some(value.clone()),
+            "html" => html = Some(value.clone()),
+            // `partial:`/`locals:`/`renderable:` render through Rails
+            // rather than carrying markup, and `attributes:` is not
+            // modeled on the call side yet. Leave the whole call alone
+            // rather than emit a broadcast that drops what it was told.
+            _ => return None,
+        }
+    }
+    let target = target?;
+    if matches!(action, BroadcastAct::Remove) {
+        if html.is_some() {
+            return None;
+        }
+    } else {
+        html.as_ref()?;
+    }
+    let mut call = broadcasts_call(action, stream.clone(), target, html);
+    call.inherit_span(expr.span);
+    Some(call)
+}
+
 fn walk(e: Expr, model: &Model) -> Expr {
     // `<call> rescue nil` where `<call>` is a recognized broadcast →
     // unwrap the rescue (the spinel shape's nil-check supersedes).
@@ -519,6 +591,7 @@ fn broadcast_action(method: &str) -> Option<BroadcastAct> {
         "broadcast_replace_to" => Some(BroadcastAct::Replace),
         "broadcast_append_to" => Some(BroadcastAct::Append),
         "broadcast_prepend_to" => Some(BroadcastAct::Prepend),
+        "broadcast_update_to" => Some(BroadcastAct::Update),
         "broadcast_remove_to" => Some(BroadcastAct::Remove),
         _ => None,
     }

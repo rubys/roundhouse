@@ -55,7 +55,7 @@ function emit(action: string, opts: BroadcastOpts): void {
  *  (see `broadcasts_class_info` in `model_to_library`). Each method
  *  takes a kwargs-shaped hash and returns nothing. The action set
  *  matches `BroadcastAct` in the lowerer (Append/Prepend/Replace/
- *  Remove) — adding methods here without a matching variant there
+ *  Update/Remove) — adding methods here without a matching variant there
  *  produces dead code. */
 export class Broadcasts {
   // Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
@@ -88,6 +88,9 @@ export class Broadcasts {
   }
   static replace(opts: BroadcastOpts): void {
     emit("replace", opts);
+  }
+  static update(opts: BroadcastOpts): void {
+    emit("update", opts);
   }
   static remove(opts: BroadcastOpts): void {
     emit("remove", opts);

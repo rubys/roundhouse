@@ -28,6 +28,7 @@ object Broadcasts {
     fun append(opts: MutableMap<String, Any?>) = record("append", opts)
     fun prepend(opts: MutableMap<String, Any?>) = record("prepend", opts)
     fun replace(opts: MutableMap<String, Any?>) = record("replace", opts)
+    fun update(opts: MutableMap<String, Any?>) = record("update", opts)
     fun remove(opts: MutableMap<String, Any?>) = record("remove", opts)
 
     private fun record(action: String, opts: MutableMap<String, Any?>) {

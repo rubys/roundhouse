@@ -70,6 +70,10 @@ func Broadcasts_replace(attrs map[string]interface{}) {
 	recordBroadcast("replace", attrs)
 }
 
+func Broadcasts_update(attrs map[string]interface{}) {
+	recordBroadcast("update", attrs)
+}
+
 func Broadcasts_remove(attrs map[string]interface{}) {
 	recordBroadcast("remove", attrs)
 }

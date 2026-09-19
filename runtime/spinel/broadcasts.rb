@@ -93,6 +93,10 @@ module Broadcasts
     Turbo::StreamsChannel.broadcast_replace_to(stream, target: target, html: html, attributes: attributes)
   end
 
+  def self.update(stream:, target:, html:, attributes: "")
+    Turbo::StreamsChannel.broadcast_update_to(stream, target: target, html: html, attributes: attributes)
+  end
+
   def self.remove(stream:, target:, attributes: "")
     Turbo::StreamsChannel.broadcast_remove_to(stream, target: target, attributes: attributes)
   end

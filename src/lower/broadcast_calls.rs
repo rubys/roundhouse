@@ -26,10 +26,12 @@
 //! `qualify_relative_model_includes` already relies on.
 
 use crate::app::App;
-use crate::dialect::{Model, ModelBodyItem};
+use crate::dialect::{ControllerBodyItem, Model, ModelBodyItem};
 use crate::ident::ClassId;
 
-use super::model_to_library::broadcasts::rewrite_rails_broadcast_calls;
+use super::model_to_library::broadcasts::{
+    rewrite_channel_broadcast_calls, rewrite_rails_broadcast_calls,
+};
 
 pub(crate) fn apply_broadcast_calls_lowering(app: &mut App) {
     // The rewrite reads the owner while its methods are being replaced,
@@ -48,6 +50,33 @@ pub(crate) fn apply_broadcast_calls_lowering(app: &mut App) {
         let Some(owner) = enclosing_model(&lc.name, &owners) else { continue };
         for method in &mut lc.methods {
             method.body = rewrite_rails_broadcast_calls(method.body.clone(), owner);
+        }
+    }
+
+    // The class-side form needs no owner: it carries its stream, target
+    // and markup itself. So it applies everywhere a body can be —
+    // including the library classes the loop above skipped for having
+    // no model behind them, which is exactly where an app puts a
+    // broadcaster that is not about one record.
+    for model in &mut app.models {
+        for item in &mut model.body {
+            let ModelBodyItem::Method { method, .. } = item else { continue };
+            rewrite_channel_broadcast_calls(&mut method.body);
+        }
+    }
+    for lc in &mut app.library_classes {
+        for method in &mut lc.methods {
+            rewrite_channel_broadcast_calls(&mut method.body);
+        }
+    }
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            match item {
+                ControllerBodyItem::Action { action, .. } => {
+                    rewrite_channel_broadcast_calls(&mut action.body)
+                }
+                _ => {}
+            }
         }
     }
 }

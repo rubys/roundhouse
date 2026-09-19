@@ -122,6 +122,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
+    // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
+    // the one an app reaches for when the payload is not a record's
+    // partial: a rendered component, a counter, a status panel. The
+    // record-side surface is registered on every model (it is mixed
+    // into `ActiveRecord::Base`); this is the same five actions with
+    // the stream, target and markup passed explicitly. They answer the
+    // broadcast, which nothing consumes: `Nil`.
+    register_stdlib_class(classes, "Turbo::StreamsChannel", &[
+        ("broadcast_append_to", Ty::Nil), ("broadcast_prepend_to", Ty::Nil),
+        ("broadcast_replace_to", Ty::Nil), ("broadcast_update_to", Ty::Nil),
+        ("broadcast_remove_to", Ty::Nil),
+    ], &[]);
     // `ENV` — a Rails app's configuration seam, and the one stdlib
     // object whose values have a single concrete type: every entry is
     // a String. `fetch` narrows to that, which is right for the two

@@ -46,6 +46,7 @@ defmodule Broadcasts do
   def append(attrs), do: record(:append, attrs)
   def prepend(attrs), do: record(:prepend, attrs)
   def replace(attrs), do: record(:replace, attrs)
+  def update(attrs), do: record(:update, attrs)
   def remove(attrs), do: record(:remove, attrs)
 
   @doc "The recorded broadcasts, oldest first."
