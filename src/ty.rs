@@ -75,6 +75,26 @@ pub enum Ty {
     Record { row: Row },
     Union { variants: Vec<Ty> },
 
+    /// An instance of the class that RECEIVED the call — RBS
+    /// `instance` (and `self` on an instance-side member), sorbet
+    /// `T.attached_class`.
+    ///
+    /// Carries no class id, because the whole point is that the
+    /// DECLARING class does not know it: a factory written once on a
+    /// base class answers with an instance of whichever subclass was
+    /// called. Without this, every such signature had to be read as
+    /// the base class or not at all, and the chain after it went
+    /// untyped.
+    ///
+    /// Exists only between the signature readers and dispatch:
+    /// `dispatch` substitutes it with the receiver's class (see
+    /// [`Ty::subst_self`]) before the type is stored or joined, so no
+    /// emitter should ever meet one. A target whose emitter DOES meet
+    /// it must route it to an `Unsupported` emit diagnostic, never
+    /// silently degrade — it is a defect that it got that far, and a
+    /// silent fallback would hide it.
+    SelfInstance,
+
     Class { id: ClassId, args: Vec<Ty> },
 
     Fn {
@@ -122,6 +142,65 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// Replace every [`Ty::SelfInstance`] in this type with `with`.
+    ///
+    /// The one place the substitution lives. `dispatch` applies it as
+    /// soon as it has found a signature, against the class the
+    /// ancestor walk STARTED from — the subclass that received the
+    /// call, not the class the signature was found on. That is the
+    /// whole point: a factory declared once on a base class answers
+    /// with an instance of whoever called it.
+    ///
+    /// Recurses through every type that can CONTAIN one, so
+    /// `Array[instance]`, `instance?` and a signature's params are all
+    /// substituted, not just a bare return.
+    pub fn subst_self(&self, with: &Ty) -> Ty {
+        match self {
+            Ty::SelfInstance => with.clone(),
+            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.subst_self(with)) },
+            Ty::Hash { key, value } => Ty::Hash {
+                key: Box::new(key.subst_self(with)),
+                value: Box::new(value.subst_self(with)),
+            },
+            Ty::Tuple { elems } => {
+                Ty::Tuple { elems: elems.iter().map(|t| t.subst_self(with)).collect() }
+            }
+            Ty::Record { row } => Ty::Record {
+                row: Row {
+                    fields: row
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| (name.clone(), ty.subst_self(with)))
+                        .collect(),
+                    rest: row.rest.clone(),
+                },
+            },
+            Ty::Union { variants } => {
+                Ty::Union { variants: variants.iter().map(|t| t.subst_self(with)).collect() }
+            }
+            Ty::Class { id, args } => Ty::Class {
+                id: id.clone(),
+                args: args.iter().map(|t| t.subst_self(with)).collect(),
+            },
+            Ty::Fn { params, block, ret, effects } => Ty::Fn {
+                params: params
+                    .iter()
+                    .map(|p| Param {
+                        name: p.name.clone(),
+                        ty: p.ty.subst_self(with),
+                        kind: p.kind.clone(),
+                    })
+                    .collect(),
+                block: block.as_ref().map(|b| Box::new(b.subst_self(with))),
+                ret: Box::new(ret.subst_self(with)),
+                effects: effects.clone(),
+            },
+            // Leaves, and `Relation { of }` whose `of` is a ClassId
+            // rather than a Ty.
+            other => other.clone(),
+        }
+    }
+
     /// True for the two "no known type" variants: [`Ty::Var`] (the
     /// analyzer couldn't infer a type) and [`Ty::Untyped`] (an
     /// author-signed gradual-typing opt-out). Both mean "don't reason

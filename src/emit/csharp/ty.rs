@@ -38,6 +38,12 @@ pub fn csharp_ty(t: &Ty) -> String {
         // Analysis-time relation type — erased by query specialization
         // before emit (see `Ty::Relation`). Reaching here is a
         // coverage gap: report, never degrade to `List<T>`.
+        // A self type the analyzer should have substituted with
+        // the receiving class (see `Ty::SelfInstance`). Reaching
+        // here is a defect: report, never guess a class.
+        Ty::SelfInstance => {
+            return crate::emit::diagnostics::unsupported_self_instance_ty("csharp");
+        }
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("csharp", of);
         }

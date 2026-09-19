@@ -455,6 +455,11 @@ impl<'a> BodyTyper<'a> {
             }
             current_id = cls.parent.as_ref();
         };
+        // The same substitution dispatch makes, for the same reason:
+        // a signature that declares `(instance) -> bool` (`==`,
+        // `<=>`) must present a concrete param type to the check
+        // below, not a self type it cannot classify.
+        let sig = sig.map(|s| s.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() }));
         let Some(Ty::Fn { params, .. }) = sig else { return };
         let Some(last_param) = params.last() else { return };
         let last_kind_positional = matches!(
@@ -810,11 +815,25 @@ impl<'a> BodyTyper<'a> {
                         break;
                     };
                     steps += 1;
+                    // A signature found ANYWHERE on this walk may name
+                    // the receiving class as `instance` /
+                    // `T.attached_class` — a fact the declaring class
+                    // cannot spell, because it is about its callers.
+                    // Substituted here, against the class the walk
+                    // STARTED from rather than the one the signature
+                    // was found on: an inherited factory answers with
+                    // an instance of the subclass that called it. Done
+                    // before `unwrap_fn_ret` so a signature's params
+                    // are substituted too, and the arity and
+                    // kwargs-flip checks see a concrete type.
+                    let subst = |ty: &Ty| {
+                        ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() })
+                    };
                     if let Some(ty) = cls.class_methods.get(method) {
-                        return unwrap_fn_ret(ty);
+                        return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(ty);
+                        return unwrap_fn_ret(&subst(ty));
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
@@ -823,7 +842,7 @@ impl<'a> BodyTyper<'a> {
                     // module between the class and its superclass.
                     for module_id in &cls.includes {
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
-                            return ty;
+                            return subst(&ty);
                         }
                     }
                     current_id = cls.parent.as_ref();
