@@ -361,7 +361,24 @@ parse_wrk() {
     p50="$(normalize_latency "$p50")"
     p99="$(normalize_latency "$p99")"
     [[ -z "$req_sec" ]] && req_sec="null"
-    echo "{\"req_sec\":$req_sec,\"p50_ms\":$p50,\"p99_ms\":$p99}"
+    # wrk counts every response toward Requests/sec, including a 500 —
+    # and a Rails 500 page is cheap to serve. The line four above the
+    # rate says how many were errors; absent when all were 2xx/3xx. A
+    # cell with ANY is not a measurement of the endpoint: its rate is
+    # reported as null (the page prints "—" and the banner says why)
+    # with the counts kept beside it, so the record shows what was seen.
+    # Found the hard way: the rails-jruby JSON cell published ~1,100
+    # req/s of error pages for months (jruby#9531, fixed in 10.1.1.0).
+    local requests non_2xx
+    requests="$(awk '/ requests in /{print $1; exit}' "$out")"
+    non_2xx="$(awk '/^ *Non-2xx or 3xx responses:/{print $NF; exit}' "$out")"
+    [[ -z "$requests" ]] && requests=0
+    [[ -z "$non_2xx" ]] && non_2xx=0
+    if (( non_2xx > 0 )); then
+        echo "{\"req_sec\":null,\"p50_ms\":null,\"p99_ms\":null,\"requests\":$requests,\"non_2xx\":$non_2xx}"
+    else
+        echo "{\"req_sec\":$req_sec,\"p50_ms\":$p50,\"p99_ms\":$p99,\"requests\":$requests,\"non_2xx\":0}"
+    fi
 }
 
 # ── target lifecycle ─────────────────────────────────────────────────
@@ -1156,6 +1173,15 @@ measure_one() {
 
     local wrk_json
     wrk_json="$(parse_wrk "$wrk_out")"
+    # An error-bearing cell is recorded like a lane that stopped
+    # answering: skipped.json carries the reason the page prints.
+    if [[ "$wrk_json" == *'"req_sec":null'* ]] && grep -q '^ *Non-2xx or 3xx responses:' "$wrk_out"; then
+        local n_err
+        n_err="$(awk '/^ *Non-2xx or 3xx responses:/{print $NF; exit}' "$wrk_out")"
+        fail "$target $endpoint run $run_n: $n_err responses were not 2xx/3xx; cell recorded as no data ($wrk_out)"
+        printf '%s\n' "$endpoint: $n_err of $(awk '/ requests in /{print $1; exit}' "$wrk_out") responses were not 2xx/3xx — the server answered, with errors; see the lane log" > "$wrk_out.errors"
+        record_skip "$target" errors "$wrk_out.errors"
+    fi
     local rss_median_kb
     rss_median_kb="$(median < "$rss_out")"
     [[ -z "$rss_median_kb" || "$rss_median_kb" == "0" ]] && rss_median_kb=0
@@ -1293,6 +1319,9 @@ cells = records.group_by { |r| [r["target"], r["workers"], r["endpoint"]] }.map 
     req_sec: req_sec, p50_ms: p50, p99_ms: p99,
     rss_kb: rss_kb, rss_mb: rss_kb ? rss_kb / 1024.0 : nil,
     rps_per_gb: rps_per_gb,
+    # Responses wrk saw that were not 2xx/3xx, summed over the runs. A
+    # cell with any has req_sec nil (parse_wrk), and the page says why.
+    non_2xx: runs.sum { |r| r["non_2xx"].to_i },
   }
 end
 

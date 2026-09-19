@@ -163,7 +163,9 @@ targets   = order_first(cells.map { |c| c['target'] }.uniq, TARGET_ORDER)
 
 # A cell with a nil req_sec was never measured: wrk found nothing serving,
 # which is what a server that died mid-run leaves behind for every cell
-# after it. nil is NOT zero, and `.to_f` erases the difference — a dead
+# after it — or it served ERRORS (the record then carries `non_2xx` and
+# skipped.json a reason), which wrk would otherwise have counted as
+# throughput: a Rails 500 page is cheap to serve. nil is NOT zero, and `.to_f` erases the difference — a dead
 # lane then draws a real-looking 0 bar, ranked last, indistinguishable
 # from a runtime that was measured and is simply slow. Everything below
 # reads metrics through `cell_metric`, which keeps the nil.
@@ -351,7 +353,8 @@ def hbar_log(rows, metric:, unit:)
     # No bar at all for an unmeasured cell. A zero-width bar would still
     # read as a measurement of ~0; the words say what actually happened.
     if v.nil?
-      buf << t(left_pad, y + row_h * 0.7, 'no data — server not answering', fill: '#999')
+      why = c['non_2xx'].to_i > 0 ? 'no data — answered with errors' : 'no data — server not answering'
+      buf << t(left_pad, y + row_h * 0.7, why, fill: '#999')
       next
     end
 
@@ -613,7 +616,9 @@ unless never_ran.empty? && dead_targets.empty? && partial.empty?
   items += (dead_targets + partial).map do |t|
     tally = run_tally[t]
     counted = tally[:total] > 0 ? " (#{tally[:measured]} of #{tally[:total]} timed runs recorded)" : ''
+    errored = skipped_by[t].any? { |r| r['stage'] == 'errors' }
     verb = dead_targets.include?(t) ? 'recorded no measurements' :
+           errored ? 'answered some cells with errors' :
            'stopped answering partway through its cells'
     line = "<li><code>#{t}</code> #{verb}#{counted}"
     # A lane whose SERVER died mid-run writes the exit status to
@@ -645,7 +650,7 @@ unless never_ran.empty? && dead_targets.empty? && partial.empty?
       <ul>
       #{items.join("\n")}
       </ul>
-      <p class="caveat">Every chart and table below is drawn from the targets that were measured; a target that failed to build is absent, not slow. Where a lane reached the run and then produced no numbers its cells are shown as <em>no data</em>, not as zero — an unmeasured cell means <code>wrk</code> found nothing serving, which is a different claim from a runtime that was measured and is slow. Such lanes are left out of the derived charts (multipliers, RSS ranking) for the same reason.</p>
+      <p class="caveat">Every chart and table below is drawn from the targets that were measured; a target that failed to build is absent, not slow. Where a lane reached the run and then produced no numbers its cells are shown as <em>no data</em>, not as zero — an unmeasured cell means <code>wrk</code> found nothing serving, or found a server answering with errors (a cell with any non-2xx response is not a measurement of the endpoint — an error page is cheap to serve), which is a different claim from a runtime that was measured and is slow. Such lanes are left out of the derived charts (multipliers, RSS ranking) for the same reason.</p>
     </div>
   BANNER
 end
