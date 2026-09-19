@@ -523,7 +523,12 @@ if env
   appendix_ref = ' Full hardware, toolchain versions, and the exact invocation are in the <a href="#environment">environment appendix</a> below.'
 else
   harness_name = 'scripts/bench'
-  machine = 'Bare-metal Linux host, frequency boost disabled, governor=performance'
+  # A run with no env.json recorded nothing about its clocks. The line
+  # used to assert the May 2026 pin (performance, boost off) here — a
+  # claim the box stopped satisfying on 06-11 when a reboot dropped the
+  # non-persistent cpupower setting; runs WITH env.json printed the true
+  # schedutil/boost-on the whole time. Say unrecorded, not a wish.
+  machine = 'Bare-metal Linux host; governor and boost state unrecorded (no env.json)'
   harness = "workers=1, #{runs} runs per cell"
   appendix_ref = ''
 end

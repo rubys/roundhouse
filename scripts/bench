@@ -60,9 +60,13 @@
 #                                                 # stage and log tail
 #
 # Environment:
-#   On Linux: assumes `cpupower frequency-set -g performance` was run
-#   beforehand and SMT is set to your preference (script doesn't change
-#   these). On macOS: no-op; numbers will be M-class baseline.
+#   On Linux: assumes `cpupower frequency-set -g performance` and boost
+#   off (`echo 0 > /sys/devices/system/cpu/cpufreq/boost`) — on the bench
+#   box a systemd oneshot (cpu-bench-pin.service) applies both at boot,
+#   because cpupower's setting is not persistent and a June 2026 reboot
+#   silently ran three months of nightlies on schedutil with boost on.
+#   The script doesn't change these; env.json records what it found and
+#   the page prints it, so check the machine line. On macOS: no-op; numbers will be M-class baseline.
 
 set -euo pipefail
 
