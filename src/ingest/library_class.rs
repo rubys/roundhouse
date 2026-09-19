@@ -221,7 +221,7 @@ pub(super) fn library_class_and_struct_base(
         None => parent,
     };
 
-    let (mut includes, mut methods, constants, mut unknown_calls) =
+    let (mut includes, mut methods, mut constants, mut unknown_calls) =
         walk_decl_body(class.body(), &owner, file, false)?;
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
@@ -239,6 +239,31 @@ pub(super) fn library_class_and_struct_base(
         unknown_calls.retain(|call| !is_struct_declaration(call));
         includes.retain(|i| !i.0.as_str().starts_with("T::"));
         let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable);
+        synthesized.append(&mut methods);
+        methods = synthesized;
+        None
+    } else if parent.as_ref().is_some_and(is_sorbet_enum_parent) {
+        // The body walk already read the members out of `enums do` as
+        // constants of this class, receiver spelled out, so they are
+        // read from there rather than from the block a second time.
+        let members: Vec<SorbetEnumMember> = constants
+            .iter()
+            .filter(|(_, value)| is_enum_member(&owner, value))
+            .map(|(name, _)| SorbetEnumMember { name: name.clone() })
+            .collect();
+        // Each member is told the constant it is bound to. sorbet reads
+        // that off the constant table when the `enums` block finishes;
+        // here it is known at ingest, and `inspect` needs it.
+        for (name, value) in constants.iter_mut() {
+            if !is_enum_member(&owner, value) {
+                continue;
+            }
+            if let ExprNode::Send { args, .. } = &mut *value.node {
+                args.push(str_lit(name.as_str()));
+            }
+        }
+        unknown_calls.retain(|call| !is_enums_declaration(call));
+        let mut synthesized = synth_sorbet_enum_methods(&owner, &members);
         synthesized.append(&mut methods);
         methods = synthesized;
         None
@@ -262,6 +287,278 @@ pub(super) fn library_class_and_struct_base(
         },
         base,
     ))
+}
+
+/// `T::Enum` in superclass position. Like `T::Struct` it is a class
+/// GENERATOR, not an annotation: `enums do Fill = new("fill") end`
+/// declares members other code names and a serialization surface other
+/// code calls, so the class is lowered into the plain Ruby it stands
+/// for rather than dropped or carried.
+fn is_sorbet_enum_parent(parent: &ClassId) -> bool {
+    parent.0.as_str() == "T::Enum"
+}
+
+/// The `enums do … end` call in the collected class-body calls. The
+/// members were read out of it as constants by the body walk, so
+/// replaying the call would re-declare them against a `T::Enum` that
+/// is not there.
+fn is_enums_declaration(call: &Expr) -> bool {
+    matches!(
+        &*call.node,
+        ExprNode::Send { recv: None, method, .. } if method.as_str() == "enums"
+    )
+}
+
+/// One member of a lowered enum: the constant it is bound to, which is
+/// also the name `inspect` prints.
+struct SorbetEnumMember {
+    name: Symbol,
+}
+
+/// A class-body constant initialized by this class's own `new` — which
+/// is what the body walk makes of a member inside `enums do`, receiver
+/// spelled out. A `T::Enum` may hold other constants (an alias for a
+/// member, a lookup table); those are not members and are left alone.
+fn is_enum_member(owner: &ClassId, value: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*value.node else { return false };
+    if method.as_str() != "new" {
+        return false;
+    }
+    let ExprNode::Const { path } = &*recv.node else { return false };
+    path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::") == owner.0.as_str()
+}
+
+fn str_lit(value: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: crate::expr::Literal::Str { value: value.to_string() } },
+    )
+}
+
+fn call(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv,
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
+fn local(name: &str) -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+}
+
+/// The plain Ruby a `T::Enum` stands for. The surface is sorbet's own,
+/// read off `T::Enum` rather than guessed: `serialize` answers the
+/// value a member was built from, `values` lists the members,
+/// `try_deserialize` maps a value back to the member that carries it
+/// (nil when none does) and `from_serialized` / `deserialize` raise
+/// `KeyError` there instead, `has_serialized?` asks without raising,
+/// and `to_s` delegates to `inspect`.
+///
+/// `==` is deliberately absent: sorbet's is identity (`super`) outside
+/// migration mode, and members are single instances bound to
+/// constants, so the plain class already answers it the same way.
+fn synth_sorbet_enum_methods(owner: &ClassId, members: &[SorbetEnumMember]) -> Vec<MethodDef> {
+    let method = |name: &str, params: Vec<Param>, receiver: MethodReceiver, body: Expr| MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from(name),
+        receiver,
+        params,
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: name == "initialize",
+        block_param: None,
+    };
+    let member_const = |name: &Symbol| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const {
+                path: owner
+                    .0
+                    .as_str()
+                    .split("::")
+                    .map(Symbol::from)
+                    .chain(std::iter::once(name.clone()))
+                    .collect(),
+            },
+        )
+    };
+    let ivar = |name: &str| Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from(name) });
+    let assign = |name: &str, value: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Ivar { name: Symbol::from(name) }, value },
+        )
+    };
+    // `find { |member| member.serialize == value }` over the members.
+    let lookup = || {
+        let matches = call(
+            Some(call(Some(local("member")), "serialize", vec![])),
+            "==",
+            vec![local("value")],
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(call(Some(self_class()), "values", vec![])),
+                method: Symbol::from("find"),
+                args: vec![],
+                block: Some(block_of("member", matches)),
+                parenthesized: false,
+            },
+        )
+    };
+    let value_param = || vec![Param::positional(Symbol::from("value"))];
+
+    let mut methods = vec![
+        method(
+            "initialize",
+            vec![
+                Param::positional(Symbol::from("serialized")),
+                Param::positional(Symbol::from("const_name")),
+            ],
+            MethodReceiver::Instance,
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Seq {
+                    exprs: vec![
+                        assign("serialized_val", local("serialized")),
+                        assign("const_name", local("const_name")),
+                    ],
+                },
+            ),
+        ),
+        method("serialize", vec![], MethodReceiver::Instance, ivar("serialized_val")),
+        // sorbet's `inspect` is `#<Enum::Member>`, and its `to_s`
+        // delegates to it rather than to the serialized value — a
+        // difference that would otherwise show up wherever an enum is
+        // interpolated into a string, with nothing at the call site to
+        // say it changed.
+        method(
+            "inspect",
+            vec![],
+            MethodReceiver::Instance,
+            call(
+                Some(call(
+                    Some(str_lit(&format!("#<{}::", owner.0.as_str()))),
+                    "+",
+                    vec![ivar("const_name")],
+                )),
+                "+",
+                vec![str_lit(">")],
+            ),
+        ),
+        method(
+            "to_s",
+            vec![],
+            MethodReceiver::Instance,
+            call(Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)), "inspect", vec![]),
+        ),
+        method(
+            "values",
+            vec![],
+            MethodReceiver::Class,
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array {
+                    elements: members.iter().map(|m| member_const(&m.name)).collect(),
+                    style: crate::expr::ArrayStyle::default(),
+                },
+            ),
+        ),
+        method("try_deserialize", value_param(), MethodReceiver::Class, lookup()),
+        method(
+            "has_serialized?",
+            value_param(),
+            MethodReceiver::Class,
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(call(Some(self_class()), "values", vec![])),
+                    method: Symbol::from("any?"),
+                    args: vec![],
+                    block: Some(block_of(
+                        "member",
+                        call(
+                            Some(call(Some(local("member")), "serialize", vec![])),
+                            "==",
+                            vec![local("value")],
+                        ),
+                    )),
+                    parenthesized: false,
+                },
+            ),
+        ),
+    ];
+    // `from_serialized` raises where `try_deserialize` answers nil, and
+    // `deserialize` is sorbet's alias for it.
+    let found = Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::default(),
+            left: call(Some(self_class()), "try_deserialize", vec![local("value")]),
+            right: call(
+                None,
+                "raise",
+                vec![call(
+                    Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Const { path: vec![Symbol::from("KeyError")] },
+                    )),
+                    "new",
+                    // The offending value is in sorbet's message, and a
+                    // KeyError without it is the one thing you need at
+                    // the point it is raised.
+                    vec![call(
+                        Some(str_lit(&format!("Enum {} key not found: ", owner.0.as_str()))),
+                        "+",
+                        vec![call(Some(local("value")), "inspect", vec![])],
+                    )],
+                )],
+            ),
+        },
+    );
+    methods.push(method(
+        "from_serialized",
+        value_param(),
+        MethodReceiver::Class,
+        found,
+    ));
+    methods.push(method(
+        "deserialize",
+        value_param(),
+        MethodReceiver::Class,
+        call(Some(self_class()), "from_serialized", vec![local("value")]),
+    ));
+    methods
+}
+
+/// `{ |name| body }` attached to a call.
+fn block_of(param: &str, body: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![Symbol::from(param)],
+            rest_param: None,
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    )
+}
+
+fn self_class() -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::SelfRef)
 }
 
 /// A `const` / `prop` call in the collected class-body calls, which
