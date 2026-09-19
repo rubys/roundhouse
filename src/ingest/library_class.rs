@@ -455,6 +455,54 @@ fn walk_decl_body<'pr>(
     };
 
     for stmt in flatten_statements(b) {
+        // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
+        // declares its members inside a block, so the constants are one
+        // level deeper than every other class-body constant. They are
+        // constants of this class all the same, and reading them is what
+        // lets `Mode::Fill` type as a Mode rather than as a class nobody
+        // defined.
+        if let Some(call) = stmt.as_call_node() {
+            let name = call.name();
+            if constant_id_str(&name) == "enums" && call.receiver().is_none() {
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    if let Some(block_body) = block.body() {
+                        for member in flatten_statements(block_body) {
+                            let Some(cw) = member.as_constant_write_node() else { continue };
+                            let name = Symbol::from(constant_id_str(&cw.name()));
+                            let mut value = ingest_expr(&cw.value(), file)?;
+                            // `Fill = new("fill")` — inside the class
+                            // body, the receiverless `new` IS
+                            // `Mode.new`, and spelling it out is what
+                            // lets the constant registry type the
+                            // member as an instance of its enum rather
+                            // than leaving it untyped. (T::Enum makes
+                            // the constructor private at run time; this
+                            // is the ingest's reading of it, not an
+                            // emitted call.)
+                            if let ExprNode::Send { recv: recv @ None, method, .. } =
+                                &mut *value.node
+                            {
+                                if method.as_str() == "new" {
+                                    *recv = Some(Expr::new(
+                                        crate::span::Span::synthetic(),
+                                        ExprNode::Const {
+                                            path: owner
+                                                .0
+                                                .as_str()
+                                                .split("::")
+                                                .map(Symbol::from)
+                                                .collect(),
+                                        },
+                                    ));
+                                }
+                            }
+                            constants.push((name, value));
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
         // Class-level constant `NAME = <expr>` (e.g. `STORIES_PER_PAGE = 25`).
         if let Some(cw) = stmt.as_constant_write_node() {
             let name = Symbol::from(constant_id_str(&cw.name()));
