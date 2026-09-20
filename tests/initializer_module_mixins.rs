@@ -225,6 +225,118 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
     );
 }
 
+/// The mixin's companion: `X.before_action :m` in the same initializer.
+/// campfire's `active_storage_authentication.rb` includes a session
+/// check into Active Storage's two direct-upload controllers and adds
+/// the `before_action` that makes an anonymous upload a 401 — a guard
+/// that is nothing without the second line. Read at ingest (with its
+/// `only:`), kept by the lowering when the target is a runtime
+/// controller carrying the seam and a kept mixin supplies the method.
+#[test]
+fn a_before_action_on_a_runtime_controller_is_kept_with_its_mixin() {
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/active_storage_authentication.rb",
+                "Rails.application.config.to_prepare do\n  \
+                 ActiveStorage::DirectUploadsController.include ActiveStorageAuthentication\n  \
+                 ActiveStorage::DirectUploadsController.before_action :require_active_storage_authentication\n  \
+                 ActiveStorage::DiskController.include ActiveStorageAuthentication\n  \
+                 ActiveStorage::DiskController.before_action :require_active_storage_authentication, only: :update\n\
+                 end\n",
+            ),
+            (
+                "app/controllers/concerns/active_storage_authentication.rb",
+                "module ActiveStorageAuthentication\n  extend ActiveSupport::Concern\n\n  private\n    \
+                 def require_active_storage_authentication\n      head :unauthorized unless cookies[:session_token].present?\n    end\nend\n",
+            ),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
+    assert_eq!(app.module_mixins.len(), 2);
+    assert_eq!(app.initializer_filters.len(), 2, "{:?}", app.initializer_filters);
+    assert!(app.initializer_filters[0].only.is_empty(), "every action");
+    assert_eq!(
+        app.initializer_filters[1].only.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        vec!["update"]
+    );
+
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert_eq!(app.module_mixins.len(), 2, "both controllers are runtime classes the tree ships");
+    assert_eq!(
+        app.initializer_filters.len(),
+        2,
+        "the guard's method is defined by the module the same initializer mixes in: {:#?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// A `before_action` whose target takes no filter (an ingested
+/// controller, or a runtime class without the seam), or whose method
+/// no kept mixin supplies, is dropped and reported — a filter that
+/// never runs is the same silent absence a dropped mixin is.
+#[test]
+fn a_before_action_nothing_supplies_is_dropped_and_reported() {
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/guard.rb",
+                "ActiveStorage::DiskController.before_action :require_active_storage_authentication\n",
+            ),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
+    assert_eq!(app.initializer_filters.len(), 1);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(app.initializer_filters.is_empty());
+    assert!(
+        diags.iter().any(|d| d.message.contains("no module mixed into ActiveStorage::DiskController")),
+        "{:#?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// The emit: one reopen per target at the end of boot.rb, redefining
+/// the runtime controller's `initializer_filters` seam with the
+/// filters in order, `only:` rendered as the lowered controllers spell
+/// it. Pushed onto a real-blog App directly, as the mixin test above is.
+#[test]
+fn a_kept_before_action_reaches_boot_as_the_controllers_filter_seam() {
+    use roundhouse::app::{InitializerFilter, MixinKind, ModuleMixin};
+    use roundhouse::ident::Symbol;
+    use roundhouse::project::{target_files, BuildTarget};
+
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
+    let mut app = roundhouse::ingest::ingest_app(&fixture).expect("ingest real-blog");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app.module_mixins.push(ModuleMixin {
+        target: Symbol::from("ActiveStorage::DiskController"),
+        module: Symbol::from("ActiveStorageAuthentication"),
+        kind: MixinKind::Include,
+    });
+    app.initializer_filters.push(InitializerFilter {
+        target: Symbol::from("ActiveStorage::DiskController"),
+        method: Symbol::from("require_active_storage_authentication"),
+        only: vec![Symbol::from("update")],
+    });
+
+    let files = target_files(&app, &fixture, BuildTarget::Ruby).expect("ruby target files");
+    let boot = files.iter().find(|(p, _)| p == "boot.rb").map(|(_, c)| c.clone()).expect("boot.rb");
+    assert!(boot.contains("ActiveStorage::DiskController.include ActiveStorageAuthentication"), "{boot}");
+    assert!(
+        boot.contains(
+            "class ActiveStorage::DiskController\n  def initializer_filters(action_name)\n    \
+             require_active_storage_authentication if [:update].include?(action_name)\n    \
+             return nil if performed?\n    nil\n  end\nend"
+        ),
+        "the filter reopen never reached boot.rb:\n{boot}"
+    );
+}
+
 /// THE DRIFT GUARD on `RUNTIME_MIXIN_TARGETS`. That list is the one
 /// place the lowering credits a constant it cannot see — the runtime is
 /// not in `App` — so it is also the one place a rename in
@@ -239,6 +351,23 @@ fn every_credited_runtime_mixin_target_is_actually_defined() {
         source.contains("class StreamsChannel < ActionCable::Channel::Base"),
         "`Turbo::StreamsChannel` is credited by lower::module_mixins but no longer \
          defined in runtime/spinel/turbo_streams.rb"
+    );
+    // The two direct-upload controllers, and the seam a filter is
+    // written into — `process_action` must ASK it, or the generated
+    // reopen defines a method nothing calls.
+    let disk = std::fs::read_to_string(root.join("runtime/spinel/active_storage_disk.rb"))
+        .expect("runtime/spinel/active_storage_disk.rb");
+    for class in ["DirectUploadsController", "DiskController"] {
+        assert!(
+            disk.contains(&format!("class {class} < ActionController::Base")),
+            "`ActiveStorage::{class}` is credited by lower::module_mixins but no longer \
+             defined in runtime/spinel/active_storage_disk.rb"
+        );
+    }
+    assert_eq!(
+        disk.matches("initializer_filters(action_name)\n      return nil if performed?").count(),
+        2,
+        "each direct-upload controller's process_action asks the filter seam before its action"
     );
 }
 

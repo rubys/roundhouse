@@ -1082,6 +1082,52 @@ Signed ids are the `signed_id` envelope under Active Storage's own
 salt (`blob_id` for the blob, `disk_key` with a five-minute expiry
 for the disk token); `Blob.find_signed` verifies them.
 
+**Direct uploads.** The same table mounts Rails' direct-upload pair:
+
+    POST /rails/active_storage/direct_uploads
+    PUT  /rails/active_storage/disk/:encoded_token
+
+`DirectUploadsController#create` allocates the row from what the
+browser declared (`Blob.create_before_direct_upload!` — key, size,
+MD5 checksum, type; no bytes yet) and answers Rails' JSON: the blob's
+attributes, its `signed_id`, and under `direct_upload` the PUT url
+and the `Content-Type` header to send. That url carries a second
+token (`blob_token`) signing the key, type, length and checksum, and
+`DiskController#update` holds the PUT to it: a token that does not
+verify is a 404, a body whose type or length differs from the
+declaration is a 422, and a checksum that does not match after the
+write is Rails' `IntegrityError` — the file is removed and the answer
+is 422. Both tokens are minted by `ActiveStorage::DiskKey`, which is
+shared runtime (`runtime/ruby/active_storage.rb`) so that `Blob#url`
+can be Rails' SERVICE url — the disk route, absolute — on every
+target; only serving the routes is the ruby family's.
+
+`Blob#url` is absolute through `ActiveStorage::Current.url_options`,
+which the engine controllers set from the request (Rails'
+`SetCurrent`) and a caller outside a request sets itself. Divergence,
+named: Rails raises when the disk service is asked for a url with no
+options set; here the url is path-only, which a browser resolves
+against the page. `Digest::MD5` is ported for the spinel tree
+(`runtime/spinel/digest_md5.rb`) — spinel's `digest` package binds
+SHA-256 and SHA-1 only.
+
+**The guard.** Rails mounts these two endpoints on every app whether
+or not its forms use direct uploads, so campfire — whose composer
+uploads through `MessagesController` — guards them in
+`config/initializers/active_storage_authentication.rb`: an `include`
+of its session check into each controller and a `before_action` that
+answers an anonymous caller 401. Both lines are the initializer's own
+and both are performed. `lower::module_mixins` already kept an
+`include`/`prepend` onto a runtime class it credits; it now keeps a
+`before_action` too, when the target is a runtime controller that
+asks `initializer_filters(action_name)` before its action (the two
+direct-upload controllers) and a kept mixin onto that target defines
+the method. The emit writes one reopen per target at the end of
+`boot.rb` redefining that seam — `only:` rendered as the lowered
+controllers spell it — so the framework controller runs the app's
+filter with the app's cookies and models, on both lanes. A filter
+nothing supplies is dropped and reported, as a dropped mixin is.
+
 `url_for(attachment)` / `image_tag(attachment)` — Rails'
 `polymorphic_url` on an attachment — are grounded at the call site by
 `lower::attached_url`: an attachment-shaped argument (a `has_one_

@@ -225,6 +225,20 @@ pub struct App {
     /// NameError at boot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_mixins: Vec<ModuleMixin>,
+    /// `X.before_action :m[, only: …]` registered by a
+    /// `config/initializers/` file — the mixin's companion: an app
+    /// that mixes a guard INTO a framework controller also has to
+    /// tell that controller to RUN it, and Rails apps write the two
+    /// lines together. campfire's `active_storage_authentication.rb`
+    /// includes `ActiveStorageAuthentication` into Active Storage's
+    /// direct-upload controllers and adds the `before_action` that
+    /// makes an anonymous upload a 401. Same standing as
+    /// `module_mixins`: recorded at ingest, resolved by
+    /// `lower::module_mixins`, which keeps only a filter onto a
+    /// runtime controller that carries the seam and whose method a
+    /// kept mixin supplies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initializer_filters: Vec<InitializerFilter>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -433,6 +447,18 @@ pub struct ModuleMixin {
     pub kind: MixinKind,
 }
 
+/// `X.before_action :m, only: [:a, …]` from a `config/initializers/`
+/// file. `only` empty means every action, as Rails reads it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InitializerFilter {
+    /// The controller receiving the filter, as the initializer spells it.
+    pub target: Symbol,
+    /// The filter method, which a mixin onto the same target supplies.
+    pub method: Symbol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<Symbol>,
+}
+
 /// `prepend` inserts AHEAD of the target in the lookup chain, `include`
 /// behind it. The distinction is the whole point of campfire's
 /// `RoomStreamsAreAuthorized`, whose `subscribed` calls `super` — as an
@@ -583,6 +609,7 @@ impl App {
             html_safe_methods: BTreeSet::new(),
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
+            initializer_filters: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_spliced_actions: HashMap::new(),

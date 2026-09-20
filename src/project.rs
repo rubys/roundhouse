@@ -2437,7 +2437,7 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
 fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: MixinForm) {
     use std::fmt::Write;
 
-    if app.module_mixins.is_empty() {
+    if app.module_mixins.is_empty() && app.initializer_filters.is_empty() {
         return;
     }
     let mut block = String::from(match form {
@@ -2490,6 +2490,33 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: Mixin
                 mixin.module.as_str()
             ),
         };
+    }
+    // The filters, one reopen per target. The runtime controller's
+    // `process_action` calls `initializer_filters(action_name)` before
+    // the action and stops when a filter has answered (`performed?`),
+    // the same shape the lowered app controllers spell inline. A
+    // reopen on both lanes: CRuby redefines the seam's default, and
+    // spinel takes the later definition in a reopened class.
+    let mut targets: Vec<&str> = app.initializer_filters.iter().map(|f| f.target.as_str()).collect();
+    targets.dedup();
+    for target in targets {
+        let _ = writeln!(
+            block,
+            "\n# `before_action` the app registers on a framework controller in\n\
+             # config/initializers/ (generated — see apply_module_mixins). The\n\
+             # controller asks this before its action and stops if it answered.\n\
+             class {target}\n  def initializer_filters(action_name)"
+        );
+        for f in app.initializer_filters.iter().filter(|f| f.target.as_str() == target) {
+            if f.only.is_empty() {
+                let _ = writeln!(block, "    {}", f.method.as_str());
+            } else {
+                let only: Vec<String> = f.only.iter().map(|a| format!(":{}", a.as_str())).collect();
+                let _ = writeln!(block, "    {} if [{}].include?(action_name)", f.method.as_str(), only.join(", "));
+            }
+            let _ = writeln!(block, "    return nil if performed?");
+        }
+        let _ = writeln!(block, "    nil\n  end\nend");
     }
     for (path, content) in files.iter_mut() {
         if path == "boot.rb" {
@@ -3092,6 +3119,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_record_equality_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/active_record_equality_spinel.rbs: {e}"))?;
         files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
+    }
+
+    // Digest::MD5 sidecar — runtime/digest_md5.rb is the class spinel's
+    // digest package does not bind, ported for Active Storage's
+    // direct-upload checksums; the .rbs types its three readers.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/digest_md5.rbs")
+            .map_err(|e| format!("read runtime/spinel/digest_md5.rbs: {e}"))?;
+        files.push(("sig/runtime/digest_md5.rbs".to_string(), rbs));
     }
 
     // RecordIdentifier sidecar — runtime/record_identifier_spinel.rb

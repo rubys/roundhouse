@@ -849,6 +849,10 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     ("patch", || fn_sig_one(Ty::Untyped, Ty::Nil)),
     ("delete", || fn_sig_one(Ty::Untyped, Ty::Nil)),
     ("head", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    // A second browser (`ActionDispatch::Integration::Session`), for a
+    // test that asks a question as another client; the verbs above
+    // are then sent to it.
+    ("open_session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
     // Response assertions.
     ("assert_response", || fn_sig_one(Ty::Untyped, Ty::Nil)),
     ("assert_redirected_to", || fn_sig_one(Ty::Untyped, Ty::Nil)),

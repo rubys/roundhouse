@@ -1246,7 +1246,18 @@ fn every_runtime_method_body_concretely_typed() {
     // 416 -> 417: `Relation#take`, one `first` self-send under the
     // declared `untyped` return `first` has always had. What it
     // bought: the Rails 8 authentication generator's `User.take`.
-    const CEILING: usize = 417;
+    //
+    // 417 -> 418: `ActiveStorage::DiskKey.expiry`, the `Time.now + 300`
+    // that `signed_id.rb`'s entry above already explains (`Time#+` is
+    // untyped by design; `iso8601_ms`'s `::Time` parameter absorbs it).
+    // ONE site for the module: the disk-route token and the
+    // direct-upload token both take their expiry from it, and the
+    // module moved into the shared runtime from the ruby family's
+    // `active_storage_disk.rb` so `Blob#url` can be Rails' service url
+    // on every target. What it bought: Active Storage's direct-upload
+    // pair (`POST /rails/active_storage/direct_uploads`, the disk
+    // service's `PUT`), served and guarded by campfire's initializer.
+    const CEILING: usize = 418;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -69,6 +69,8 @@ module ActiveStorage
     # `data` is the file's CONTENTS — the lowering reads the io at the
     # call site so nothing here has to name a File.
     def self.create_and_upload!: (String data, String filename, String content_type) -> ActiveStorage::Blob
+    def self.create_before_direct_upload!: (String filename, Integer byte_size, String checksum, String content_type) -> ActiveStorage::Blob
+    def self.count: () -> Integer
     # Rails' attachable coercion (an uploaded file, a blob, …). Raises
     # here; the ruby family reopens it with the class tests.
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
@@ -80,7 +82,25 @@ module ActiveStorage
     def image?: () -> bool
     def audio?: () -> bool
     def variable?: () -> bool
-    def url: (String disposition) -> String
+    def redirect_url: (String disposition) -> String
+    def url: (?String disposition) -> String
+  end
+
+  module DiskKey
+    def self.expiry: () -> String
+    def self.encode: (String key, String disposition) -> String
+    def self.decode: (String token) -> Array[String]
+    def self.disk_url: (ActiveStorage::Blob blob, String disposition) -> String
+    def self.encode_upload: (String key, String content_type, Integer content_length, String checksum) -> String
+    def self.decode_upload: (String token) -> Array[String]
+    def self.upload_url: (ActiveStorage::Blob blob, String checksum) -> String
+  end
+
+  module Current
+    self.@url_options: Hash[Symbol, String]?
+    def self.url_options: () -> Hash[Symbol, String]?
+    def self.url_options=: (Hash[Symbol, String]? options) -> Hash[Symbol, String]?
+    def self.base_url: () -> String
   end
 
   class ImageAnalyzer
@@ -197,4 +217,6 @@ module RouteHelpers
   def self.rails_blob_url: (ActiveStorage::Attached attachment, ?disposition: String?, ?only_path: bool?) -> String
   def self.rails_representation_path: (ActiveStorage::VariantWithRecord variant, ?only_path: bool?) -> String
   def self.rails_representation_url: (ActiveStorage::VariantWithRecord variant, ?only_path: bool?) -> String
+  def self.rails_direct_uploads_path: () -> String
+  def self.rails_direct_uploads_url: () -> String
 end

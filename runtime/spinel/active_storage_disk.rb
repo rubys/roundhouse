@@ -1,3 +1,4 @@
+require "json"
 # Active Storage's BYTES half, for the ruby family: the disk service,
 # the attachable coercion, the image analyzer, and the three engine
 # routes that serve a blob back. Reopens the shared
@@ -16,6 +17,8 @@
 # test, as Rails' generated storage.yml has it — the test harness cleans
 # `tmp/storage` between files rather than between tests, which is also
 # what Rails does.
+require "digest"
+
 module ActiveStorage
   class Service
     def root
@@ -175,11 +178,13 @@ module ActiveStorage
     end
   end
 
-  # The engine's three routes, mounted by the dispatcher beside the
-  # app's own table (`Main.route_table`), and the controllers behind
-  # them. Rails answers the first two with a redirect to the third —
-  # the blob's SERVICE URL, which for the disk service is this same
-  # process — so that is what these do.
+  # The engine's routes, mounted by the dispatcher beside the app's
+  # own table (`Main.route_table`), and the controllers behind them.
+  # Rails answers the two redirect routes with a redirect to the disk
+  # route — the blob's SERVICE URL, which for the disk service is this
+  # same process — so that is what these do. The last two are the
+  # DIRECT UPLOAD pair: the browser POSTs the blob's metadata and gets
+  # a signed PUT url back, then PUTs the bytes there.
   #
   # `*filename` is the glob Rails puts last: cosmetic (the key travels
   # in the signed segment), so the router's own `.ext` format peel
@@ -199,6 +204,14 @@ module ActiveStorage
           "GET", "/rails/active_storage/disk/:encoded_key/*filename",
           :active_storage_disk, :show
         ),
+        ActionDispatch::Router::Route.new(
+          "POST", "/rails/active_storage/direct_uploads",
+          :active_storage_direct_uploads, :create
+        ),
+        ActionDispatch::Router::Route.new(
+          "PUT", "/rails/active_storage/disk/:encoded_token",
+          :active_storage_disk, :update
+        ),
       ]
     end
 
@@ -209,45 +222,25 @@ module ActiveStorage
         ActiveStorage::Blobs::RedirectController.new
       elsif sym == :active_storage_representations_redirect
         ActiveStorage::Representations::RedirectController.new
+      elsif sym == :active_storage_direct_uploads
+        ActiveStorage::DirectUploadsController.new
       else
         ActiveStorage::DiskController.new
       end
     end
   end
 
-  # What Rails' `DiskService#url` signs into the disk route: the key
-  # and the disposition to serve it with (Rails also signs the content
-  # type and filename; here the blob row answers those, found by key).
-  # One envelope under Active Storage's salt, purpose `disk_key`, five
-  # minutes to live — Rails' own `urls_expire_in`. The payload is a
-  # JSON STRING (`"key|disposition"`) because the envelope's `data`
-  # reader stops at the first comma or brace of a bare value.
-  module DiskKey
-    def self.encode(key, disposition)
-      exp = "\"" + ActionController::MessageVerifier.iso8601_ms(Time.now + 300) + "\""
-      ActionController::MessageVerifier.data_envelope(
-        Rails.application.secret_key_base, "ActiveStorage",
-        ActionController::MessageVerifier.json_string(key + "|" + disposition),
-        "disk_key", exp, false
-      )
-    end
-
-    # `[key, disposition]`, or an empty key when the token is bad or
-    # stale.
-    def self.decode(token)
-      json = ActionController::MessageVerifier.verified_data_json(
-        Rails.application.secret_key_base, "ActiveStorage", token, "disk_key", false
-      )
-      return ["", ""] if json == ""
-      parts = ActionController::MessageVerifier.json_value(json).split("|")
-      return ["", ""] if parts.length != 2
-      [parts[0].to_s, parts[1].to_s]
-    end
-
-    def self.disk_url(blob, disposition)
-      "/rails/active_storage/disk/" + encode(blob.key, disposition) + "/" +
-        ActiveStorage.url_filename(blob.filename.to_s)
-    end
+  # Rails' `ActiveStorage::SetCurrent`, which every engine controller
+  # includes: the request's protocol and host become the options the
+  # disk service builds its urls against, so a redirect or a direct
+  # upload url is absolute the way Rails' is.
+  def self.set_current(request)
+    return nil if request.nil?
+    ActiveStorage::Current.url_options = {
+      protocol: request.base_url.start_with?("https://") ? "https" : "http",
+      host: request.host,
+    }
+    nil
   end
 
   # The shape the app's own controllers have: `process_action` runs
@@ -256,6 +249,7 @@ module ActiveStorage
   module Blobs
     class RedirectController < ActionController::Base
       def process_action(action_name)
+        ActiveStorage.set_current(request)
         show
         nil
       end
@@ -282,6 +276,7 @@ module ActiveStorage
   module Representations
     class RedirectController < ActionController::Base
       def process_action(action_name)
+        ActiveStorage.set_current(request)
         show
         nil
       end
@@ -311,9 +306,129 @@ module ActiveStorage
   # disposition the signed key carries. `Content-Disposition` is what
   # makes a "Download" link download; the app's initializer asks for an
   # hour of public caching on this route and gets it.
+  # Rails' `DirectUploadsController#create`: allocate the blob row from
+  # what the browser declared and answer the blob's attributes plus
+  # where to PUT the bytes. Rails mounts it on every app whether or
+  # not the app's own forms use direct uploads (campfire's do not: its
+  # composer uploads through `MessagesController`), which is why
+  # campfire guards it — `config/initializers/active_storage_
+  # authentication.rb` includes a session check into this class and
+  # adds the `before_action`. That guard reaches here through
+  # `initializer_filters`, the seam `lower::module_mixins` writes an
+  # initializer's `before_action` into; with none registered it is a
+  # no-op and the endpoint is as open as Rails' own.
+  #
+  # The body is JSON on the wire (Active Storage's JS POSTs
+  # `{"blob":{…}}` with `Content-Type: application/json`), which the
+  # production dispatcher does not parse into params, so it is read
+  # off the raw body here when `blob` did not arrive as a param.
+  class DirectUploadsController < ActionController::Base
+    def process_action(action_name)
+      ActiveStorage.set_current(request)
+      initializer_filters(action_name)
+      return nil if performed?
+      create
+      nil
+    end
+
+    # The seam an initializer's `before_action` is written into — see
+    # `project::apply_module_mixins`. Redefined by the generated reopen
+    # at the end of boot.rb when the app registers one.
+    def initializer_filters(action_name)
+      nil
+    end
+
+    def create
+      blob = Params.sub(@params, "blob")
+      if blob.length == 0 && request.body.length > 0
+        parsed = JSON.parse(request.body.read)
+        blob = parsed.is_a?(Hash) ? Params.sub(parsed, "blob") : {}
+      end
+      filename = blob.fetch("filename", "").to_s
+      byte_size = blob.fetch("byte_size", "").to_s.to_i
+      checksum = blob.fetch("checksum", "").to_s
+      content_type = blob.fetch("content_type", "application/octet-stream").to_s
+      if filename == "" || checksum == ""
+        head(:unprocessable_entity)
+        return nil
+      end
+      record = ActiveStorage::Blob.create_before_direct_upload!(filename, byte_size, checksum, content_type)
+      render(direct_upload_json(record, checksum), content_type: "application/json")
+      nil
+    end
+
+    # Rails' `direct_upload_json`: `blob.as_json(root: false, methods:
+    # :signed_id)` merged with the upload url and headers. Written out
+    # rather than through a Hash: the values are of four types and a
+    # bag of them is the shape a strict target pays for. `created_at`
+    # and `attachable_sgid` are not answered — nothing that consumes
+    # this response reads them (Active Storage's own JS reads
+    # `signed_id` and `direct_upload`).
+    def direct_upload_json(blob, checksum)
+      q = ->(v) { ActionController::MessageVerifier.json_string(v) }
+      "{\"id\":" + blob.id.to_s +
+        ",\"key\":" + q.call(blob.key) +
+        ",\"filename\":" + q.call(blob.filename.to_s) +
+        ",\"content_type\":" + q.call(blob.content_type) +
+        ",\"metadata\":{}" +
+        ",\"service_name\":\"local\"" +
+        ",\"byte_size\":" + blob.byte_size.to_s +
+        ",\"checksum\":" + q.call(checksum) +
+        ",\"signed_id\":" + q.call(blob.signed_id) +
+        ",\"direct_upload\":{\"url\":" + q.call(ActiveStorage::DiskKey.upload_url(blob, checksum)) +
+        ",\"headers\":{\"Content-Type\":" + q.call(blob.content_type) + "}}}"
+    end
+  end
+
   class DiskController < ActionController::Base
     def process_action(action_name)
-      show
+      ActiveStorage.set_current(request)
+      initializer_filters(action_name)
+      return nil if performed?
+      if action_name == :update
+        update
+      else
+        show
+      end
+      nil
+    end
+
+    # The seam an initializer's `before_action` is written into — see
+    # `DirectUploadsController#initializer_filters`.
+    def initializer_filters(action_name)
+      nil
+    end
+
+    # Rails' `DiskController#update`: the bytes of a direct upload,
+    # held to the token the metadata POST signed — the key they go
+    # under, and the content type, length and MD5 the browser
+    # declared. A token that does not verify is a 404 (Rails' answer:
+    # there is no such upload), a body that does not match what was
+    # declared is a 422, and a checksum mismatch after the write is
+    # Rails' `IntegrityError`: the file is removed and the answer is
+    # 422 too. `Content-Type` is compared as a media type — Rails'
+    # `content_mime_type` — so a charset parameter does not fail it.
+    def update
+      decoded = ActiveStorage::DiskKey.decode_upload(Params.str(@params, "encoded_token", ""))
+      key = decoded[0]
+      if key == ""
+        head(:not_found)
+        return nil
+      end
+      body = request.body.read
+      declared_type = request.env.fetch("CONTENT_TYPE", "").to_s.split(";")[0].to_s.strip
+      if declared_type != decoded[1] || body.bytesize.to_s != decoded[2]
+        head(:unprocessable_entity)
+        return nil
+      end
+      service = ActiveStorage::Blob.service
+      service.upload(key, body)
+      if Digest::MD5.base64digest(body) != decoded[3]
+        service.delete(key)
+        head(:unprocessable_entity)
+        return nil
+      end
+      head(:no_content)
       nil
     end
 

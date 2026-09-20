@@ -419,6 +419,9 @@ module Main
     # found it.
     request_obj.user_agent = user_agent
     request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
+    # The body's declared type, for the one route that checks it
+    # against what was promised: Active Storage's direct-upload PUT.
+    request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")
     controller.request = request_obj
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller

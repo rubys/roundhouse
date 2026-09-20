@@ -34,7 +34,7 @@ use crate::span::Span;
 
 /// Drop the mixins this tree cannot perform, reporting each one.
 pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
-    if app.module_mixins.is_empty() {
+    if app.module_mixins.is_empty() && app.initializer_filters.is_empty() {
         return Vec::new();
     }
 
@@ -90,7 +90,64 @@ pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
     }
 
     app.module_mixins = kept;
+
+    // The filters, against the mixins that survived: a filter is kept
+    // when its target is a runtime controller carrying the seam and a
+    // kept mixin onto that target supplies the method. Anything else
+    // would be a `NoMethodError` on the first request to that route —
+    // or, on an ingested controller, a filter the controller lowering
+    // never saw — so it is dropped and reported at the same standing
+    // as a dropped mixin.
+    let filters = std::mem::take(&mut app.initializer_filters);
+    let mut kept_filters = Vec::new();
+    for filter in filters {
+        let target = filter.target.as_str();
+        let seam = RUNTIME_FILTER_SEAMS.contains(&target);
+        let supplied = app
+            .module_mixins
+            .iter()
+            .filter(|m| m.target == filter.target)
+            .any(|m| module_defines(app, &m.module, &filter.method));
+        if seam && supplied {
+            kept_filters.push(filter);
+            continue;
+        }
+        let why = if !seam {
+            format!("{target} is not a framework controller this tree runs initializer filters on")
+        } else {
+            format!("no module mixed into {target} by an initializer defines `{}`", filter.method.as_str())
+        };
+        let mut d = Diagnostic::unsupported(
+            Span::synthetic(),
+            None,
+            "initializer before_action",
+            format!(
+                "`{target}.before_action :{}` was dropped: {why}. \
+                 The guard it names never runs on that controller's actions.",
+                filter.method.as_str(),
+            ),
+        );
+        d.severity = crate::diagnostic::Severity::Warning;
+        diags.push(d);
+    }
+    app.initializer_filters = kept_filters;
     diags
+}
+
+/// Whether the ingested module `name` defines an instance method
+/// `method` — itself, or through a module it includes (one level: a
+/// concern including a concern is the depth campfire's guard has).
+fn module_defines(app: &App, name: &Symbol, method: &Symbol) -> bool {
+    let Some(lc) = app.library_classes.iter().find(|lc| lc.name.0 == *name) else { return false };
+    if lc.methods.iter().any(|m| m.name == *method) {
+        return true;
+    }
+    lc.includes.iter().any(|inc| {
+        app.library_classes
+            .iter()
+            .find(|l| l.name == *inc)
+            .is_some_and(|l| l.methods.iter().any(|m| m.name == *method))
+    })
 }
 
 /// Framework classes the RUNTIME defines that a mixin may target.
@@ -109,7 +166,26 @@ pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
 /// `RoomStreamsAreAuthorized` onto it to refuse its own `:messages`
 /// streams, and `tests/overlay_cable_dispatch.rb` drives a subscribe
 /// through the prepended `subscribed` to its `super`.
-const RUNTIME_MIXIN_TARGETS: [&str; 1] = ["Turbo::StreamsChannel"];
+///
+/// `ActiveStorage::DirectUploadsController` and
+/// `ActiveStorage::DiskController` (runtime/spinel/active_storage_disk.rb)
+/// are Active Storage's direct-upload endpoints. campfire includes
+/// `ActiveStorageAuthentication` into both and adds the `before_action`
+/// that answers an anonymous upload with 401; the campfire suite's
+/// `active_storage_authentication_test` drives a request through the
+/// included guard to the 401 on both lanes, and
+/// `tests/initializer_module_mixins.rs` pins the ingest, the lowering
+/// and the generated reopen.
+const RUNTIME_MIXIN_TARGETS: [&str; 3] =
+    ["Turbo::StreamsChannel", "ActiveStorage::DirectUploadsController", "ActiveStorage::DiskController"];
+
+/// The runtime controllers whose `process_action` asks
+/// `initializer_filters(action_name)` before the action — the seam an
+/// initializer's `before_action` is written into (`project::
+/// apply_module_mixins`). A mixin target without the seam can take the
+/// module but not the filter, so this list is separate.
+const RUNTIME_FILTER_SEAMS: [&str; 2] =
+    ["ActiveStorage::DirectUploadsController", "ActiveStorage::DiskController"];
 
 /// Will this constant be defined when boot.rb reaches the mixin line?
 ///

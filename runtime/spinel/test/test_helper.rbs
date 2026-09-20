@@ -241,19 +241,24 @@ module RequestDispatch
   # spinel#4172 — a `Hash#merge` whose argument is keyed differently
   # resolves to `ActionDispatch::Flash#merge` instead. Do not "fix" it
   # from this file.
-  def get: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
-  def post: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
-  def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
-  def put: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
-  def head: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def get: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
+  def post: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
+  def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
+  def put: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
+  def head: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
   def follow_redirect!: () -> ActionResponse
-  def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped]) -> ActionResponse
+  def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped], ?env: Hash[untyped, untyped], ?as: Symbol?) -> ActionResponse
+
+  def open_session: () -> ActionDispatch::Integration::Session
+  def status: () -> Integer
+  def env_key: (String name) -> String
 
   def dispatch_request: (
     String method,
     String path,
     Hash[untyped, untyped] params,
-    ?Hash[untyped, untyped] headers
+    ?Hash[untyped, untyped] headers,
+    ?Symbol? as
   ) -> ActionResponse
 
   # Recursive Hash-keys-to-strings. Strictly `(Hash) -> Hash`; non-

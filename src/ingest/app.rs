@@ -786,6 +786,7 @@ end
                 // tree — `lower::module_mixins` decides that, because it
                 // runs after every class the tree will have exists.
                 app.module_mixins.extend(extract_module_mixins(&bytes, &path_str));
+                app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
             }
         }
     }
@@ -3501,10 +3502,37 @@ fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMix
     let src = String::from_utf8_lossy(source).into_owned();
     let Some(program) = root.as_program_node() else { return Vec::new() };
 
-    // Top-level statements, plus the body of any `to_prepare`/`to_run`
-    // block, flattened into one list. One level of unwrapping is enough:
-    // nesting a second config block inside the first is not a shape
-    // Rails apps write, and guessing at it would be inventing a need.
+    let mut out = Vec::new();
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        let kind = match super::util::constant_id_str(&call.name()) {
+            "prepend" => MixinKind::Prepend,
+            "include" => MixinKind::Include,
+            _ => continue,
+        };
+        // A RECEIVER is required. `include Foo` with none is a mixin
+        // into `main`, which is not a lookup change this tree can carry.
+        let Some(recv) = call.receiver() else { continue };
+        let Some(target) = constant_text(&recv, &src) else { continue };
+
+        // Exactly one argument. `prepend A, B` is legal Ruby and the
+        // corpus has never written it; taking only the single-argument
+        // form keeps the recorded fact unambiguous.
+        let Some(args) = call.arguments() else { continue };
+        let args: Vec<_> = args.arguments().iter().collect();
+        let [arg] = args.as_slice() else { continue };
+        let Some(module) = constant_text(arg, &src) else { continue };
+
+        out.push(ModuleMixin { target: Symbol::from(target), module: Symbol::from(module), kind });
+    }
+    out
+}
+
+/// Top-level statements, plus the body of any `to_prepare`/`to_run`
+/// block, flattened into one list. One level of unwrapping is enough:
+/// nesting a second config block inside the first is not a shape
+/// Rails apps write, and guessing at it would be inventing a need.
+fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
     let mut stmts: Vec<Node> = Vec::new();
     for stmt in program.statements().body().iter() {
         let mut unwrapped = false;
@@ -3526,29 +3554,73 @@ fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMix
             stmts.push(stmt);
         }
     }
+    stmts
+}
+
+/// `X.before_action :m[, only: :a | %i[a b]]` in a `config/initializers/`
+/// file — the mixin's companion (see `extract_module_mixins`): a guard
+/// mixed into a framework controller does nothing until that
+/// controller is told to run it, and campfire writes the two lines
+/// together in `active_storage_authentication.rb`.
+///
+/// The same discipline as the mixin reader: a constant receiver, a
+/// Symbol method, and at most an `only:` of Symbols, all readable off
+/// the parse. `except:`, a block, an `if:` — anything else — is not
+/// recorded, and the lowering reports the target it never sees a
+/// filter for.
+fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crate::app::InitializerFilter> {
+    use crate::app::InitializerFilter;
+
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
 
     let mut out = Vec::new();
-    for stmt in stmts {
+    for stmt in initializer_statements(&program) {
         let Some(call) = stmt.as_call_node() else { continue };
-        let kind = match super::util::constant_id_str(&call.name()) {
-            "prepend" => MixinKind::Prepend,
-            "include" => MixinKind::Include,
-            _ => continue,
-        };
-        // A RECEIVER is required. `include Foo` with none is a mixin
-        // into `main`, which is not a lookup change this tree can carry.
+        if super::util::constant_id_str(&call.name()) != "before_action" {
+            continue;
+        }
         let Some(recv) = call.receiver() else { continue };
         let Some(target) = constant_text(&recv, &src) else { continue };
-
-        // Exactly one argument. `prepend A, B` is legal Ruby and the
-        // corpus has never written it; taking only the single-argument
-        // form keeps the recorded fact unambiguous.
         let Some(args) = call.arguments() else { continue };
         let args: Vec<_> = args.arguments().iter().collect();
-        let [arg] = args.as_slice() else { continue };
-        let Some(module) = constant_text(arg, &src) else { continue };
-
-        out.push(ModuleMixin { target: Symbol::from(target), module: Symbol::from(module), kind });
+        let (method, options) = match args.as_slice() {
+            [m] => (m, None),
+            [m, o] => (m, Some(o)),
+            _ => continue,
+        };
+        let Some(method) = super::util::symbol_value(method) else { continue };
+        let mut only: Vec<Symbol> = Vec::new();
+        if let Some(options) = options {
+            let Some(hash) = options.as_keyword_hash_node() else { continue };
+            let mut readable = true;
+            for element in hash.elements().iter() {
+                let Some(pair) = element.as_assoc_node() else { readable = false; break };
+                if super::util::symbol_value(&pair.key()).as_deref() != Some("only") {
+                    readable = false;
+                    break;
+                }
+                let value = pair.value();
+                if let Some(one) = super::util::symbol_value(&value) {
+                    only.push(Symbol::from(one));
+                } else if let Some(list) = value.as_array_node() {
+                    for e in list.elements().iter() {
+                        match super::util::symbol_value(&e) {
+                            Some(s) => only.push(Symbol::from(s)),
+                            None => { readable = false; break }
+                        }
+                    }
+                } else {
+                    readable = false;
+                }
+            }
+            if !readable || only.is_empty() {
+                continue;
+            }
+        }
+        out.push(InitializerFilter { target: Symbol::from(target), method: Symbol::from(method), only });
     }
     out
 }

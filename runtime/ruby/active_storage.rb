@@ -621,6 +621,36 @@ module ActiveStorage
       Blob.new(id, key, filename, content_type, data.length, metadata)
     end
 
+    # Rails' `create_before_direct_upload!`: the ROW ONLY. A direct
+    # upload allocates the blob first — key, size, checksum and type
+    # as the browser declared them — and the bytes arrive afterwards
+    # on the disk service's own PUT, which checks them against the
+    # checksum signed into its token. No analysis: there are no bytes
+    # yet, so the metadata is empty, as Rails' is until `analyze` runs.
+    def self.create_before_direct_upload!(filename, byte_size, checksum, content_type)
+      key = generate_key(filename, byte_size)
+      metadata = BlobMetadata.new(0, 0)
+      id = ActiveRecord.adapter.insert("active_storage_blobs", {
+        "key" => key,
+        "filename" => filename,
+        "content_type" => content_type,
+        "metadata" => metadata.to_json,
+        "service_name" => "local",
+        "byte_size" => byte_size,
+        "checksum" => checksum,
+        "created_at" => ActiveSupport.db_now,
+      })
+      Blob.new(id, key, filename, content_type, byte_size, metadata)
+    end
+
+    # `ActiveStorage::Blob.count` — a test's `assert_difference`
+    # around a direct upload. The blob table is not a model, so the
+    # relation's `count` does not reach it; the same SQL, here.
+    def self.count
+      rows = ActiveRecord.adapter.select_rows("SELECT COUNT(*) AS n FROM active_storage_blobs")
+      rows.length == 0 ? 0 : rows[0]["n"].to_i
+    end
+
     # Rails' attachable coercion: what `record.avatar = x` and
     # `create!(avatar: x)` accept — an uploaded file, a blob, a signed
     # blob id. Narrowing an untyped value by class is the ruby family's
@@ -681,10 +711,133 @@ module ActiveStorage
 
     # The blob's own route: `rails_blob_path(blob)`. A `disposition` of
     # "attachment" rides as the query Rails puts it in.
-    def url(disposition)
+    def redirect_url(disposition)
       base = "/rails/active_storage/blobs/redirect/" + signed_id + "/" +
              ActiveStorage.url_filename(@filename)
       disposition == "" ? base : base + "?disposition=" + disposition
+    end
+
+    # Rails' `Blob#url`: the SERVICE's url for the bytes — for the disk
+    # service, its own signed route, which the redirect route above
+    # answers with a 302 to. `rails_blob_path` is the redirect and this
+    # is where it lands; an app that reads `blob.url` (or a test that
+    # fetches it anonymously) gets the bytes in one hop, as in Rails.
+    def url(disposition = "inline")
+      DiskKey.disk_url(self, disposition)
+    end
+  end
+
+  # What Rails' `DiskService#url` signs into the disk route: the key
+  # and the disposition to serve it with (Rails also signs the content
+  # type and filename; here the blob row answers those, found by key).
+  # One envelope under Active Storage's salt, purpose `disk_key`, five
+  # minutes to live — Rails' own `urls_expire_in`. The payload is a
+  # JSON STRING (`"key|disposition"`) because the envelope's `data`
+  # reader stops at the first comma or brace of a bare value.
+  #
+  # Shared, not a per-target seam: signing is string work the shared
+  # verifier already does, and `Blob#url` above needs it on every
+  # target. Serving the route it names is the ruby family's
+  # (`runtime/spinel/active_storage_disk.rb`).
+  module DiskKey
+    # The envelope's `exp`: five minutes out, quoted as the JSON string
+    # the verifier writes.
+    def self.expiry
+      "\"" + ActionController::MessageVerifier.iso8601_ms(Time.now + 300) + "\""
+    end
+
+    def self.encode(key, disposition)
+      ActionController::MessageVerifier.data_envelope(
+        Rails.application.secret_key_base, "ActiveStorage",
+        ActionController::MessageVerifier.json_string(key + "|" + disposition),
+        "disk_key", expiry, false
+      )
+    end
+
+    # `[key, disposition]`, or an empty key when the token is bad or
+    # stale.
+    def self.decode(token)
+      json = ActionController::MessageVerifier.verified_data_json(
+        Rails.application.secret_key_base, "ActiveStorage", token, "disk_key", false
+      )
+      return ["", ""] if json == ""
+      parts = ActionController::MessageVerifier.json_value(json).split("|")
+      return ["", ""] if parts.length != 2
+      [parts[0].to_s, parts[1].to_s]
+    end
+
+    def self.disk_url(blob, disposition)
+      ActiveStorage::Current.base_url + "/rails/active_storage/disk/" +
+        encode(blob.key, disposition) + "/" + ActiveStorage.url_filename(blob.filename.to_s)
+    end
+
+    # The token a direct upload's PUT carries (Rails' `DiskService#
+    # url_for_direct_upload`): the key plus what the browser declared —
+    # content type, length, MD5 checksum — signed under purpose
+    # `blob_token`, so the disk controller can hold the bytes to the
+    # blob's own row. Same envelope, five minutes, `|`-joined (a
+    # content type has no `|`).
+    def self.encode_upload(key, content_type, content_length, checksum)
+      ActionController::MessageVerifier.data_envelope(
+        Rails.application.secret_key_base, "ActiveStorage",
+        ActionController::MessageVerifier.json_string(
+          key + "|" + content_type + "|" + content_length.to_s + "|" + checksum
+        ),
+        "blob_token", expiry, false
+      )
+    end
+
+    # `[key, content_type, content_length, checksum]`, or an empty key
+    # when the token is bad or stale.
+    def self.decode_upload(token)
+      json = ActionController::MessageVerifier.verified_data_json(
+        Rails.application.secret_key_base, "ActiveStorage", token, "blob_token", false
+      )
+      return ["", "", "", ""] if json == ""
+      parts = ActionController::MessageVerifier.json_value(json).split("|")
+      return ["", "", "", ""] if parts.length != 4
+      [parts[0].to_s, parts[1].to_s, parts[2].to_s, parts[3].to_s]
+    end
+
+    def self.upload_url(blob, checksum)
+      ActiveStorage::Current.base_url + "/rails/active_storage/disk/" +
+        encode_upload(blob.key, blob.content_type, blob.byte_size, checksum)
+    end
+  end
+
+  # Rails' `ActiveStorage::Current` — `url_options` is what the disk
+  # service's urls are built against: Active Storage's controllers set
+  # it from the request (`ActiveStorage::SetCurrent`, here `set_current`
+  # in each engine controller), and code outside a request sets it
+  # itself (a job; campfire's download test). `protocol:` and `host:`
+  # as Rails spells them, and `port:` when there is one.
+  #
+  # DIVERGENCE, named: Rails RAISES when the disk service is asked for
+  # a url with no options set. Here the url is path-only instead —
+  # the app's own `_url` helpers are host-less on every target, and a
+  # browser resolves a path against the page it is on — so a caller
+  # that never set them gets a url that works rather than an
+  # exception.
+  module Current
+    def self.url_options
+      @url_options
+    end
+
+    def self.url_options=(options)
+      @url_options = options
+    end
+
+    # `protocol://host[:port]`, or "" with no options set. `protocol`
+    # is taken with or without Rails' trailing `://` (`request.protocol`
+    # carries it; a hand-written `protocol: "https"` does not).
+    def self.base_url
+      options = @url_options
+      return "" if options.nil?
+      host = options.fetch(:host, "")
+      return "" if host == ""
+      protocol = options.fetch(:protocol, "http").sub("://", "")
+      port = options.fetch(:port, "")
+      port == "" ? protocol + "://" + host : protocol + "://" + host + ":" + port
     end
   end
 
@@ -1056,7 +1209,7 @@ module ActiveStorage
     # own route, inline.
     def url
       b = blob
-      b.nil? ? "" : b.url("")
+      b.nil? ? "" : b.redirect_url("")
     end
 
     # Rails' `attach`, the row half: point this record at `blob` under
@@ -1130,6 +1283,8 @@ end
 #   /rails/active_storage/blobs/redirect/:signed_id/*filename
 #   /rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename
 #   /rails/active_storage/disk/:encoded_key/*filename
+#   /rails/active_storage/direct_uploads              (POST)
+#   /rails/active_storage/disk/:encoded_token         (PUT)
 #
 # `disposition` and `only_path` are spelled out because those are the
 # two options an ingested app has written. `_url` is the same string as
@@ -1137,7 +1292,17 @@ end
 module RouteHelpers
   def self.rails_blob_path(attachment, disposition: nil, only_path: nil)
     b = attachment.blob
-    b.nil? ? "" : b.url(disposition.to_s)
+    b.nil? ? "" : b.redirect_url(disposition.to_s)
+  end
+
+  # The direct-upload endpoint (`POST`), which Rails mounts on every
+  # app; campfire's suite asserts its guard.
+  def self.rails_direct_uploads_path
+    "/rails/active_storage/direct_uploads"
+  end
+
+  def self.rails_direct_uploads_url
+    rails_direct_uploads_path
   end
 
   def self.rails_blob_url(attachment, disposition: nil, only_path: nil)

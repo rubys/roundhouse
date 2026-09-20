@@ -1003,32 +1003,54 @@ module RequestDispatch
   # already, they are the same hash here. Merged with `env:` last, so a
   # test naming a key in both gets the rawer one, which is Rails'
   # order too.
-  def get(path, params: {}, headers: {}, env: {})
-    dispatch_request("GET", path, params, headers.merge(env))
+  #
+  # `as: :json` is Rails' request ENCODER: the params travel as a JSON
+  # body under `Content-Type: application/json`, and the app reads
+  # them back as params because Rails parses that body. The harness
+  # hands the params to the controller directly — the parse Rails does
+  # on the way in — and sets the content type and format the encoder
+  # would; a controller that reads the raw body sees an empty one.
+  # campfire's direct-upload tests are the corpus's use.
+  def get(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("GET", path, params, headers.merge(env), as)
   end
 
-  def post(path, params: {}, headers: {}, env: {})
-    dispatch_request("POST", path, params, headers.merge(env))
+  def post(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("POST", path, params, headers.merge(env), as)
   end
 
-  def patch(path, params: {}, headers: {}, env: {})
-    dispatch_request("PATCH", path, params, headers.merge(env))
+  def patch(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("PATCH", path, params, headers.merge(env), as)
   end
 
   # Rails' integration tests define all five verbs plus `head`; the four
   # the blog happened to use were the four that existed. campfire's
   # `put account_user_url(...)` is the first `put` in the corpus, and it
   # failed as a missing METHOD rather than as an unrouted request.
-  def put(path, params: {}, headers: {}, env: {})
-    dispatch_request("PUT", path, params, headers.merge(env))
+  def put(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("PUT", path, params, headers.merge(env), as)
   end
 
-  def delete(path, params: {}, headers: {}, env: {})
-    dispatch_request("DELETE", path, params, headers.merge(env))
+  def delete(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("DELETE", path, params, headers.merge(env), as)
   end
 
-  def head(path, params: {}, headers: {}, env: {})
-    dispatch_request("HEAD", path, params, headers.merge(env))
+  def head(path, params: {}, headers: {}, env: {}, as: nil)
+    dispatch_request("HEAD", path, params, headers.merge(env), as)
+  end
+
+  # Rails' `open_session` — a second browser beside the test's own, with
+  # its own cookie jar and last response. campfire's direct-upload tests
+  # sign in on the test's session and then ask, as an anonymous client,
+  # whether the upload url the signed-in one was given is guarded.
+  def open_session
+    ActionDispatch::Integration::Session.new(nil)
+  end
+
+  # `session.status` — the last response's status, Rails' spelling on
+  # an integration session (`anonymous.status`).
+  def status
+    @__response.status
   end
 
   # Rails' `follow_redirect!` — re-issue the LAST response's redirect as
@@ -1098,7 +1120,7 @@ module RequestDispatch
     @__host
   end
 
-  def dispatch_request(method, path, params, headers = {})
+  def dispatch_request(method, path, params, headers = {}, as = nil)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
     # eager-requires them; they're lazy-loaded at dispatch). The blog's
@@ -1205,6 +1227,7 @@ module RequestDispatch
     controller.request_format = :rss if path_format == "rss"
     controller.request_format = :json if matched.req_format == :json
     controller.request_format = :rss if matched.req_format == :rss
+    controller.request_format = :json if as == :json
     # The request object, built the way the dispatcher builds it (see
     # `main.rb`'s `controller.request = ActionDispatch::Request.new(...)`).
     # Without it `controller.request` was nil and any filter touching it
@@ -1226,7 +1249,8 @@ module RequestDispatch
       "REMOTE_ADDR"     => "127.0.0.1",
       "HTTP_USER_AGENT" => "Roundhouse Test",
     }
-    headers.each { |k, v| env[k.to_s] = v.to_s }
+    headers.each { |k, v| env[env_key(k.to_s)] = v.to_s }
+    env["CONTENT_TYPE"] = "application/json" if as == :json
     env["REQUEST_METHOD"] = method
     env["PATH_INFO"]      = request_path
     env["QUERY_STRING"]   = request_query
@@ -1283,6 +1307,19 @@ module RequestDispatch
     @request = @__request
     @response = @__response
     @__response
+  end
+
+  # A `headers:` key as the env spells it — Rails' `Http::Headers#
+  # env_name`: a wire-shaped name (`Content-Type`, `user-agent`) is
+  # upcased with `-` to `_` and prefixed `HTTP_`, except the CGI
+  # variables that carry no prefix (`CONTENT_TYPE`, `CONTENT_LENGTH`);
+  # a name already in env shape (`REMOTE_ADDR`, `HTTP_USER_AGENT`) is
+  # left as it is. The one rule the corpus exercises: campfire's
+  # direct-upload test PUTs bytes under a `"Content-Type"` header.
+  def env_key(name)
+    return name if name == name.upcase && !name.include?("-")
+    key = name.upcase.tr("-", "_")
+    key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key
   end
 
   # What a browser does with a response's Set-Cookie lines: take the
