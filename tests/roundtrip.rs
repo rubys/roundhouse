@@ -80,6 +80,7 @@ fn tiny_blog_round_trips() {
         name: Symbol::from("index"),
         params: Row::closed(),
         opt_params: vec![],
+        kw_params: vec![],
         block_param: None,
         body: action_body,
         renders: RenderTarget::Inferred,

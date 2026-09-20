@@ -988,6 +988,7 @@ fn action_item(name: Symbol, body: Expr) -> ControllerBodyItem {
             name,
             params: Row::closed(),
             opt_params: Vec::new(),
+            kw_params: Vec::new(),
             block_param: None,
             body,
             renders,
