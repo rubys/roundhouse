@@ -307,10 +307,14 @@ impl<'a> BodyTyper<'a> {
                             .get(method)
                             .or_else(|| c.class_methods.get(method))
                         {
+                            // The block's yield may name the receiver
+                            // (`{ (instance) -> void }`); substitute
+                            // against the class the walk started from,
+                            // as dispatch does.
                             return match sig {
-                                Ty::Fn { block: Some(block_ty), .. } => {
-                                    Some(vec![(**block_ty).clone()])
-                                }
+                                Ty::Fn { block: Some(block_ty), .. } => Some(vec![
+                                    block_ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() }),
+                                ]),
                                 _ => None,
                             };
                         }
@@ -519,7 +523,11 @@ impl<'a> BodyTyper<'a> {
                     while let Some(cid) = cur {
                         let Some(cls) = self.classes().get(&cid) else { break };
                         if let Some(ty) = cls.instance_methods.get(m).or_else(|| cls.class_methods.get(m)) {
-                            return union_of(unwrap_fn_ret(ty), Ty::Nil);
+                            // Same substitution as dispatch, against the
+                            // receiver's class: `try(:instance)` on a
+                            // subclass answers the subclass.
+                            let ty = ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() });
+                            return union_of(unwrap_fn_ret(&ty), Ty::Nil);
                         }
                         depth += 1;
                         if depth > 32 {
@@ -1338,7 +1346,9 @@ impl<'a> BodyTyper<'a> {
             }
             let Some(cls) = self.classes().get(&cid) else { continue };
             for ty in cls.instance_methods.values() {
-                let r = unwrap_fn_ret(ty);
+                // `-> self` on an ancestor answers the receiver, not
+                // the ancestor — substitute before the return is read.
+                let r = unwrap_fn_ret(&ty.subst_self(recv_ty));
                 // A single gradual method makes the dynamic union
                 // gradual — bail early with the absorbing type.
                 if matches!(r, Ty::Untyped) {

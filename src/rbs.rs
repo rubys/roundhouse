@@ -620,12 +620,6 @@ struct TyCtx<'a> {
     self_is_instance: bool,
 }
 
-impl<'a> TyCtx<'a> {
-    fn new(scope: Option<&'a str>) -> Self {
-        TyCtx { scope, self_is_instance: false }
-    }
-}
-
 fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
     match node {
         Node::ClassInstanceType(class_type) => {
@@ -877,6 +871,9 @@ pub fn print_ty(ty: &Ty) -> String {
         // point — an author reading an inferred signature should see
         // the relation, not `untyped`.
         Ty::Relation { of } => format!("Relation[{}]", of.0.as_str()),
+        // RBS can spell this one honestly, and it re-parses to the
+        // same variant on an instance member — the fixed point holds.
+        Ty::SelfInstance => "instance".to_string(),
         // Value-position function types would need RBS proc syntax,
         // which the parse direction rejects — degrade.
         Ty::Fn { .. } => "untyped".to_string(),

@@ -235,3 +235,23 @@ end
         other => panic!("expected a function type, got {other:?}"),
     }
 }
+
+#[test]
+fn try_substitutes_the_same_way_dispatch_does() {
+    // `Readings.try(:instance)` reads the same registry entry through
+    // a different door. The answer is `Readings | nil`, never the
+    // self type with `nil` beside it — a self type that reaches an
+    // emitter is a defect by contract, and this is a real path there.
+    let caller = r#"class GaugesController < ApplicationController
+  def index
+    reading = Readings.try(:instance)
+    @label = reading.latest if reading
+  end
+end
+"#;
+    let failed = dispatch_failures(&app(SUBCLASS, caller));
+    assert!(
+        !failed.iter().any(|f| f.starts_with("instance")),
+        "the receiver should be `Readings`, not the self type; failures = {failed:?}"
+    );
+}

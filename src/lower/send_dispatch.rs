@@ -444,9 +444,12 @@ fn method_return_via_registry(
         }
         let Some(cls) = registry.get(&cid) else { continue };
         if let Some(ty) = cls.instance_methods.get(&Symbol::from(name)) {
+            // A `-> self` found on an ancestor answers the class the
+            // walk started from, as analyze's dispatch substitutes.
+            let ty = ty.subst_self(&Ty::Class { id: class.clone(), args: Vec::new() });
             let ret = match ty {
-                Ty::Fn { ret, .. } => (**ret).clone(),
-                t => t.clone(),
+                Ty::Fn { ret, .. } => *ret,
+                t => t,
             };
             return match ret {
                 Ty::Var { .. } | Ty::Bottom => None,

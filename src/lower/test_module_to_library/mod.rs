@@ -426,11 +426,20 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
     // signature instead; param NAMES still come from this definition
     // (emit zips `m.params` against the signature positionally), so the
     // RBS's `_action_name` doesn't leak into the body.
+    // A parent signature may name its receiver (`-> instance`); the
+    // receiver is this inner class, so substitute on adoption rather
+    // than emit a self type as a declaration.
+    let self_ty = Ty::Class { id: inner.name.clone(), args: Vec::new() };
     let parent_methods: HashMap<Symbol, Ty> = inner
         .parent
         .as_ref()
         .and_then(|p| classes.get(p))
-        .map(|i| i.instance_methods.clone())
+        .map(|i| {
+            i.instance_methods
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.subst_self(&self_ty)))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Pass 1 — provisional signatures (so params bind from defaults) +
