@@ -67,7 +67,7 @@ fn render_class(lc: &LibraryClass) -> String {
     }
 
     for m in &lc.methods {
-        let line = render_method(m);
+        let line = render_method(m, &segments);
         writeln!(s, "{body_pad}{line}").unwrap();
     }
 
@@ -78,7 +78,7 @@ fn render_class(lc: &LibraryClass) -> String {
     s
 }
 
-fn render_method(m: &MethodDef) -> String {
+fn render_method(m: &MethodDef, enclosing: &[&str]) -> String {
     // Class-receiver methods can't be attr_reader / attr_writer at the
     // RBS surface — the `attr_*` shorthand only describes instance
     // attributes, and an `attr_reader name?: bool` form lacks any way
@@ -89,45 +89,47 @@ fn render_method(m: &MethodDef) -> String {
     // ivar named `@abstract?` — invalid C identifier. Fall through to
     // `def self.name` rendering for any class-receiver method.
     if matches!(m.receiver, MethodReceiver::Class) {
-        return render_def(m);
+        return render_def(m, enclosing);
     }
     match m.kind {
-        AccessorKind::AttributeReader => render_attr_reader(m),
-        AccessorKind::AttributeWriter => render_attr_writer(m),
-        AccessorKind::Method => render_def(m),
+        AccessorKind::AttributeReader => render_attr_reader(m, enclosing),
+        AccessorKind::AttributeWriter => render_attr_writer(m, enclosing),
+        AccessorKind::Method => render_def(m, enclosing),
     }
 }
 
-fn render_attr_reader(m: &MethodDef) -> String {
+fn render_attr_reader(m: &MethodDef, enclosing: &[&str]) -> String {
     let ty = match &m.signature {
-        Some(Ty::Fn { ret, .. }) => ty_to_rbs(ret),
+        Some(Ty::Fn { ret, .. }) => ty_to_rbs_in(ret, enclosing),
         _ => "untyped".to_string(),
     };
     format!("attr_reader {}: {}", m.name.as_str(), ty)
 }
 
-fn render_attr_writer(m: &MethodDef) -> String {
+fn render_attr_writer(m: &MethodDef, enclosing: &[&str]) -> String {
     let ty = match &m.signature {
-        Some(Ty::Fn { params, .. }) if !params.is_empty() => ty_to_rbs(&params[0].ty),
+        Some(Ty::Fn { params, .. }) if !params.is_empty() => {
+            ty_to_rbs_in(&params[0].ty, enclosing)
+        }
         _ => "untyped".to_string(),
     };
     let bare = m.name.as_str().trim_end_matches('=');
     format!("attr_writer {}: {}", bare, ty)
 }
 
-fn render_def(m: &MethodDef) -> String {
+fn render_def(m: &MethodDef, enclosing: &[&str]) -> String {
     let receiver_prefix = match m.receiver {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
     let sig = match &m.signature {
         Some(Ty::Fn { params, block, ret, .. }) => {
-            let params_str = render_typed_params(params);
+            let params_str = render_typed_params(params, enclosing);
             let block_str = match block.as_deref() {
-                Some(b) => format!(" {{ {} }}", render_block_ty(b)),
+                Some(b) => format!(" {{ {} }}", render_block_ty(b, enclosing)),
                 None => String::new(),
             };
-            let ret_str = ty_to_rbs(ret);
+            let ret_str = ty_to_rbs_in(ret, enclosing);
             format!("({}){} -> {}", params_str, block_str, ret_str)
         }
         _ => render_untyped_fallback(m),
@@ -158,14 +160,14 @@ fn render_untyped_fallback(m: &MethodDef) -> String {
     format!("({}) -> untyped", parts.join(", "))
 }
 
-fn render_typed_params(params: &[Param]) -> String {
+fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {
     // Group: required pos, optional pos, rest, required kw, optional kw,
     // kw rest, block (block handled outside). RBS requires a specific
     // order; the IR already carries them in that order from the lowerers.
     let mut parts = Vec::new();
     for p in params {
         let name = p.name.as_str();
-        let ty = ty_to_rbs(&p.ty);
+        let ty = ty_to_rbs_in(&p.ty, enclosing);
         let part = match p.kind {
             ParamKind::Required => format!("{ty} {name}"),
             ParamKind::Optional => format!("?{ty} {name}"),
@@ -180,11 +182,11 @@ fn render_typed_params(params: &[Param]) -> String {
     parts.join(", ")
 }
 
-fn render_block_ty(b: &Ty) -> String {
+fn render_block_ty(b: &Ty, enclosing: &[&str]) -> String {
     match b {
         Ty::Fn { params, ret, .. } => {
-            let p = render_typed_params(params);
-            format!("({p}) -> {}", ty_to_rbs(ret))
+            let p = render_typed_params(params, enclosing);
+            format!("({p}) -> {}", ty_to_rbs_in(ret, enclosing))
         }
         // Block slot containing a non-Fn type is unusual; fall back to
         // an untyped block contract.
@@ -192,8 +194,28 @@ fn render_block_ty(b: &Ty) -> String {
     }
 }
 
-/// Render a `Ty` as an RBS type expression.
+/// Render a `Ty` as an RBS type expression, at the top level.
 pub fn ty_to_rbs(ty: &Ty) -> String {
+    ty_to_rbs_in(ty, &[])
+}
+
+/// Render a `Ty` as an RBS type expression inside the declaration
+/// `enclosing` names (its `module`/`class` segments, outermost first).
+///
+/// A type name in RBS resolves LEXICALLY, as a constant does in Ruby:
+/// inside `module Views; module Search`, `Search` is `Views::Search`.
+/// Every `Ty::Class` id here is the top-level name, so one whose first
+/// segment is also a NESTED enclosing segment is written rooted
+/// (`::Search`), which names the same class from anywhere. lobsters'
+/// search view is exactly that shape — `Views::Search.index_into(io,
+/// Search search, …)` — and spinel, once it read the name lexically,
+/// typed `search` as the view module and refused
+/// `search.total_results > -1`. The outermost segment is not a
+/// collision: inside `class Domain`, `Domain` resolves to the top-level
+/// `Domain` it names, so a model's references to itself stay bare and
+/// only the shadowed names change.
+fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
+    let rbs = |t: &Ty| ty_to_rbs_in(t, enclosing);
     match ty {
         Ty::Int => "Integer".into(),
         Ty::Float => "Float".into(),
@@ -229,34 +251,40 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
         // has. The class is non-generic in v1 (its element type is
         // `untyped`), so the `of` is dropped rather than rendered.
         Ty::Relation { .. } => "ActiveRecord::Relation".into(),
-        Ty::Array { elem } => format!("Array[{}]", ty_to_rbs(elem)),
-        Ty::Hash { key, value } => format!("Hash[{}, {}]", ty_to_rbs(key), ty_to_rbs(value)),
+        Ty::Array { elem } => format!("Array[{}]", rbs(elem)),
+        Ty::Hash { key, value } => format!("Hash[{}, {}]", rbs(key), rbs(value)),
         Ty::Tuple { elems } => {
-            let inner: Vec<String> = elems.iter().map(ty_to_rbs).collect();
+            let inner: Vec<String> = elems.iter().map(rbs).collect();
             format!("[{}]", inner.join(", "))
         }
         Ty::Record { row } => {
             let inner: Vec<String> = row
                 .fields
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k.as_str(), ty_to_rbs(v)))
+                .map(|(k, v)| format!("{}: {}", k.as_str(), rbs(v)))
                 .collect();
             format!("{{ {} }}", inner.join(", "))
         }
-        Ty::Union { variants } => render_union(variants),
+        Ty::Union { variants } => render_union(variants, enclosing),
         Ty::Class { id, args } => {
             let raw = id.0.as_str();
-            if args.is_empty() {
-                raw.to_string()
+            let first = raw.split("::").next().unwrap_or(raw);
+            let name = if enclosing.iter().skip(1).any(|seg| *seg == first) {
+                format!("::{raw}")
             } else {
-                let a: Vec<String> = args.iter().map(ty_to_rbs).collect();
-                format!("{raw}[{}]", a.join(", "))
+                raw.to_string()
+            };
+            if args.is_empty() {
+                name
+            } else {
+                let a: Vec<String> = args.iter().map(rbs).collect();
+                format!("{name}[{}]", a.join(", "))
             }
         }
         Ty::Fn { params, ret, .. } => {
             // Procs in value position render as `^(Params) -> Ret`.
-            let p = render_typed_params(params);
-            format!("^({p}) -> {}", ty_to_rbs(ret))
+            let p = render_typed_params(params, enclosing);
+            format!("^({p}) -> {}", rbs(ret))
         }
         Ty::Var { .. } => "untyped".into(),
         Ty::Untyped => "untyped".into(),
@@ -264,7 +292,7 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
     }
 }
 
-fn render_union(variants: &[Ty]) -> String {
+fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
     // `String | untyped` IS `untyped` — the gradual arm subsumes every
     // other one, so rendering the members alongside it advertises a
     // precision the type does not have. Spinel reads `(String |
@@ -288,13 +316,13 @@ fn render_union(variants: &[Ty]) -> String {
         }
     }
     if has_nil && non_nil.len() == 1 {
-        return format!("{}?", ty_to_rbs(non_nil[0]));
+        return format!("{}?", ty_to_rbs_in(non_nil[0], enclosing));
     }
     if non_nil.is_empty() {
         // All-Nil union; degenerate but represent it.
         return "nil".into();
     }
-    let rendered: Vec<String> = non_nil.iter().map(|t| ty_to_rbs(t)).collect();
+    let rendered: Vec<String> = non_nil.iter().map(|t| ty_to_rbs_in(t, enclosing)).collect();
     if has_nil {
         format!("({} | nil)", rendered.join(" | "))
     } else if rendered.len() == 1 {
