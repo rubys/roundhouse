@@ -111,8 +111,48 @@ module ActionCable
       nil
     end
 
+    # `ActionCable.server.stubs(:remote_connections).returns(<mock graph>)`
+    # — `lower::mocha` folds a graph spelling `where(current_user: u)
+    # .disconnect(reconnect: r)` into this one call. `where` then admits
+    # only `u` and `disconnect` only `r` (any other argument is mocha's
+    # unexpected invocation, raised at the call), and the helper's
+    # teardown verify wants `disconnect` reached `count` times.
+    # campfire's sign-out test proves a signed-out user's live sockets
+    # are told to reconnect.
+    #
+    # EXPECT_USERS is unseeded, as `TcpSocketStub::EXPECT_PREDS` is: its
+    # element type is the app's own user class, which the lowered test
+    # pushes.
+    EXPECT_USERS = []
+    EXPECT_RECONNECT = [ false ]
+    EXPECT_COUNT = [ -1 ]
+    EXPECT_CALLS = [ 0 ]
+
+    def expect_remote_connections_where_disconnect(count, current_user, reconnect)
+      EXPECT_USERS.clear
+      EXPECT_USERS << current_user
+      EXPECT_RECONNECT[0] = reconnect
+      EXPECT_COUNT[0] = count
+      EXPECT_CALLS[0] = 0
+      nil
+    end
+
+    def verify_remote_connections_expectations
+      expected = EXPECT_COUNT[0]
+      return nil if expected < 0
+      got = EXPECT_CALLS[0]
+      EXPECT_COUNT[0] = -1
+      if got != expected
+        raise "remote_connections.where(current_user: …).disconnect(reconnect: …) was expected #{expected} time(s), got #{got}"
+      end
+      nil
+    end
+
     def clear_remote_connections_stubs
       STUB_RAISE_ON[0] = false
+      EXPECT_USERS.clear
+      EXPECT_COUNT[0] = -1
+      EXPECT_CALLS[0] = 0
       nil
     end
 
@@ -173,12 +213,22 @@ module ActionCable
   # identifier any ingested app has ever named.
   class RemoteConnections
     def where(current_user:)
+      if Server::EXPECT_COUNT[0] >= 0
+        admitted = Server::EXPECT_USERS.length == 1 && current_user == Server::EXPECT_USERS[0]
+        raise "unexpected invocation: remote_connections.where(current_user: #{current_user.id})" unless admitted
+      end
       RemoteConnection.new
     end
   end
 
   class RemoteConnection
     def disconnect(reconnect:)
+      if Server::EXPECT_COUNT[0] >= 0
+        if reconnect != Server::EXPECT_RECONNECT[0]
+          raise "unexpected invocation: remote_connection.disconnect(reconnect: #{reconnect})"
+        end
+        Server::EXPECT_CALLS[0] += 1
+      end
       nil
     end
   end

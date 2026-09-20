@@ -147,6 +147,18 @@ struct Stubbable {
     /// app's call was grounded to (`Random.uuid` → `SecureRandom.uuid`,
     /// `lower::random_formatter`). `None` means `konst`.
     slot_on: Option<&'static str>,
+    /// `stubs(:m).returns(<mock graph>)` — a bare `mock` whose
+    /// expectations spell a PATH through the value the row's method
+    /// answers: one `(method, keywords)` step per link, the leaf
+    /// counted. The slot takes the leaf's count, then every step's
+    /// keyword values in order. See `lower_mock_graphs`.
+    mock_path: Option<MockPath>,
+}
+
+/// The slot a mock graph lowers to, and the steps it must spell.
+struct MockPath {
+    slot: &'static str,
+    steps: &'static [(&'static str, &'static [&'static str])],
 }
 
 impl Stubbable {
@@ -175,6 +187,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: None,
         require: "../runtime/resolv",
         slot_on: None,
+        mock_path: None,
     },
     // The socket the HTTP client opens. campfire's DNS-rebinding tests
     // put block-predicate expectations on it — `.never` for the
@@ -199,6 +212,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: Some("verify_open_expectations"),
         require: "../runtime/tcp_socket_stub",
         slot_on: Some("TcpSocketStub"),
+        mock_path: None,
     },
     // The stdlib's CSPRNG (spinel: `packages/securerandom`). campfire's
     // bot and user tests pin `alphanumeric` / `uuid` to a literal and
@@ -223,6 +237,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: None,
         require: "../runtime/secure_random_stub",
         slot_on: None,
+        mock_path: None,
     },
     Stubbable {
         konst: "SecureRandom",
@@ -242,6 +257,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: None,
         require: "../runtime/secure_random_stub",
         slot_on: None,
+        mock_path: None,
     },
     // `Random.uuid` is `SecureRandom.uuid` once lowered (the app's
     // call and the test's stub have to meet at ONE method), so the
@@ -264,6 +280,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: None,
         require: "../runtime/secure_random_stub",
         slot_on: Some("SecureRandom"),
+        mock_path: None,
     },
     // The façade for the `web-push` gem. A bare `stubs` answers `""`,
     // which is what a test that only wants delivery to not happen
@@ -287,6 +304,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: Some("verify_payload_send_expectations"),
         require: "../runtime/gem_facades",
         slot_on: None,
+        mock_path: None,
     },
     // The cable server singleton (`runtime/spinel/action_cable.rb` and
     // the overlay sibling, both `ActionCable::Server`). campfire's
@@ -307,9 +325,18 @@ const STUBBABLE: &[Stubbable] = &[
         expect_throws_where: None,
         expect_raises: None,
         clear: "clear_remote_connections_stubs",
-        verify: None,
+        verify: Some("verify_remote_connections_expectations"),
         require: "../runtime/action_cable",
         slot_on: None,
+        // The same test file's sibling proves sign-out reaches
+        // `remote_connections.where(current_user: user).disconnect(
+        // reconnect: true)` with a two-mock graph; the path is the
+        // runtime's own shape (`RemoteConnections#where` →
+        // `RemoteConnection#disconnect`).
+        mock_path: Some(MockPath {
+            slot: "expect_remote_connections_where_disconnect",
+            steps: &[("where", &["current_user"]), ("disconnect", &["reconnect"])],
+        }),
     },
     // Our own channel class (`runtime/spinel/turbo_streams.rb`, every
     // ruby-family tree carries it). campfire's messages controller
@@ -332,6 +359,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
         slot_on: None,
+        mock_path: None,
     },
     Stubbable {
         konst: "Turbo::StreamsChannel",
@@ -351,6 +379,7 @@ const STUBBABLE: &[Stubbable] = &[
         verify: Some("verify_broadcast_expectations"),
         require: "../runtime/turbo_streams",
         slot_on: None,
+        mock_path: None,
     },
 ];
 
@@ -480,12 +509,15 @@ pub fn apply_mocha_lowering(app: &mut App) {
     for tm in &mut app.test_modules {
         ctx.setup = tm.setup.clone();
         if let Some(setup) = &mut tm.setup {
+            lower_mock_graphs(setup, &ctx);
             rewrite(setup, &mut ctx);
         }
         for t in &mut tm.tests {
+            lower_mock_graphs(&mut t.body, &ctx);
             rewrite(&mut t.body, &mut ctx);
         }
         for m in &mut tm.helpers {
+            lower_mock_graphs(&mut m.body, &ctx);
             rewrite(&mut m.body, &mut ctx);
         }
     }
@@ -720,6 +752,310 @@ fn row_for(path: &str, method: &str) -> Option<&'static Stubbable> {
                 s.konst == last
             }
     })
+}
+
+/// A bare `mock` — mocha's anonymous expectation object — and what the
+/// body expects of it.
+#[derive(Default, Clone)]
+struct MockSpec {
+    expectations: Vec<MockExpectation>,
+}
+
+/// `m.expects(:method).with(k: v, …).returns(r)[.count]` on a mock.
+#[derive(Clone)]
+struct MockExpectation {
+    method: Symbol,
+    /// The `with` keywords, in source order; empty for a bare `expects`.
+    with: Vec<(Symbol, Expr)>,
+    returns: Option<Expr>,
+    count: Expr,
+}
+
+/// A mock graph, lowered to the row's path slot.
+///
+/// mocha's `mock` builds an object whose whole interface is the
+/// expectations set on it, and a test hands that object to the code
+/// under test through a stub — campfire's sign-out test:
+///
+/// ```ruby
+///   remote_connections = mock
+///   remote_connections.expects(:disconnect).with(reconnect: true)
+///   ActionCable.server.stubs(:remote_connections).returns(
+///     mock.tap { |m| m.expects(:where).with(current_user: users(:david)).returns(remote_connections) })
+/// ```
+///
+/// A strict target has no anonymous object to build, so `mock` is a
+/// refusal there. But the graph is closed: read whole, it is a PATH
+/// through the value the stubbed method answers — `where(current_user:
+/// u)` then `disconnect(reconnect: r)`, once — and a row that declares
+/// that path (`mock_path`) can hold it as ONE slot call on the
+/// runtime's own objects, which then check each step's arguments and
+/// count the leaf:
+///
+/// ```ruby
+///   ActionCable.server.expect_remote_connections_where_disconnect(1, users(:david), true)
+/// ```
+///
+/// Read off the body's top-level statements: a local assigned `mock`
+/// (or `mock.tap { |m| … }`), expectation chains on such a local, and
+/// a `stubs(:m).returns(<mock>)` chain on a row with a path. The
+/// rewrite is all-or-nothing per body — a mock the graph does not
+/// consume, an expectation link the path cannot carry, or a step out
+/// of order leaves the body as written, and the chain goes to the
+/// bridge as before (a raise on a strict target, real mocha on CRuby).
+fn lower_mock_graphs(body: &mut Expr, ctx: &AppMethods) {
+    let ExprNode::Seq { exprs } = &*body.node else { return };
+    if !exprs.iter().any(|e| assigned_mock(e).is_some()) {
+        return;
+    }
+    let mut stmts: Vec<Expr> = exprs.clone();
+    let mut mocks: BTreeMap<String, MockSpec> = BTreeMap::new();
+    let mut consumed: Vec<usize> = Vec::new();
+    // 1. The locals that are mocks.
+    for (i, e) in stmts.iter().enumerate() {
+        if let Some((name, spec)) = assigned_mock(e) {
+            let Some(spec) = spec else { return };
+            mocks.insert(name, spec);
+            consumed.push(i);
+        }
+    }
+    // 2. Their expectations.
+    for (i, e) in stmts.iter().enumerate() {
+        let Some((name, expectation)) = mock_expectation(e, &mocks) else { continue };
+        let Some(expectation) = expectation else { return };
+        mocks.get_mut(&name).expect("named above").expectations.push(expectation);
+        consumed.push(i);
+    }
+    // 3. The stub that hands a mock to the code under test.
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut lowered: Vec<(usize, Expr)> = Vec::new();
+    for (i, e) in stmts.iter().enumerate() {
+        let Some(chain) = parse_chain(e, ctx) else { continue };
+        if chain.instance.is_some() || chain.any_instance || chain.kind.as_str() != "stubs" {
+            continue;
+        }
+        let [ret] = chain.ops.as_slice() else { continue };
+        if ret.name.as_str() != "returns" || ret.args.len() != 1 || ret.block.is_some() {
+            continue;
+        }
+        let Some(row) = row_for(&chain.path, chain.method.as_str()) else { continue };
+        let Some(path) = &row.mock_path else { continue };
+        let Some(head) = mock_ref(&ret.args[0], &mocks) else { continue };
+        let Some(args) = resolve_mock_path(head, &mocks, path.steps, &mut used) else { return };
+        lowered.push((i, call(e.span, chain.konst.clone(), path.slot, args)));
+    }
+    if lowered.is_empty() {
+        return;
+    }
+    // Every mock local must have been consumed by a graph, and nothing
+    // else in the body may still read one.
+    if mocks.keys().any(|name| !used.contains(name)) {
+        return;
+    }
+    for (i, e) in lowered {
+        stmts[i] = e;
+    }
+    let mut out: Vec<Expr> = Vec::new();
+    for (i, e) in stmts.into_iter().enumerate() {
+        if consumed.contains(&i) {
+            continue;
+        }
+        if mocks.keys().any(|name| reads_var(&e, name)) {
+            return;
+        }
+        out.push(e);
+    }
+    *body = Expr::new(body.span, ExprNode::Seq { exprs: out });
+}
+
+/// `name = mock` / `name = mock.tap { |m| … }` — the local and its
+/// spec; `Some(None)` for a tap block the reader could not follow.
+fn assigned_mock(e: &Expr) -> Option<(String, Option<MockSpec>)> {
+    let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node else { return None };
+    if is_bare_mock(value) {
+        return Some((name.as_str().to_string(), Some(MockSpec::default())));
+    }
+    if is_mock_tap(value) {
+        return Some((name.as_str().to_string(), tap_mock(value)));
+    }
+    None
+}
+
+/// `mock`, with nothing on it.
+fn is_bare_mock(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "mock" && args.is_empty())
+}
+
+/// `mock.tap { |m| … }`.
+fn is_mock_tap(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: Some(_), .. }
+        if method.as_str() == "tap" && args.is_empty() && is_bare_mock(r))
+}
+
+/// The expectations a `mock.tap { |m| … }` block sets on its parameter.
+/// `None` for a block that does anything else.
+fn tap_mock(e: &Expr) -> Option<MockSpec> {
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else { return None };
+    let ExprNode::Lambda { params, rest_param: None, block_param: None, body, .. } = &*block.node else { return None };
+    let [param] = params.as_slice() else { return None };
+    let mut inner: BTreeMap<String, MockSpec> = BTreeMap::new();
+    inner.insert(param.as_str().to_string(), MockSpec::default());
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let mut spec = MockSpec::default();
+    for stmt in stmts {
+        let (name, expectation) = mock_expectation(stmt, &inner)?;
+        if name != param.as_str() {
+            return None;
+        }
+        // A `returns(<outer mock>)` inside the block names a local of
+        // the enclosing body; `resolve_mock_path` reads it against the
+        // body's mocks when it walks the graph.
+        spec.expectations.push(expectation?);
+    }
+    Some(spec)
+}
+
+/// `<mock local>.expects(:m)[.with(k: v)][.returns(r)][.count]` — the
+/// local and the expectation; `Some((name, None))` for a chain on a
+/// mock that carries a link this reader does not hold.
+fn mock_expectation(e: &Expr, mocks: &BTreeMap<String, MockSpec>) -> Option<(String, Option<MockExpectation>)> {
+    let mut ops: Vec<Op> = Vec::new();
+    let mut cur = e;
+    loop {
+        let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*cur.node else { return None };
+        let m = method.as_str();
+        if m == "expects" && args.len() == 1 && block.is_none() {
+            let ExprNode::Var { name, .. } = &*recv.node else { return None };
+            if !mocks.contains_key(name.as_str()) {
+                return None;
+            }
+            let ExprNode::Lit { value: Literal::Sym { value: stubbed } } = &*args[0].node else {
+                return Some((name.as_str().to_string(), None));
+            };
+            ops.reverse();
+            let mut with: Vec<(Symbol, Expr)> = Vec::new();
+            let mut returns: Option<Expr> = None;
+            let mut count: Option<Expr> = None;
+            for op in &ops {
+                if let Some(n) = count_of(op) {
+                    if count.is_some() {
+                        return Some((name.as_str().to_string(), None));
+                    }
+                    count = Some(n);
+                } else if op.name.as_str() == "with" && op.args.len() == 1 && op.block.is_none() && with.is_empty() {
+                    let ExprNode::Hash { entries, .. } = &*op.args[0].node else {
+                        return Some((name.as_str().to_string(), None));
+                    };
+                    for (k, v) in entries {
+                        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                            return Some((name.as_str().to_string(), None));
+                        };
+                        with.push((key.clone(), v.clone()));
+                    }
+                    if with.is_empty() {
+                        return Some((name.as_str().to_string(), None));
+                    }
+                } else if op.name.as_str() == "returns" && op.args.len() == 1 && op.block.is_none() && returns.is_none() {
+                    returns = Some(op.args[0].clone());
+                } else {
+                    return Some((name.as_str().to_string(), None));
+                }
+            }
+            let count = count.unwrap_or_else(|| int_lit(e.span, 1));
+            return Some((name.as_str().to_string(), Some(MockExpectation { method: stubbed.clone(), with, returns, count })));
+        }
+        if !OPS.contains(&m) {
+            return None;
+        }
+        ops.push(Op { name: method.clone(), args: args.clone(), block: block.clone() });
+        cur = recv;
+    }
+}
+
+/// What a `returns(…)` argument names: a mock local, or an inline
+/// `mock.tap { … }`.
+enum MockRef {
+    Local(String),
+    Inline(MockSpec),
+}
+
+fn mock_ref(e: &Expr, mocks: &BTreeMap<String, MockSpec>) -> Option<MockRef> {
+    match &*e.node {
+        ExprNode::Var { name, .. } if mocks.contains_key(name.as_str()) => Some(MockRef::Local(name.as_str().to_string())),
+        _ if is_bare_mock(e) => Some(MockRef::Inline(MockSpec::default())),
+        _ if is_mock_tap(e) => tap_mock(e).map(MockRef::Inline),
+        _ => None,
+    }
+}
+
+/// Walk the graph from `head` along the row's steps, collecting each
+/// step's keyword values; the slot's arguments are the leaf's count
+/// then those values in order. `None` when the graph does not spell
+/// the path exactly: one expectation per mock, the step's method, the
+/// step's keywords and no others, a mock returned at every step but
+/// the last, nothing returned at the last.
+fn resolve_mock_path(
+    head: MockRef,
+    mocks: &BTreeMap<String, MockSpec>,
+    steps: &[(&str, &[&str])],
+    used: &mut BTreeSet<String>,
+) -> Option<Vec<Expr>> {
+    let mut values: Vec<Expr> = Vec::new();
+    let mut count: Option<Expr> = None;
+    let mut cur = Some(head);
+    for (i, (method, keys)) in steps.iter().enumerate() {
+        let spec: MockSpec = match cur.take()? {
+            MockRef::Local(name) => {
+                // A local reached twice is two paths through one mock,
+                // which this slot does not hold.
+                if !used.insert(name.clone()) {
+                    return None;
+                }
+                mocks.get(&name)?.clone()
+            }
+            MockRef::Inline(spec) => spec,
+        };
+        let [expectation] = spec.expectations.as_slice() else { return None };
+        if expectation.method.as_str() != *method || expectation.with.len() != keys.len() {
+            return None;
+        }
+        for ((k, v), key) in expectation.with.iter().zip(keys.iter()) {
+            if k.as_str() != *key {
+                return None;
+            }
+            values.push(v.clone());
+        }
+        let last = i + 1 == steps.len();
+        match (&expectation.returns, last) {
+            (None, true) => {
+                count = Some(expectation.count.clone());
+            }
+            (Some(r), false) => {
+                cur = Some(mock_ref(r, mocks)?);
+            }
+            _ => return None,
+        }
+    }
+    let mut args = vec![count?];
+    args.extend(values);
+    Some(args)
+}
+
+/// Whether `e` reads the local `name` anywhere.
+fn reads_var(e: &Expr, name: &str) -> bool {
+    if matches!(&*e.node, ExprNode::Var { name: n, .. } if n.as_str() == name) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| {
+        if !found && reads_var(c, name) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Top-down, and that direction is load-bearing: a chain is one
@@ -1294,6 +1630,78 @@ mod tests {
         assert_eq!(reader, "server", "the slot is a method on the object the reader answers");
         assert_eq!(m, "stub_remote_connections_raises");
         assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn a_mock_graph_returned_from_a_row_stub_lowers_to_the_paths_slot() {
+        // remote_connections = mock
+        // remote_connections.expects(:disconnect).with(reconnect: true)
+        // ActionCable.server.stubs(:remote_connections).returns(
+        //   mock.tap { |m| m.expects(:where).with(current_user: users(:david)).returns(remote_connections) })
+        // delete session_url
+        let var = |n: &str| Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(n) });
+        let kw = |k: &str, v: Expr| Expr::new(sp(), ExprNode::Hash { entries: vec![(sym(k), v)], kwargs: true });
+        let bare_mock = || send(None, "mock", vec![]);
+        let assign = Expr::new(
+            sp(),
+            ExprNode::Assign { target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("remote_connections") }, value: bare_mock() },
+        );
+        let bool_lit = Expr::new(sp(), ExprNode::Lit { value: Literal::Bool { value: true } });
+        let leaf = send(Some(send(Some(var("remote_connections")), "expects", vec![sym("disconnect")])), "with", vec![kw("reconnect", bool_lit)]);
+        let david = send(None, "users", vec![sym("david")]);
+        let inner = send(
+            Some(send(Some(send(Some(var("m")), "expects", vec![sym("where")])), "with", vec![kw("current_user", david)])),
+            "returns",
+            vec![var("remote_connections")],
+        );
+        let tap_block = Expr::new(
+            sp(),
+            ExprNode::Lambda {
+                rest_param: None,
+                params: vec![Symbol::from("m")],
+                block_param: None,
+                body: inner,
+                block_style: crate::expr::BlockStyle::Brace,
+            },
+        );
+        let tap = send_blk(bare_mock(), "tap", tap_block);
+        let server = send(Some(konst(&["ActionCable"])), "server", vec![]);
+        let stub = send(Some(send(Some(server), "stubs", vec![sym("remote_connections")])), "returns", vec![tap]);
+        let delete = send(None, "delete", vec![send(None, "session_url", vec![])]);
+        let mut body = Expr::new(sp(), ExprNode::Seq { exprs: vec![assign, leaf, stub, delete] });
+        lower_mock_graphs(&mut body, &AppMethods::empty());
+        let ExprNode::Seq { exprs } = &*body.node else { panic!("{:?}", body.node) };
+        assert_eq!(exprs.len(), 2, "the mock's declaration and its expectation fold into the slot call: {:?}", exprs);
+        let (recv, m, args, _) = as_send(&exprs[0]);
+        let (k, reader, _, _) = as_send(recv);
+        assert_eq!(const_path(k), "ActionCable");
+        assert_eq!(reader, "server");
+        assert_eq!(m, "expect_remote_connections_where_disconnect");
+        assert_eq!(args.len(), 3, "count, then each step's keyword value in path order");
+        assert_eq!(int_of(&args[0]), 1, "a bare expects is once");
+        assert!(matches!(&*args[1].node, ExprNode::Send { method, .. } if method.as_str() == "users"));
+        assert!(matches!(&*args[2].node, ExprNode::Lit { value: Literal::Bool { value: true } }));
+        assert!(matches!(&*exprs[1].node, ExprNode::Send { method, .. } if method.as_str() == "delete"));
+    }
+
+    #[test]
+    fn a_mock_graph_the_path_does_not_spell_is_left_as_written() {
+        // remote_connections = mock
+        // remote_connections.expects(:close)          — not the path's leaf
+        // ActionCable.server.stubs(:remote_connections).returns(remote_connections)
+        let var = |n: &str| Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(n) });
+        let assign = Expr::new(
+            sp(),
+            ExprNode::Assign { target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("remote_connections") }, value: send(None, "mock", vec![]) },
+        );
+        let leaf = send(Some(var("remote_connections")), "expects", vec![sym("close")]);
+        let server = send(Some(konst(&["ActionCable"])), "server", vec![]);
+        let stub = send(Some(send(Some(server), "stubs", vec![sym("remote_connections")])), "returns", vec![var("remote_connections")]);
+        let mut body = Expr::new(sp(), ExprNode::Seq { exprs: vec![assign, leaf, stub] });
+        lower_mock_graphs(&mut body, &AppMethods::empty());
+        let ExprNode::Seq { exprs } = &*body.node else { panic!("{:?}", body.node) };
+        assert_eq!(exprs.len(), 3, "nothing consumed, nothing rewritten");
+        assert!(matches!(&*exprs[0].node, ExprNode::Assign { .. }));
     }
 
     #[test]
