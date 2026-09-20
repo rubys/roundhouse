@@ -5438,6 +5438,24 @@ fn emit_library_class_decl_inner(
             requires.push(relpath(&out_dir, anchor));
         }
     }
+    // The same rule for a namespace the runtime owns through a require
+    // anchor rather than that table: the header below is the COMPOUND
+    // `class Net::HTTP` whenever `Net` resolves to `runtime/net_http`,
+    // and a compound header looks the outer constant up instead of
+    // creating it. Nothing else loads that file first — boot.rb carries
+    // no line for it, and lobsters' `extras/sponge.rb` reopen is loaded
+    // through the models aggregator — so the file that needs the
+    // constant requires the file that provides it.
+    let outer_runtime_anchor = (outer_segments.len() > 1)
+        .then(|| require_path_for_body_const(&[outer_segments[0].to_string()], app, ""))
+        .flatten()
+        .filter(|p| p.starts_with("runtime/"));
+    if let Some(anchor) = outer_runtime_anchor.as_deref() {
+        let rel = relpath(&out_dir, anchor);
+        if !requires.contains(&rel) {
+            requires.push(rel);
+        }
+    }
     // `include`d modules must be LOADED before the `include` executes at
     // class-definition time — unlike body const-refs (request-time), so we
     // require them even when they're same-dir siblings (plain Ruby has no
@@ -5532,20 +5550,12 @@ fn emit_library_class_decl_inner(
     //
     // The COMPOUND header the source itself wrote needs no such
     // knowledge — it only requires the outer constants to already
-    // exist, which is exactly what the runtime being required before
-    // app code guarantees. That is also why this is not the default:
+    // exist, which the `require_relative` of that runtime file written
+    // above guarantees. That is also why this is not the default:
     // `Views::Articles` has no owner but the nesting itself, and a
     // compound header there would look up a `Views` nothing created.
-    if segments.len() > 1 {
-        let runtime_owned = require_path_for_body_const(
-            &[segments[0].to_string()],
-            app,
-            "",
-        )
-        .is_some_and(|p| p.starts_with("runtime/"));
-        if runtime_owned {
-            segments = vec![name];
-        }
+    if outer_runtime_anchor.is_some() {
+        segments = vec![name];
     }
     let segments = segments;
     let depth = segments.len();

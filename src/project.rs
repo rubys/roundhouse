@@ -4421,6 +4421,23 @@ fn defines_constant(src: &str, konst: &str) -> bool {
     })
 }
 
+/// True where the file has the require as a STATEMENT. A substring
+/// match is not that: `runtime/spinel/erb_spinel.rb` explains in a
+/// comment why it is not named `erb.rb` — quoting `require "erb"` —
+/// and that quote made the shim look like a reopen over the bundled
+/// library rather than the definer of `ERB`, so `require "erb"` was
+/// written into every file naming `ERB::Util` and spinel's
+/// `packages/erb` (a `class`) collided with the shim (a `module`). The
+/// lobsters AOT lane was red for ten days on that comment.
+fn requires_feature(src: &str, require_line: &str) -> bool {
+    src.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed
+            .strip_prefix(require_line)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
+}
+
 /// `write_bundled_requires` in the value-passing shape `target_files`'
 /// match arms want.
 fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, String)> {
@@ -4488,14 +4505,14 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
         // and every other file naming the constant still needs the
         // require.
         if files.iter().any(|(p, c)| {
-            p.ends_with(".rb") && defines_constant(c, konst) && !c.contains(&require_line)
+            p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
         }) {
             continue;
         }
         for (i, (path, content)) in files.iter().enumerate() {
             if path.ends_with(".rb")
                 && names_constant(content, konst)
-                && !content.contains(&require_line)
+                && !requires_feature(content, &require_line)
             {
                 gaps.push((i, require_line.clone()));
             }
@@ -6171,8 +6188,18 @@ mod tests {
                 "require \"stringio\"\nStringIO.new(\"x\")\n".to_string(),
             ),
             // The emitted runtime defines this one, so the bundled erb is
-            // not what `ERB.new` refers to.
-            ("runtime/erb.rb".to_string(), "module ERB\nend\n".to_string()),
+            // not what `ERB.new` refers to — and the comment QUOTING the
+            // require it stands in for is not a require (the real shim,
+            // runtime/spinel/erb_spinel.rb, carries that sentence; the
+            // substring match it once tripped put `require "erb"` into
+            // every file naming `ERB::Util`, and spinel's `class ERB`
+            // package collided with the `module ERB` shim).
+            (
+                "runtime/erb.rb".to_string(),
+                "# Not named erb.rb: a bare `require \"erb\"` must reach the stdlib.\n\
+                 module ERB\nend\n"
+                    .to_string(),
+            ),
             (
                 "app/views/show.rb".to_string(),
                 "ERB.new(src).result(b)\n".to_string(),
