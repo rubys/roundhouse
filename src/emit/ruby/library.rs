@@ -5496,6 +5496,17 @@ fn emit_library_class_decl_inner(
     for (_, value) in &lc.constants {
         walk_const_paths(value, &mut load_const_paths);
     }
+    // A class-body CALL runs while the file is being required, for the
+    // same reason a constant initializer does — it is a statement in
+    // the class body. A DSL macro reads its arguments' constants at
+    // that moment: `handles(Failures::TourNotFound, with: …)` in a
+    // resolver's body needs `Failures::TourNotFound` loaded already,
+    // and got no require for it. The source app never noticed because
+    // Rails autoloads; the emitted tree stopped there with an
+    // `uninitialized constant`.
+    for call in &lc.unknown_calls {
+        walk_const_paths(call, &mut load_const_paths);
+    }
     let mut body_const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
     for m in &lc.methods {
         walk_const_paths(&m.body, &mut body_const_paths);

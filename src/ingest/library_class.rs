@@ -1374,6 +1374,22 @@ fn walk_decl_body<'pr>(
                         }
                     }
                 }
+            } else if call.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+                // `self.default_success = Success` — a class-level
+                // attribute write. The whole branch above requires NO
+                // receiver, so this never reached the capture and was
+                // dropped without even the diagnostic a dropped
+                // receiverless call gets.
+                //
+                // It matters for the same classes the replay rule
+                // exists for: a base roundhouse does not model, whose
+                // DSL IS the class body. A gem that validates its own
+                // subclasses at load time (`must explicitly call
+                // self.default_success = …`) rejects the emitted class
+                // outright, so the tree stops there.
+                if let Ok(e) = ingest_expr(&stmt, file) {
+                    unknown_calls.push(e);
+                }
             }
         }
         // Nested class/module declarations also fall through here; they
