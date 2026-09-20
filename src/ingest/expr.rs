@@ -1962,8 +1962,13 @@ fn ingest_call_block(
                     end: loc.end_offset() as u32,
                 };
                 let var = |name: &Symbol| {
+                    // The symbol's own span, not a synthetic one: this
+                    // variable exists only because `&:sym` was
+                    // expanded, so a diagnostic about it has nowhere
+                    // else to point. Span-less, it printed with no
+                    // file and no line at all.
                     Expr::new(
-                        Span::synthetic(),
+                        sym_span,
                         ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
                     )
                 };
