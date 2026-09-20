@@ -37,13 +37,19 @@ pub fn ingest_sorbet_signatures(source: &[u8]) -> HashMap<ClassId, HashMap<Symbo
         return HashMap::new();
     };
     let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-    walk(&program.statements().body().iter().collect::<Vec<_>>(), None, &mut out);
+    walk(&program.statements().body().iter().collect::<Vec<_>>(), None, false, &mut out);
     out
 }
 
+/// `in_singleton_class` is true while walking a `class << self` body.
+/// The methods there are the enclosing class's SINGLETON methods even
+/// though their `def` carries no receiver, which is the one thing a
+/// reader must not get wrong: `T.self_type` means the class object
+/// there, not an instance of it.
 fn walk(
     statements: &[Node<'_>],
     scope: Option<&str>,
+    in_singleton_class: bool,
     out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
 ) {
     // The `sig` immediately above a `def` is the one that applies to
@@ -65,7 +71,7 @@ fn walk(
                     if superclass.as_deref() == Some("T::Enum") {
                         collect_enum_surface(&statements, &name, out);
                     }
-                    walk(&statements, Some(&name), out);
+                    walk(&statements, Some(&name), false, out);
                 }
             }
             pending = None;
@@ -75,7 +81,22 @@ fn walk(
             let name = qualify(scope, &constant_path_name(&module.constant_path()));
             if let Some(body) = module.body() {
                 if let Some(body) = body.as_statements_node() {
-                    walk(&body.body().iter().collect::<Vec<_>>(), Some(&name), out);
+                    walk(&body.body().iter().collect::<Vec<_>>(), Some(&name), false, out);
+                }
+            }
+            pending = None;
+            continue;
+        }
+        // `class << self` — its `def`s are the enclosing class's
+        // singleton methods, and their `sig`s were invisible: the walk
+        // only descended into class and module bodies, so a whole
+        // singleton surface declared this way read as undeclared.
+        // Same scope, because that is the class the methods belong to
+        // and this table does not separate the two sides anyway.
+        if let Some(singleton) = statement.as_singleton_class_node() {
+            if let Some(body) = singleton.body() {
+                if let Some(body) = body.as_statements_node() {
+                    walk(&body.body().iter().collect::<Vec<_>>(), scope, true, out);
                 }
             }
             pending = None;
@@ -83,7 +104,7 @@ fn walk(
         }
         if let Some(def) = statement.as_def_node() {
             if let (Some(sig), Some(scope)) = (pending.take(), scope) {
-                if let Some(ty) = signature_ty(&statements[sig], &def) {
+                if let Some(ty) = signature_ty(&statements[sig], &def, in_singleton_class) {
                     out.entry(ClassId(Symbol::new(scope)))
                         .or_default()
                         .insert(Symbol::new(constant_id_str(&def.name())), ty);
@@ -277,11 +298,17 @@ fn qualify(scope: Option<&str>, name: &str) -> String {
 
 /// The `Ty::Fn` a `sig { … }` declares for the `def` below it, or
 /// `None` when any part of it is outside the grammar.
-fn signature_ty(sig: &Node<'_>, def: &ruby_prism::DefNode<'_>) -> Option<Ty> {
+fn signature_ty(
+    sig: &Node<'_>,
+    def: &ruby_prism::DefNode<'_>,
+    in_singleton_class: bool,
+) -> Option<Ty> {
     // `def self.build` is singleton-side, `def build` instance-side —
     // which is what decides whether `T.self_type` is readable. See
-    // `sorbet_ty`.
-    let self_is_instance = def.receiver().is_none();
+    // `sorbet_ty`. Inside `class << self` a receiverless `def` is
+    // singleton-side too, and reading its `self` as an instance would
+    // be a wrong type rather than a missing one.
+    let self_is_instance = def.receiver().is_none() && !in_singleton_class;
     let call = sig.as_call_node()?;
     let block = call.block()?;
     let block = block.as_block_node()?;
