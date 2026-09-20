@@ -190,6 +190,38 @@ pub(in crate::analyze) fn register(
         }
         app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
+    // HTTP Basic auth: yields the credentials the client sent and
+    // answers what the block decided — or renders the 401 challenge
+    // itself when there were none. Registered with BOTH block
+    // parameters, because a block yielding two values that names one
+    // leaves the second bound to nothing and everything compared
+    // against it untyped.
+    app_ctrl.class_methods.insert(
+        Symbol::from("authenticate_or_request_with_http_basic"),
+        Ty::Fn {
+            params: Vec::new(),
+            block: Some(Box::new(Ty::Fn {
+                params: vec![
+                    crate::ty::Param {
+                        name: Symbol::from("username"),
+                        ty: Ty::Str,
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                    crate::ty::Param {
+                        name: Symbol::from("password"),
+                        ty: Ty::Str,
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                ],
+                block: None,
+                ret: Box::new(Ty::Bool),
+                effects: crate::effect::EffectSet::default(),
+            })),
+            // The block's verdict, or the challenge it renders instead.
+            ret: Box::new(Ty::Untyped),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
     // `cookies` is the cookie jar: string values in and out,
