@@ -38,15 +38,15 @@ pub fn swift_ty(t: &Ty) -> String {
         // direct analog of Kotlin `Nothing` / Rust `!`.
         Ty::Bottom => "Never".to_string(),
 
-        // Analysis-time relation type — erased by query specialization
-        // before emit (see `Ty::Relation`). Reaching here is a
-        // coverage gap: report, never degrade to `[T]`.
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching
         // here is a defect: report, never guess a class.
         Ty::SelfInstance => {
             return crate::emit::diagnostics::unsupported_self_instance_ty("swift");
         }
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `[T]`.
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("swift", of);
         }

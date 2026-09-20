@@ -23,16 +23,16 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Time => "Date".into(),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),
-        // Analysis-time relation type — erased by query specialization
-        // before emit (see `Ty::Relation`). Explicit arm so the `any`
-        // catch-all below can't silently absorb it: report, never
-        // degrade.
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching
         // here is a defect: report, never guess a class.
         Ty::SelfInstance => {
             return crate::emit::diagnostics::unsupported_self_instance_ty("typescript");
         }
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Explicit arm so the `any`
+        // catch-all below can't silently absorb it: report, never
+        // degrade.
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("typescript", of);
         }

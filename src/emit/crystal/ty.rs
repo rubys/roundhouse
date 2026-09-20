@@ -25,15 +25,15 @@ pub fn crystal_ty(t: &Ty) -> String {
         Ty::Time => "Time".to_string(),
         Ty::Nil => "Nil".to_string(),
         Ty::Bottom => "NoReturn".to_string(),
-        // Analysis-time relation type — erased by query specialization
-        // before emit (see `Ty::Relation`). Reaching here is a
-        // coverage gap: report, never degrade to `Array(T)`.
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching
         // here is a defect: report, never guess a class.
         Ty::SelfInstance => {
             return crate::emit::diagnostics::unsupported_self_instance_ty("crystal");
         }
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `Array(T)`.
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("crystal", of);
         }
