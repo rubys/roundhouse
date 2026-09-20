@@ -972,6 +972,35 @@ module ActionDispatch
   end
 end
 
+# The other three test-case parents a Rails app writes against, so a
+# file declaring one LOADS. That is all they do so far: every test
+# under them fails on its first `stub_connection` / `view` /
+# `connect` — a per-test NoMethodError in the tally, which is the
+# honest reading of "the harness has no such thing yet", and a
+# better one than a NameError taking the file whole. The tests that
+# need them (campfire's `test/channels`, `test/helpers`) were never
+# in any tally before this, so the count they add is red until the
+# harness under each is written — Channel::TestCase's `subscribe`/
+# `subscription`/`assert_has_stream(_for)` and a recording pubsub,
+# Connection::TestCase's `cookies.signed`/`connect`/
+# `assert_reject_connection`, ActionView::TestCase's `view`.
+module ActionView
+  class TestCase < TestBase
+  end
+end
+
+module ActionCable
+  module Channel
+    class TestCase < TestBase
+    end
+  end
+
+  module Connection
+    class TestCase < TestBase
+    end
+  end
+end
+
 module RequestDispatch
   # NO `include ActionView` / `include ActionDispatch` here, though it
   # would shorten the two references below. Including a namespace makes

@@ -55,7 +55,7 @@ pub use routes::ingest_routes;
 pub use schema::{ingest_migration, ingest_schema};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
-pub use test::ingest_test_file;
+pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 
 // Errors ----------------------------------------------------------------

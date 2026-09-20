@@ -218,6 +218,25 @@ module ActionDispatch
   end
 end
 
+# The three other test-case parents — bare subclasses of TestBase so
+# a file declaring one loads; see the .rb for what each still lacks.
+module ActionView
+  class TestCase < TestBase
+  end
+end
+
+module ActionCable
+  module Channel
+    class TestCase < TestBase
+    end
+  end
+
+  module Connection
+    class TestCase < TestBase
+    end
+  end
+end
+
 # In-process request dispatch. The four HTTP-verb helpers route
 # through `dispatch_request`. `stringify_keys` is strictly typed
 # `(Hash) -> Hash`; the polymorphism (Hash vs leaf) lives in the

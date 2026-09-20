@@ -33,24 +33,54 @@ use super::{IngestError, IngestResult};
 /// top-level helper class lands alongside the test file without
 /// per-target plumbing changes.
 pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestModule>> {
+    Ok(ingest_test_files(source, file)?.into_iter().next())
+}
+
+/// Every test class the file declares, each as its own `TestModule`.
+///
+/// A Rails test file is usually one class, but not always:
+/// campfire's `test/channels/room_messages_channel_test.rb` declares
+/// `RoomMessagesChannelTest` and, beside it, `RoomMessagesViaStock-
+/// TurboChannelTest` — the second exists to prove the STOCK
+/// `Turbo::StreamsChannel` turns the same stream names away, which is
+/// a different subject and so a different class. `ingest_test_file`
+/// kept only the first and routed the second through
+/// `inner_classes`, where a `*Test` class was then skipped on
+/// purpose (see the note at the end of `ingest_test_class`): two
+/// tests silently absent from every tally. Each class here becomes
+/// a module of its own, and the emit names files by class, so they
+/// land as two test files the way Minitest would have run them as
+/// two suites. Non-test top-level classes are shared by every module
+/// as helpers, the way they were for the one.
+pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut top_classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
     collect_top_level_classes(&root, &mut top_classes);
     if top_classes.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    // Pick the test class by heuristic; everything else is a helper.
-    // Fall back to first class if no candidate matches (preserves the
-    // historical single-class shape).
-    let test_idx = top_classes
+    let (mut test_nodes, helper_nodes): (Vec<_>, Vec<_>) =
+        top_classes.into_iter().partition(is_test_class_node);
+    // No candidate matches: the historical single-class shape, where
+    // the first class is the test whatever it is called.
+    if test_nodes.is_empty() {
+        let mut helper_nodes = helper_nodes;
+        test_nodes.push(helper_nodes.remove(0));
+        return ingest_test_class(&test_nodes[0], &helper_nodes, file).map(|tm| vec![tm]);
+    }
+    test_nodes
         .iter()
-        .position(is_test_class_node)
-        .unwrap_or(0);
-    let class = top_classes.remove(test_idx);
-    let top_level_helper_nodes = top_classes;
+        .map(|class| ingest_test_class(class, &helper_nodes, file))
+        .collect()
+}
 
+fn ingest_test_class(
+    class: &ruby_prism::ClassNode<'_>,
+    top_level_helper_nodes: &[ruby_prism::ClassNode<'_>],
+    file: &str,
+) -> IngestResult<TestModule> {
     let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "test class name must be a simple constant or path".into(),
@@ -63,7 +93,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 
     // Rails convention: `ArticleTest` tests `Article`. Strip the `Test`
     // suffix off the last name-path segment. Unusual naming → None.
-    let target = name_path
+    let mut target = name_path
         .last()
         .and_then(|last| last.strip_suffix("Test"))
         .map(|stem| ClassId(Symbol::from(stem)));
@@ -127,6 +157,22 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
             // ignores these — its framework-namespace import-stripper
             // handles the same refs by a different mechanism.
             if let Some(call) = stmt.as_call_node() {
+                // `tests RoomMessagesChannel` — ActionCable's channel
+                // and connection test cases (and ActionController::
+                // TestCase) name their subject with this macro when
+                // the class name does not: `RoomMessagesViaStock-
+                // TurboChannelTest` tests `Turbo::StreamsChannel`. It
+                // overrides the `FooTest` → `Foo` convention above.
+                if call.receiver().is_none() && constant_id_str(&call.name()) == "tests" {
+                    if let Some(args) = call.arguments() {
+                        if let Some(arg) = args.arguments().iter().next() {
+                            if let Some(path) = constant_path_of(&arg) {
+                                target = Some(ClassId(Symbol::from(path.join("::"))));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if call.receiver().is_none()
                     && constant_id_str(&call.name()) == "include"
                 {
@@ -165,27 +211,19 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
     // `inner_classes` to file scope above the test body — same routing,
     // no further per-target changes needed.
     //
-    // Additional `*Test`-shaped classes (a single file with multiple
-    // `< Minitest::Test` classes, as in
-    // `runtime/ruby/test/active_record/errors_test.rb` declaring
-    // `RecordNotFoundTest` + `RecordInvalidTest`) are NOT added as
-    // helpers — inner_classes don't get the `< Minitest::Test → <
-    // TestBase` parent rewrite the main test class does, so emitting
-    // them inline would have Minitest find them as Test subclasses
-    // under CRuby and run them against the wrong assertion surface.
-    // The right fix is to emit each as its own test file; that
-    // requires plumbing a `Vec<TestModule>` return from this function
-    // and is tracked separately. For now they fall through and stay
-    // silently dropped (same behavior as before this commit).
-    for helper_node in &top_level_helper_nodes {
-        if is_test_class_node(helper_node) {
-            continue;
-        }
+    // Additional `*Test`-shaped classes are each a module of their
+    // own — `ingest_test_files` splits them before this runs — so
+    // every node here is a genuine helper. (They used to be dropped:
+    // an inner class does not get the `< Minitest::Test → < TestBase`
+    // parent rewrite the test class does, so emitting one inline
+    // would have Minitest find it under CRuby and run it against the
+    // wrong assertion surface.)
+    for helper_node in top_level_helper_nodes {
         let lc = library_class_from_node(helper_node, file)?;
         inner_classes.push(lc);
     }
 
-    Ok(Some(TestModule {
+    Ok(TestModule {
         name,
         parent,
         target,
@@ -195,7 +233,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         helpers,
         constants,
         includes,
-    }))
+    })
 }
 
 /// Collect every direct top-level class declaration. Does NOT recurse
@@ -411,4 +449,80 @@ fn ingest_test_declaration(
     };
 
     Ok(Some(Test { name, body }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // campfire's `test/channels/room_messages_channel_test.rb`: two
+    // `< ActionCable::Channel::TestCase` classes in one file, the
+    // second naming its subject with `tests Turbo::StreamsChannel`.
+    // Before `ingest_test_files`, the second class was demoted to a
+    // helper and then skipped for being a test — two tests in no
+    // tally.
+    const TWO_CLASSES: &str = r#"
+require "test_helper"
+
+class RoomMessagesChannelTest < ActionCable::Channel::TestCase
+  tests RoomMessagesChannel
+
+  setup do
+    @room = rooms(:designers)
+  end
+
+  test "a member may subscribe" do
+    assert true
+  end
+
+  test "an outsider may not" do
+    assert true
+  end
+end
+
+class RoomMessagesViaStockTurboChannelTest < ActionCable::Channel::TestCase
+  tests Turbo::StreamsChannel
+
+  test "the stock channel refuses a room message stream" do
+    assert true
+  end
+end
+"#;
+
+    #[test]
+    fn every_test_class_in_a_file_is_its_own_module() {
+        let tms = ingest_test_files(TWO_CLASSES.as_bytes(), "room_messages_channel_test.rb")
+            .expect("ingest");
+        let names: Vec<&str> = tms.iter().map(|tm| tm.name.0.as_str()).collect();
+        assert_eq!(
+            names,
+            ["RoomMessagesChannelTest", "RoomMessagesViaStockTurboChannelTest"]
+        );
+        assert_eq!(tms[0].tests.len(), 2);
+        assert_eq!(tms[1].tests.len(), 1);
+        // Neither is the other's helper.
+        assert!(tms.iter().all(|tm| tm.inner_classes.is_empty()));
+        // The first module still carries its own setup.
+        assert!(tms[0].setup.is_some());
+        assert!(tms[1].setup.is_none());
+    }
+
+    #[test]
+    fn tests_macro_names_the_subject() {
+        let tms = ingest_test_files(TWO_CLASSES.as_bytes(), "room_messages_channel_test.rb")
+            .expect("ingest");
+        let targets: Vec<&str> = tms
+            .iter()
+            .map(|tm| tm.target.as_ref().map(|t| t.0.as_str()).unwrap_or(""))
+            .collect();
+        assert_eq!(targets, ["RoomMessagesChannel", "Turbo::StreamsChannel"]);
+    }
+
+    #[test]
+    fn single_class_wrapper_still_answers_the_first() {
+        let tm = ingest_test_file(TWO_CLASSES.as_bytes(), "room_messages_channel_test.rb")
+            .expect("ingest")
+            .expect("a test class");
+        assert_eq!(tm.name.0.as_str(), "RoomMessagesChannelTest");
+    }
 }

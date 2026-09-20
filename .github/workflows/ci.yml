@@ -1201,6 +1201,21 @@ jobs:
       # tampered sgid in action_text_attachment_test with `to_sgid(for:)`
       # instead of extending one live Room. The suite is otherwise
       # unchanged, and the last ledger line (`object-extend`) reads zero.
+      #
+      # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
+      # ingest had only ever read `test/models` and `test/controllers`,
+      # and campfire's `test/lib`, `test/channels` and `test/helpers` —
+      # twelve files, ninety-seven tests — were in no tally at all. Now
+      # read, they land as thirteen files (one declares two test
+      # classes, which used to lose the second) and 42 pass at once,
+      # 21 of them the private-network guard's. The 55 short are each
+      # a named cause in bench/campfire/suite-causes.json, and the two
+      # largest are harness, not app: `ActionCable::Channel::TestCase`
+      # (20 tests, `cable-test-case` + `turbo-signed-stream-name`) and
+      # the libvips loader policy the test process never applies
+      # (`vips-policy-not-applied-in-tests`). The floor did not move:
+      # no file that was green went red, and a floor is raised on the
+      # notice below, never on a denominator.
         env:
           FLOOR_TESTS: 256
           FLOOR_FILES: 42

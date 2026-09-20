@@ -1039,16 +1039,34 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         for lc in &fixture_lcs {
             reset_lines.push(format!("{}._fixtures_load!", lc.name.0.as_str()));
         }
+        // Two test classes can flatten to one stem: campfire's
+        // `ActionTextAttachmentTest` (test/models) and
+        // `ActionText::AttachmentTest` (test/lib/rails_ext) are both
+        // `action_text_attachment`, and the second written would
+        // silently replace the first. A namespaced class whose stem
+        // is taken spells its `::` as `__` instead — decided from the
+        // whole set, so the outcome does not depend on emit order.
+        let stem_counts: std::collections::HashMap<String, usize> = test_lowered
+            .iter()
+            .map(|l| test_file_stem(l.test_class.name.0.as_str()))
+            .fold(std::collections::HashMap::new(), |mut m, s| {
+                *m.entry(s).or_insert(0) += 1;
+                m
+            });
         for lowered in &test_lowered {
             let lc = &lowered.test_class;
             let class_name = lc.name.0.as_str();
-            let stem = test_file_stem(class_name);
-            let dir = if class_name.ends_with("ControllerTest") {
-                "controllers"
-            } else {
-                "models"
-            };
-            let out_path = PathBuf::from(format!("test/{dir}/{stem}_test.rb"));
+            let mut stem = test_file_stem(class_name);
+            if stem_counts.get(&stem).copied().unwrap_or(0) > 1 && class_name.contains("::") {
+                stem = class_name
+                    .strip_suffix("Test")
+                    .unwrap_or(class_name)
+                    .split("::")
+                    .map(crate::naming::snake_case)
+                    .collect::<Vec<_>>()
+                    .join("__");
+            }
+            let out_path = PathBuf::from(format!("test/{}/{stem}_test.rb", test_subdir(lc)));
             // Map both `ActiveSupport::TestCase` (Rails app tests) and
             // `Minitest::Test` (framework's own tests) to roundhouse-
             // owned `TestBase` (defined in test_helper.rb). Insulates
@@ -1567,6 +1585,27 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
 fn test_file_stem(class_name: &str) -> String {
     let stem = class_name.strip_suffix("Test").unwrap_or(class_name);
     crate::naming::underscore(stem).replace('/', "_")
+}
+
+/// The `test/<dir>/` a lowered test class is written under — the
+/// Rails layout, read back off the class: its parent says what kind
+/// of test it is, and the `ControllerTest` suffix is the one
+/// convention that predates the parent check. Everything else is a
+/// model test, which is where a plain `ActiveSupport::TestCase` lives
+/// in Rails too — campfire's `test/lib/` files are that, and land
+/// under `models/` here rather than growing a fourth dir the Makefile
+/// and the suite runner would each have to learn.
+fn test_subdir(lc: &LibraryClass) -> &'static str {
+    let parent = lc.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("");
+    if lc.name.0.as_str().ends_with("ControllerTest") {
+        "controllers"
+    } else if parent.ends_with("Channel::TestCase") || parent.ends_with("Connection::TestCase") {
+        "channels"
+    } else if parent == "ActionView::TestCase" {
+        "helpers"
+    } else {
+        "models"
+    }
 }
 
 

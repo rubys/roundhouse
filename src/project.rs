@@ -4214,8 +4214,11 @@ fn apply_makefile_test_list(files: &mut [(String, String)], app: &App) {
         .filter_map(|f| {
             let p = f.path.to_str()?;
             let stem = p.strip_suffix(".rb")?;
+            // Any `test/<dir>/` the ruby emit writes — models,
+            // controllers, channels, helpers (`emit::ruby::test_subdir`).
             (stem.ends_with("_test")
-                && (stem.starts_with("test/models/") || stem.starts_with("test/controllers/")))
+                && stem.starts_with("test/")
+                && stem.matches('/').count() == 2)
             .then(|| stem.to_string())
         })
         .collect();
@@ -5022,7 +5025,17 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
 /// makes a `< TestBase` HELPER class beside a Minitest one harmless.
 fn lane_test_class(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("class ")?;
-    if !rest.contains("< TestBase") && !rest.contains("< ActionDispatch::IntegrationTest") {
+    // The parents `emit::ruby` leaves on a test class: `TestBase` is
+    // what `ActiveSupport::TestCase` becomes; the rest are the
+    // harness's own subclasses of it (runtime/spinel/test/test_helper.rb).
+    const LANE_PARENTS: [&str; 5] = [
+        "< TestBase",
+        "< ActionDispatch::IntegrationTest",
+        "< ActionView::TestCase",
+        "< ActionCable::Channel::TestCase",
+        "< ActionCable::Connection::TestCase",
+    ];
+    if !LANE_PARENTS.iter().any(|p| rest.contains(p)) {
         return None;
     }
     Some(rest.split_whitespace().next().unwrap_or_default().to_string())
@@ -5556,6 +5569,27 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three test-case parents campfire's `test/channels` and
+    /// `test/helpers` write against are lane tests, the way an
+    /// integration test is; a Minitest one still is not.
+    #[test]
+    fn lane_test_class_knows_every_harness_parent() {
+        for line in [
+            "class PresenceChannelTest < ActionCable::Channel::TestCase",
+            "class ApplicationCable::ConnectionTest < ActionCable::Connection::TestCase",
+            "class MessagesHelperTest < ActionView::TestCase",
+            "class RoomTest < TestBase",
+            "class RoomsControllerTest < ActionDispatch::IntegrationTest",
+        ] {
+            assert!(lane_test_class(line).is_some(), "{line}");
+        }
+        assert_eq!(
+            lane_test_class("class ApplicationCable::ConnectionTest < ActionCable::Connection::TestCase"),
+            Some("ApplicationCable::ConnectionTest".to_string())
+        );
+        assert_eq!(lane_test_class("class InflectorTest < Minitest::Test"), None);
+    }
 
     /// The gem-demand scan reads the APP's test bodies, never our own
     /// shim. `test/test_helper.rb` mentions `WebMock` on purpose (it

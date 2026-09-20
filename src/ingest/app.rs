@@ -30,7 +30,7 @@ use super::library_class::{
 use super::model::ingest_model;
 use super::routes::ingest_routes_with_draws;
 use super::schema::{ingest_migration, ingest_schema};
-use super::test::ingest_test_file;
+use super::test::ingest_test_files;
 use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
@@ -958,21 +958,29 @@ end
         }
     };
 
-    // Test files — `test/models/*_test.rb` and
-    // `test/controllers/*_test.rb`. System tests under `test/system/`
-    // still need a browser-driver runtime and stay out of scope.
-    // Ingesting controller tests early (Phase 4-compile stage) lets
-    // the emitter surface the HTTP primitives the tests reference,
-    // even if those tests all skip pending the HTTP runtime.
-    for subdir in ["test/models", "test/controllers"] {
+    // Test files — every `test/<dir>/**/*_test.rb` that runs in
+    // process. System tests under `test/system/` need a browser
+    // driver and stay out of scope; `test/performance/` is a
+    // benchmark, not a suite.
+    //
+    // This list was `models` and `controllers` for a long time, and
+    // that was the whole reason campfire's `test/lib`, `test/channels`
+    // and `test/helpers` — twelve files, ninety-seven tests — were
+    // never in any tally: not a gap in what they exercise, just never
+    // read. The subjects those dirs test (the private-network guard,
+    // the channels, the content filters) were already emitted.
+    // `test/mailers` (the store fixture has one, against
+    // `ActionMailer::TestCase`) and `test/jobs` are the next two, and
+    // each is a harness the runtime does not have yet.
+    for subdir in ["test/models", "test/controllers", "test/helpers", "test/channels", "test/lib"] {
         let tests_dir = dir.join(subdir);
         if vfs.is_dir(&tests_dir) {
             for entry in read_rb_files(vfs, &tests_dir)? {
                 let source = vfs.read(&entry)?;
-                if let Some(maybe_tm) =
-                    unwrap_or_record(ingest_test_file(&source, &entry.display().to_string()))?
+                if let Some(tms) =
+                    unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
                 {
-                    if let Some(mut tm) = maybe_tm {
+                    for mut tm in tms {
                         splice_test_helpers(&mut tm, &shared_test_helpers);
                         if let Some(case_setup) = &test_case_setup {
                             splice_test_case_setup(&mut tm, case_setup);

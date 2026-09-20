@@ -42,11 +42,84 @@
 
   "causes": [
     {
+      "slug": "turbo-signed-stream-name",
+      "title": "`Turbo::StreamsChannel.signed_stream_name` and `Turbo.signed_stream_verifier` — minting the name a subscriber sends",
+      "owner": "compiler",
+      "match": "undefined method '(signed_stream_name|signed_stream_verifier)' for (class|module) Turbo",
+      "note": "campfire's `RoomMessagesChannelTest` subscribes the way the browser does — with `Turbo::StreamsChannel.signed_stream_name([room, :messages])` — and one test hands the channel the VERIFIED (unsigned) name to prove it is refused. The runtime has the constant (`turbo-streams-channel`, closed) and the view-side `turbo_stream_from` that signs a name for the page; the class-level mint and the verifier the test reaches for are not on it. Six of the eight room-messages tests stop here, before `stub_connection`."
+    },
+    {
+      "slug": "web-push-pinned-delivery",
+      "title": "Proving which address web-push delivery connects to — `TCPSocket.expects(:open).with { … }` around `WebPush.payload_send`",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "WebPush::PersistentRequestTest#",
+      "note": "campfire's `WebPush::PersistentRequest` (config/initializers/web_push.rb, prepended into the gem's `Request`) pins delivery to the `endpoint_ip:` Push::Subscription resolved and ignores an egress proxy, so a rebind between resolution and delivery cannot reopen the SSRF. The two tests are the dns_rebinding shape (`socket-interception`, served) on a different client: `TCPSocket.expects(:open).with { |*args, **| args.first == host }.never`, `.throws(:pinned_to_ip)` for the IP, and `assert_throws` around a `payload_send` with an empty message. Here `payload_send` is the mocha slot the suite stubs (`project::WEB_PUSH_STUB_REOPEN`) — it never opens a socket to assert on, and without the gem it says `web-push is not installed`. Serving this means the real gem (or the runtime's own delivery) under the TcpSocketStub seam, with the initializer's prepend lowered onto it."
+    },
+    {
+      "slug": "cable-test-case",
+      "title": "`ActionCable::Channel::TestCase` / `Connection::TestCase` — parents with no harness behind them",
+      "owner": "compiler",
+      "match": "undefined method '(stub_connection|subscribe|subscription|unsubscribe|assert_has_stream(_for)?|connect|cookies|assert_reject_connection|disconnect)' for an instance of ",
+      "note": "campfire's test/channels — four files, twenty tests — were never in this tally until 2026-09-20: the ingest read only test/models and test/controllers. Both parents now exist in the emitted test_helper so the files load, and every test under them fails on its first call into a harness that is not there: `stub_connection`, `subscribe`, `subscription.confirmed?/rejected?/streams`, `assert_has_stream(_for)`, `unsubscribe` for a channel; `cookies.signed`, `connect`, `connection`, `assert_reject_connection` for a connection; and `ActionCable.server.pubsub.broadcasts(stream)` behind those, which wants a RECORDING pubsub the way Rails' test adapter is one. The channels themselves are emitted and run (the cable walk drives them); what is missing is Rails' way of building one without a socket. tests/spinel_cable_channel.rb's header says why this matters: until these are green, the conformance number says nothing about the cable lane."
+    },
+    {
+      "slug": "view-test-case",
+      "title": "`ActionView::TestCase` — `view` with the app's helpers on it",
+      "owner": "compiler",
+      "match": "undefined local variable or method 'view' for an instance of \\S*Test\\b",
+      "note": "campfire's test/helpers, never in the tally before 2026-09-20. `MessagesHelperTest` calls `view.message_presentation(message)`: Rails' ActionView::TestCase hands the test a view object with every app helper mixed in. The parent now exists so the file loads; `view` does not. ContentFiltersTest, in the same directory, is 8 of 14 without it, because it calls the filters directly."
+    },
+    {
+      "slug": "rails-test-support-classes",
+      "title": "A Rails support class a test constructs by name — `ActionDispatch::TestRequest`, `ActiveSupport::Logger`",
+      "owner": "compiler",
+      "match": "uninitialized constant (ActionDispatch::TestRequest|ActiveSupport::Logger|ActiveSupport::TaggedLogging)",
+      "note": "`Current.set request: ActionDispatch::TestRequest.create(\"HTTP_HOST\" => …)` is how the opengraph-embed test names this Campfire's own host; `ActiveSupport::Logger.new(io)` wrapped in `TaggedLogging` is how the log-scrubbing test reproduces production's logger stack. Neither is app code, and neither exists in the emit."
+    },
+    {
+      "slug": "kwargs-splat-forwarding",
+      "title": "A test-local helper forwarding `**attributes` to a keyword-only callee",
+      "owner": "compiler",
+      "match": "wrong number of arguments \\(given 1, expected 0; required keywords: ",
+      "note": "`def embed_from(**attributes) = attachment_for(**attributes).attachable` — the caller's keywords splatted through to a `(href:, url:, filename: …, caption: …)` signature. The emit lowers `**attributes` to a positional Hash and the callee still wants keywords, so every one of the eight opengraph-embed tests trips here before it reaches the subject. Sibling of `test-helper-kwarg-defaults`, which filled the SKIPPED slots; this is the splat."
+    },
+    {
+      "slug": "actiontext-fragment-mutation",
+      "title": "`ActionText::Fragment#update` / `Node#inner_html=` — rewriting a parsed body in place",
+      "owner": "compiler",
+      "match": "undefined method '(update|replace)' for an instance of ActionText::Fragment|undefined method 'inner_html=' for an instance of ActionText::Node|(refute_equal|assert_match) failed",
+      "match_test": "ContentFiltersTest#test_(entire_message_contains_an_unfurled_url|unfurled_tweet)",
+      "note": "campfire's `RemoveSoloUnfurledLinkText` (`fragment.replace(\"div\") { |n| n.inner_html = … }`) and `StyleUnfurledTwitterAvatars` (`fragment.update { |source| source.at_css(\"div\")[\"class\"] = … }`) are the two filters that MUTATE the parsed fragment rather than read it. The runtime's Fragment answers `find_all`, `to_html` and `to_plain_text` — the read side the sanitizer needed — and none of the write side, so one of them raises and the other is skipped (`applicable?` is answered, `apply` never lands), which is the `refute_equal failed` a solo unfurled URL reads as: the body came back unchanged."
+    },
+    {
+      "slug": "activesupport-string-core-ext",
+      "title": "An ActiveSupport String core extension — `squish`",
+      "owner": "compiler",
+      "match": "undefined method '(squish|squish!|truncate_words|remove)' for an instance of String",
+      "note": "`<<~HTML.squish` in a test body. `blank?`/`present?`/`truncate` landed as the corpus called them; this is the next one it did."
+    },
+    {
+      "slug": "ipaddr-octets-on-stdlib",
+      "title": "The surfguard port calls `IPAddr#octets`, which only the runtime's own IPAddr has",
+      "owner": "compiler",
+      "match": "undefined method 'octets' for an instance of IPAddr",
+      "note": "runtime/ruby/surfguard.rb reads the embedded IPv4 of a NAT64 / SIIT address through `IPAddr#octets` — a method runtime/ruby/ipaddr.rb defines and Ruby's stdlib `ipaddr` does not. The ruby family runs on the stdlib one, so on that lane `private_ip?(\"64:ff9b::a9fe:a9fe\")` RAISES rather than answering true: the guard fails closed (a NoMethodError, not a pass-through), but it fails, and the three NAT64/SIIT tests say so. Twenty-one of the twenty-four guard tests pass. The port should read the low 32 bits through `to_i`, which both IPAddrs answer."
+    },
+    {
+      "slug": "vips-policy-not-applied-in-tests",
+      "title": "The libvips loader policy is applied by the image processor's file, which the test process never loads",
+      "owner": "harness",
+      "match": "assert_(nil|match) failed",
+      "match_test": "VipsLoaderPolicyTest#test_denies_",
+      "note": "campfire's config/initializers/vips.rb (`Vips.block_untrusted(true)`, `Vips.block(\"VipsForeignLoadOpenslide\", true)`) is lifted at ingest onto the Application reopen and applied in runtime/active_storage_processor.rb — once, process-wide, where the server loads it. The emitted test_helper does not load that file, so in the test process the policy is simply absent: `Vips.vips_foreign_find_load` picks magickload for a BMP and the ten `denies …` tests fail, while the seven `loads …` pass. In Rails the initializer runs at boot for tests too. The fix is the harness applying the app's boot-time policy the way the server does; nothing here says the SERVER is unguarded."
+    },
+    {
       "slug": "test-harness-surface",
       "title": "The emitted test base class is missing Rails' test surface",
       "owner": "compiler",
-      "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body)' for an instance of \\S*Test\\b",
-      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls.",
+      "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body|skip)' for an instance of \\S*Test\\b",
+      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls. `skip` joined the list on 2026-09-20 with test/lib: `VipsLoaderPolicyTest` skips a loader libvips was not built with.",
       "at_zero": "the family landed over several commits, `fixture_file_upload` last in f86ac0b6; the rule stays as a regression tripwire."
     },
     {
@@ -167,7 +240,7 @@
       "slug": "globalid-sgid",
       "title": "Global IDs — minting and dereferencing an sgid",
       "owner": "compiler",
-      "match": "(attachable_sgid|to_gid_param|uninitialized constant ActionText::Fragment)",
+      "match": "(attachable_sgid|to_gid_param|undefined method 'to_gid'|uninitialized constant ActionText::Fragment)",
       "note": "docs/pipeline/runtime.md now carries the split: `attachable_ids(\"User\")` verifies an sgid and `lower::attachables_grep` rewrites `body.attachables.grep(User)` into a query over the ids, so a caller that NAMES its class resolves. The name-keyed dispatch exists now too: `ActionText::Attachable.locate` is generated per app as a `case` over the models that mix `Attachable` in, and `Attachment#attachable` resolves through it. What is left is MINTING — `to_gid_param` on a record — and a bare `attachables`, which still answers `[]` rather than the poly list the generated locator could now fill."
     },
     {
