@@ -262,6 +262,19 @@ pub(super) fn library_class_and_struct_base(
                 continue;
             }
             if let ExprNode::Send { args, .. } = &mut *value.node {
+                // `Desktop = new` — no serialized value given. sorbet
+                // derives it from the constant name, and derives it by
+                // DOWNCASING and nothing else: `PartiallyCompleted` is
+                // "partiallycompleted", not "partially_completed"
+                // (`const_to_serialized_val`, whose own comment says
+                // the lowercase form is historical). Without this the
+                // constant name landed in the value's slot and the
+                // member was built with one argument where the
+                // constructor takes two — an ArgumentError at LOAD
+                // time, which takes the whole tree with it.
+                if args.is_empty() {
+                    args.push(str_lit(&name.as_str().to_lowercase()));
+                }
                 args.push(str_lit(name.as_str()));
             }
         }
@@ -300,12 +313,22 @@ pub(super) fn library_class_and_struct_base(
 /// build the type object with.
 pub(super) fn is_sorbet_type_alias(value: &ruby_prism::Node<'_>) -> bool {
     let Some(call) = value.as_call_node() else { return false };
-    if constant_id_str(&call.name()) != "type_alias" {
-        return false;
+    match constant_id_str(&call.name()) {
+        "type_alias" => call
+            .receiver()
+            .and_then(|r| r.as_constant_read_node())
+            .is_some_and(|c| constant_id_str(&c.name()) == "T"),
+        // `EventType = type_member { { upper: Event } }` — a type
+        // PARAMETER, declared by a receiverless call `T::Generic`
+        // provides. The annotations pass drops that `extend`, which is
+        // right, and left this behind, which was not: the emitted
+        // class called a method nothing defines and the tree stopped
+        // loading there. A type parameter has no more runtime than the
+        // alias above it, and the only thing that reads either is a
+        // `sig`.
+        "type_member" | "type_template" => call.receiver().is_none(),
+        _ => false,
     }
-    call.receiver()
-        .and_then(|r| r.as_constant_read_node())
-        .is_some_and(|c| constant_id_str(&c.name()) == "T")
 }
 
 /// `T::Enum` in superclass position. Like `T::Struct` it is a class

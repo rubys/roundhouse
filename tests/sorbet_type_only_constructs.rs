@@ -70,6 +70,34 @@ end
 }
 
 #[test]
+fn a_type_member_goes_with_the_extend_that_enabled_it() {
+    // `EventType = type_member { { upper: Event } }` declares a type
+    // PARAMETER through a receiverless call `T::Generic` provides. The
+    // annotations pass drops that `extend`, correctly, and left this
+    // behind — so the emitted class called a method nothing defines
+    // and the tree stopped LOADING there, which no amount of checking
+    // shows.
+    let emitted = emitted(
+        r#"class Handler
+  extend T::Generic
+
+  EventType = type_member { { upper: Integer } }
+  LIMIT = 100
+
+  def run
+    LIMIT
+  end
+end
+"#,
+        "handler.rb",
+    );
+    assert!(!emitted.contains("type_member"), "got:\n{emitted}");
+    assert!(!emitted.contains("EventType"), "got:\n{emitted}");
+    // An ordinary constant beside it is untouched, as ever.
+    assert!(emitted.contains("LIMIT = 100"), "got:\n{emitted}");
+}
+
+#[test]
 fn a_type_alias_in_a_controller_goes_too() {
     // A controller body has its own ingest path, and it carried the
     // alias when the class-body one had stopped — the emitted
