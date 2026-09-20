@@ -3121,15 +3121,6 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/active_record_equality_spinel.rbs".to_string(), rbs));
     }
 
-    // Digest::MD5 sidecar — runtime/digest_md5.rb is the class spinel's
-    // digest package does not bind, ported for Active Storage's
-    // direct-upload checksums; the .rbs types its three readers.
-    {
-        let rbs = crate::runtime_files::read_to_string("runtime/spinel/digest_md5.rbs")
-            .map_err(|e| format!("read runtime/spinel/digest_md5.rbs: {e}"))?;
-        files.push(("sig/runtime/digest_md5.rbs".to_string(), rbs));
-    }
-
     // RecordIdentifier sidecar — runtime/record_identifier_spinel.rb
     // names `ActionView::RecordIdentifier.dom_id`; the .rbs carries the
     // shared `dom_id`'s contract so the record argument stays typed.

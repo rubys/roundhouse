@@ -29,10 +29,6 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
-# Digest::MD5 — spinel's digest package binds SHA-256/SHA-1 only; Active
-# Storage's direct-upload checksums are MD5. spinel-tree only: the CRuby
-# overlay has the stdlib's.
-require_relative "runtime/digest_md5"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from

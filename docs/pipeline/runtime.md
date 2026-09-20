@@ -1107,9 +1107,10 @@ which the engine controllers set from the request (Rails'
 `SetCurrent`) and a caller outside a request sets itself. Divergence,
 named: Rails raises when the disk service is asked for a url with no
 options set; here the url is path-only, which a browser resolves
-against the page. `Digest::MD5` is ported for the spinel tree
-(`runtime/spinel/digest_md5.rb`) — spinel's `digest` package binds
-SHA-256 and SHA-1 only.
+against the page. The checksum is `Digest::MD5.base64digest` on both
+lanes — spinel's `digest` package bound it the day it was asked for
+(matz/spinel#4631, 00e00631); a pure-Ruby port stood in for one
+commit.
 
 **The guard.** Rails mounts these two endpoints on every app whether
 or not its forms use direct uploads, so campfire — whose composer
