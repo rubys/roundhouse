@@ -22,7 +22,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 977cbcd135783e09d631301bc39cbb4e7961ec4e
+  CAMPFIRE_SHA: ed0f9a5dba396a2f70e62328c9079929d5df9b46
 
 jobs:
   # -------------------------------------------------------------------
@@ -1195,6 +1195,12 @@ jobs:
       # on attachment RENDERING, and they found that @mentions and link
       # previews never reach their partials on either lane
       # (`attachable-partials-not-rendered`).
+      #
+      # `ed0f9a5d` (2026-09-20) is one commit past `977cbcd1`: our own
+      # basecamp/once-campfire#279, merged by rosa, which mints the
+      # tampered sgid in action_text_attachment_test with `to_sgid(for:)`
+      # instead of extending one live Room. The suite is otherwise
+      # unchanged, and the last ledger line (`object-extend`) reads zero.
         env:
           FLOOR_TESTS: 256
           FLOOR_FILES: 42
