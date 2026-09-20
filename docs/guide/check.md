@@ -54,7 +54,13 @@ same table:
 
 - **`sig/**/*.rbs`** — RBS written for roundhouse, keyed by class and
   method. This is the sidecar the analyzer has always read; it wins
-  wherever both sources declare the same method.
+  wherever both sources declare the same method. `instance` is
+  readable here, and `self` on an instance-side member: both mean an
+  instance of the class that RECEIVED the call, so one line on a base
+  class types the inherited factory for every subclass
+  (`def self.instance: () -> instance`) instead of one line per
+  subclass. Declare a namespaced class with nested `module` blocks —
+  a declaration written `class A::B` is currently keyed as `B`.
 - **Sorbet `sig` blocks** — annotations an app on sorbet-runtime has
   already written, read in place from `app/` and `lib/`. A
   `sig { params(user: User).returns(T.nilable(String)) }` above a `def`
@@ -62,24 +68,38 @@ same table:
   declare typed readers (and, for `prop`, writers). The grammar read is
   `params` / `returns` / `void`, the modifiers (`override`, `abstract`,
   `checked`, …), and for types `T.nilable`, `T.any`, `T.untyped`,
-  `T::Boolean`, `T::Array[…]`, `T::Hash[…, …]` and class constants. A
-  `sig` outside that — `type_parameters`, `T.attached_class`,
-  `T.self_type`, shapes, proc types, a parameter name the `def` does
-  not have — is dropped whole and the method is inferred as before; a
-  `sig` above `attr_reader` or above `private def` is not paired. A
-  `sig` inside `class << self` IS paired, and what it declares there is
-  class-side — so `T.self_type` means the class object there and stays
-  unread, exactly as it does above a `def self.x`.
+  `T::Boolean`, `T::Array[…]`, `T::Hash[…, …]` and class constants.
+  `T.attached_class` reads as the self type — an instance of the class
+  that RECEIVED the call, substituted with that class at dispatch, so
+  a factory declared once on a base class answers with an instance of
+  whichever subclass called it. `T.self_type` reads the same way on an
+  instance-side `def`; on a `def self.x` — or on any `def` inside
+  `class << self`, which is class-side too — it means the class
+  object, which has no type to give it, so it stays unread. A `sig`
+  outside all that — `type_parameters`, shapes, proc types, a
+  parameter name the `def` does not have — is dropped whole and the
+  method is inferred as before; a `sig` above `attr_reader` or above
+  `private def` is not paired.
   `T.let`, `T.cast`, `T.must`, `T.bind`,
   `T.unsafe` and `T.assert_type!` unwrap to the value they wrap so its
   own inferred type flows on; the annotation on those is discarded, so
   `T.must(x)` does not narrow `x` past what inference already knows.
 
-Where an annotation and inference disagree, the annotation wins, and
-silently — today. The seeds feed the analyzer's dispatch table, which
-is what `check`, the editor, the MCP server and the emitters' typing
-read; the Spinel lane's own `.rbs` sidecar is typed from the lowered
-code rather than from them.
+The two sources above settle against each other — the sidecar wins
+where both declare the same method. Against INFERENCE, neither wins:
+where the analyzer can type a method's body, the return harvested from
+that body overwrites the declared one at dispatch, whichever source
+declared it. A sidecar saying `Integer` over a body that plainly
+returns a string reads as `String` at the call site, and the table
+still holds the `Integer` that lost. So a declaration is worth writing
+where inference runs OUT — the boundary these annotations exist for —
+and is not a way to correct inference where it has an answer you
+disagree with. Silent either way, today.
+
+The seeds feed the analyzer's dispatch table, which is what `check`,
+the editor, the MCP server and the emitters' typing read; the Spinel
+lane's own `.rbs` sidecar is typed from the lowered code rather than
+from them.
 
 ## The two modes
 
