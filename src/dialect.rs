@@ -1127,6 +1127,14 @@ pub struct Action {
     /// and crashing the body that still reads them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opt_params: Vec<(Symbol, Expr)>,
+    /// Keyword params with their default-value exprs (`None` for a
+    /// required one), in declaration order. Same reason as
+    /// `opt_params`, and the same bug when they are missing: a helper
+    /// emitted as `def label_for` while its own call site still passes
+    /// `label_for(code:, upcase:)` raises `ArgumentError` the first
+    /// time the action runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kw_params: Vec<(Symbol, Option<Expr>)>,
     /// The captured block parameter name (`def f(&block)`), if the method
     /// names its block. Occupies the `def`-site `&`-slot, distinct from
     /// the positional `params`.

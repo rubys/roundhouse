@@ -1712,6 +1712,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         name: method.name.clone(),
                         params,
                         opt_params,
+                        kw_params: Vec::new(),
                         block_param: method.block_param.as_ref().map(|p| p.name.clone()),
                         body,
                         renders: RenderTarget::Inferred,
@@ -3182,6 +3183,7 @@ fn synthesize_redirect_controller(
                     name: redirect.action.clone(),
                     params: crate::ty::Row::default(),
                     opt_params: Vec::new(),
+                    kw_params: Vec::new(),
                     block_param: None,
                     name_span: Span::synthetic(),
                     body: Expr::new(

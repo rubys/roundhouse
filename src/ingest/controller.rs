@@ -287,6 +287,7 @@ fn ingest_controller_body_item(
         // unhandled for now.
         let mut params = Row::closed();
         let mut opt_params: Vec<(Symbol, Expr)> = Vec::new();
+        let mut kw_params: Vec<(Symbol, Option<Expr>)> = Vec::new();
         let mut block_param: Option<Symbol> = None;
         if let Some(pn) = def.parameters() {
             for req in pn.requireds().iter() {
@@ -297,13 +298,27 @@ fn ingest_controller_body_item(
                 }
             }
             // Optional positionals (`opts = {}`) — keep the name + default
-            // so the emitted signature round-trips. Keyword / rest / post
-            // params still need richer modeling and stay unhandled.
+            // so the emitted signature round-trips. Rest / post params
+            // still need richer modeling and stay unhandled.
             for opt in pn.optionals().iter() {
                 if let Some(op) = opt.as_optional_parameter_node() {
                     let name = Symbol::from(constant_id_str(&op.name()));
                     let default = ingest_expr(&op.value(), file)?;
                     opt_params.push((name, default));
+                }
+            }
+            // Keyword params (`def f(code:, upcase: true)`) — same
+            // reason as the optionals above, and the same failure when
+            // they are dropped: the body still reads the names, and
+            // the call site still passes them, so the emitted `def`
+            // took neither and raised.
+            for kw in pn.keywords().iter() {
+                if let Some(req) = kw.as_required_keyword_parameter_node() {
+                    kw_params.push((Symbol::from(constant_id_str(&req.name())), None));
+                } else if let Some(opt) = kw.as_optional_keyword_parameter_node() {
+                    let name = Symbol::from(constant_id_str(&opt.name()));
+                    let default = ingest_expr(&opt.value(), file)?;
+                    kw_params.push((name, Some(default)));
                 }
             }
             // Block param (`&block`) — methods that name their block so
@@ -325,6 +340,7 @@ fn ingest_controller_body_item(
                 name: Symbol::from(action_name),
                 params,
                 opt_params,
+                kw_params,
                 block_param,
                 body: body_expr,
                 renders,

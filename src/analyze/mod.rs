@@ -1425,6 +1425,7 @@ impl Analyzer {
                     origin,
                     &action.name,
                     &action.params,
+                    &action.kw_params,
                     action.block_param.as_ref(),
                 );
                 self.body_typer().analyze_expr(&mut action.body, &mctx);
@@ -1767,6 +1768,7 @@ impl Analyzer {
                             origin,
                             &action.name,
                             &action.params,
+                            &action.kw_params,
                             action.block_param.as_ref(),
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
@@ -2249,6 +2251,7 @@ impl Analyzer {
                         origin,
                         &action.name,
                         &action.params,
+                        &action.kw_params,
                         action.block_param.as_ref(),
                     );
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
@@ -2932,6 +2935,35 @@ impl Analyzer {
     /// `Ty::Var` for `Var { name }` reads — same as before any
     /// inference ran. Each fixpoint iteration that refines a param's
     /// type makes the next typing pass see a more concrete binding.
+    /// The parameter type a SIGNATURE declares for this method.
+    ///
+    /// `sig` blocks and `sig/**/*.rbs` land in the same table, so this
+    /// covers both. Matched by name before position: a signature names
+    /// its parameters and so does the `MethodDef`, and for keyword
+    /// arguments the two orders can differ.
+    ///
+    /// Used only where inference has nothing better — see the call
+    /// sites. A declaration is worth reading where inference runs out,
+    /// which for a parameter is the common case: its type is a fact
+    /// about the CALLERS, and a private helper nobody calls from a
+    /// typed site has none.
+    fn declared_param_ty(
+        &self,
+        class_id: &ClassId,
+        method: &Symbol,
+        index: usize,
+        name: &Symbol,
+    ) -> Option<Ty> {
+        let cls = self.classes.get(class_id)?;
+        let ty = cls
+            .instance_methods
+            .get(method)
+            .or_else(|| cls.class_methods.get(method))?;
+        let Ty::Fn { params, .. } = ty else { return None };
+        let found = params.iter().find(|p| p.name == *name).or_else(|| params.get(index))?;
+        (!matches!(found.ty, Ty::Var { .. } | Ty::Untyped)).then(|| found.ty.clone())
+    }
+
     fn seed_method_params(
         &self,
         base: &Ctx,
@@ -2943,7 +2975,18 @@ impl Analyzer {
         let mut ctx = base.clone();
         for (i, param) in method.params.iter().enumerate() {
             let from_sites = observed.and_then(|v| v.get(i)).cloned();
-            if let Some(ty) = param_ty_with_default(from_sites, param) {
+            let seeded = param_ty_with_default(from_sites, param);
+            // A declared type fills in where the call sites said
+            // nothing. Strictly additive: an observed type that IS
+            // something keeps winning, so nothing that resolves today
+            // resolves differently.
+            let ty = match &seeded {
+                Some(t) if !matches!(t, Ty::Var { .. }) => seeded.clone(),
+                _ => self
+                    .declared_param_ty(class_id, &method.name, i, &param.name)
+                    .or_else(|| seeded.clone()),
+            };
+            if let Some(ty) = ty {
                 ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
@@ -2968,6 +3011,7 @@ impl Analyzer {
         origin: Option<&ClassId>,
         action_name: &Symbol,
         params: &Row,
+        kw_params: &[(Symbol, Option<crate::expr::Expr>)],
         block_param: Option<&Symbol>,
     ) -> Ctx {
         let own = self.inferred_params.get(&(class_id.clone(), action_name.clone()));
@@ -2981,7 +3025,24 @@ impl Analyzer {
                 .filter_map(|v| v.get(i).cloned())
                 .filter(|t| !matches!(t, Ty::Var { .. }))
                 .reduce(unify_param_ty);
-            if let Some(ty) = observed {
+            let ty = observed
+                .or_else(|| self.declared_param_ty(class_id, action_name, i, name));
+            if let Some(ty) = ty {
+                ctx.local_bindings.insert(name.clone(), ty);
+            }
+        }
+        // Keyword params sit beside the positional row rather than in
+        // it, and a call site passes them by NAME — so there is no
+        // index to read an observation from. The declaration is the
+        // only source, which is the case the signature readers exist
+        // for.
+        for (i, (name, _)) in kw_params.iter().enumerate() {
+            if ctx.local_bindings.contains_key(name) {
+                continue;
+            }
+            if let Some(ty) =
+                self.declared_param_ty(class_id, action_name, params.fields.len() + i, name)
+            {
                 ctx.local_bindings.insert(name.clone(), ty);
             }
         }
