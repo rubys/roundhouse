@@ -149,7 +149,16 @@ pub(in crate::analyze) fn register(
         ] {
             request.instance_methods.insert(Symbol::from(m), Ty::Str);
         }
-        for m in ["referer", "referrer", "content_type", "origin", "subdomain", "remote_addr"] {
+        for m in [
+            "referer", "referrer", "content_type", "origin", "subdomain", "remote_addr",
+            // The CSP nonce a layout interpolates into a script tag —
+            // `get_header(NONCE)`, so nil until a policy sets one.
+            // Typing `request` on the view context is what surfaced
+            // its absence: a template that reads it turned from an
+            // untyped call into a dispatch failure, which is the
+            // trade typing anything makes.
+            "content_security_policy_nonce",
+        ] {
             request.instance_methods.insert(Symbol::from(m), str_or_nil());
         }
         for m in [
@@ -166,10 +175,20 @@ pub(in crate::analyze) fn register(
             request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
         }
         classes.insert(request_id.clone(), request);
-        app_ctrl.class_methods.insert(
-            Symbol::from("request"),
-            Ty::Class { id: request_id, args: vec![] },
-        );
+        let request_ty = Ty::Class { id: request_id, args: vec![] };
+        // A template reads `request` too — Rails' view context
+        // delegates it, and a layout reaching for
+        // `request.content_security_policy_nonce` is the shape that
+        // found this. Registered on both contexts for the same reason
+        // `flash` is (see `registry::view`): the controller has it
+        // class-side, the view instance-side, and it is one object.
+        if let Some(view_cls) = classes.get_mut(&ClassId(Symbol::from("ActionView::Base")))
+        {
+            view_cls
+                .instance_methods
+                .insert(Symbol::from("request"), request_ty.clone());
+        }
+        app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
