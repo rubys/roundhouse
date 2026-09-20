@@ -66,8 +66,11 @@ same table:
   `sig` outside that — `type_parameters`, `T.attached_class`,
   `T.self_type`, shapes, proc types, a parameter name the `def` does
   not have — is dropped whole and the method is inferred as before; a
-  `sig` above `attr_reader`, above `private def`, or inside
-  `class << self` is not paired. `T.let`, `T.cast`, `T.must`, `T.bind`,
+  `sig` above `attr_reader` or above `private def` is not paired. A
+  `sig` inside `class << self` IS paired, and what it declares there is
+  class-side — so `T.self_type` means the class object there and stays
+  unread, exactly as it does above a `def self.x`.
+  `T.let`, `T.cast`, `T.must`, `T.bind`,
   `T.unsafe` and `T.assert_type!` unwrap to the value they wrap so its
   own inferred type flows on; the annotation on those is discarded, so
   `T.must(x)` does not narrow `x` past what inference already knows.
