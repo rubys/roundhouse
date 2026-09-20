@@ -9,7 +9,9 @@
 # runtime's SHA-256 and SHA-1 and nothing else (packages/digest/
 # digest.rb), so the class is ported here for the spinel tree; the
 # CRuby overlay has the stdlib's and never loads this file. Nothing in
-# it is hot — one digest per upload.
+# it is hot — one digest per upload. Filed as matz/spinel#4631 with the
+# contract that lets this file be deleted (a native MD5 beside the SHA
+# pair, `base64digest` on all three).
 #
 # 32-bit arithmetic on a 64-bit Integer, masked at every add; the
 # rotate is two shifts. `getbyte` rather than `unpack`, which the
