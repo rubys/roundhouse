@@ -312,5 +312,25 @@ pub(in crate::analyze) fn register(
             );
         }
     }
-    classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
+    // The surface belongs to `ActionController::Base`, which is where
+    // Rails defines it and where the emitted runtime puts it — not to
+    // `ApplicationController`, which is merely the class an app's own
+    // controllers happen to inherit from. Registered there, with
+    // `ApplicationController` inheriting it, so a controller that does
+    // NOT descend from the app's own base still resolves: roundhouse's
+    // synthesized redirect controller is exactly that, and its
+    // `redirect_to` read as a call nothing knew.
+    let acb_id = ClassId(Symbol::from("ActionController::Base"));
+    let acb = classes.entry(acb_id.clone()).or_default();
+    acb.instance_methods.extend(app_ctrl.instance_methods.drain());
+    for (name, ty) in app_ctrl.class_methods.drain() {
+        acb.class_methods.insert(name, ty);
+    }
+    acb.includes.extend(app_ctrl.includes.drain(..));
+    // The entry stays — code and tests key on it, and an app's own
+    // `ApplicationController` merges into it — but what it carries now
+    // comes from its parent.
+    let mut app_ctrl_entry = app_ctrl;
+    app_ctrl_entry.parent = Some(acb_id);
+    classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl_entry);
 }
