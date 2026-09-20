@@ -204,6 +204,17 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
         // apply_datetime_lowering.
         Ty::Time => "Time".into(),
         Ty::Nil => "nil".into(),
+        // RBS can SPELL this one — `instance` is its own syntax, and
+        // it is where roundhouse reads it from. It is still a
+        // diagnostic rather than a round-trip: `dispatch` substitutes
+        // a self type with the receiving class before the type is
+        // stored or joined (see `Ty::SelfInstance`), so one arriving
+        // here is a signature that was read and never dispatched.
+        // Printing `instance` back out would make that defect
+        // invisible precisely because the output stays valid.
+        Ty::SelfInstance => {
+            crate::emit::diagnostics::unsupported_self_instance_ty("rbs")
+        }
         // Analysis-time relation type. On the STRICT targets reaching
         // here is a coverage gap — a chain that escaped the arel fold
         // with no runtime to fall back on — and their renderers report

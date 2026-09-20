@@ -26,6 +26,12 @@ pub fn rust_ty(ty: &Ty) -> String {
         // Analysis-time relation type — erased by query specialization
         // before emit (see `Ty::Relation`). Reaching here is a
         // coverage gap: report, never degrade to `Vec<T>`.
+        // A self type the analyzer should have substituted with
+        // the receiving class (see `Ty::SelfInstance`). Reaching
+        // here is a defect: report, never guess a class.
+        Ty::SelfInstance => {
+            return crate::emit::diagnostics::unsupported_self_instance_ty("rust");
+        }
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("rust", of);
         }

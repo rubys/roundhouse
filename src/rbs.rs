@@ -265,6 +265,16 @@ fn method_signature_ty(
     method: &ruby_rbs::node::MethodDefinitionNode<'_>,
     scope: Option<&str>,
 ) -> Result<Ty, String> {
+    // RBS `self` on an instance member is the receiving class; on a
+    // singleton member it is the class object. See `TyCtx`.
+    let ctx = TyCtx {
+        scope,
+        self_is_instance: matches!(
+            method.kind(),
+            ruby_rbs::node::MethodDefinitionKind::Instance
+                | ruby_rbs::node::MethodDefinitionKind::SingletonInstance
+        ),
+    };
     let mut overloads = method.overloads().iter();
     let first = overloads
         .next()
@@ -298,7 +308,7 @@ fn method_signature_ty(
     };
 
     let method_name = method.name().as_str().to_string();
-    let (mut params, ret) = parse_function_type_to_fn(&fn_type, &method_name, scope)?;
+    let (mut params, ret) = parse_function_type_to_fn(&fn_type, &method_name, ctx)?;
 
     // Block signature: `{ (...) -> T }` — captured on method_type, not
     // fn_type. Parse the block's function type into a `Ty::Fn` (with
@@ -308,7 +318,7 @@ fn method_signature_ty(
     let block_ty = if let Some(block_node) = method_type.block() {
         if let Node::FunctionType(block_fn_type) = block_node.type_() {
             let (block_params, block_ret) =
-                parse_function_type_to_fn(&block_fn_type, &method_name, scope)?;
+                parse_function_type_to_fn(&block_fn_type, &method_name, ctx)?;
             Some(Ty::Fn {
                 params: block_params,
                 block: None,
@@ -346,7 +356,7 @@ fn method_signature_ty(
 fn parse_function_type_to_fn(
     fn_type: &ruby_rbs::node::FunctionTypeNode<'_>,
     method_name: &str,
-    scope: Option<&str>,
+    ctx: TyCtx<'_>,
 ) -> Result<(Vec<Param>, Ty), String> {
     let mut params = Vec::new();
 
@@ -356,7 +366,7 @@ fn parse_function_type_to_fn(
         ParamKind::Required,
         method_name,
         "required",
-        scope,
+        ctx,
     )?;
     collect_function_params(
         fn_type.optional_positionals().iter(),
@@ -364,7 +374,7 @@ fn parse_function_type_to_fn(
         ParamKind::Optional,
         method_name,
         "optional",
-        scope,
+        ctx,
     )?;
 
     // `*rest` positional. Prism-rbs models this as a single optional
@@ -383,7 +393,7 @@ fn parse_function_type_to_fn(
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("rest"));
-        let elem_ty = ty_from_node(&fn_param.type_(), scope)?;
+        let elem_ty = ty_from_node(&fn_param.type_(), ctx)?;
         let ty = Ty::Array { elem: Box::new(elem_ty) };
         params.push(Param { name, ty, kind: ParamKind::Rest });
     }
@@ -394,7 +404,7 @@ fn parse_function_type_to_fn(
         ParamKind::Required,
         method_name,
         "trailing",
-        scope,
+        ctx,
     )?;
 
     // Required keywords: `k: Ty` (no default marker on the RBS side).
@@ -406,7 +416,7 @@ fn parse_function_type_to_fn(
                 name.as_str()
             ));
         };
-        let ty = ty_from_node(&fn_param.type_(), scope)?;
+        let ty = ty_from_node(&fn_param.type_(), ctx)?;
         params.push(Param {
             name,
             ty,
@@ -423,7 +433,7 @@ fn parse_function_type_to_fn(
                 name.as_str()
             ));
         };
-        let ty = ty_from_node(&fn_param.type_(), scope)?;
+        let ty = ty_from_node(&fn_param.type_(), ctx)?;
         params.push(Param {
             name,
             ty,
@@ -445,7 +455,7 @@ fn parse_function_type_to_fn(
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("opts"));
-        let value_ty = ty_from_node(&fn_param.type_(), scope)?;
+        let value_ty = ty_from_node(&fn_param.type_(), ctx)?;
         let ty = Ty::Hash {
             key: Box::new(Ty::Sym),
             value: Box::new(value_ty),
@@ -457,7 +467,7 @@ fn parse_function_type_to_fn(
         });
     }
 
-    let ret = ty_from_node(&fn_type.return_type(), scope)?;
+    let ret = ty_from_node(&fn_type.return_type(), ctx)?;
     Ok((params, ret))
 }
 
@@ -477,7 +487,7 @@ fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
     kind: ParamKind,
     method_name: &str,
     category: &str,
-    scope: Option<&str>,
+    ctx: TyCtx<'_>,
 ) -> Result<(), String> {
     // Placeholder prefix for unnamed positionals. Keep "arg" for the
     // required/optional/trailing cases so the existing convention
@@ -492,7 +502,7 @@ fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new(format!("arg{idx}")));
-        let ty = ty_from_node(&fn_param.type_(), scope)?;
+        let ty = ty_from_node(&fn_param.type_(), ctx)?;
         out.push(Param { name, ty, kind: kind.clone() });
     }
     Ok(())
@@ -594,14 +604,36 @@ fn is_builtin_class_name(name: &str) -> bool {
     )
 }
 
-fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
+/// What a type expression is being read IN: the namespace bare class
+/// refs qualify against, and whether the member it belongs to is
+/// instance-side.
+///
+/// The second one is only about RBS `self`. On an instance member
+/// `self` means an instance of the receiving class — the same fact as
+/// `instance`. On a SINGLETON member it means the class OBJECT, which
+/// `Ty` has no variant for, so it stays unread rather than being given
+/// an instance type it does not have: a strict target would find the
+/// difference later, and by then it would look like inference.
+#[derive(Clone, Copy)]
+struct TyCtx<'a> {
+    scope: Option<&'a str>,
+    self_is_instance: bool,
+}
+
+impl<'a> TyCtx<'a> {
+    fn new(scope: Option<&'a str>) -> Self {
+        TyCtx { scope, self_is_instance: false }
+    }
+}
+
+fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
     match node {
         Node::ClassInstanceType(class_type) => {
-            let qualified = qualify_class_ref(&class_type.name(), scope);
+            let qualified = qualify_class_ref(&class_type.name(), ctx.scope);
             let args: Vec<Ty> = class_type
                 .args()
                 .iter()
-                .map(|n| ty_from_node(&n, scope))
+                .map(|n| ty_from_node(&n, ctx))
                 .collect::<Result<_, _>>()?;
             Ok(map_class_instance(&qualified, args))
         }
@@ -618,14 +650,14 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
         // at emit time.
         Node::AnyType(_) => Ok(Ty::Untyped),
         Node::OptionalType(opt) => {
-            let inner = ty_from_node(&opt.type_(), scope)?;
+            let inner = ty_from_node(&opt.type_(), ctx)?;
             Ok(union_or_single(vec![inner, Ty::Nil]))
         }
         Node::UnionType(u) => {
             let variants: Vec<Ty> = u
                 .types()
                 .iter()
-                .map(|n| ty_from_node(&n, scope))
+                .map(|n| ty_from_node(&n, ctx))
                 .collect::<Result<_, _>>()?;
             Ok(union_or_single(variants))
         }
@@ -633,7 +665,7 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
             let elems: Vec<Ty> = t
                 .types()
                 .iter()
-                .map(|n| ty_from_node(&n, scope))
+                .map(|n| ty_from_node(&n, ctx))
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple { elems })
         }
@@ -654,7 +686,7 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
                 let Node::RecordFieldType(field) = value else {
                     return Err("record-type value is not a RecordFieldType".to_string());
                 };
-                let ty = ty_from_node(&field.type_(), scope)?;
+                let ty = ty_from_node(&field.type_(), ctx)?;
                 fields.insert(name, ty);
             }
             Ok(Ty::Record { row: crate::ty::Row { fields, rest: None } })
@@ -672,7 +704,7 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
             let Node::FunctionType(fn_type) = p.type_() else {
                 return Err("proc-type payload is not a FunctionType".to_string());
             };
-            let (params, ret) = parse_function_type_to_fn(&fn_type, "(proc)", scope)?;
+            let (params, ret) = parse_function_type_to_fn(&fn_type, "(proc)", ctx)?;
             Ok(Ty::Fn {
                 params,
                 block: None,
@@ -680,6 +712,18 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
                 effects: EffectSet::default(),
             })
         }
+        // `instance` — an instance of the class that RECEIVED the
+        // call, which is exactly what a base class cannot name about
+        // its subclasses. Until this arm existed, a signature
+        // containing one failed to parse and took the whole method
+        // signature with it, so an inherited factory typed as nothing
+        // at all and the chain below it went untyped.
+        Node::InstanceType(_) => Ok(Ty::SelfInstance),
+        // `self` on an INSTANCE member is the same fact. On a
+        // singleton member it is the class object, which `Ty` cannot
+        // spell — that falls through to the error below and stays an
+        // honestly unread signature rather than a wrong one.
+        Node::SelfType(_) if ctx.self_is_instance => Ok(Ty::SelfInstance),
         other => Err(format!(
             "unsupported RBS type node: {}",
             type_node_kind(other)
@@ -731,6 +775,9 @@ fn type_node_kind(node: &Node<'_>) -> &'static str {
     match node {
         Node::ClassInstanceType(_) => "ClassInstanceType",
         Node::ClassSingletonType(_) => "ClassSingletonType",
+        Node::InstanceType(_) => "InstanceType",
+        Node::SelfType(_) => "SelfType",
+        Node::ClassType(_) => "ClassType",
         Node::InterfaceType(_) => "InterfaceType",
         Node::AliasType(_) => "AliasType",
         Node::LiteralType(_) => "LiteralType",
@@ -962,6 +1009,48 @@ mod tests {
         } else {
             panic!("expected Ty::Fn, got {ty:?}");
         }
+    }
+
+    #[test]
+    fn instance_parses_as_the_self_type() {
+        // `instance` is what a base class says about its callers, and
+        // until it parsed, a signature carrying one failed WHOLE — the
+        // factory typed as nothing and everything below it went
+        // untyped.
+        let src = "class Base\n  def self.build: () -> instance\nend\n";
+        let (_, ret) = fn_parts(parse_one(src));
+        assert_eq!(ret, Ty::SelfInstance);
+    }
+
+    #[test]
+    fn self_reads_on_an_instance_member_and_not_on_a_singleton_one() {
+        // On an instance member `self` is an instance of the receiving
+        // class — the same fact as `instance`.
+        let src = "class Base\n  def dup: () -> self\nend\n";
+        let (_, ret) = fn_parts(parse_one(src));
+        assert_eq!(ret, Ty::SelfInstance);
+
+        // On a SINGLETON member it is the class OBJECT, which `Ty`
+        // cannot spell. Giving it an instance type to make a chain
+        // dispatch would be a lie a strict target catches later, so it
+        // stays unread — and unread here means the reader REFUSES,
+        // which costs the whole file's signatures, not just this
+        // method. That is this reader's existing rule for any type
+        // node it does not know, pinned rather than changed: widening
+        // it is a separate question about every unreadable node, not
+        // about `self`.
+        let src = "class Base\n  def self.build: () -> self\nend\n";
+        let err = parse_signatures(src).expect_err("a singleton `self` is not readable");
+        assert!(err.contains("SelfType"), "the refusal names the node; got {err}");
+    }
+
+    #[test]
+    fn a_self_type_nested_in_a_container_parses_too() {
+        // `Array[instance]` — the substitution recurses, so the parse
+        // must not stop at the top level either.
+        let src = "class Base\n  def self.all: () -> Array[instance]\nend\n";
+        let (_, ret) = fn_parts(parse_one(src));
+        assert_eq!(ret, Ty::Array { elem: Box::new(Ty::SelfInstance) });
     }
 
     #[test]

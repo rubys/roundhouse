@@ -27,6 +27,12 @@ pub fn ts_ty(ty: &Ty) -> String {
         // before emit (see `Ty::Relation`). Explicit arm so the `any`
         // catch-all below can't silently absorb it: report, never
         // degrade.
+        // A self type the analyzer should have substituted with
+        // the receiving class (see `Ty::SelfInstance`). Reaching
+        // here is a defect: report, never guess a class.
+        Ty::SelfInstance => {
+            return crate::emit::diagnostics::unsupported_self_instance_ty("typescript");
+        }
         Ty::Relation { of } => {
             return crate::emit::diagnostics::unsupported_relation_ty("typescript", of);
         }

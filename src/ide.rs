@@ -1098,6 +1098,11 @@ pub fn render_ty(ty: &Ty) -> String {
         Ty::Sym => "Symbol".to_string(),
         Ty::Time => "Time".to_string(),
         Ty::Nil => "nil".to_string(),
+        // Consumer-facing projection too, and for the same reason as
+        // the relation below: this is what the signature SAYS, and on
+        // hover that is the honest answer. (In an emit type position
+        // it is a diagnostic — there it means dispatch never ran.)
+        Ty::SelfInstance => "instance".to_string(),
         // Consumer-facing projection of the analysis-time relation
         // type: an unmaterialized query over `of`. `Relation[Story]`
         // is what a Rails developer expects to read on hover for

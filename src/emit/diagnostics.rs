@@ -144,6 +144,27 @@ pub fn unsupported_relation_ty(target: &str, of: &crate::ident::ClassId) -> Stri
     "RoundhouseUnsupportedRelation".to_string()
 }
 
+/// Report that a `Ty::SelfInstance` reached a target's type renderer.
+/// It is the receiver-dependent type a signature declares — RBS
+/// `instance`, sorbet `T.attached_class` — and `dispatch` substitutes
+/// it with the receiving class before the type is stored or joined, so
+/// one surviving into emit means a signature was read for a type that
+/// was never dispatched. That is a defect, not a shape to approximate:
+/// the plausible fallbacks (the DECLARING class, or `Untyped`) are
+/// both wrong in the direction that hides it. Same pattern as
+/// [`unsupported_relation_ty`].
+pub fn unsupported_self_instance_ty(target: &str) -> String {
+    push(Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(Symbol::from(target)),
+        "self_instance_type",
+        "`instance` / `T.attached_class` reached emit — a self type must be \
+         substituted with the receiving class at dispatch"
+            .to_string(),
+    ));
+    "RoundhouseUnsupportedSelfInstance".to_string()
+}
+
 /// How a target spells "raise at runtime" — used to render the degrade
 /// stub. Each variant reproduces exactly the raise-equivalent that
 /// target's emitter already drops for `Expr.diagnostic` annotations, so

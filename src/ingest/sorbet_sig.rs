@@ -132,7 +132,7 @@ fn collect_struct_properties(
         let Some(arguments) = call.arguments() else { continue };
         let mut arguments = arguments.arguments().iter();
         let Some(name) = arguments.next().and_then(|n| symbol_name(&n)) else { continue };
-        let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n)) else { continue };
+        let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n, true)) else { continue };
         let reader = Ty::Fn {
             params: Vec::new(),
             block: None,
@@ -278,6 +278,10 @@ fn qualify(scope: Option<&str>, name: &str) -> String {
 /// The `Ty::Fn` a `sig { … }` declares for the `def` below it, or
 /// `None` when any part of it is outside the grammar.
 fn signature_ty(sig: &Node<'_>, def: &ruby_prism::DefNode<'_>) -> Option<Ty> {
+    // `def self.build` is singleton-side, `def build` instance-side —
+    // which is what decides whether `T.self_type` is readable. See
+    // `sorbet_ty`.
+    let self_is_instance = def.receiver().is_none();
     let call = sig.as_call_node()?;
     let block = call.block()?;
     let block = block.as_block_node()?;
@@ -300,7 +304,7 @@ fn signature_ty(sig: &Node<'_>, def: &ruby_prism::DefNode<'_>) -> Option<Ty> {
                 saw_return_clause = true;
                 let argument = call.arguments()?.arguments().iter().next()?;
                 if returns.is_none() {
-                    returns = Some(sorbet_ty(&argument)?);
+                    returns = Some(sorbet_ty(&argument, self_is_instance)?);
                 }
             }
             "void" => {
@@ -317,7 +321,7 @@ fn signature_ty(sig: &Node<'_>, def: &ruby_prism::DefNode<'_>) -> Option<Ty> {
                         let key = assoc.key();
                         let key = key.as_symbol_node()?;
                         let name = String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
-                        declared.insert(name, sorbet_ty(&assoc.value())?);
+                        declared.insert(name, sorbet_ty(&assoc.value(), self_is_instance)?);
                     }
                 }
             }
@@ -402,7 +406,13 @@ fn def_parameters(
 /// The sorbet type grammar this module reads. Anything else — generics
 /// via `type_parameters`, `T.attached_class`, `T.self_type`, shapes,
 /// proc types — returns `None`, which drops the whole signature.
-fn sorbet_ty(node: &Node<'_>) -> Option<Ty> {
+/// `self_is_instance` mirrors the RBS reader's rule for `self`: on an
+/// instance-side member `T.self_type` is an instance of the receiving
+/// class; on a singleton member it is the class object, which `Ty`
+/// cannot spell, so it stays unread. `T.attached_class` needs no such
+/// test — it MEANS "an instance of the attached class" and sorbet only
+/// admits it where that is what it is.
+fn sorbet_ty(node: &Node<'_>, self_is_instance: bool) -> Option<Ty> {
     if let Some(read) = node.as_constant_read_node() {
         return Some(named_ty(constant_id_str(&read.name())));
     }
@@ -430,7 +440,7 @@ fn sorbet_ty(node: &Node<'_>) -> Option<Ty> {
                 .arguments()?
                 .arguments()
                 .iter()
-                .map(|a| sorbet_ty(&a))
+                .map(|a| sorbet_ty(&a, self_is_instance))
                 .collect::<Option<_>>()?;
             return match (container.as_str(), args.as_slice()) {
                 ("T::Array", [elem]) => Some(Ty::Array { elem: Box::new(elem.clone()) }),
@@ -448,8 +458,15 @@ fn sorbet_ty(node: &Node<'_>) -> Option<Ty> {
         }
         return match method.as_str() {
             "untyped" => Some(Ty::Untyped),
+            // The receiver-dependent type, and the reason this whole
+            // seam exists: a factory declared once on a base class
+            // answers with an instance of whichever subclass called
+            // it. `dispatch` substitutes it there.
+            "attached_class" => Some(Ty::SelfInstance),
+            "self_type" if self_is_instance => Some(Ty::SelfInstance),
             "nilable" => {
-                let inner = sorbet_ty(&index.arguments()?.arguments().iter().next()?)?;
+                let inner =
+                    sorbet_ty(&index.arguments()?.arguments().iter().next()?, self_is_instance)?;
                 Some(Ty::Union { variants: vec![inner, Ty::Nil] })
             }
             "any" => {
@@ -457,7 +474,7 @@ fn sorbet_ty(node: &Node<'_>) -> Option<Ty> {
                     .arguments()?
                     .arguments()
                     .iter()
-                    .map(|a| sorbet_ty(&a))
+                    .map(|a| sorbet_ty(&a, self_is_instance))
                     .collect::<Option<_>>()?;
                 (variants.len() > 1).then_some(Ty::Union { variants })
             }
