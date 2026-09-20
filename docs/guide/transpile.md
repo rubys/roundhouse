@@ -80,6 +80,27 @@ suite, and for the server targets an `e2e/` Playwright suite. The
 setup, run, test — and it is executed verbatim by the project's CI
 against the blog fixture, so the commands in it are known to work.
 
+What does NOT come out is sorbet-runtime. An app that annotates with
+it transpiles to a tree that does not need it at run time: a `sig` is
+read (see [`check.md`](check.md)) and then dropped, along with
+`extend T::Sig`, `abstract!` and the rest of the annotations;
+`T.let` / `T.must` / `T.cast` and their siblings become the value they
+wrap; `T.type_alias` constants go with the signatures that were their
+only reader. The two constructs that are class GENERATORS rather than
+annotations are lowered into the plain Ruby they stand for — a
+`T::Struct` into readers plus the keyword constructor it generates
+(and `==`, where it included `ActsAsComparable`), a `T::Enum` into its
+members plus `serialize` / `values` / `deserialize` /
+`try_deserialize` / `from_serialized` / `has_serialized?`. `T.absurd`
+is the one that keeps behavior rather than losing it: it RAISES where
+it stood, message and value included, because dropping it would turn
+"this cannot happen" into "this returns nil".
+
+What remains is a `const` or `prop` on a base class from a gem: nothing
+in the tree says that DSL is a typed prop rather than some other one,
+and guessing from the method name would rewrite calls that were never
+props.
+
 The server targets all serve the app on `http://localhost:3000` (`PORT`
 overrides), with Action Cable at `/cable`, against a SQLite file at
 the Rails-traditional `storage/development.sqlite3`. Setup is one
