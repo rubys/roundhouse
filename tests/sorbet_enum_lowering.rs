@@ -106,6 +106,45 @@ fn to_s_answers_what_sorbets_to_s_answers() {
 }
 
 #[test]
+fn a_member_without_a_value_derives_one_from_its_name() {
+    // `Desktop = new` is the shorthand: sorbet derives the serialized
+    // value from the constant name. Missing this, the name landed in
+    // the VALUE's slot and the member was built with one argument
+    // where the constructor takes two — an ArgumentError at load
+    // time, which takes the whole tree with it.
+    //
+    // Derived by DOWNCASING and nothing else. `PartiallyCompleted` is
+    // "partiallycompleted", not "partially_completed" — checked
+    // against the gem rather than assumed, because the underscored
+    // form is what one expects.
+    let emitted = emitted(
+        r#"class Mode < T::Enum
+  enums do
+    Fill = new
+    PartiallyCompleted = new
+  end
+end
+"#,
+        "mode.rb",
+    );
+    // Parenthesised or not is the source's own surface — `= new`
+    // carried none — so the arguments are what is asserted.
+    assert!(emitted.contains(r#""fill", "Fill""#), "got:\n{emitted}");
+    assert!(
+        emitted.contains(r#""partiallycompleted", "PartiallyCompleted""#),
+        "got:\n{emitted}"
+    );
+}
+
+#[test]
+fn an_explicit_value_is_not_overwritten_by_the_derived_one() {
+    // The guard: the shorthand fills a gap, it does not re-decide.
+    let emitted = emitted(ENUM, "mode.rb");
+    assert!(emitted.contains(r#""fill", "Fill""#), "got:\n{emitted}");
+    assert!(!emitted.contains(r#""fill", "fill""#), "got:\n{emitted}");
+}
+
+#[test]
 fn a_missing_key_is_named_in_the_error() {
     // sorbet's `KeyError` message carries the value that was not
     // found. Without it the raise says only that SOMETHING was not a
