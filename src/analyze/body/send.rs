@@ -311,10 +311,25 @@ impl<'a> BodyTyper<'a> {
                             // (`{ (instance) -> void }`); substitute
                             // against the class the walk started from,
                             // as dispatch does.
+                            let self_ty = Ty::Class { id: id.clone(), args: Vec::new() };
                             return match sig {
-                                Ty::Fn { block: Some(block_ty), .. } => Some(vec![
-                                    block_ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() }),
-                                ]),
+                                // A block that yields SEVERAL values
+                                // names them in its own `Ty::Fn`
+                                // params — `{ (String, String) -> bool }`
+                                // for an authenticator yielding a
+                                // username and a password. Spread them,
+                                // or the second parameter binds nothing
+                                // and everything read from it is
+                                // untyped.
+                                Ty::Fn { block: Some(block_ty), .. } => match &**block_ty {
+                                    Ty::Fn { params, .. } if params.len() > 1 => Some(
+                                        params
+                                            .iter()
+                                            .map(|p| p.ty.subst_self(&self_ty))
+                                            .collect(),
+                                    ),
+                                    _ => Some(vec![block_ty.subst_self(&self_ty)]),
+                                },
                                 _ => None,
                             };
                         }
