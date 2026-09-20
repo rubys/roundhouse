@@ -95,6 +95,43 @@ fn an_instance_extend_stubs_the_test_that_reaches_for_it() {
     );
 }
 
+/// The same test without the extend: what `ActionText::Attachable#
+/// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
+/// A shape every target compiles, and Rails mints the identical bytes
+/// for it — so `lower::to_sgid` grounds it to the runtime's attachable
+/// mint with the model name baked in, read off the fixture call.
+#[test]
+fn to_sgid_for_the_attachable_locator_is_the_runtime_mint() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("test/fixtures/rooms.yml", "pets:\n  name: Pets\n"),
+        (
+            "test/models/room_test.rb",
+            "require \"test_helper\"\nclass RoomTest < ActiveSupport::TestCase\n  test \"sgid\" do\n    \
+             message, signature = rooms(:pets).to_sgid(expires_in: nil, for: ActionText::Attachable::LOCATOR_NAME).to_s.split(\"--\")\n    \
+             assert_not_nil message\n  end\n\n  test \"other purpose\" do\n    \
+             token = rooms(:pets).to_sgid(for: :transfer).to_s\n    assert_not_nil token\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("room_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("ActionText::SignedGlobalId.generate(\"Room\", RoomsFixtures.pets.id).split(\"--\")"),
+        "the attachable sgid is the runtime mint:\n{test}"
+    );
+    // Another purpose is nothing this runtime verifies: reported, left.
+    let report = diags.iter().find(|d| d.message.contains("not the attachable locator")).expect("the other purpose is reported");
+    assert_eq!(report.severity, roundhouse::diagnostic::Severity::Warning);
+    assert!(test.contains("to_sgid(for: :transfer)"), "the declined site is left as written:\n{test}");
+}
+
 // campfire's `lib/rails_ext/action_text_attachables.rb`, verbatim: the
 // rotated-secret tolerance, as an `on_load` reopen.
 const TOLERANT_REOPEN: &str = r#"ActiveSupport.on_load(:action_text_content) do

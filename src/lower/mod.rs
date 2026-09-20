@@ -100,6 +100,7 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod object_extend;
+pub mod to_sgid;
 pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
@@ -523,6 +524,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // `record.to_sgid(for: LOCATOR_NAME).to_s` -> the runtime's attachable
+    // sgid mint, model name baked in. Consumes a shape no pass produces
+    // or reads; no constraints.
+    ("to_sgid", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -797,6 +802,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("attachables_grep");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    diags.extend(to_sgid::apply_to_sgid_lowering(app));
+    ran!("to_sgid");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));
