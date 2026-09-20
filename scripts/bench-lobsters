@@ -1440,7 +1440,13 @@ RUN_RUBY=("$RUBY_BIN")
 if [[ "$RUNTIME" == cruby ]] && (cd "$SRC" 2>/dev/null && bundle check >/dev/null 2>&1); then
     RUN_RUBY=(env "BUNDLE_GEMFILE=$SRC/Gemfile" bundle exec "$RUBY_BIN")
 fi
-(cd "$OUT_TREE" && "${RUN_RUBY[@]}" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
+# The replay's output is also kept on its own, so a failure can be NAMED
+# below: the outer lane runner reports the last line of run.log as the
+# reason, and for ten days that line was this script's own "summary
+# written" while the real one — `uninitialized constant Net (NameError)`
+# — sat twelve lines up.
+REPLAY_LOG="$OUT_DIR/replay.log"
+(cd "$OUT_TREE" && "${RUN_RUBY[@]}" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") 2>&1 | tee "$REPLAY_LOG" || status=${PIPESTATUS[0]}
 
 # ── compare against the previous run ─────────────────────────────────
 # Resolve the runtime's own `latest` BEFORE repointing it (cruby keeps the
@@ -1490,4 +1496,14 @@ fi
 # caller passing --out (the matrix) manages its own tree.
 (( EXPLICIT_OUT == 0 )) && ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/$LATEST_NAME" 2>/dev/null || true
 ok "summary written to $OUT_DIR/summary.md"
+# LAST, because it is the line the lane runner reads as the reason. A
+# Ruby exception's own line ends in its class, `… (NameError)`, ahead of
+# the frames and the "Did you mean?"; the replay's own refusals
+# (LOGINFAIL, PARITY) are single lines, so the last non-blank line is
+# the one to repeat when no exception was raised.
+if (( status != 0 )); then
+    reason="$(grep -m1 -E '\([A-Z][A-Za-z:]*(Error|Exception|Interrupt)\)$' "$REPLAY_LOG" 2>/dev/null \
+              || grep -v '^[[:space:]]*$' "$REPLAY_LOG" 2>/dev/null | tail -1)"
+    fail "replay exited $status: $(printf '%s' "${reason:-no output}" | cut -c1-300)"
+fi
 exit "$status"
