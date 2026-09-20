@@ -37,7 +37,13 @@ pub fn ingest_sorbet_signatures(source: &[u8]) -> HashMap<ClassId, HashMap<Symbo
         return HashMap::new();
     };
     let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-    walk(&program.statements().body().iter().collect::<Vec<_>>(), None, false, &mut out);
+    walk(
+        &program.statements().body().iter().collect::<Vec<_>>(),
+        None,
+        false,
+        &HashMap::new(),
+        &mut out,
+    );
     out
 }
 
@@ -50,6 +56,7 @@ fn walk(
     statements: &[Node<'_>],
     scope: Option<&str>,
     in_singleton_class: bool,
+    aliases: &HashMap<String, Ty>,
     out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
 ) {
     // The `sig` immediately above a `def` is the one that applies to
@@ -71,7 +78,16 @@ fn walk(
                     if superclass.as_deref() == Some("T::Enum") {
                         collect_enum_surface(&statements, &name, out);
                     }
-                    walk(&statements, Some(&name), false, out);
+                    // `Name = T.type_alias { … }` in this body names a
+                    // TYPE, and a `sig` below it refers to that name.
+                    // Without resolving it the reader produced a
+                    // `Ty::Class` for a class that does not exist, and
+                    // every use of the annotated parameter dispatched
+                    // against nothing. Collected before the walk so the
+                    // order of alias and `sig` in the file does not
+                    // matter; an enclosing scope's aliases stay visible.
+                    let inner = collect_type_aliases(&statements, aliases);
+                    walk(&statements, Some(&name), false, &inner, out);
                 }
             }
             pending = None;
@@ -81,7 +97,9 @@ fn walk(
             let name = qualify(scope, &constant_path_name(&module.constant_path()));
             if let Some(body) = module.body() {
                 if let Some(body) = body.as_statements_node() {
-                    walk(&body.body().iter().collect::<Vec<_>>(), Some(&name), false, out);
+                    let statements = body.body().iter().collect::<Vec<_>>();
+                    let inner = collect_type_aliases(&statements, aliases);
+                    walk(&statements, Some(&name), false, &inner, out);
                 }
             }
             pending = None;
@@ -96,7 +114,7 @@ fn walk(
         if let Some(singleton) = statement.as_singleton_class_node() {
             if let Some(body) = singleton.body() {
                 if let Some(body) = body.as_statements_node() {
-                    walk(&body.body().iter().collect::<Vec<_>>(), scope, true, out);
+                    walk(&body.body().iter().collect::<Vec<_>>(), scope, true, aliases, out);
                 }
             }
             pending = None;
@@ -104,7 +122,7 @@ fn walk(
         }
         if let Some(def) = statement.as_def_node() {
             if let (Some(sig), Some(scope)) = (pending.take(), scope) {
-                if let Some(ty) = signature_ty(&statements[sig], &def, in_singleton_class) {
+                if let Some(ty) = signature_ty(&statements[sig], &def, in_singleton_class, aliases) {
                     out.entry(ClassId(Symbol::new(scope)))
                         .or_default()
                         .insert(Symbol::new(constant_id_str(&def.name())), ty);
@@ -153,7 +171,7 @@ fn collect_struct_properties(
         let Some(arguments) = call.arguments() else { continue };
         let mut arguments = arguments.arguments().iter();
         let Some(name) = arguments.next().and_then(|n| symbol_name(&n)) else { continue };
-        let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n, true)) else { continue };
+        let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n, true, &HashMap::new())) else { continue };
         let reader = Ty::Fn {
             params: Vec::new(),
             block: None,
@@ -302,6 +320,7 @@ fn signature_ty(
     sig: &Node<'_>,
     def: &ruby_prism::DefNode<'_>,
     in_singleton_class: bool,
+    aliases: &HashMap<String, Ty>,
 ) -> Option<Ty> {
     // `def self.build` is singleton-side, `def build` instance-side —
     // which is what decides whether `T.self_type` is readable. See
@@ -331,7 +350,7 @@ fn signature_ty(
                 saw_return_clause = true;
                 let argument = call.arguments()?.arguments().iter().next()?;
                 if returns.is_none() {
-                    returns = Some(sorbet_ty(&argument, self_is_instance)?);
+                    returns = Some(sorbet_ty(&argument, self_is_instance, aliases)?);
                 }
             }
             "void" => {
@@ -348,7 +367,7 @@ fn signature_ty(
                         let key = assoc.key();
                         let key = key.as_symbol_node()?;
                         let name = String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
-                        declared.insert(name, sorbet_ty(&assoc.value(), self_is_instance)?);
+                        declared.insert(name, sorbet_ty(&assoc.value(), self_is_instance, aliases)?);
                     }
                 }
             }
@@ -433,15 +452,70 @@ fn def_parameters(
 /// The sorbet type grammar this module reads. Anything else — generics
 /// via `type_parameters`, `T.attached_class`, `T.self_type`, shapes,
 /// proc types — returns `None`, which drops the whole signature.
+/// The `Name = T.type_alias { … }` constants a class body declares,
+/// on top of what the enclosing scopes already named.
+///
+/// A type alias is the one constant a `sig` can name that is NOT a
+/// class, and the reader had no way to tell the difference — so a
+/// parameter declared with one typed as a class nobody defines. The
+/// emit already drops these constants for having no runtime; this is
+/// the other half, reading what they were for.
+fn collect_type_aliases(
+    statements: &[Node<'_>],
+    outer: &HashMap<String, Ty>,
+) -> HashMap<String, Ty> {
+    let mut out = outer.clone();
+    for statement in statements {
+        let Some(write) = statement.as_constant_write_node() else { continue };
+        let Some(call) = write.value().as_call_node() else { continue };
+        if constant_id_str(&call.name()) != "type_alias" {
+            continue;
+        }
+        let names_t = call
+            .receiver()
+            .and_then(|r| r.as_constant_read_node())
+            .is_some_and(|c| constant_id_str(&c.name()) == "T");
+        if !names_t {
+            continue;
+        }
+        // `T.type_alias { X }` / `T.type_alias do X end` — the block's
+        // single statement IS the type.
+        let Some(body) = call
+            .block()
+            .and_then(|b| b.as_block_node())
+            .and_then(|b| b.body())
+            .and_then(|b| b.as_statements_node())
+        else {
+            continue;
+        };
+        let Some(expr) = body.body().iter().next() else { continue };
+        // Resolved against what is known SO FAR, so an alias built
+        // from an earlier one reads; a forward reference does not,
+        // which is the same order Ruby itself requires.
+        if let Some(ty) = sorbet_ty(&expr, true, &out) {
+            out.insert(constant_id_str(&write.name()).to_string(), ty);
+        }
+    }
+    out
+}
+
 /// `self_is_instance` mirrors the RBS reader's rule for `self`: on an
 /// instance-side member `T.self_type` is an instance of the receiving
 /// class; on a singleton member it is the class object, which `Ty`
 /// cannot spell, so it stays unread. `T.attached_class` needs no such
 /// test — it MEANS "an instance of the attached class" and sorbet only
 /// admits it where that is what it is.
-fn sorbet_ty(node: &Node<'_>, self_is_instance: bool) -> Option<Ty> {
+fn sorbet_ty(
+    node: &Node<'_>,
+    self_is_instance: bool,
+    aliases: &HashMap<String, Ty>,
+) -> Option<Ty> {
     if let Some(read) = node.as_constant_read_node() {
-        return Some(named_ty(constant_id_str(&read.name())));
+        let name = constant_id_str(&read.name());
+        if let Some(ty) = aliases.get(name) {
+            return Some(ty.clone());
+        }
+        return Some(named_ty(name));
     }
     if let Some(path) = node.as_constant_path_node() {
         let name = constant_path_name(node);
@@ -467,7 +541,7 @@ fn sorbet_ty(node: &Node<'_>, self_is_instance: bool) -> Option<Ty> {
                 .arguments()?
                 .arguments()
                 .iter()
-                .map(|a| sorbet_ty(&a, self_is_instance))
+                .map(|a| sorbet_ty(&a, self_is_instance, aliases))
                 .collect::<Option<_>>()?;
             return match (container.as_str(), args.as_slice()) {
                 ("T::Array", [elem]) => Some(Ty::Array { elem: Box::new(elem.clone()) }),
@@ -493,7 +567,7 @@ fn sorbet_ty(node: &Node<'_>, self_is_instance: bool) -> Option<Ty> {
             "self_type" if self_is_instance => Some(Ty::SelfInstance),
             "nilable" => {
                 let inner =
-                    sorbet_ty(&index.arguments()?.arguments().iter().next()?, self_is_instance)?;
+                    sorbet_ty(&index.arguments()?.arguments().iter().next()?, self_is_instance, aliases)?;
                 Some(Ty::Union { variants: vec![inner, Ty::Nil] })
             }
             "any" => {
@@ -501,7 +575,7 @@ fn sorbet_ty(node: &Node<'_>, self_is_instance: bool) -> Option<Ty> {
                     .arguments()?
                     .arguments()
                     .iter()
-                    .map(|a| sorbet_ty(&a, self_is_instance))
+                    .map(|a| sorbet_ty(&a, self_is_instance, aliases))
                     .collect::<Option<_>>()?;
                 (variants.len() > 1).then_some(Ty::Union { variants })
             }
