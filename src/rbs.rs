@@ -38,15 +38,15 @@ pub fn parse_signatures(source: &str) -> Result<Signatures, String> {
     for decl in signature.declarations().iter() {
         match decl {
             Node::Class(class) => {
-                let scope = class.name().name().as_str().to_string();
+                let scope = declared_name(&class.name());
                 collect_members(class.members().iter(), &mut out, Some(&scope))?;
             }
             Node::Module(module) => {
-                let scope = module.name().name().as_str().to_string();
+                let scope = declared_name(&module.name());
                 collect_members(module.members().iter(), &mut out, Some(&scope))?;
             }
             Node::Interface(iface) => {
-                let scope = iface.name().name().as_str().to_string();
+                let scope = declared_name(&iface.name());
                 collect_members(iface.members().iter(), &mut out, Some(&scope))?;
             }
             _ => {}
@@ -112,15 +112,15 @@ fn walk_includes(
 ) -> Result<(), String> {
     match decl {
         Node::Class(class) => {
-            let name = namespace_join(parent, class.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&class.name()));
             collect_class_includes(class.members().iter(), &name, out)?;
         }
         Node::Module(module) => {
-            let name = namespace_join(parent, module.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&module.name()));
             collect_class_includes(module.members().iter(), &name, out)?;
         }
         Node::Interface(iface) => {
-            let name = namespace_join(parent, iface.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&iface.name()));
             collect_class_includes(iface.members().iter(), &name, out)?;
         }
         _ => {}
@@ -152,6 +152,33 @@ fn collect_class_includes<'a, I: Iterator<Item = Node<'a>>>(
     Ok(())
 }
 
+/// A declaration's own name AS WRITTEN — `class A::B` is `A::B`, not
+/// `B`.
+///
+/// `TypeNameNode::name` is the last segment only, so a qualified
+/// declaration name lost its namespace and its signatures were filed
+/// under a key nothing dispatches on. Silently: the file parses, no
+/// diagnostic fires, and the only symptom is that the types declared
+/// in it never show up. Both spellings are valid RBS for the same
+/// class, which is what made it cost an afternoon to meet.
+fn declared_name(type_name: &ruby_rbs::node::TypeNameNode<'_>) -> String {
+    let bare = type_name.name().as_str().to_string();
+    let segments: Vec<String> = type_name
+        .namespace()
+        .path()
+        .iter()
+        .filter_map(|seg| match seg {
+            Node::Symbol(s) => Some(s.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
+    if segments.is_empty() {
+        bare
+    } else {
+        format!("{}::{bare}", segments.join("::"))
+    }
+}
+
 fn walk_decl(
     decl: &Node<'_>,
     parent: Option<&str>,
@@ -159,15 +186,15 @@ fn walk_decl(
 ) -> Result<(), String> {
     match decl {
         Node::Class(class) => {
-            let name = namespace_join(parent, class.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&class.name()));
             collect_class_methods(class.members().iter(), &name, out)?;
         }
         Node::Module(module) => {
-            let name = namespace_join(parent, module.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&module.name()));
             collect_class_methods(module.members().iter(), &name, out)?;
         }
         Node::Interface(iface) => {
-            let name = namespace_join(parent, iface.name().name().as_str());
+            let name = namespace_join(parent, &declared_name(&iface.name()));
             collect_class_methods(iface.members().iter(), &name, out)?;
         }
         _ => {}
@@ -228,15 +255,15 @@ fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
             // Scope deepens to include the enclosing path so bare
             // class refs inside qualify correctly.
             Node::Class(class) => {
-                let nested_scope = namespace_join(scope, class.name().name().as_str());
+                let nested_scope = namespace_join(scope, &declared_name(&class.name()));
                 collect_members(class.members().iter(), out, Some(&nested_scope))?;
             }
             Node::Module(module) => {
-                let nested_scope = namespace_join(scope, module.name().name().as_str());
+                let nested_scope = namespace_join(scope, &declared_name(&module.name()));
                 collect_members(module.members().iter(), out, Some(&nested_scope))?;
             }
             Node::Interface(iface) => {
-                let nested_scope = namespace_join(scope, iface.name().name().as_str());
+                let nested_scope = namespace_join(scope, &declared_name(&iface.name()));
                 collect_members(iface.members().iter(), out, Some(&nested_scope))?;
             }
             _ => {}
@@ -1006,6 +1033,40 @@ mod tests {
         } else {
             panic!("expected Ty::Fn, got {ty:?}");
         }
+    }
+
+    #[test]
+    fn a_qualified_declaration_keeps_its_namespace() {
+        // `class A::B` and the nested-module spelling are the same
+        // class in RBS. Filed under `B`, the signatures landed on a
+        // key nothing dispatches against — and nothing said so: the
+        // file parses, no diagnostic fires, and the only symptom is
+        // that the declared types never show up.
+        let qualified = "class Vendor::Facade\n  def self.instance: () -> instance\nend\n";
+        let nested =
+            "module Vendor\n  class Facade\n    def self.instance: () -> instance\n  end\nend\n";
+        let key = ClassId(Symbol::new("Vendor::Facade"));
+        for src in [qualified, nested] {
+            let sigs = parse_app_signatures(src).expect("parses");
+            assert!(
+                sigs.contains_key(&key),
+                "both spellings file under `Vendor::Facade`; got {:?}",
+                sigs.keys().map(|k| k.0.as_str().to_string()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_qualified_declaration_nests_further() {
+        // The scope a member's bare class refs qualify against has to
+        // deepen by the whole written name, not by its last segment.
+        let src = "module Outer\n  class Inner::Leaf\n    def f: () -> Integer\n  end\nend\n";
+        let sigs = parse_app_signatures(src).expect("parses");
+        assert!(
+            sigs.contains_key(&ClassId(Symbol::new("Outer::Inner::Leaf"))),
+            "got {:?}",
+            sigs.keys().map(|k| k.0.as_str().to_string()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
