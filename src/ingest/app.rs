@@ -203,18 +203,27 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // pre-pass over the same files, so the fact is complete when the
     // models loop starts.
     let mut table_prefixes = super::model::TablePrefixes::new();
+    // The same pre-pass answers a second question: which classes are
+    // ActiveRecord bases. A model descending through the app's own
+    // abstract base was classified a library class and lost its DSL,
+    // and one file's AST cannot resolve that — the base is declared in
+    // another file, possibly later.
+    let mut model_bases = super::library_class::ModelBases::new();
+    let mut base_pairs: Vec<(String, String)> = Vec::new();
     if vfs.is_dir(&models_dir) {
         for entry in read_rb_files(vfs, &models_dir)? {
             let source = vfs.read(&entry)?;
             table_prefixes
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
+            model_bases.record(&source, &mut base_pairs);
         }
     }
+    model_bases.close_over(&base_pairs);
     if vfs.is_dir(&models_dir) {
         for entry in read_rb_files(vfs, &models_dir)? {
             let source = vfs.read(&entry)?;
             let path_str = entry.display().to_string();
-            match classify_class_file(&source) {
+            match classify_class_file(&source, &model_bases) {
                 Some(ClassKind::Model) | None => {
                     if let Some(maybe_model) =
                         unwrap_or_record(ingest_model(&source, &path_str, &app.schema, &table_prefixes))?
