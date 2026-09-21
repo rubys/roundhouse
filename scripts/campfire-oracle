@@ -183,7 +183,11 @@ FORCE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app)      APP="$2"; shift 2 ;;
-        --out)      OUT="$2"; shift 2 ;;
+        # Absolutised for the same reason --shape-report is: `serve` does
+        # `cd "$OUT"`, and every path derived from OUT after that (the
+        # TruffleRuby bundle beside it, its lockfile) would otherwise
+        # resolve inside the tree it was meant to sit beside.
+        --out)      mkdir -p "$2"; OUT="$(cd "$2" && pwd)"; shift 2 ;;
         --port)     PORT="$2"; shift 2 ;;
         --workers)  WORKERS="$2"; shift 2 ;;
         --threads)  THREADS="$2"; shift 2 ;;
@@ -429,16 +433,42 @@ cmd_serve() {
 # The bundle lives BESIDE the oracle, not inside it: `prepare` starts
 # with `rm -rf "$OUT"` every night, and a bundle inside the tree would
 # mean re-cloning rails/rails and recompiling six C extensions nightly.
-# `bundle check` against the (re-exported) lockfile is what keeps a
-# surviving bundle honest.
+#
+# AND SO DOES ITS LOCKFILE. campfire's Gemfile.lock resolves nokogiri,
+# sqlite3 and thruster to their PRECOMPILED x86_64-linux variants, which
+# TruffleRuby cannot load; `bundle install` under it adds the `ruby`
+# (source) variants plus mini_portile2 to the lock — in place, in the
+# oracle's Gemfile.lock. The first nightly (2026-09-21) re-exported the
+# oracle, `bundle check` against the pristine lock said "satisfied", and
+# `bundle exec puma` then RE-RESOLVED at setup time (the lock did not
+# cover this Ruby), which loads bundler's HTTP fetcher, which requires
+# openssl, which activates TruffleRuby's default openssl 4.0.0 over the
+# lock's 3.3.0 — and the lane died on "You have already activated
+# openssl". Three consequences:
+#   * the TruffleRuby bundle has its OWN lockfile (BUNDLE_LOCKFILE),
+#     beside the bundle, seeded from the oracle's and RE-SEEDED whenever
+#     the oracle's changes (a new campfire SHA), so the gem versions and
+#     the Rails revision stay exactly the CRuby lane's;
+#   * `bundle` always runs `bundle install` (idempotent, seconds when
+#     satisfied) — `bundle check` is not a gate here, it passed on the
+#     very lock setup then refused;
+#   * BUNDLE_VERSION=system: the lock's `BUNDLED WITH` is CRuby's bundler,
+#     and rubygems would otherwise self-install that version into the
+#     bundle and run it under TruffleRuby. Its own is the one it ships.
 tr_bundle_path() { echo "${OUT%/}-bundle-truffleruby"; }
+tr_bundle_env() {   # echoes the env assignments the truffleruby bundle needs
+    local bp; bp="$(tr_bundle_path)"
+    printf '%s\n' "BUNDLE_PATH=$bp" "BUNDLE_LOCKFILE=$bp/Gemfile.lock" \
+        "BUNDLE_WITHOUT=development:test" "BUNDLE_VERSION=system"
+}
 cmd_serve_truffleruby() {
     command -v truffleruby >/dev/null || die "truffleruby not on PATH"
     local bp; bp="$(tr_bundle_path)"
-    [[ -d "$bp" ]] || die "no TruffleRuby bundle at $bp — run 'bundle --runtime truffleruby' first"
+    [[ -f "$bp/Gemfile.lock" ]] || die "no TruffleRuby bundle at $bp — run 'bundle --runtime truffleruby' first"
     step "puma :$PORT — $RAILS_ENV_NAME, truffleruby, one process, $THREADS thread(s), heap $HEAP, fragment-cache=$FRAGMENT_CACHE"
     cd "$OUT"
     report_shape "runtime=truffleruby"
+    report_shape "bundler=$(BUNDLE_VERSION=system truffleruby -S bundle --version 2>/dev/null | awk '{print $NF}'), own lockfile at $bp/Gemfile.lock"
     report_shape "jemalloc=n/a (managed heap, --vm.Xmx$HEAP)"
     report_shape "heap=$HEAP"
     report_shape "workers=0 (one process, no fork)"
@@ -448,10 +478,10 @@ cmd_serve_truffleruby() {
         RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
         DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
-        BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test"
         TRUFFLERUBYOPT="--vm.Xmx$HEAP"
     )
-    exec env "${pre[@]}" truffleruby -S bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
+    local benv=(); mapfile -t benv < <(tr_bundle_env)
+    exec env "${pre[@]}" "${benv[@]}" truffleruby -S bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
 }
 
 # Install the oracle's gems under another Ruby, into a BUNDLE_PATH of its
@@ -465,14 +495,20 @@ cmd_bundle() {
         truffleruby)
             command -v truffleruby >/dev/null || die "truffleruby not on PATH"
             local bp; bp="$(tr_bundle_path)"
-            if (cd "$OUT" && BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test" \
-                    truffleruby -S bundle check >/dev/null 2>&1); then
-                step "truffleruby bundle satisfied at $bp"
-            else
-                step "installing the truffleruby bundle into $bp (compiles the C extensions)"
-                (cd "$OUT" && BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test" \
-                    truffleruby -S bundle install >/dev/null) || die "truffleruby bundle install failed"
+            mkdir -p "$bp"
+            # Seed (or re-seed) the runtime's lockfile from the oracle's.
+            # `.seed` remembers which oracle lock the runtime lock came
+            # from; a changed oracle lock — a new campfire SHA — replaces
+            # both, so the two runtimes never drift apart on a version.
+            if ! cmp -s "$OUT/Gemfile.lock" "$bp/Gemfile.lock.seed"; then
+                step "seeding the truffleruby lockfile from the oracle's"
+                cp "$OUT/Gemfile.lock" "$bp/Gemfile.lock"
+                cp "$OUT/Gemfile.lock" "$bp/Gemfile.lock.seed"
             fi
+            local benv=(); mapfile -t benv < <(tr_bundle_env)
+            step "bundle install under truffleruby into $bp (C extensions compile the first time)"
+            (cd "$OUT" && env "${benv[@]}" truffleruby -S bundle install >/dev/null) \
+                || die "truffleruby bundle install failed"
             ;;
         cruby) step "the CRuby bundle is prepare's; nothing to do" ;;
         *) die "unknown --runtime $RUNTIME (cruby | truffleruby)" ;;

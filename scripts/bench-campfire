@@ -825,6 +825,7 @@ start_lane() {
     wait_for_port "http://127.0.0.1:$port/" "$boot_budget" || {
         fail "$lane did not come up within ${boot_budget}s — tail of $log:"
         tail -20 "$log" >&2
+        BOOT_BUDGET_USED="$boot_budget"
         return 1
     }
 }
@@ -892,6 +893,7 @@ LOG_OVERRIDE=""
 # the next lane. The shape record already names its pid, so stop it by
 # number rather than by matching a pattern.
 LANE_JOBS_PID=""
+BOOT_BUDGET_USED=""
 : > "$PER_RUN"
 : > "$OUT_DIR/parity.txt"
 : > "$COLD"
@@ -998,7 +1000,7 @@ for lane in "${LANES[@]}"; do
     step "start $lane on :$port ($shape_note)"
     if ! start_lane "$lane" "$port"; then
         fail "$lane failed to start; skipping lane"
-        skip_lane "$lane" "boot" "did not answer on :$port within 60s" "$LOG_DIR/$lane.log"
+        skip_lane "$lane" "boot" "did not answer on :$port within ${BOOT_BUDGET_USED:-60}s" "$LOG_DIR/$lane.log"
         stop_lane "$port"
         port=$(( port + 1 )); continue
     fi
