@@ -300,6 +300,43 @@ impl<'a> BodyTyper<'a> {
         ty
     }
 
+    /// The type of a bare constant read resolved from where it is
+    /// read: each enclosing lexical scope of `self` (`A::B::C`, then
+    /// `A::B`, then `A`) by its own table, then the ancestors of the
+    /// innermost one — its includes, then the parent chain. The
+    /// per-class tables the registry builder fills are what make a
+    /// same-named constant in two classes answerable at all; the
+    /// global by-name map has to drop it.
+    fn lexical_constant(&self, name: &Symbol, ctx: &Ctx) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = &ctx.self_ty else {
+            return None;
+        };
+        let own = |id: &ClassId| self.classes.get(id).and_then(|c| c.constants.get(name).cloned());
+        let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
+        while !scope.is_empty() {
+            if let Some(ty) = own(&ClassId(Symbol::from(scope.join("::").as_str()))) {
+                return Some(ty);
+            }
+            scope.pop();
+        }
+        let mut cursor = Some(id.clone());
+        // Bounded: a parent link that cycles must not hang the typer.
+        for _ in 0..16 {
+            let Some(cur) = cursor else { break };
+            let Some(info) = self.classes.get(&cur) else { break };
+            if let Some(ty) = info.includes.iter().find_map(own) {
+                return Some(ty);
+            }
+            cursor = info.parent.clone();
+            if let Some(next) = &cursor {
+                if let Some(ty) = own(next) {
+                    return Some(ty);
+                }
+            }
+        }
+        None
+    }
+
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let expr_span = expr.span;
         match &mut *expr.node {
@@ -326,6 +363,22 @@ impl<'a> BodyTyper<'a> {
                         .and_then(|owner| self.classes().get(&owner).cloned())
                         .and_then(|c| c.constants.get(&last).cloned())
                     {
+                        return ty;
+                    }
+                }
+                // A bare read is answered the way Ruby answers it:
+                // the lexical scope first, outward, then the ancestors
+                // of the innermost class. `PREFIX` inside the class
+                // that declares `PREFIX = "main"` is that String even
+                // when three other classes declare their own `PREFIX`
+                // — which is exactly the case the global map below
+                // has to give up on, and the common one (a
+                // per-component DOM-id prefix, a default), so without
+                // this hop the read fell to the `Class { PREFIX }`
+                // fallback and reached the emitted RBS as a return
+                // type nothing can satisfy (#130).
+                if path.len() == 1 {
+                    if let Some(ty) = self.lexical_constant(&last, ctx) {
                         return ty;
                     }
                 }
