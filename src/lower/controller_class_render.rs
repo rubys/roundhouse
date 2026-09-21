@@ -17,6 +17,27 @@
 //! from a view that has them; a class-side call has no such context, so
 //! there is nothing to bind and guessing would pass the wrong
 //! arguments. Rails would raise there too, one step later.
+//!
+//! ## The attachment's own partial
+//!
+//! `ApplicationController.render partial: attachment.to_partial_path,
+//! locals: { opengraph_embed: attachment }` — the partial is not a
+//! literal but the ATTACHMENT'S, which is per node: whichever attachable
+//! the node resolves to names it. That is exactly the dispatch
+//! `Content.render_attachment` is generated to make
+//! (`project::apply_content_layout`: one arm per attachable class, the
+//! partial's local bound to the attachable), so the call becomes
+//! `ActionText::Content.render_attachment(attachment)` when the one
+//! local is that same attachment. The local's NAME is not checked: the
+//! generated arm binds the partial's declared local, and a working app
+//! (this one renders under Rails) can only have named it that.
+//!
+//! In a TEST class the local carries no type yet — test bodies are typed
+//! when they are lowered, after this pass — so the attachment is known
+//! syntactically instead: a local assigned from the class's own helper
+//! whose tail expression is `ActionText::Attachment.from_node(…)`
+//! (campfire's `attachment = attachment_for(…)`). A receiver typed
+//! `ActionText::Attachment` counts wherever the type is there.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
@@ -31,18 +52,70 @@ pub fn apply_controller_class_render(app: &mut App) {
     if contracts.is_empty() {
         return;
     }
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &contracts));
+    let none = std::collections::HashSet::new();
+    super::for_each_hook_body(app, &mut |e| rewrite(e, &contracts, &none));
     for tm in &mut app.test_modules {
+        let builders: std::collections::HashSet<Symbol> = tm
+            .helpers
+            .iter()
+            .filter(|h| builds_attachment(&h.body))
+            .map(|h| h.name.clone())
+            .collect();
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &contracts);
+            rewrite(setup, &contracts, &attachment_locals(setup, &builders));
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body, &contracts);
+            let locals = attachment_locals(&t.body, &builders);
+            rewrite(&mut t.body, &contracts, &locals);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body, &contracts);
+            let locals = attachment_locals(&m.body, &builders);
+            rewrite(&mut m.body, &contracts, &locals);
         }
     }
+}
+
+/// Does this body end in `ActionText::Attachment.from_node(…)` — the
+/// constructor, so whatever calls the method holds an Attachment?
+fn builds_attachment(body: &Expr) -> bool {
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(e) => e,
+            None => return false,
+        },
+        _ => body,
+    };
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*tail.node else { return false };
+    if method.as_str() != "from_node" {
+        return false;
+    }
+    let ExprNode::Const { path } = &*recv.node else { return false };
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    joined == "ActionText::Attachment"
+}
+
+/// Locals in `body` assigned from a receiverless call to one of the
+/// attachment `builders`.
+fn attachment_locals(
+    body: &Expr,
+    builders: &std::collections::HashSet<Symbol>,
+) -> std::collections::HashSet<Symbol> {
+    let mut out = std::collections::HashSet::new();
+    if builders.is_empty() {
+        return out;
+    }
+    fn walk(e: &Expr, builders: &std::collections::HashSet<Symbol>, out: &mut std::collections::HashSet<Symbol>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node {
+            if let ExprNode::Send { recv: None, method, .. } = &*value.node {
+                if builders.contains(method) {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, builders, out));
+    }
+    walk(body, builders, &mut out);
+    out
 }
 
 type Contracts = std::collections::HashMap<
@@ -50,8 +123,8 @@ type Contracts = std::collections::HashMap<
     crate::lower::view_to_library::PartialCallContract,
 >;
 
-fn rewrite(expr: &mut Expr, contracts: &Contracts) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, contracts));
+fn rewrite(expr: &mut Expr, contracts: &Contracts, attachment_locals: &std::collections::HashSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, contracts, attachment_locals));
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
         return;
     };
@@ -77,6 +150,25 @@ fn rewrite(expr: &mut Expr, contracts: &Contracts) {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
             if matches!(value.as_str(), "partial" | "locals"))
     }) {
+        return;
+    }
+    if let Some(attachment) = attachments_own_partial(opt("partial"), opt("locals"), attachment_locals) {
+        let span = expr.span;
+        *expr = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const {
+                        path: vec![Symbol::from("ActionText"), Symbol::from("Content")],
+                    },
+                )),
+                method: Symbol::from("render_attachment"),
+                args: vec![attachment],
+                block: None,
+                parenthesized: true,
+            },
+        );
         return;
     }
     let Some(ExprNode::Lit { value: Literal::Str { value: partial } }) =
@@ -134,4 +226,39 @@ fn rewrite(expr: &mut Expr, contracts: &Contracts) {
             parenthesized: true,
         },
     );
+}
+
+/// `partial: a.to_partial_path, locals: { k: a }` with `a` an
+/// `ActionText::Attachment`: the attachment, when the call is that
+/// shape and nothing else.
+fn attachments_own_partial(
+    partial: Option<&Expr>,
+    locals: Option<&Expr>,
+    attachment_locals: &std::collections::HashSet<Symbol>,
+) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*partial?.node
+    else {
+        return None;
+    };
+    if method.as_str() != "to_partial_path" || !args.is_empty() {
+        return None;
+    }
+    let typed_attachment = matches!(
+        recv.ty.as_ref(),
+        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "ActionText::Attachment"
+    );
+    let is_attachment = match &*recv.node {
+        ExprNode::Var { name, .. } => typed_attachment || attachment_locals.contains(name),
+        ExprNode::Ivar { .. } => typed_attachment,
+        _ => false,
+    };
+    if !is_attachment {
+        return None;
+    }
+    let ExprNode::Hash { entries, .. } = &*locals?.node else { return None };
+    let [(_, value)] = entries.as_slice() else { return None };
+    if value != recv {
+        return None;
+    }
+    Some(recv.clone())
 }

@@ -95,10 +95,10 @@ end
 }
 
 #[test]
-fn optional_keyword_is_ledgered_not_expanded() {
+fn optional_keyword_with_a_literal_default_reads_with_the_default_in_hand() {
     // `k: h[:k]` would pass nil for an absent key where Ruby uses the
-    // declared default — a silently different value, so the pass declines
-    // and says so.
+    // declared default; `h.fetch(:k, 48)` passes what Ruby would. The
+    // default is restated at the call site, which a literal survives.
     let (out, diags) = expand_and_emit(
         r#"
 class Tag
@@ -115,12 +115,38 @@ end
 "#,
     );
     assert!(
+        out.contains("Tag.new(name: opts[:name], size: opts.fetch(:size, 48))"),
+        "expected the optional keyword read with its default:\n{out}"
+    );
+    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+}
+
+#[test]
+fn optional_keyword_with_a_computed_default_is_ledgered_not_expanded() {
+    // `Current.user` means something else where the caller stands, so
+    // the pass declines and says so.
+    let (out, diags) = expand_and_emit(
+        r#"
+class Tag
+  def initialize(name:, owner: Current.user)
+    @name = name
+  end
+end
+
+class Builder
+  def build(opts)
+    Tag.new(**opts)
+  end
+end
+"#,
+    );
+    assert!(
         out.contains("Tag.new(opts)"),
-        "optional-keyword callee must be left alone:\n{out}"
+        "a computed default must leave the call alone:\n{out}"
     );
     assert_eq!(diags.len(), 1, "expected one ledger line: {diags:?}");
     assert!(
-        diags[0].message.contains("optional keyword"),
+        diags[0].message.contains("not a literal"),
         "ledger should name the reason: {}",
         diags[0].message
     );
@@ -256,4 +282,65 @@ end
         "expected the literal's keywords kept and the rest indexed off the bundle:\n{out}"
     );
     assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+}
+
+/// A TEST CLASS forwarding `**attributes` from one of its own helpers
+/// into another that declares keywords — campfire's
+/// `embed_from(**attributes) = attachment_for(**attributes).attachable`
+/// against `attachment_for(href:, url:, filename: "Title", caption:
+/// "Description")`. The call is receiverless, so the callee is resolved
+/// against the class's own helpers; the optional keywords are read with
+/// their literal defaults in hand.
+#[test]
+fn a_test_classs_own_helper_forwarding_a_splat_expands_against_the_class() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    assert_equal "a", embed_from(href: "a", url: "b")
+  end
+
+  private
+    def attachment_for(href:, url:, filename: "Title", caption: "Description")
+      href
+    end
+
+    def embed_from(**attributes)
+      attachment_for(**attributes)
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains(
+            r#"attachment_for(href: attributes[:href], url: attributes[:url], filename: attributes.fetch(:filename, "Title"), caption: attributes.fetch(:caption, "Description"))"#
+        ),
+        "expected the forwarded splat expanded against the class's own helper:\n{src}"
+    );
 }

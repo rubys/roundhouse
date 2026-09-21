@@ -340,7 +340,22 @@ module ActionView
       # NamedTuple#merge can't take a Hash, and Hash#merge can't
       # take a NamedTuple. Same `.to_h` pattern applies to every
       # helper below that merges user opts into a default Hash.
-      attrs = render_attrs({ href: href }.merge(opts.to_h))
+      #
+      # ORDER IS RAILS' ORDER: the html options first and `href` LAST
+      # (`link_to` does `html_options["href"] ||= url` after the options
+      # are in hand), so `link_to "T", url, rel: "noreferrer", target:
+      # "_blank"` is `<a rel="noreferrer" target="_blank" href="…">`.
+      # campfire's opengraph-embed test matches on exactly that
+      # string. An `href:` the caller put in the options wins, as
+      # `||=` has it. The href is appended as text rather than merged
+      # in: `opts.merge({ href: … })` puts a Hash literal in ARGUMENT
+      # position, which two strict emitters type from the literal
+      # (Crystal a NamedTuple, Swift a `[String: String]` cast on the
+      # receiver), where every other merge in this file has the
+      # literal as the receiver. Same escape `render_attrs` applies.
+      given = opts.to_h
+      attrs = render_attrs(given)
+      attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)
       "<a#{attrs}>#{html_escape(text)}</a>"
     end
 

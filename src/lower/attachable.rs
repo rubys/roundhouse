@@ -170,41 +170,54 @@ pub fn attachable_partials(app: &App) -> Vec<(ClassId, String)> {
         if !models.contains(&m.name) {
             continue;
         }
-        if let Some(path) = m.methods().find_map(partial_path_literal) {
-            out.push((m.name.clone(), path));
-            continue;
-        }
-        // The include chain, breadth first, matching on the include's
-        // last segment as `attachable_models` does for the marker.
-        let mut queue: Vec<Symbol> =
-            crate::analyze::model_includes(m).into_iter().map(|c| c.0).collect();
-        let mut seen: BTreeSet<Symbol> = BTreeSet::new();
-        let mut found = None;
-        while let Some(inc) = queue.pop() {
-            if !seen.insert(inc.clone()) {
-                continue;
-            }
-            let last = inc.as_str().rsplit("::").next().unwrap_or("");
-            for lc in &app.library_classes {
-                let lc_last = lc.name.0.as_str().rsplit("::").next().unwrap_or("");
-                if lc.name.0 != inc && lc_last != last {
-                    continue;
-                }
-                if let Some(path) = lc.methods.iter().find_map(partial_path_literal) {
-                    found = Some(path);
-                    break;
-                }
-                queue.extend(lc.includes.iter().map(|i| i.0.clone()));
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        if let Some(path) = found {
+        if let Some(path) = find_on_model_or_concerns(app, m, partial_path_literal) {
             out.push((m.name.clone(), path));
         }
     }
     out
+}
+
+/// The first `pick` over the model's own methods, then over every
+/// library class the model includes, transitively — the include chain
+/// walked breadth first, matching on the include's last segment as
+/// `attachable_models` does for the marker (a bare `include
+/// Mentionable` inside `class User` names `User::Mentionable`).
+fn find_on_model_or_concerns<T>(
+    app: &App,
+    m: &Model,
+    pick: impl Fn(&MethodDef) -> Option<T>,
+) -> Option<T> {
+    if let Some(found) = m.methods().find_map(&pick) {
+        return Some(found);
+    }
+    let mut queue: Vec<Symbol> =
+        crate::analyze::model_includes(m).into_iter().map(|c| c.0).collect();
+    let mut seen: BTreeSet<Symbol> = BTreeSet::new();
+    while let Some(inc) = queue.pop() {
+        if !seen.insert(inc.clone()) {
+            continue;
+        }
+        let last = inc.as_str().rsplit("::").next().unwrap_or("");
+        for lc in &app.library_classes {
+            let lc_last = lc.name.0.as_str().rsplit("::").next().unwrap_or("");
+            if lc.name.0 != inc && lc_last != last {
+                continue;
+            }
+            if let Some(found) = lc.methods.iter().find_map(&pick) {
+                return Some(found);
+            }
+            queue.extend(lc.includes.iter().map(|i| i.0.clone()));
+        }
+    }
+    None
+}
+
+/// Whether `m` is the instance method Rails' `Attachment#to_plain_text`
+/// asks an attachable for.
+fn plain_text_representation(m: &MethodDef) -> Option<()> {
+    (m.name.as_str() == "attachable_plain_text_representation"
+        && m.receiver == MethodReceiver::Instance)
+        .then_some(())
 }
 
 fn partial_path_literal(m: &MethodDef) -> Option<String> {
@@ -244,6 +257,12 @@ pub struct AttachablePartial {
     /// such a class builds itself from the node through its own
     /// `from_node`.
     pub content_type: Option<String>,
+    /// Whether the class (or, for a model, a concern it includes)
+    /// defines `attachable_plain_text_representation(caption)` — the
+    /// hook `Attachment#to_plain_text` prefers to the caption. campfire's
+    /// `User::Mentionable` answers `"@#{name}"` and its `OpengraphEmbed`
+    /// `""`; `Content.attachment_plain_text` gets an arm for each.
+    pub plain_text: bool,
 }
 
 /// Every class in the app that names an attachment partial by literal —
@@ -255,11 +274,17 @@ pub struct AttachablePartial {
 pub fn attachable_partial_bindings(app: &App) -> Vec<AttachablePartial> {
     let mut out = Vec::new();
     for (class, partial) in attachable_partials(app) {
+        let plain_text = app
+            .models
+            .iter()
+            .find(|m| m.name == class)
+            .is_some_and(|m| find_on_model_or_concerns(app, m, plain_text_representation).is_some());
         out.push(AttachablePartial {
             local: element_of(&class),
             class,
             partial,
             content_type: None,
+            plain_text,
         });
     }
     for lc in &app.library_classes {
@@ -295,6 +320,7 @@ pub fn attachable_partial_bindings(app: &App) -> Vec<AttachablePartial> {
             class: lc.name.clone(),
             partial,
             content_type,
+            plain_text: lc.methods.iter().any(|m| plain_text_representation(m).is_some()),
         });
     }
     out

@@ -58,12 +58,34 @@
 //! Expanding also types each argument individually instead of passing
 //! one opaque Hash.
 //!
+//! ## Optional keywords
+//!
+//! An optional keyword — `filename: "Title"` — is read with the default
+//! in hand: `filename: h.fetch(:filename, "Title")`, which is what Ruby's
+//! `**` does for a key the bundle does not carry. That re-evaluates the
+//! default in the CALLER's scope, so only a literal qualifies (a Symbol,
+//! String, number, `nil`, an empty collection — the same rule
+//! `kwrest_forward` applies, for the same reason: `Current.user` means
+//! something else over here). campfire's test helper
+//! `attachment_for(href:, url:, filename: "Title", caption:
+//! "Description")`, reached through `embed_from(**attributes)`, is the
+//! shape; all eight opengraph-embed tests tripped on it.
+//!
+//! ## Receiverless calls in a test class
+//!
+//! `embed_from(**attributes)` is a self-send: no receiver, so no
+//! receiver type to look the callee up by. Inside a test class the
+//! callee is the class's own helper, resolved per class the way
+//! `helper_kwargs` resolves its test-module half — by name, declining a
+//! name two helpers share. Test helpers KEEP their keyword parameters
+//! through ingest (unlike library classes, which flatten them), so the
+//! excess-argument evidence reads the same.
+//!
 //! ## The three guards, and why each one fails closed
 //!
-//! - **Every keyword parameter must be required.** With an optional
-//!   keyword, `k: h[:k]` passes `nil` for an absent key where Ruby would
-//!   have used the declared default — a silently different value. There
-//!   is no static way to know which keys `h` holds.
+//! - **Every optional keyword's default must be a literal.** Anything
+//!   else would be evaluated where the caller stands, not where the
+//!   callee wrote it.
 //! - **The hash expression must be a pure, cheap read** (local, ivar or
 //!   constant). It is evaluated once per keyword, so a call or an
 //!   arithmetic chain would be re-run N times.
@@ -115,7 +137,56 @@ pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
     let sigs = collect_signatures(app);
     let mut diags = Vec::new();
     super::for_each_hook_body(app, &mut |body| rewrite(body, &sigs, &mut diags));
+    apply_to_test_modules(app, &mut diags);
     diags
+}
+
+/// The test-class half: a receiverless call in a test body, `setup` or
+/// helper, resolved against the class's OWN helpers by name. A name two
+/// helpers share is skipped — the call site does not say which.
+fn apply_to_test_modules(app: &mut App, diags: &mut Vec<Diagnostic>) {
+    for tm in &mut app.test_modules {
+        let mut helpers: HashMap<Symbol, Vec<Param>> = HashMap::new();
+        let mut ambiguous: Vec<Symbol> = Vec::new();
+        for m in &tm.helpers {
+            if helpers.insert(m.name.clone(), m.params.clone()).is_some() {
+                ambiguous.push(m.name.clone());
+            }
+        }
+        for name in ambiguous {
+            helpers.remove(&name);
+        }
+        if helpers.is_empty() {
+            continue;
+        }
+        let mut visit = |body: &mut Expr| rewrite_self_sends(body, &helpers, diags);
+        if let Some(setup) = &mut tm.setup {
+            visit(setup);
+        }
+        for t in &mut tm.tests {
+            visit(&mut t.body);
+        }
+        for h in &mut tm.helpers {
+            visit(&mut h.body);
+        }
+    }
+}
+
+fn rewrite_self_sends(expr: &mut Expr, helpers: &HashMap<Symbol, Vec<Param>>, diags: &mut Vec<Diagnostic>) {
+    expr.node
+        .for_each_child_mut(&mut |child| rewrite_self_sends(child, helpers, diags));
+    let splat = {
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            return;
+        };
+        let Some(params) = helpers.get(method) else { return };
+        let Some(splat) = erased_splat_against(args, params) else { return };
+        splat
+    };
+    let ExprNode::Send { args, .. } = &mut *expr.node else {
+        unreachable!("matched a Send above")
+    };
+    expand(args, splat, diags);
 }
 
 /// Every instance method an app class declares. Class-side methods are
@@ -152,11 +223,12 @@ fn collect_signatures(app: &App) -> Signatures {
 /// The callee's keyword parameters, when this call is an erased `**`
 /// splat into explicit keywords.
 struct ErasedSplat {
-    /// Keyword parameter names, in declaration order.
-    keywords: Vec<Symbol>,
-    /// False when any keyword carries a default — the pass may not
-    /// expand it, but still ledgers it.
-    all_required: bool,
+    /// Keyword parameters in declaration order, each with the default
+    /// it declares (None for a required keyword).
+    keywords: Vec<(Symbol, Option<Expr>)>,
+    /// False when some optional keyword's default is not a literal —
+    /// the pass may not expand it, but still ledgers it.
+    defaults_literal: bool,
 }
 
 fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
@@ -169,10 +241,19 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
     let ExprNode::Send { args, .. } = &mut *expr.node else {
         unreachable!("erased_splat matched a Send")
     };
+    expand(args, splat, diags);
+}
+
+/// Replace the trailing positional bundle in `args` with the keyword
+/// list `splat` names, or ledger why not.
+fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>) {
     let hash = args.last().expect("erased_splat matched a trailing arg");
 
-    if !splat.all_required {
-        diags.push(residue(hash, "callee declares optional keyword parameters"));
+    if !splat.defaults_literal {
+        diags.push(residue(
+            hash,
+            "callee declares an optional keyword whose default is not a literal",
+        ));
         return;
     }
     let Some((read, literal)) = splat_shape(hash) else {
@@ -190,16 +271,20 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
         _ => Ty::Untyped,
     };
     // A keyword the literal names takes the literal's value — evaluated
-    // once, as Ruby's `**` would; the rest are read off the bundle.
+    // once, as Ruby's `**` would; the rest are read off the bundle, an
+    // optional one with its declared default in hand.
     let entries = splat
         .keywords
         .iter()
-        .map(|kw| {
+        .map(|(kw, default)| {
             let value = literal
                 .iter()
                 .find(|(k, _)| sym_of(k).is_some_and(|k| k == kw))
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| index(&read, kw, value_ty.clone()));
+                .unwrap_or_else(|| match default {
+                    Some(default) => fetch(&read, kw, default, value_ty.clone()),
+                    None => index(&read, kw, value_ty.clone()),
+                });
             (sym_key(kw, hash.span), value)
         })
         .collect();
@@ -250,13 +335,17 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
     let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
         return None;
     };
+    let params = callee_params(recv.ty.as_ref()?, method, sigs)?;
+    erased_splat_against(args, params)
+}
+
+/// The same question with the callee's parameter list already in hand.
+fn erased_splat_against(args: &[Expr], params: &[Param]) -> Option<ErasedSplat> {
     let last = args.last()?;
     // A literal keyword list already renders as keywords.
     if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) {
         return None;
     }
-
-    let params = callee_params(recv.ty.as_ref()?, method, sigs)?;
 
     // A `*rest` parameter absorbs any number of positional arguments, so
     // the excess-argument evidence says nothing about this call.
@@ -273,17 +362,33 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
     // bundle then lands in THAT slot — see `lower::kwrest_forward`,
     // which owns the case this pass declines.
     let positional = params.iter().filter(|p| !p.keyword && !p.rest).count();
-    let keywords: Vec<Symbol> = params
+    let keywords: Vec<(Symbol, Option<Expr>)> = params
         .iter()
         .filter(|p| p.keyword)
-        .map(|p| p.name.clone())
+        .map(|p| (p.name.clone(), p.default.clone()))
         .collect();
     if keywords.is_empty() || args.len() != positional + 1 {
         return None;
     }
-    // A keyword param carrying a default is Ruby's optional keyword.
-    let all_required = params.iter().all(|p| !p.keyword || p.default.is_none());
-    Some(ErasedSplat { keywords, all_required })
+    // A keyword param carrying a default is Ruby's optional keyword; it
+    // expands only when that default can be restated at the call site.
+    let defaults_literal = keywords
+        .iter()
+        .all(|(_, d)| d.as_ref().is_none_or(is_literal));
+    Some(ErasedSplat { keywords, defaults_literal })
+}
+
+/// A default that means the same thing at the call site as in the
+/// callee: literals and empty collections. A constant may resolve
+/// differently (or not at all) where the caller sits, and a call would
+/// run in the wrong scope.
+fn is_literal(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Hash { entries, .. } => entries.is_empty(),
+        ExprNode::Array { elements, .. } => elements.is_empty(),
+        _ => false,
+    }
 }
 
 /// The callee's parameter list, walking the inheritance chain the way
@@ -338,6 +443,26 @@ fn index(hash: &Expr, key: &Symbol, value_ty: Ty) -> Expr {
             args: vec![sym_key(key, hash.span)],
             block: None,
             parenthesized: false,
+        },
+    );
+    e.ty = Some(value_ty);
+    e
+}
+
+/// `<hash>.fetch(:<key>, <default>)`, typed as the hash's value type —
+/// the read of an OPTIONAL keyword, with the callee's default standing
+/// in for an absent key as Ruby's `**` would have it.
+fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
+    let mut e = Expr::new(
+        hash.span,
+        ExprNode::Send {
+            recv: Some(hash.clone()),
+            method: Symbol::from("fetch"),
+            args: vec![sym_key(key, hash.span), default.clone()],
+            block: None,
+            // Inside a keyword list, so the two arguments must be
+            // fenced off from the keywords that follow.
+            parenthesized: true,
         },
     );
     e.ty = Some(value_ty);

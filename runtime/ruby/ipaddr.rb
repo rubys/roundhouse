@@ -25,6 +25,14 @@
 # every target already has. `@octets` is 4 long for IPv4 and 16 for
 # IPv6, so `ipv4?` is a length test.
 #
+# THE RUBY FAMILY DOES NOT RUN THIS FILE. There `runtime/ipaddr.rb` is
+# the stdlib's class with `octets` reopened onto it
+# (`project::IPADDR_STDLIB`), because a second IPAddr beside the one
+# net/http already loaded is a superclass mismatch. So `octets` is the
+# ONE surface runtime code may assume of an IPAddr on every lane; a
+# method added here that the stdlib lacks must be added to that reopen
+# too, or the ruby lane raises where the strict ones answer.
+#
 # PREFIXES ARE HERE NOW, and they arrived the way the note below said
 # they would. `RestrictedHTTP::PrivateNetworkGuard` maps ten CIDR
 # strings through `IPAddr.new` in a CLASS BODY, so campfire's binary

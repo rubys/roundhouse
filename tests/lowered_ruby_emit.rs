@@ -1361,9 +1361,10 @@ fn lowered_index_view_rewrites_view_helpers() {
         !src.contains("ViewHelpers.link_to"),
         "ViewHelpers.link_to runtime call should be retired by inline expansion; got:\n{src}",
     );
+    // Rails' attribute order: the options first, `href` last.
     assert!(
-        src.contains("<a href=\\\""),
-        "expected inline <a href> tag; got:\n{src}",
+        src.contains("<a class=") && src.contains(" href=\\\""),
+        "expected inline <a …class… href> tag; got:\n{src}",
     );
     assert!(
         src.contains("RouteHelpers.new_article_path"),

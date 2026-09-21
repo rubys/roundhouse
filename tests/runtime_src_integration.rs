@@ -1257,7 +1257,28 @@ fn every_runtime_method_body_concretely_typed() {
     // on every target. What it bought: Active Storage's direct-upload
     // pair (`POST /rails/active_storage/direct_uploads`, the disk
     // service's `PUT`), served and guarded by campfire's initializer.
-    const CEILING: usize = 418;
+    //
+    // 418 -> 425: Action Text's attachable dispatch, SEVEN sites in
+    // three methods, all the one `attachable` a node resolves to —
+    // which is poly by Rails' own contract (campfire's
+    // `OpengraphEmbed` built from the node, a `User` from its sgid, a
+    // `MissingAttachable` when neither answers) and was already the
+    // declared `untyped` return of `Attachment#attachable`. FOUR in
+    // `attachable`: the content-type read now taken first
+    // (`Content.content_type_attachable(self)`, generated per app) is
+    // bound, nil-tested and returned. TWO in `to_partial_path`, Rails'
+    // `delegate_missing_to :attachable` for the one reader a
+    // class-side render asks. ONE in `Fragment#update`: what the block
+    // answers, discarded — Rails' `update` yields the source for
+    // writing and returns the fragment, the same block contract
+    // `replace` already pays one site for. What it bought: a test that
+    // builds an embed node by hand gets the embed back, not a
+    // `MissingAttachable`; `ApplicationController.render partial:
+    // attachment.to_partial_path` lowers to the generated dispatch; and
+    // campfire's two mutating content filters (`inner_html=`,
+    // `at_css(...)["class"] =`) run — opengraph-embed 7/8,
+    // content_filters 12/14.
+    const CEILING: usize = 425;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

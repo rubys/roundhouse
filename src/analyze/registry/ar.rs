@@ -480,7 +480,52 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // Read as a constant by content filters (`Attachment.tag_name`),
     // which is why it is a class method and not a bare literal.
     attachment.class_methods.insert(Symbol::from("tag_name"), Ty::Str);
+    // `Attachment.from_node(node)` — how a test builds one from markup
+    // it wrote (`Fragment.wrap(html).find_all(tag).first`); typed so a
+    // local holding it is KNOWN to be an Attachment, which is what
+    // `lower::controller_class_render` needs to send
+    // `render partial: attachment.to_partial_path` to the attachment's
+    // own per-app dispatch.
+    attachment.class_methods.insert(Symbol::from("from_node"), attachment_ty.clone());
+    attachment.instance_methods.insert(Symbol::from("to_partial_path"), Ty::Str);
     classes.insert(attachment_id, attachment);
+
+    // `ActionText::Fragment` / `ActionText::Node` — the element view a
+    // content filter (and a test) reads markup through: the selector
+    // scans answer nodes, a node answers its attributes and its html.
+    let fragment_id = ClassId(Symbol::from("ActionText::Fragment"));
+    let fragment_ty = Ty::Class { id: fragment_id.clone(), args: vec![] };
+    let node_id = ClassId(Symbol::from("ActionText::Node"));
+    let node_ty = Ty::Class { id: node_id.clone(), args: vec![] };
+    let mut fragment = ClassInfo::default();
+    fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
+    for m in ["to_s", "to_html", "source"] {
+        fragment.instance_methods.insert(Symbol::from(m), Ty::Str);
+    }
+    for m in ["find_all", "css"] {
+        fragment
+            .instance_methods
+            .insert(Symbol::from(m), Ty::Array { elem: Box::new(node_ty.clone()) });
+    }
+    fragment.instance_methods.insert(
+        Symbol::from("at_css"),
+        Ty::Union { variants: vec![node_ty.clone(), Ty::Nil] },
+    );
+    for m in ["replace", "update"] {
+        fragment.instance_methods.insert(Symbol::from(m), fragment_ty.clone());
+    }
+    classes.insert(fragment_id, fragment);
+    let mut node = ClassInfo::default();
+    for m in ["name", "to_s", "to_html", "inner_html"] {
+        node.instance_methods.insert(Symbol::from(m), Ty::Str);
+    }
+    node.instance_methods
+        .insert(Symbol::from("[]"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    node.instance_methods.insert(
+        Symbol::from("attributes"),
+        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+    );
+    classes.insert(node_id, node);
 
     let mut content = ClassInfo::default();
     for m in ["to_html", "to_s", "as_json", "to_plain_text"] {

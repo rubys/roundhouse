@@ -6162,7 +6162,11 @@ fn require_path_for_body_const(
         // `project::BUNDLED`, so nothing inserts a bare
         // `require "ipaddr"` that would reopen this class with the
         // stdlib's own `initialize` and leave the predicates reading a
-        // slot nobody filled. One IPAddr per tree, and it is ours.
+        // slot nobody filled. One IPAddr per tree: ours on the strict
+        // targets, and on the ruby family the stdlib's under the same
+        // path with the port's `octets` reopened onto it
+        // (`project::IPADDR_STDLIB`) — so runtime code reads octets
+        // everywhere and never `to_i`.
         "IPAddr" => Some("runtime/ipaddr".to_string()),
         // `Resolv` — Ruby's resolver, ported into
         // `runtime/ruby/resolv.rb` for the targets that have none and

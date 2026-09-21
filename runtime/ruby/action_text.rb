@@ -286,8 +286,11 @@ module ActionText
       @attributes.fetch(name, "")
     end
 
-    # The record this attachment points at — Rails' `attachable`,
-    # resolved from the node's SIGNED sgid through `Attachable.locate`
+    # The record this attachment points at — Rails' `attachable`: a
+    # class the node names by CONTENT TYPE first, built from the node
+    # (`Content.content_type_attachable`, generated per app; campfire's
+    # `from_node` reopen asks `OpengraphEmbed` before it reads the
+    # sgid), else the sgid's record resolved through `Attachable.locate`
     # — or a `MissingAttachable` when nothing answers: no sgid on the
     # node, a signature that does not verify (tampered, or minted under
     # another secret), a model no locator knows, a row since deleted.
@@ -303,6 +306,8 @@ module ActionText
     # An app without the reopen keeps the empty default, and a tampered
     # sgid is missing here as it is in stock Rails.
     def attachable
+      built = Content.content_type_attachable(self)
+      return built unless built.nil?
       model_name = resolved_model_name
       record = nil
       if model_name != ""
@@ -379,23 +384,60 @@ module ActionText
       self["url"]
     end
 
-    # Rails renders an attachment into plain text as its caption, and
-    # falls back to the filename when there is none
-    # (`Attachment#to_plain_text`).
+    # `delegate_missing_to :attachable` — the partial is the attachable's
+    # (a `MissingAttachable` names its own).
+    def to_partial_path
+      attachable.to_partial_path
+    end
+
+    # Rails' `Attachment#to_plain_text`: the ATTACHABLE's
+    # `attachable_plain_text_representation(caption)` when it has one,
+    # `caption.to_s` otherwise. Which attachable a node has is per app
+    # (`Content.attachment_plain_text`, generated beside
+    # `render_attachment`) — campfire's opengraph embed answers "" and
+    # its @mention "@name", and both used to come out here as the
+    # caption, so a solo unfurled link never matched its own plain
+    # text and the search index never held a mention.
     def to_plain_text
-      caption || filename.to_s
+      Content.attachment_plain_text(self)
     end
   end
 
-  # One element from a [`Fragment`] scan: its name, its attributes, and
-  # its OUTER html (the open tag through its matching close tag, or the
-  # tag alone when it is void). A filter reads it the way it reads a
-  # Nokogiri node — `node["href"]`, `node.to_s`.
+  # One element from a [`Fragment`] scan, in three pieces: its open tag,
+  # its inner html, and its close tag (both empty for a void or
+  # self-closed element). A filter reads it the way it reads a Nokogiri
+  # node — `node["href"]`, `node.to_s` — and WRITES it the same two
+  # ways: `node.inner_html = markup` and `node["class"] = value`, which
+  # are what campfire's `RemoveSoloUnfurledLinkText` and
+  # `StyleUnfurledTwitterAvatars` do to the fragment they were handed.
+  # A write rebuilds only the piece it touches — an attribute is spliced
+  # into the open tag as it was spelled, neighbours untouched — so an
+  # untouched node's `to_s` is still the source bytes.
+  #
+  # A node is DETACHED unless a fragment bound it: `find_all` and the
+  # node `replace` yields stand alone, and a write changes what the
+  # node answers (`replace` then splices `node.to_s` in). `Fragment#css`
+  # / `#at_css` — the names Nokogiri gives the same reads — bind the
+  # node to the fragment that answered it, so a write lands in that
+  # fragment's source too, which is what an `update` block reaches
+  # for. One write per bound node per fragment: offsets are taken
+  # when the node is found, not tracked afterwards.
   class Node
-    def initialize(name, attributes, outer)
+    def initialize(name, attributes, open_tag, inner, close_tag)
       @name = name
       @attributes = attributes
-      @outer = outer
+      @open_tag = open_tag
+      @inner = inner
+      @close_tag = close_tag
+      @owner = nil
+      @at = 0
+    end
+
+    # Ties this node to the fragment that found it, at `at` (the open
+    # tag's offset in that fragment's source), for write-through.
+    def bind(owner, at)
+      @owner = owner
+      @at = at
     end
 
     def name
@@ -406,16 +448,46 @@ module ActionText
       @attributes.fetch(key, nil)
     end
 
+    # Nokogiri's `node["k"] = v`: the value replaced in place when the
+    # attribute is spelled in the open tag, appended before the `>`
+    # when it is not.
+    def []=(key, value)
+      before = to_s
+      @attributes[key] = value
+      raw = @open_tag[1, @open_tag.length - 2].to_s
+      @open_tag = "<" + Fragment.set_attribute(raw, key, value) + ">"
+      write_through(before)
+    end
+
     def attributes
       @attributes
     end
 
+    def inner_html
+      @inner
+    end
+
+    # Nokogiri's `inner_html=`: the children replaced by `markup`, the
+    # element's own tags kept. On a void element there is nowhere to
+    # put it, so, as Nokogiri does, nothing happens.
+    def inner_html=(markup)
+      return if @close_tag == ""
+      before = to_s
+      @inner = markup.to_s
+      write_through(before)
+    end
+
     def to_s
-      @outer
+      @open_tag + @inner + @close_tag
     end
 
     def to_html
-      @outer
+      to_s
+    end
+
+    def write_through(before)
+      owner = @owner
+      owner.splice(@at, before.length, to_s) unless owner.nil?
     end
   end
 
@@ -504,8 +576,44 @@ module ActionText
       @html
     end
 
-    # Elements matching `selector`, in document order.
+    # Elements matching `selector`, in document order — detached nodes,
+    # a read (Rails' `Fragment#find_all`).
     def find_all(selector)
+      scan_elements(selector, false)
+    end
+
+    # The same elements BOUND to this fragment, so a write on one lands
+    # here: Nokogiri's `css`, the name an `update` block calls.
+    def css(selector)
+      scan_elements(selector, true)
+    end
+
+    # The first of `css`, or nil.
+    def at_css(selector)
+      found = scan_elements(selector, true)
+      found.empty? ? nil : found[0]
+    end
+
+    # Rails' `Fragment#update`: a COPY of this fragment, yielded for the
+    # block to write on through `at_css` / `css`, and answered. The
+    # receiver is unchanged, as Rails' is (it dups the source first).
+    def update
+      copy = Fragment.new(@html)
+      yield copy
+      copy
+    end
+
+    # Replaces `length` characters at `at` with `text` — a bound node's
+    # write landing in its fragment's source.
+    def splice(at, length, text)
+      @html = @html[0, at].to_s + text + @html[at + length, @html.length - at - length].to_s
+    end
+
+    # `scan_elements`, not `scan`: `scan` is a builtin-owned name on
+    # spinel (String#scan), and a class method of that name conflicts
+    # with the prelude's declaration at the C level — the same family
+    # as `replace` (matz/spinel#4240).
+    def scan_elements(selector, bound)
       out = []
       matcher = Fragment.parse_selector(selector)
       i = 0
@@ -521,7 +629,9 @@ module ActionText
           attrs = Content.parse_attributes(raw)
           stop = Fragment.element_end(@html, open_at, tag_end, name, raw)
           if Fragment.matches?(name, attrs, matcher)
-            out << Node.new(name, attrs, @html[open_at, stop - open_at].to_s)
+            node = node_at(name, attrs, open_at, tag_end, stop)
+            node.bind(self, open_at) if bound
+            out << node
           end
           # Into the children either way: a match's descendants are
           # elements too, and Rails' `css` returns them.
@@ -529,6 +639,19 @@ module ActionText
         end
       end
       out
+    end
+
+    # The element opened at `open_at` as a Node: open tag, inner, close
+    # tag. A void or self-closed element (`stop` right after its tag)
+    # has neither inner nor close; an unclosed one (`stop` at the end
+    # with no `</name>` there) has its inner run to the end and no
+    # close tag, the same forgiving reading `element_end` gave it.
+    def node_at(name, attrs, open_at, tag_end, stop)
+      open_tag = @html[open_at, tag_end - open_at + 1].to_s
+      return Node.new(name, attrs, open_tag, "", "") if stop == tag_end + 1
+      close_at = Fragment.close_tag_start(@html, tag_end, stop, name)
+      inner = @html[tag_end + 1, close_at - tag_end - 1].to_s
+      Node.new(name, attrs, open_tag, inner, @html[close_at, stop - close_at].to_s)
     end
 
     # Rails' `ActionText::Fragment#replace`: every matching element's
@@ -559,7 +682,7 @@ module ActionText
           attrs = Content.parse_attributes(raw)
           stop = Fragment.element_end(@html, open_at, tag_end, name, raw)
           if Fragment.matches?(name, attrs, matcher)
-            node = Node.new(name, attrs, @html[open_at, stop - open_at].to_s)
+            node = node_at(name, attrs, open_at, tag_end, stop)
             out = out + (yield node).to_s
             i = stop
           else
@@ -630,10 +753,8 @@ module ActionText
         if html[i, 1].to_s == "<"
           close = html[i + 1, 1].to_s == "/"
           start = close ? i + 2 : i + 1
-          j = i + 1
-          while j < n && html[j, 1].to_s != ">"
-            j = j + 1
-          end
+          j = Content.tag_end(html, i)
+          j = n if j < 0
           inner_raw = html[start, j - start].to_s
           if Content.tag_name_of(inner_raw) == name
             if close
@@ -656,6 +777,83 @@ module ActionText
         name == "embed" || name == "hr" || name == "img" || name == "input" ||
         name == "link" || name == "meta" || name == "param" ||
         name == "source" || name == "track" || name == "wbr"
+    end
+
+    # Where the `</name>` that `element_end` stopped after begins, or
+    # `stop` itself when the element ran unclosed to the end and there
+    # is no such tag: the `<` scanned back to from `stop` counts only
+    # if it opens a close tag of this name.
+    def self.close_tag_start(html, tag_end, stop, name)
+      k = stop - 1
+      while k > tag_end && html[k, 1].to_s != "<"
+        k = k - 1
+      end
+      return stop if k <= tag_end
+      return stop if html[k + 1, 1].to_s != "/"
+      return stop if Content.tag_name_of(html[k + 1, stop - k - 2].to_s) != name
+      k
+    end
+
+    # The interior of an open tag (`raw`, no angle brackets) with `key`
+    # set to `value`: an existing attribute's value replaced between
+    # its own quotes, a bare one quoted, a valueless one given `="…"`,
+    # and a missing one appended (before the `/` of a self-closing
+    # tag). The same tokenization as `Content.parse_attributes`, kept
+    # in step with it; `"` and `&` are the two characters an attribute
+    # value cannot carry raw.
+    def self.set_attribute(raw, key, value)
+      escaped = value.gsub("&", "&amp;").gsub("\"", "&quot;")
+      quoted = "\"" + escaped + "\""
+      i = 0
+      n = raw.length
+      while i < n && !Content.space_at(raw, i)
+        i = i + 1
+      end
+      while i < n
+        while i < n && Content.space_at(raw, i)
+          i = i + 1
+        end
+        name_start = i
+        while i < n && !Content.space_at(raw, i) && raw[i, 1].to_s != "="
+          i = i + 1
+        end
+        name = raw[name_start, i - name_start].to_s.downcase
+        break if name == "" || name == "/"
+        if raw[i, 1].to_s == "="
+          i = i + 1
+          quote = raw[i, 1].to_s
+          if quote == "\"" || quote == "'"
+            i = i + 1
+            value_start = i
+            while i < n && raw[i, 1].to_s != quote
+              i = i + 1
+            end
+            if name == key
+              return raw[0, value_start].to_s + escaped + raw[i, n - i].to_s
+            end
+            i = i + 1
+          else
+            value_start = i
+            while i < n && !Content.space_at(raw, i)
+              i = i + 1
+            end
+            if name == key
+              return raw[0, value_start].to_s + quoted + raw[i, n - i].to_s
+            end
+          end
+        elsif name == key
+          return raw[0, i].to_s + "=" + quoted + raw[i, n - i].to_s
+        end
+      end
+      # Not spelled: appended, inside a self-closing tag's `/`.
+      body = raw
+      tail = ""
+      if body.end_with?("/")
+        body = body[0, body.length - 1].to_s
+        tail = "/"
+      end
+      body = body.rstrip
+      body + " " + key + "=" + quoted + tail
     end
 
     # ---- selectors ----------------------------------------------------
@@ -886,6 +1084,54 @@ module ActionText
     end
     # <<< generated: attachment-render
 
+    # `Attachment#to_plain_text`'s dispatch, per app the way
+    # `render_attachment` is: Rails asks the ATTACHABLE for
+    # `attachable_plain_text_representation(caption)` and falls back to
+    # `caption.to_s`. The generated body (`project::apply_content_layout`)
+    # gets one arm per attachable class that defines the method, in the
+    # order the app's `from_node` resolves them — a class the node names
+    # by content type first, then the sgid's model by name — and falls
+    # through to the framework's own attachables below. An app without
+    # one keeps this body.
+    # The attachable a node names by CONTENT TYPE, built from the node
+    # by the class's own `from_node`, or nil when no such class claims
+    # it — `Attachment#attachable`'s first read. One arm per class,
+    # generated with the two dispatches above; an app with none keeps
+    # this body.
+    # >>> generated: attachable-by-content-type
+    def self.content_type_attachable(attachment)
+      nil
+    end
+    # <<< generated: attachable-by-content-type
+
+    # >>> generated: attachment-plain-text
+    def self.attachment_plain_text(attachment)
+      Content.default_attachment_plain_text(attachment)
+    end
+    # <<< generated: attachment-plain-text
+
+    # The attachables Action Text itself ships, after the app's had
+    # their turn: a blob's sgid is "[caption or filename]"
+    # (`ActiveStorage::Blob`, action_text/engine.rb), a node with a
+    # `url` and an image content type and no sgid is a RemoteImage,
+    # "[caption or Image]"; anything else — a `MissingAttachable`, a
+    # model with no representation of its own — is the caption.
+    def self.default_attachment_plain_text(attachment)
+      caption = attachment.caption
+      if attachment.resolved_model_name == "ActiveStorage::Blob"
+        return "[" + (caption.nil? ? attachment.filename.to_s : caption) + "]"
+      end
+      if attachment.sgid == "" && attachment.url != "" && Content.image_content_type?(attachment.content_type)
+        return "[" + (caption.nil? ? "Image" : caption) + "]"
+      end
+      caption.to_s
+    end
+
+    # `RemoteImage.content_type_is_image?`: `image`, or `image/…`.
+    def self.image_content_type?(content_type)
+      content_type == "image" || content_type.start_with?("image/")
+    end
+
     def as_json
       @html
     end
@@ -1016,10 +1262,10 @@ module ActionText
         if c == "<"
           close = @html[i + 1, 1].to_s == "/"
           name_start = close ? i + 2 : i + 1
-          j = name_start
-          while j < n && @html[j, 1].to_s != ">"
-            j = j + 1
-          end
+          # Quote-aware: an opengraph node's `content` attribute holds
+          # raw markup, and the first `>` in the tag is inside it.
+          j = Content.tag_end(@html, i)
+          j = n if j < 0
           raw = @html[name_start, j - name_start].to_s
           name = Content.tag_name_of(raw)
           void = raw[raw.length - 1, 1].to_s == "/"
@@ -1038,8 +1284,13 @@ module ActionText
           elsif name == "br"
             out = out + "\n"
           elsif name == ActionText::Attachment.tag_name
+            # Rails REPLACES the node with its plain text — children and
+            # all. A node carries its rendered attachable as children
+            # (Trix stores an unfurled link's `<figure>` inside it), and
+            # that markup is not the message's text.
             unless close
               out = out + ActionText::Attachment.new(Content.parse_attributes(raw)).to_plain_text
+              j = Fragment.element_end(@html, i, j, name, raw) - 1
             end
           elsif Content.scoped_element(name)
             if close

@@ -453,10 +453,40 @@ default under the oracle's bundle: 30 of 31 probes in
 `tests/shared_autolink.rb` byte for byte; the one difference is an
 unterminated tag the HTML5 parser closes and the scanner drops.
 
+**Plain text asks the attachable too.** Rails' `Attachment#to_plain_text`
+is the attachable's `attachable_plain_text_representation(caption)`
+when it defines one and `caption.to_s` otherwise, and the node is
+REPLACED whole — children included, and Trix stores an unfurled link's
+rendered `<figure>` inside its node. So an opengraph embed is `""`
+(campfire says so), a mention is `"@name"`, a blob is `"[caption or
+filename]"` and an unresolved sgid is its caption alone. That dispatch
+is per app for the same reason the render is:
+`Content.attachment_plain_text` is generated beside `render_attachment`
+with an arm for each attachable class that defines the hook, falling
+through to the framework's own attachables (blob, remote image,
+caption). Until 2026-09-21 every attachment answered `caption ||
+filename` and the scanner walked into its children, so a solo
+unfurled link never equalled its own plain text and
+`RemoveSoloUnfurledLinkText` never fired — served bodies kept the URL
+text Rails strips. `Attachment#attachable` reads the content-type
+class first as well (`Content.content_type_attachable`, generated), so
+a test that builds an embed node by hand and asks for its attachable
+gets the `OpengraphEmbed`, not a `MissingAttachable`.
+
+**The fragment can be written, not only read.** A `Node` is its open
+tag, inner html and close tag; `inner_html=` and `node["k"] = v` rewrite
+the piece they touch (an attribute is spliced into the open tag as it
+was spelled, so an untouched node is still the source bytes), and
+`Fragment#update` yields a copy whose `css` / `at_css` bind nodes for
+write-through — the two shapes campfire's mutating filters use
+(`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
+`fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
+stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
+for these was measured against Rails' Nokogiri-backed Fragment.
+
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
-`filename`, `url`), and `to_plain_text` renders an attachment as its
-caption or filename exactly as Rails does.
+`filename`, `url`).
 
 ### Action Text decodes only the entities Rails' escaper emits
 

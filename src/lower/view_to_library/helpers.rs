@@ -503,19 +503,23 @@ pub(crate) fn link_to_wrapper_markup(
     url_expr: Expr,
     opts_entries: Vec<(Expr, Expr)>,
 ) -> (Vec<InterpPart>, Vec<InterpPart>) {
+    // Rails' attribute order: the html options first, `href` LAST
+    // (`link_to` adds it with `html_options["href"] ||= url` once the
+    // options are in hand). The runtime `ViewHelpers.link_to` renders
+    // the same order, so the two spellings agree byte for byte.
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: "<a href=\"".to_string(),
+        value: "<a".to_string(),
+    });
+    append_attr_parts(&mut parts, &opts_entries);
+    parts.push(InterpPart::Text {
+        value: " href=\"".to_string(),
     });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("html_escape", vec![url_expr]),
     });
     parts.push(InterpPart::Text {
-        value: "\"".to_string(),
-    });
-    append_attr_parts(&mut parts, &opts_entries);
-    parts.push(InterpPart::Text {
-        value: ">".to_string(),
+        value: "\">".to_string(),
     });
     let suffix = vec![InterpPart::Text { value: "</a>".to_string() }];
     (parts, suffix)

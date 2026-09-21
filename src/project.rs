@@ -1355,6 +1355,34 @@ module WebPush
 end
 "##;
 
+/// The ruby family's `runtime/ipaddr.rb`: Ruby's own, plus the ONE
+/// method the port has and the stdlib does not. `runtime/ruby/ipaddr.rb`
+/// keeps the address as an `Array[Integer]` of octets because the strict
+/// targets have no 128-bit `to_i`, and the runtime code written over it
+/// reads that array — `Surfguard.embedded_ipv4` takes the last four for
+/// a NAT64 / SIIT target. On this tree the class under the same require
+/// path is the stdlib's, so without this reopen that call was a
+/// `NoMethodError` for every `64:ff9b::/96` and `::ffff:0:0:0/96`
+/// address: the guard failed CLOSED, but an unfurl of one 500'd where
+/// Rails refuses it (three of campfire's 24 guard tests). `hton` is the
+/// masked address in network order, which is what the port's `@octets`
+/// holds too.
+const IPADDR_STDLIB: &str = r##"# Ruby's own ipaddr — see `project::IPADDR_STDLIB`.
+# The port at runtime/ruby/ipaddr.rb exists for the targets
+# that have no stdlib to reach for; this tree has one, and
+# defining a second IPAddr beside it is a superclass mismatch
+# at require time.
+require "ipaddr"
+
+class IPAddr
+  # The port's representation, answered by the stdlib's: 4 octets for
+  # IPv4, 16 for IPv6, masked to the prefix.
+  def octets
+    hton.bytes
+  end unless method_defined?(:octets)
+end
+"##;
+
 const RESOLV_STUB_REOPEN: &str = r##"require "resolv"
 
 # Stub slot for `lower::mocha` — see `project::RESOLV_STUB_REOPEN`.
@@ -1588,12 +1616,13 @@ fn ruby_runtime_files(
 
     files.retain(|(p, _)| p != "runtime/db.rb");
 
-    // `IPAddr`: the CRuby/JRuby trees have Ruby's own, and it is a
-    // superset of the port. Same shape as the db.rb swap above — one
-    // require path, target-appropriate implementation — but written as
-    // a one-line file rather than a rename, because the require the
-    // emitted models carry is `require_relative ".../runtime/ipaddr"`
-    // and that path has to keep resolving.
+    // `IPAddr`: the CRuby/JRuby trees have Ruby's own. Same shape as
+    // the db.rb swap above — one require path, target-appropriate
+    // implementation — but written as a small file rather than a
+    // rename, because the require the emitted models carry is
+    // `require_relative ".../runtime/ipaddr"` and that path has to
+    // keep resolving. See `IPADDR_STDLIB` for the one method the
+    // stdlib's is NOT a superset in.
     //
     // THIS IS NOT TIDINESS. Something on the CRuby side already loads
     // the stdlib's ipaddr (net/http reaches it through resolv), and two
@@ -1603,13 +1632,7 @@ fn ruby_runtime_files(
     // on the same line.
     for (path, content) in files.iter_mut() {
         if path == "runtime/ipaddr.rb" {
-            *content = "# Ruby's own ipaddr — see `project::ruby_runtime_files`.\n\
-                        # The port at runtime/ruby/ipaddr.rb exists for the targets\n\
-                        # that have no stdlib to reach for; this tree has one, and\n\
-                        # defining a second IPAddr beside it is a superclass mismatch\n\
-                        # at require time.\n\
-                        require \"ipaddr\"\n"
-                .to_string();
+            *content = IPADDR_STDLIB.to_string();
         }
         // `Zlib`: same swap, and here it is a correctness one as much
         // as a speed one. The port computes the checksum in Ruby a bit
@@ -1920,6 +1943,10 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const VIEW: &str = "app/views/layouts/action_text/contents/_content.rb";
     const RENDER_HEAD: &str = "    # >>> generated: attachment-render\n";
     const RENDER_TAIL: &str = "    # <<< generated: attachment-render\n";
+    const PLAIN_HEAD: &str = "    # >>> generated: attachment-plain-text\n";
+    const PLAIN_TAIL: &str = "    # <<< generated: attachment-plain-text\n";
+    const BUILT_HEAD: &str = "    # >>> generated: attachable-by-content-type\n";
+    const BUILT_TAIL: &str = "    # <<< generated: attachable-by-content-type\n";
 
     let has_layout = files.iter().any(|(path, _)| path.ends_with(VIEW));
     let layout = format!(
@@ -1932,8 +1959,23 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // itself from the node (`OpengraphEmbed.from_node`, which applies
     // its own `web_url` filter and answers nil for any other node), and
     // is asked first; then the sgid's model, by name.
+    //
+    // And beside it `Content.attachment_plain_text` — `Attachment#
+    // to_plain_text`'s dispatch, the same arms in the same order, for
+    // the classes that define `attachable_plain_text_representation`:
+    // a content-type class answers through the instance its `from_node`
+    // built, a model through the record, and a node neither claims
+    // falls through to the framework's own attachables
+    // (`default_attachment_plain_text`). A class without the hook gets
+    // no arm here — Rails would answer its caption, which is what the
+    // fall-through does.
     let mut by_content_type = String::new();
     let mut by_model = String::new();
+    let mut plain_by_content_type = String::new();
+    let mut plain_by_model = String::new();
+    // And `Content.content_type_attachable` — the same content-type arms
+    // answering the INSTANCE, for `Attachment#attachable`.
+    let mut built_by_content_type = String::new();
     for binding in crate::lower::attachable::attachable_partial_bindings(app) {
         let (dir, stem) = crate::lower::view_to_library::split_view_name(&binding.partial);
         let view_path = format!("app/views/{dir}/_{stem}.rb");
@@ -1950,14 +1992,51 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
                  return {module}.{stem}({local})\n      end\n",
                 module = module.0.as_str(),
             ));
+            built_by_content_type.push_str(&format!(
+                "      {local} = ::{name}.from_node(attachment)\n      \
+                 unless {local}.nil?\n        {local}.attachment = attachment\n        \
+                 return {local}\n      end\n",
+            ));
+            if binding.plain_text {
+                plain_by_content_type.push_str(&format!(
+                    "      {local} = ::{name}.from_node(attachment)\n      \
+                     return {local}.attachable_plain_text_representation(attachment.caption) unless {local}.nil?\n",
+                ));
+            }
         } else {
             by_model.push_str(&format!(
                 "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
                  {local}.nil? ? \"\" : {module}.{stem}({local})\n",
                 module = module.0.as_str(),
             ));
+            if binding.plain_text {
+                plain_by_model.push_str(&format!(
+                    "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
+                     return {local}.attachable_plain_text_representation(attachment.caption) unless {local}.nil?\n",
+                ));
+            }
         }
     }
+    let built = if built_by_content_type.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{BUILT_HEAD}    def self.content_type_attachable(attachment)\n{built_by_content_type}      nil\n    end\n{BUILT_TAIL}"
+        ))
+    };
+    let plain = if plain_by_content_type.is_empty() && plain_by_model.is_empty() {
+        None
+    } else {
+        let sgid_dispatch = if plain_by_model.is_empty() {
+            String::new()
+        } else {
+            format!("      case attachment.resolved_model_name\n{plain_by_model}      end\n")
+        };
+        Some(format!(
+            "{PLAIN_HEAD}    def self.attachment_plain_text(attachment)\n{plain_by_content_type}{sgid_dispatch}      \
+             Content.default_attachment_plain_text(attachment)\n    end\n{PLAIN_TAIL}"
+        ))
+    };
     let render = if by_content_type.is_empty() && by_model.is_empty() {
         None
     } else {
@@ -1988,6 +2067,22 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
                 if let Some(rel_end) = content[start..].find(RENDER_TAIL) {
                     let end = start + rel_end + RENDER_TAIL.len();
                     content.replace_range(start..end, render);
+                }
+            }
+        }
+        if let Some(built) = &built {
+            if let Some(start) = content.find(BUILT_HEAD) {
+                if let Some(rel_end) = content[start..].find(BUILT_TAIL) {
+                    let end = start + rel_end + BUILT_TAIL.len();
+                    content.replace_range(start..end, built);
+                }
+            }
+        }
+        if let Some(plain) = &plain {
+            if let Some(start) = content.find(PLAIN_HEAD) {
+                if let Some(rel_end) = content[start..].find(PLAIN_TAIL) {
+                    let end = start + rel_end + PLAIN_TAIL.len();
+                    content.replace_range(start..end, plain);
                 }
             }
         }
@@ -2786,9 +2881,10 @@ fn jruby_runtime_files(
         }
         // JRuby has Ruby's own ipaddr too — same swap, same reason
         // (a second `IPAddr::InvalidAddressError` is a superclass
-        // mismatch at require time). See `ruby_runtime_files`.
+        // mismatch at require time), same `octets` reopen. See
+        // `ruby_runtime_files`.
         if path == "runtime/ipaddr.rb" {
-            *content = "require \"ipaddr\"\n".to_string();
+            *content = IPADDR_STDLIB.to_string();
         }
         // Same for zlib — the JVM tree has Ruby's own.
         if path == "runtime/zlib.rb" {

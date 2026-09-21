@@ -156,10 +156,35 @@ class ActionTextContentTest < Minitest::Test
     assert_equal "hi A cap there", ActionText::Content.new(html).to_plain_text
   end
 
-  def test_attachment_falls_back_to_filename
+  # An sgid nothing resolves is a `MissingAttachable`, which has no
+  # plain-text representation of its own, so the node is its caption
+  # and nothing else — NOT its filename. (Measured: Rails answers "" for
+  # this node. "[racecar.jpg]" is what a BLOB's sgid would give, and
+  # this one resolves to no blob.)
+  def test_an_unresolved_attachment_without_a_caption_is_nothing
     html = '<action-text-attachment sgid="abc" filename="racecar.jpg">' \
            "</action-text-attachment>"
-    assert_equal "racecar.jpg", ActionText::Content.new(html).to_plain_text
+    assert_equal "", ActionText::Content.new(html).to_plain_text
+  end
+
+  # An attachment's CHILDREN are not text: Rails replaces the whole
+  # node, and Trix stores an unfurled link's rendered `<figure>` inside
+  # it. (Measured.)
+  def test_an_attachments_children_are_not_text
+    html = '<div>see <action-text-attachment sgid="abc" caption="cap">' \
+           "<figure><a href=\"http://x/\">Title</a><div>blurb</div></figure></action-text-attachment> now</div>"
+    assert_equal "see cap now", ActionText::Content.new(html).to_plain_text
+  end
+
+  # A node with a `url` and an image content type and no sgid is
+  # Action Text's own `RemoteImage`: "[caption]", "[Image]" without one.
+  def test_a_remote_image_is_bracketed
+    html = '<div>x<action-text-attachment content-type="image/png" url="http://x/1.png">' \
+           "</action-text-attachment></div>"
+    assert_equal "x[Image]", ActionText::Content.new(html).to_plain_text
+    html = '<div>x<action-text-attachment content-type="image/png" url="http://x/1.png" caption="pic">' \
+           "</action-text-attachment></div>"
+    assert_equal "x[pic]", ActionText::Content.new(html).to_plain_text
   end
 
   def test_links_are_extracted_in_order_without_duplicates
@@ -314,6 +339,52 @@ class ActionTextFragmentTest < Minitest::Test
   def test_a_void_element_is_its_own_tag
     fragment = ActionText::Content.new("<div>a<br>b</div>").fragment
     assert_equal "<br>", fragment.find_all("br").first.to_s
+  end
+
+  # The WRITE side, which campfire's two mutating filters use: a node
+  # handed out by `replace` takes `inner_html=` and is spliced back as
+  # rewritten, and an `update` block writes through `at_css` into the
+  # copy it was handed. Every expectation measured against Rails'
+  # Nokogiri-backed Fragment.
+  def test_replace_can_rewrite_a_nodes_inner_html
+    fragment = ActionText::Content.new("<div>a<b>k</b></div>").fragment
+    out = fragment.replace("div") { |node| node.tap { |n| n.inner_html = "<i>in</i>" } }
+    assert_equal "<div><i>in</i></div>", out.to_s
+  end
+
+  def test_update_writes_an_attribute_through_at_css
+    fragment = ActionText::Content.new("<div>a<b>k</b></div>").fragment
+    out = fragment.update { |source| source.at_css("div")["class"] = "x" }
+    assert_equal "<div class=\"x\">a<b>k</b></div>", out.to_s
+    # The receiver is untouched, as Rails' is: `update` works on a copy.
+    assert_equal "<div>a<b>k</b></div>", fragment.to_s
+  end
+
+  def test_setting_an_attribute_replaces_it_in_place_or_appends_it
+    fragment = ActionText::Content.new("<div class=\"a\" id=\"b\">t</div>").fragment
+    out = fragment.update do |source|
+      div = source.at_css("div")
+      div["class"] = "q\"&x"
+      div["title"] = "t"
+    end
+    assert_equal "<div class=\"q&quot;&amp;x\" id=\"b\" title=\"t\">t</div>", out.to_s
+  end
+
+  def test_a_void_element_takes_an_attribute_but_no_inner_html
+    fragment = ActionText::Content.new("<div>a<br>b</div>").fragment
+    out = fragment.update do |source|
+      source.at_css("br")["class"] = "c"
+      source.at_css("br").inner_html = "zzz"
+    end
+    assert_equal "<div>a<br class=\"c\">b</div>", out.to_s
+  end
+
+  def test_a_node_reads_its_own_pieces
+    node = ActionText::Content.new("<div>a<b>k</b></div>").fragment.find_all("div").first
+    assert_equal "a<b>k</b>", node.inner_html
+    node["class"] = "x"
+    assert_equal "x", node["class"]
+    assert_equal "<div class=\"x\">a<b>k</b></div>", node.to_s
   end
 
   def test_wrap_takes_a_string_or_a_fragment

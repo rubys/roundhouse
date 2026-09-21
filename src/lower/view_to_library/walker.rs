@@ -1994,7 +1994,9 @@ mod tests {
         // renders per message on the room page.
         let emitted = inline_helper_block_emit("link_to");
 
-        assert!(emitted.contains("<a href="), "the anchor opens inline:\n{emitted}");
+        // Rails' attribute order: the options, then `href` last.
+        assert!(emitted.contains("<a class="), "the anchor opens inline:\n{emitted}");
+        assert!(emitted.contains(" href="), "with the href after the options:\n{emitted}");
         assert!(emitted.contains("inner"), "block body walked inline:\n{emitted}");
         assert!(emitted.contains("</a>"), "and closes after it:\n{emitted}");
         assert!(

@@ -216,11 +216,16 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<a href="/articles/42">Show</a>), out
   end
 
+  # Rails' order: the html options first, `href` last (measured —
+  # campfire's opengraph-embed test matches on the exact string).
   def test_link_to_with_class
     out = ViewHelpers.link_to("Show", "/articles/42", class: "btn")
-    assert_includes out, %(href="/articles/42")
-    assert_includes out, %(class="btn")
-    assert_includes out, ">Show</a>"
+    assert_equal %(<a class="btn" href="/articles/42">Show</a>), out
+  end
+
+  def test_link_to_puts_the_options_before_the_href
+    out = ViewHelpers.link_to("Title", "https://example.com/page", rel: "noreferrer", target: "_blank")
+    assert_equal %(<a rel="noreferrer" target="_blank" href="https://example.com/page">Title</a>), out
   end
 
   def test_link_to_escapes_text
@@ -230,8 +235,8 @@ class ViewHelpersTest < Minitest::Test
 
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
-  # puts the html options before the href; `link_to` here already
-  # differs the same way, and compare is DOM-equivalence).
+  # puts the html options before the href; `link_to` above follows
+  # that now, `mail_to` still does not, and compare is DOM-equivalence).
   def test_mail_to_labels_the_link_with_the_address
     assert_equal %(<a href="mailto:me@example.com">me@example.com</a>),
                  ViewHelpers.mail_to("me@example.com")

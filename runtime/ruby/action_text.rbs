@@ -45,6 +45,7 @@ module ActionText
     def attributes: () -> Hash[String, String]
     def []: (String name) -> String
     def attachable: () -> untyped
+    def to_partial_path: () -> String
     def resolved_model_name: () -> String
     def resolved_id: () -> Integer
     def sgid: () -> String
@@ -56,12 +57,24 @@ module ActionText
   end
 
   class Node
-    def initialize: (String name, Hash[String, String] attributes, String outer) -> void
+    @name: String
+    @attributes: Hash[String, String]
+    @open_tag: String
+    @inner: String
+    @close_tag: String
+    @owner: Fragment?
+    @at: Integer
+    def initialize: (String name, Hash[String, String] attributes, String open_tag, String inner, String close_tag) -> void
+    def bind: (Fragment owner, Integer at) -> void
     def name: () -> String
     def []: (String key) -> String?
+    def []=: (String key, String value) -> void
     def attributes: () -> Hash[String, String]
+    def inner_html: () -> String
+    def inner_html=: (String markup) -> void
     def to_s: () -> String
     def to_html: () -> String
+    def write_through: (String before) -> void
   end
 
   class Selector
@@ -81,11 +94,19 @@ module ActionText
     def to_html: () -> String
     def source: () -> String
     def find_all: (String selector) -> Array[ActionText::Node]
+    def css: (String selector) -> Array[ActionText::Node]
+    def at_css: (String selector) -> ActionText::Node?
+    def update: () { (Fragment source) -> untyped } -> Fragment
+    def splice: (Integer at, Integer length, String text) -> void
+    def scan_elements: (String selector, bool bound) -> Array[ActionText::Node]
+    def node_at: (String name, Hash[String, String] attrs, Integer open_at, Integer tag_end, Integer stop) -> ActionText::Node
     def replace: (String selector) { (ActionText::Node node) -> untyped } -> Fragment
     def self.next_element: (String html, Integer from) -> Integer
     def self.tag_end: (String html, Integer at) -> Integer
     def self.element_end: (String html, Integer at, Integer tag_end, String name, String raw) -> Integer
     def self.void_element: (String name) -> bool
+    def self.close_tag_start: (String html, Integer tag_end, Integer stop, String name) -> Integer
+    def self.set_attribute: (String raw, String key, String value) -> String
     def self.parse_selector: (String selector) -> Selector
     def self.element_name?: (String text) -> bool
     def self.not_names: (String text) -> Array[String]
@@ -100,6 +121,10 @@ module ActionText
     def rendered_html: () -> String
     def render_attachments: () -> String
     def self.render_attachment: (ActionText::Attachment attachment) -> String
+    def self.content_type_attachable: (ActionText::Attachment attachment) -> untyped
+    def self.attachment_plain_text: (ActionText::Attachment attachment) -> String
+    def self.default_attachment_plain_text: (ActionText::Attachment attachment) -> String
+    def self.image_content_type?: (String content_type) -> bool
     def as_json: () -> String
     def blank?: () -> bool
     def empty?: () -> bool
