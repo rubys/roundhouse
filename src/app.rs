@@ -74,6 +74,14 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// What a `sig/**/*.rbs` sidecar says a class INCLUDES, keyed by
+    /// the declaring class and holding the module names as written.
+    ///
+    /// Ancestry is the one fact about a gem's base class that the tree
+    /// cannot see for itself, and guessing it from a method name is
+    /// what `docs/guide/transpile.md` says not to do. A sidecar is
+    /// where an app states it.
+    pub rbs_includes: HashMap<ClassId, Vec<ClassId>>,
     /// The app's `Gemfile.lock`, parsed, when the tree carries one.
     /// Read at ingest for the gem census ([`crate::gems`]) and the
     /// unknown-gem attribution of diagnostics; nothing in analysis or
@@ -598,6 +606,7 @@ impl App {
             importmap: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
+            rbs_includes: HashMap::new(),
             gem_lock: None,
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),

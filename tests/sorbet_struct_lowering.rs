@@ -139,3 +139,95 @@ end
     );
     assert!(!plain.contains("def =="), "got:\n{plain}");
 }
+
+/// The same lowering under a base that is NOT `T::Struct`.
+///
+/// A gem's base class is opaque to the tree: `const :amount, Integer`
+/// in its subclass is the same `T::Props` macro, and the only way to
+/// know that is the base's ancestry. Guessing from the method name is
+/// what `docs/guide/transpile.md` says not to do — so a sidecar
+/// states it, and the expansion follows.
+fn emitted_with_sidecar(source: &str, rbs: &str, file: &str) -> String {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"sightings\", force: :cascade do |t|\n    t.string \"target\", null: false\n  end\nend\n",
+        ),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+        ("app/services/observation.rb", source),
+        ("sig/vendor.rbs", rbs),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/sightings\", to: \"sightings#index\"\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    ruby::emit_library(&app)
+        .into_iter()
+        .find(|f| f.path.display().to_string().ends_with(file))
+        .map(|f| f.content)
+        .unwrap_or_else(|| panic!("{file} is emitted"))
+}
+
+const VENDOR_DIRECT: &str = "class Vendor::Operation\n  include T::Props\nend\n";
+
+#[test]
+fn a_gem_base_the_sidecar_says_has_props_gets_the_expansion() {
+    let emitted = emitted_with_sidecar(
+        r#"class Observation < Vendor::Operation
+  const :amount, Integer
+  const :label, String
+end
+"#,
+        VENDOR_DIRECT,
+        "observation.rb",
+    );
+    // The reader the macro stands for, and the keyword constructor.
+    assert!(emitted.contains("def amount"), "got:\n{emitted}");
+    assert!(emitted.contains("def label"), "got:\n{emitted}");
+    assert!(emitted.contains("def initialize("), "got:\n{emitted}");
+    // And the declaration itself is gone — expanded, not replayed.
+    assert!(!emitted.contains("const :amount"), "got:\n{emitted}");
+}
+
+#[test]
+fn the_ancestry_is_followed_through_an_intermediate_module() {
+    // The shape that actually occurs: the base includes a module that
+    // includes `T::Props`. Flattening that at the sidecar would be the
+    // app asserting something it did not write.
+    let emitted = emitted_with_sidecar(
+        r#"class Observation < Vendor::Operation
+  const :amount, Integer
+end
+"#,
+        "class Vendor::Operation\n  include Vendor::TypedProps\nend\n\nmodule Vendor::TypedProps\n  include T::Props\nend\n",
+        "observation.rb",
+    );
+    assert!(emitted.contains("def amount"), "got:\n{emitted}");
+    assert!(!emitted.contains("const :amount"), "got:\n{emitted}");
+}
+
+#[test]
+fn a_gem_base_without_props_still_replays_its_body() {
+    // The guard, and the reason the sidecar is consulted rather than
+    // the method name: `const` under a base that does NOT include
+    // `T::Props` is somebody else's DSL, and replaying it is right.
+    let emitted = emitted_with_sidecar(
+        r#"class Observation < Vendor::Operation
+  const :amount, Integer
+end
+"#,
+        "class Vendor::Operation\nend\n",
+        "observation.rb",
+    );
+    assert!(emitted.contains("const :amount"), "got:\n{emitted}");
+    assert!(!emitted.contains("def amount"), "got:\n{emitted}");
+}
