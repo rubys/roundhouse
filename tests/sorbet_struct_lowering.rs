@@ -231,3 +231,26 @@ end
     assert!(emitted.contains("const :amount"), "got:\n{emitted}");
     assert!(!emitted.contains("def amount"), "got:\n{emitted}");
 }
+
+#[test]
+fn a_class_that_includes_the_module_itself_gets_the_expansion() {
+    // The ancestry can arrive two ways. A base without `T::Props`
+    // whose SUBCLASS includes the module in its own body reaches it
+    // just the same, and its `const` is the same macro.
+    //
+    // Found by claiming the opposite: a sidecar saying the BASE had
+    // the module produced the right emit for the wrong reason, and a
+    // boot census contradicted the claim.
+    let emitted = emitted_with_sidecar(
+        r#"class Observation < Vendor::Plain
+  include Vendor::TypedProps
+
+  const :amount, Integer
+end
+"#,
+        "class Vendor::Plain\nend\n\nmodule Vendor::TypedProps\n  include T::Props\nend\n",
+        "observation.rb",
+    );
+    assert!(emitted.contains("def amount"), "got:\n{emitted}");
+    assert!(!emitted.contains("const :amount"), "got:\n{emitted}");
+}
