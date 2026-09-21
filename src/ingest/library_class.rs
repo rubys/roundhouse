@@ -2333,8 +2333,24 @@ fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
 pub(super) fn expand_props_bases(app: &mut crate::App) {
     let includes = app.rbs_includes.clone();
     for lc in app.library_classes.iter_mut() {
-        let Some(parent) = lc.parent.as_ref() else { continue };
-        if is_sorbet_struct_parent(parent) || !includes_t_props(parent, &includes) {
+        if lc.parent.as_ref().is_some_and(is_sorbet_struct_parent) {
+            continue;
+        }
+        // The ancestry can arrive two ways, and only one of them is
+        // the parent's. A class that does `include Vendor::Props` in
+        // its OWN body gets `T::Props` without its base having it —
+        // and its `const` is the same macro. Checking only the parent
+        // left those replayed, which is how this was found: a sidecar
+        // claiming the BASE had the module made the emit right for the
+        // wrong reason, and the boot census contradicted the claim.
+        let reached = lc
+            .parent
+            .as_ref()
+            .is_some_and(|p| includes_t_props(p, &includes))
+            || lc.includes.iter().any(|m| {
+                m.0.as_str() == "T::Props" || includes_t_props(m, &includes)
+            });
+        if !reached {
             continue;
         }
         let members: Vec<SorbetStructMember> = lc
