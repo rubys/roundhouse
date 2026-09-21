@@ -1130,6 +1130,16 @@ end
                             .extend(methods);
                     }
                 }
+                // The same file's `include`s. A gem's base class is
+                // opaque to the tree, so its ancestry can only come
+                // from here — and ancestry is what decides whether a
+                // class-body `const` is the `T::Props` macro or an
+                // unknown call to replay.
+                if let Ok(includes) = crate::rbs::parse_app_includes(&source) {
+                    for (class_id, modules) in includes {
+                        app.rbs_includes.entry(class_id).or_default().extend(modules);
+                    }
+                }
             }
         }
     }
@@ -1214,6 +1224,13 @@ end
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     expand_class_body_macros(&mut app);
+    // The same idea one base over: `const` / `prop` under a class
+    // whose ancestry a sidecar says reaches `T::Props` IS the
+    // `T::Struct` macro, and gets expanded rather than replayed. It
+    // runs here because the sidecars are read above and the AST is
+    // gone by then — a base's ancestry is the one thing the tree
+    // cannot see for itself.
+    super::library_class::expand_props_bases(&mut app);
     // After both: the chain is complete, so a repeated declaration can
     // find the one it replaces.
     dedup_repeated_filters(&mut app);

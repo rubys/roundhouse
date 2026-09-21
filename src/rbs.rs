@@ -137,8 +137,13 @@ fn collect_class_includes<'a, I: Iterator<Item = Node<'a>>>(
     for member in members {
         match member {
             Node::Include(inc) => {
-                let included = inc.name().name();
-                let included_id = ClassId(Symbol::new(included.as_str()));
+                // The name AS WRITTEN, which is what this map claims
+                // to hold: `include T::Props` is `T::Props`, not
+                // `Props`. Taking the last segment made a qualified
+                // include indistinguishable from a bare one of the
+                // same final name — the declaration side of this same
+                // mistake was #110.
+                let included_id = ClassId(Symbol::new(&declared_name(&inc.name())));
                 out.entry(class_id.clone())
                     .or_default()
                     .push(included_id);

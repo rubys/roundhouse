@@ -5,6 +5,8 @@
 //! machinery doesn't apply; we just collect methods and `include`
 //! directives.
 
+use std::collections::{HashMap, HashSet};
+
 use ruby_prism::parse;
 
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param};
@@ -2241,4 +2243,115 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
         }
     }
     (out, enums_out)
+}
+
+/// Does this class's ancestry, as a `sig/**/*.rbs` sidecar states it,
+/// reach `T::Props`?
+///
+/// Transitively, because the real shape is a gem including a module
+/// that includes `T::Props` — flattening that by hand at the sidecar
+/// would be the app asserting something it did not write.
+fn includes_t_props(id: &ClassId, includes: &HashMap<ClassId, Vec<ClassId>>) -> bool {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![id.clone()];
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current.0.as_str().to_string()) {
+            continue;
+        }
+        let Some(modules) = includes.get(&current) else { continue };
+        for m in modules {
+            if m.0.as_str() == "T::Props" {
+                return true;
+            }
+            stack.push(m.clone());
+        }
+    }
+    false
+}
+
+/// One `const` / `prop` call, read back out of `unknown_calls`.
+///
+/// The prism-side reader (`sorbet_struct_members`) runs while the AST
+/// is still in hand. A base known only through a sidecar is not
+/// recognizable until the sidecars have been read, which is after the
+/// AST is gone — so this reads the same declaration from the `Expr`
+/// the replay kept.
+fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
+    let ExprNode::Send { recv: None, method, args, .. } = &*call.node else {
+        return None;
+    };
+    let writable = match method.as_str() {
+        "const" => false,
+        "prop" => true,
+        _ => return None,
+    };
+    let mut args = args.iter();
+    let name = match &*args.next()?.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+        _ => return None,
+    };
+    // The type is the second argument and belongs to the analyzer.
+    let _ty = args.next();
+    let mut default = None;
+    for arg in args {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+        for (key, value) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*key.node else {
+                continue;
+            };
+            match key.as_str() {
+                "default" => default = Some(value.clone()),
+                // `factory: -> { expr }` — the body is the default,
+                // evaluated per call, as sorbet evaluates the factory
+                // per instance.
+                "factory" => {
+                    if let ExprNode::Lambda { body, .. } = &*value.node {
+                        // A one-statement lambda body IS the value; a
+                        // a `Seq` wrapping several is not a default
+                        // anything here can use, so it is left alone.
+                        default = match &*body.node {
+                            ExprNode::Seq { exprs } => exprs.first().cloned(),
+                            _ => Some(body.clone()),
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(SorbetStructMember { name, writable, default })
+}
+
+/// Expand `const` / `prop` under a base whose ancestry a sidecar says
+/// includes `T::Props`.
+///
+/// `T::Struct` gets this at ingest, matched on the base's NAME. A
+/// gem's base is a different name for the same macro, and the tree
+/// cannot see inside the gem to know that — so the sidecar supplies
+/// the ancestry and this supplies the class, rather than the body
+/// being replayed and the macro deferred to load time.
+pub(super) fn expand_props_bases(app: &mut crate::App) {
+    let includes = app.rbs_includes.clone();
+    for lc in app.library_classes.iter_mut() {
+        let Some(parent) = lc.parent.as_ref() else { continue };
+        if is_sorbet_struct_parent(parent) || !includes_t_props(parent, &includes) {
+            continue;
+        }
+        let members: Vec<SorbetStructMember> = lc
+            .unknown_calls
+            .iter()
+            .filter_map(struct_member_from_expr)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let comparable = lc
+            .includes
+            .iter()
+            .any(|i| i.0.as_str() == "T::Struct::ActsAsComparable");
+        lc.unknown_calls.retain(|call| !is_struct_declaration(call));
+        let mut synthesized = synth_sorbet_struct_methods(&lc.name, &members, comparable);
+        synthesized.append(&mut lc.methods);
+        lc.methods = synthesized;
+    }
 }
