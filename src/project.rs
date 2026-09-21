@@ -1608,14 +1608,54 @@ end
 const NET_HTTP_STDLIB: &str = "# Ruby's own net/http — see `project::NET_HTTP_STDLIB`.\n\
                                require \"net/http\"\n";
 
+/// Which VM a ruby-family tree is for. The two trees are the SAME
+/// tree — same app/, same config/, same framework runtime, same Puma +
+/// Rack overlay — and differ only in what the VM can link: the SQLite
+/// backend (a C extension, or JDBC), and the markdown renderer (cmark
+/// bindings, or a commonmark-java shim). Everything else runs unchanged
+/// on the JVM, which is why there is one builder below and not two.
+///
+/// THERE USED TO BE TWO, and they drifted: the JRuby copy of the
+/// stdlib-swap list was written once and missed every swap added
+/// afterwards (`concurrent` — a superclass mismatch at boot under
+/// campfire), skipped the image-processor wiring, and never ran
+/// `apply_module_mixins`, so the JVM tree booted without the app's
+/// initializer mixins. A VM variant is a flavor of one function, not a
+/// second function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RubyFlavor {
+    CRuby,
+    JRuby,
+}
+
 fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
 ) -> Result<Vec<(String, String)>, String> {
+    ruby_family_runtime_files(app, fixture, RubyFlavor::CRuby)
+}
+
+/// "jruby" archive: byte-identical to the "ruby" tree except the SQLite
+/// backend and the markdown shim. The Db swap installs the JDBC-backed
+/// `runtime/db_jruby.rb` as `runtime/db.rb` instead of the CRuby
+/// gem-backed `db_cruby.rb`: the `sqlite3` gem is a C extension with
+/// no JRuby build, so JRuby reaches SQLite over JDBC. JRuby is a
+/// deployment (VM) variant, not a source variant — see `RubyFlavor`.
+fn jruby_runtime_files(
+    app: &App,
+    fixture: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    ruby_family_runtime_files(app, fixture, RubyFlavor::JRuby)
+}
+
+fn ruby_family_runtime_files(
+    app: &App,
+    fixture: &Path,
+    flavor: RubyFlavor,
+) -> Result<Vec<(String, String)>, String> {
     let mut files = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
-
     // `IPAddr`: the CRuby/JRuby trees have Ruby's own. Same shape as
     // the db.rb swap above — one require path, target-appropriate
     // implementation — but written as a small file rather than a
@@ -1727,27 +1767,43 @@ fn ruby_runtime_files(
     if !app.stylesheets.iter().any(|s| s == "tailwind") {
         files.retain(|(p, _)| p != "app/assets/tailwind.css");
     }
-    for (path, content) in files.iter_mut() {
+    for (path, _) in files.iter_mut() {
         if path == "runtime/message_digest_cruby.rb" {
             *path = "runtime/message_digest.rb".to_string();
         }
-        if path == "runtime/db_cruby.rb" {
-            *path = "runtime/db.rb".to_string();
-            // The CRuby/JRuby trees resolve the temporal intrinsics
-            // (`ActiveSupport.db_now` in fill_timestamps,
-            // `parse_db_time` in temporal readers) via the overlay's
-            // ActiveSupport module. The server boot requires it from
-            // main.rb, but the emitted test bootstrap
-            // (test/test_helper.rb, shared verbatim with the spinel
-            // tree, which lacks the file — spinel#1661) does not.
-            // Chain it off db.rb — the one CRuby-only require every
-            // persistence-touching bootstrap already loads — at
-            // materialization time, since the source-tree relative
-            // path differs from the emitted-tree one.
-            content.insert_str(
-                0,
-                "require_relative \"active_support_time_parsing\"\n",
-            );
+    }
+    // The Db backend, at the shared `runtime/db.rb` path. Both trees
+    // resolve the temporal intrinsics (`ActiveSupport.db_now` in
+    // fill_timestamps, `parse_db_time` in temporal readers) via the
+    // overlay's ActiveSupport module. The server boot requires it from
+    // main.rb, but the emitted test bootstrap (test/test_helper.rb,
+    // shared verbatim with the spinel tree, which lacks the file —
+    // spinel#1661) does not. Chain it off db.rb — the one ruby-family
+    // require every persistence-touching bootstrap already loads — at
+    // materialization time, since the source-tree relative path differs
+    // from the emitted-tree one.
+    const TIME_PARSING_REQUIRE: &str = "require_relative \"active_support_time_parsing\"\n";
+    match flavor {
+        RubyFlavor::CRuby => {
+            for (path, content) in files.iter_mut() {
+                if path == "runtime/db_cruby.rb" {
+                    *path = "runtime/db.rb".to_string();
+                    content.insert_str(0, TIME_PARSING_REQUIRE);
+                }
+            }
+        }
+        RubyFlavor::JRuby => {
+            // Drop the CRuby gem backend and promote the JDBC one.
+            // `db_jruby.rb` is excluded from `spinel_files`' base set,
+            // so read it from disk and inject it here.
+            files.retain(|(p, _)| p != "runtime/db_cruby.rb");
+            let db_jruby = crate::runtime_files::read_to_string("runtime/spinel/db_jruby.rb")
+                .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
+            files.push((
+                "runtime/db.rb".to_string(),
+                format!("{TIME_PARSING_REQUIRE}{db_jruby}"),
+            ));
+            apply_jruby_gemfile(&mut files)?;
         }
     }
 
@@ -1770,46 +1826,92 @@ fn ruby_runtime_files(
     ));
 
     // Gem façades are SPINEL-ONLY: spinel AOT can't link the native
-    // gems, so it ships loudly-raising stubs. On the CRuby/JRuby path the
+    // gems, so it ships loudly-raising stubs. On the ruby family the
     // real gems (markly / nokogiri / mail) ARE available — main.rb
     // guarded-requires them — and app code renders through them at
     // request time (Markdowner.to_html behind User#linkified_about is
     // read-path: `/u/:username` markdown-renders the profile bio live).
     // The inherited façade reopens those modules and REDEFINES their
-    // methods to raise, shadowing the real gems. Neutralize it here to a
-    // no-op so the `require_relative "runtime/gem_facades"` anchor still
+    // methods to raise, shadowing the real gems. Neutralize it here so
+    // the `require_relative "runtime/gem_facades"` anchor still
     // resolves without clobbering the real implementations.
-    for (path, content) in files.iter_mut() {
-        if path == "runtime/gem_facades.rb" {
-            // Not a bare no-op: the anchor has to MEAN something. main.rb
-            // guarded-requires these gems too, but a test run never loads
-            // main.rb — `test/test_helper.rb` builds its own require
-            // chain — so a body reached only from the test harness saw an
-            // anchor that resolved to an empty file and a constant that
-            // was never defined. campfire's `users.yml` is the first such
-            // body: `password_digest: <%= BCrypt::Password.create(…) %>`
-            // lands in `UsersFixtures._fixtures_load!`, whose only caller
-            // is the harness. Requires are idempotent, so doing them here
-            // makes every consumer of the anchor self-sufficient without
-            // changing main.rb's behavior.
-            *content = format!(
-                "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
-                 # path the real gems ARE available, so this file guarded-requires\n\
-                 # them rather than shadowing them with raising stubs. Guarded because\n\
-                 # an app that uses none of them (the blog) must boot without them\n\
-                 # installed.\n\
-                 #\n\
-                 # THE ONLY LIST. boot.rb used to carry a second copy and the two had\n\
-                 # drifted (it was missing rqrcode and sentry-ruby); it requires this\n\
-                 # file now. (JRuby writes its own copy of this file — it swaps in the\n\
-                 # commonmark-java Markly shim — from the same list, minus that\n\
-                 # one name.)\n\
+    //
+    // Not a bare no-op: the anchor has to MEAN something. main.rb
+    // guarded-requires these gems too, but a test run never loads
+    // main.rb — `test/test_helper.rb` builds its own require chain — so
+    // a body reached only from the test harness saw an anchor that
+    // resolved to an empty file and a constant that was never defined.
+    // campfire's `users.yml` is the first such body: `password_digest:
+    // <%= BCrypt::Password.create(…) %>` lands in
+    // `UsersFixtures._fixtures_load!`, whose only caller is the harness.
+    // Requires are idempotent, so doing them here makes every consumer
+    // of the anchor self-sufficient without changing main.rb's behavior.
+    //
+    // THE ONLY LIST. boot.rb used to carry a second copy and the two had
+    // drifted (it was missing rqrcode and sentry-ruby); it requires this
+    // file now.
+    //
+    // JRuby: markly is cmark-gfm C bindings with no JRuby build, so that
+    // tree provides Markly over commonmark-java (runtime/markly_jruby.rb,
+    // reference-conformant: scripts/markly-conformance, vectors generated
+    // from the real gem under CRuby) and drops the gem from the list.
+    // The shim's jars are FETCHED, not shipped (bin/fetch-jars), so
+    // requiring it in a tree that never renders markdown is a LoadError
+    // on a dependency that app does not have — the require is
+    // conditional on the app naming the constant, not on the require
+    // graph's shape (which is what kept the blog's JRuby tree booting
+    // with no jars).
+    let gem_facades = match flavor {
+        RubyFlavor::CRuby => format!(
+            "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
+             # path the real gems ARE available, so this file guarded-requires\n\
+             # them rather than shadowing them with raising stubs. Guarded because\n\
+             # an app that uses none of them (the blog) must boot without them\n\
+             # installed.\n\
+             #\n\
+             # THE ONLY LIST. boot.rb used to carry a second copy and the two had\n\
+             # drifted (it was missing rqrcode and sentry-ruby); it requires this\n\
+             # file now. (JRuby writes its own copy of this file — it swaps in the\n\
+             # commonmark-java Markly shim — from the same list, minus that\n\
+             # one name.)\n\
+             require_relative \"module_delegate\"\n\
+             {}{}",
+            gem_require_block(&[]),
+            WEB_PUSH_STUB_REOPEN
+        ),
+        RubyFlavor::JRuby => {
+            let needs_markly = files.iter().any(|(p, c)| {
+                p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Markly")
+            });
+            let markly_require = if needs_markly {
+                "require_relative \"markly_jruby\"\n"
+            } else {
+                "# (this app never names Markly, so the commonmark-java shim — and\n\
+                 # the jars bin/fetch-jars pulls — stay out of its require graph)\n"
+            };
+            format!(
+                "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
+                 # (markly_jruby.rb); every other gem below is the real one (nokogiri\n\
+                 # ships a java platform build, the rest are pure Ruby). This file is\n\
+                 # also the `require_relative \"runtime/gem_facades\"` anchor and the\n\
+                 # one guarded-require list for this tree — boot.rb requires it rather\n\
+                 # than carrying a second copy.\n\
+                 {}\
                  require_relative \"module_delegate\"\n\
                  {}{}",
-                gem_require_block(&[]),
+                markly_require,
+                gem_require_block(&["markly"]),
                 WEB_PUSH_STUB_REOPEN
-            );
+            )
         }
+    };
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/gem_facades.rb" {
+            *content = gem_facades.clone();
+        }
+    }
+    if flavor == RubyFlavor::JRuby {
+        push_jruby_markly_shim(&mut files)?;
     }
 
     // Same reasoning for the extras façades (Sponge): CRuby has the real
@@ -1863,6 +1965,77 @@ fn ruby_runtime_files(
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
     Ok(files)
+}
+
+/// The JRuby tree's Gemfile: the committed scaffold Gemfile is MRI-only
+/// (`gem "sqlite3"`, a C extension with no JRuby build), so its frozen
+/// lock stays valid for the CRuby/Spinel toolchain jobs. The JRuby tree
+/// reaches SQLite over JDBC, so rewrite that one line to the Xerial
+/// driver here — the emitted tree's `bundle install` then resolves a
+/// fresh JRuby lock.
+fn apply_jruby_gemfile(files: &mut Vec<(String, String)>) -> Result<(), String> {
+    let gemfile = files
+        .iter_mut()
+        .find(|(p, _)| p == "Gemfile")
+        .ok_or("jruby_runtime_files: scaffold Gemfile not found")?;
+    if !gemfile.1.contains("gem \"sqlite3\"") {
+        return Err(
+            "jruby_runtime_files: expected `gem \"sqlite3\"` in scaffold Gemfile to swap for \
+             jdbc-sqlite3"
+                .to_string(),
+        );
+    }
+    gemfile.1 = gemfile
+        .1
+        .replace("gem \"sqlite3\"", "gem \"jdbc-sqlite3\"");
+
+    // Pin `rdoc` below 8 for the JRuby tree. rdoc 8.0.0 (2026-06-26) added
+    // a runtime dependency on `rbs (>= 4.0.0)`, whose 4.x line ships a C
+    // parser extension with no JRuby build — `jruby -S bundle install`
+    // dies in extconf ("The compiler failed to generate an executable
+    // file"). rdoc only enters this tree transitively (stimulus-rails →
+    // railties → irb → rdoc), and the CRuby/Spinel targets dodge it via
+    // their frozen `Gemfile.lock` (which pins rdoc 7.2.0 — no rbs). The
+    // JRuby tree resolves a fresh lock (it drops the MRI lock below), so
+    // hold rdoc at the pre-8 line here to keep rbs out of the graph.
+    gemfile.1.push_str("\n# rdoc 8 pulls rbs (C ext, no JRuby build); see jruby_runtime_files.\ngem \"rdoc\", \"< 8\"\n");
+
+    // Drop the committed MRI `Gemfile.lock` from the JRuby tree: it pins
+    // the C-ext `sqlite3` and omits `jdbc-sqlite3`, so shipping it would
+    // make the tree's `jruby -S bundle install` a frozen-mode mismatch.
+    // The JRuby bundle resolves its own platform-correct lock fresh.
+    files.retain(|(p, _)| p != "Gemfile.lock");
+    Ok(())
+}
+
+/// The commonmark-java Markly shim and the script that fetches its jars
+/// (they can't ship through the text-only emit; the tree pulls them from
+/// Maven Central on demand).
+fn push_jruby_markly_shim(files: &mut Vec<(String, String)>) -> Result<(), String> {
+    let markly_shim = crate::runtime_files::read_to_string("runtime/spinel/markly_jruby.rb")
+        .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
+    files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
+    files.push((
+        "bin/fetch-jars".to_string(),
+        "#!/bin/sh\n\
+         # Fetch the commonmark-java jars the Markly shim needs (see\n\
+         # runtime/markly_jruby.rb). Run once: sh bin/fetch-jars\n\
+         set -e\n\
+         dir=\"$(dirname \"$0\")/../vendor/jars\"\n\
+         mkdir -p \"$dir\"\n\
+         for spec in \\\n\
+           org/commonmark/commonmark/0.29.0/commonmark-0.29.0.jar \\\n\
+           org/commonmark/commonmark-ext-gfm-strikethrough/0.29.0/commonmark-ext-gfm-strikethrough-0.29.0.jar \\\n\
+           org/commonmark/commonmark-ext-autolink/0.29.0/commonmark-ext-autolink-0.29.0.jar \\\n\
+           org/nibor/autolink/autolink/0.12.0/autolink-0.12.0.jar \\\n\
+         ; do\n\
+           f=\"$dir/$(basename \"$spec\")\"\n\
+           [ -f \"$f\" ] || curl -sf -o \"$f\" \"https://repo1.maven.org/maven2/$spec\"\n\
+         done\n\
+         echo \"jars ready in $dir\"\n"
+            .to_string(),
+    ));
+    Ok(())
 }
 
 /// Rewrite `runtime/cable.rb`'s `Cable.build_connection` factory from
@@ -2855,238 +3028,6 @@ fn scaffold_readme_to_specimen(files: &mut [(String, String)]) {
     }
 }
 
-/// "jruby" archive: byte-identical to the "ruby" tree except the SQLite
-/// backend. Same layering as `ruby_runtime_files` — spinel files +
-/// ruby_overlay (Puma + Rack `config.ru`, all of which run unchanged on
-/// the JVM) — but the Db shim swap installs the JDBC-backed
-/// `runtime/db_jruby.rb` as `runtime/db.rb` instead of the CRuby
-/// gem-backed `db_cruby.rb`. The `sqlite3` gem is a C extension with no
-/// JRuby build, so JRuby reaches SQLite over JDBC. The emitted app/,
-/// config/, and framework runtime are identical to the CRuby target —
-/// JRuby is a deployment (VM) variant, not a source variant.
-fn jruby_runtime_files(
-    app: &App,
-    fixture: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    let mut files = spinel_files(app, fixture)?;
-
-    // Keyed digests: JRuby has OpenSSL, so it takes the same swap the
-    // CRuby target does — drop the spinel stub and promote the OpenSSL
-    // backend. Without this the JVM tree got a `raise`-only
-    // MessageDigest and the boot died where the aggregator requires it.
-    files.retain(|(p, _)| p != "runtime/message_digest.rb");
-    for (path, content) in files.iter_mut() {
-        if path == "runtime/message_digest_cruby.rb" {
-            *path = "runtime/message_digest.rb".to_string();
-        }
-        // JRuby has Ruby's own ipaddr too — same swap, same reason
-        // (a second `IPAddr::InvalidAddressError` is a superclass
-        // mismatch at require time), same `octets` reopen. See
-        // `ruby_runtime_files`.
-        if path == "runtime/ipaddr.rb" {
-            *content = IPADDR_STDLIB.to_string();
-        }
-        // Same for zlib — the JVM tree has Ruby's own.
-        if path == "runtime/zlib.rb" {
-            *content = "require \"zlib\"\n".to_string();
-        }
-        // …and for resolv, which the JVM tree also has. See
-        // `ruby_runtime_files` for why this one is not optional: the
-        // app's tests stub `Resolv.getaddresses`.
-        if path == "runtime/resolv.rb" {
-            *content = RESOLV_STUB_REOPEN.to_string();
-        }
-        // …and the WebMock seam, same as `ruby_runtime_files`.
-        if path == "runtime/http_stub.rb" {
-            *content = HTTP_STUB_WEBMOCK_DELEGATE.to_string();
-        }
-        // …and the mocha bridge, replayed through the gem here too.
-        if path == "runtime/mocha_bridge.rb" {
-            *content = MOCHA_BRIDGE_REPLAY.to_string();
-        }
-        // …and the SecureRandom slot, aliased over the JVM's own.
-        if path == "runtime/secure_random_stub.rb" {
-            *content = SECURE_RANDOM_STUB_REOPEN.to_string();
-        }
-        // …and `TCPSocket.open`, reopened over the socket seam.
-        if path == "runtime/tcp_socket_stub.rb" {
-            content.push_str(TCP_SOCKET_OPEN_REOPEN);
-        }
-        if path == "runtime/net_http.rb" {
-            *content = NET_HTTP_STDLIB.to_string();
-        }
-    }
-
-    // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
-    // backend, then promote the JDBC backend into `runtime/db.rb`.
-    // `db_jruby.rb` is excluded from `spinel_files`' base set, so read
-    // it from disk and inject it here (mirrors the gem swap the CRuby
-    // target does to `db_cruby.rb`).
-    files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/db_cruby.rb");
-    let db_jruby = crate::runtime_files::read_to_string("runtime/spinel/db_jruby.rb")
-        .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
-    // Chain the temporal-intrinsics module off db.rb, same as the
-    // CRuby swap above (the emitted test bootstrap doesn't require it;
-    // see ruby_runtime_files).
-    files.push((
-        "runtime/db.rb".to_string(),
-        format!("require_relative \"active_support_time_parsing\"\n{db_jruby}"),
-    ));
-
-    // Gemfile gem swap: the committed scaffold Gemfile is MRI-only
-    // (`gem "sqlite3"`, a C extension with no JRuby build), so its frozen
-    // lock stays valid for the CRuby/Spinel toolchain jobs. The JRuby
-    // tree reaches SQLite over JDBC, so rewrite that one line to the
-    // Xerial driver here — the emitted tree's `bundle install` then
-    // resolves a fresh JRuby lock (mirrors the `db_cruby.rb` swap above).
-    let gemfile = files
-        .iter_mut()
-        .find(|(p, _)| p == "Gemfile")
-        .ok_or("jruby_runtime_files: scaffold Gemfile not found")?;
-    if !gemfile.1.contains("gem \"sqlite3\"") {
-        return Err(
-            "jruby_runtime_files: expected `gem \"sqlite3\"` in scaffold Gemfile to swap for \
-             jdbc-sqlite3"
-                .to_string(),
-        );
-    }
-    gemfile.1 = gemfile
-        .1
-        .replace("gem \"sqlite3\"", "gem \"jdbc-sqlite3\"");
-
-    // Pin `rdoc` below 8 for the JRuby tree. rdoc 8.0.0 (2026-06-26) added
-    // a runtime dependency on `rbs (>= 4.0.0)`, whose 4.x line ships a C
-    // parser extension with no JRuby build — `jruby -S bundle install`
-    // dies in extconf ("The compiler failed to generate an executable
-    // file"). rdoc only enters this tree transitively (stimulus-rails →
-    // railties → irb → rdoc), and the CRuby/Spinel targets dodge it via
-    // their frozen `Gemfile.lock` (which pins rdoc 7.2.0 — no rbs). The
-    // JRuby tree resolves a fresh lock (it drops the MRI lock below), so
-    // hold rdoc at the pre-8 line here to keep rbs out of the graph.
-    gemfile.1.push_str("\n# rdoc 8 pulls rbs (C ext, no JRuby build); see jruby_runtime_files.\ngem \"rdoc\", \"< 8\"\n");
-
-    // Drop the committed MRI `Gemfile.lock` from the JRuby tree: it pins
-    // the C-ext `sqlite3` and omits `jdbc-sqlite3`, so shipping it would
-    // make the tree's `jruby -S bundle install` a frozen-mode mismatch.
-    // The JRuby bundle resolves its own platform-correct lock fresh.
-    files.retain(|(p, _)| p != "Gemfile.lock");
-
-    // Tep is a spinel-only transport (FFI HTTP server); JRuby uses Puma
-    // + Rack via the ruby_overlay, same as the CRuby target.
-    files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
-
-    // Markly shim: markly is cmark-gfm C bindings with no JRuby build,
-    // so this tree implements the markly contract over commonmark-java
-    // (reference-conformant: scripts/markly-conformance, vectors
-    // generated from the real gem under CRuby). The shim rides the
-    // gem_facades require anchor: swap the scaffold base's raising
-    // façade for a loader that provides Markly via the shim, while
-    // Nokogiri (java platform gem) and Mail (pure Ruby) resolve to the
-    // real gems — the JRuby analogue of the CRuby neutralization in
-    // `ruby_runtime_files`. Apps that never require the anchor (blog)
-    // never load the shim, so the jars stay optional.
-    // `Module#delegate` for the GEMS in the emitted Gemfile — see the
-    // file's own header. Pushed at the fork, never named in the
-    // `spinel_files` stems list: a reopen of `Module` that defines
-    // methods from a computed name is exactly what the strict targets
-    // cannot compile, and nothing in this tree's own emitted code needs
-    // it (an app's `delegate` is lowered at ingest).
-    files.push((
-        "runtime/module_delegate.rb".to_string(),
-        crate::runtime_files::read_to_string("runtime/spinel/module_delegate.rb")
-            .map_err(|e| format!("read runtime/spinel/module_delegate.rb: {e}"))?,
-    ));
-
-    let markly_shim = crate::runtime_files::read_to_string("runtime/spinel/markly_jruby.rb")
-        .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
-    files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
-
-    // The shim's jars (commonmark-java + org.nibor.autolink) can't ship
-    // through the text-only emit; the tree fetches them from Maven
-    // Central on demand.
-    files.push((
-        "bin/fetch-jars".to_string(),
-        "#!/bin/sh\n\
-         # Fetch the commonmark-java jars the Markly shim needs (see\n\
-         # runtime/markly_jruby.rb). Run once: sh bin/fetch-jars\n\
-         set -e\n\
-         dir=\"$(dirname \"$0\")/../vendor/jars\"\n\
-         mkdir -p \"$dir\"\n\
-         for spec in \\\n\
-           org/commonmark/commonmark/0.29.0/commonmark-0.29.0.jar \\\n\
-           org/commonmark/commonmark-ext-gfm-strikethrough/0.29.0/commonmark-ext-gfm-strikethrough-0.29.0.jar \\\n\
-           org/commonmark/commonmark-ext-autolink/0.29.0/commonmark-ext-autolink-0.29.0.jar \\\n\
-           org/nibor/autolink/autolink/0.12.0/autolink-0.12.0.jar \\\n\
-         ; do\n\
-           f=\"$dir/$(basename \"$spec\")\"\n\
-           [ -f \"$f\" ] || curl -sf -o \"$f\" \"https://repo1.maven.org/maven2/$spec\"\n\
-         done\n\
-         echo \"jars ready in $dir\"\n"
-            .to_string(),
-    ));
-
-    // Extras façades: same reasoning as the CRuby tree — Sponge's
-    // vendored source is pure stdlib (net/https, resolv, ipaddr), all
-    // of which run on the JVM — so restore the verbatim emit over the
-    // scaffold base's raising façade.
-    emit::ruby::restore_extras_facades(&mut files, app);
-
-    // The shim's jars are FETCHED, not shipped (bin/fetch-jars), so
-    // requiring it in a tree that never renders markdown is a LoadError
-    // on a dependency that app does not have. The anchor below is
-    // required from boot.rb now — it used to be reached only when some
-    // model named a gem constant, which is what kept the blog's JRuby
-    // tree booting with no jars — so the shim require has to be
-    // conditional on the app instead of on the require graph's shape.
-    let needs_markly = files
-        .iter()
-        .any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Markly"));
-    let markly_require = if needs_markly {
-        "require_relative \"markly_jruby\"\n"
-    } else {
-        "# (this app never names Markly, so the commonmark-java shim — and\n\
-         # the jars bin/fetch-jars pulls — stay out of its require graph)\n"
-    };
-    for (path, content) in files.iter_mut() {
-        if path == "runtime/gem_facades.rb" {
-            *content = format!(
-                "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
-                 # (markly_jruby.rb); every other gem below is the real one (nokogiri\n\
-                 # ships a java platform build, the rest are pure Ruby). This file is\n\
-                 # also the `require_relative \"runtime/gem_facades\"` anchor and the\n\
-                 # one guarded-require list for this tree — boot.rb requires it rather\n\
-                 # than carrying a second copy.\n\
-                 {}\
-                 require_relative \"module_delegate\"\n\
-                 {}",
-                markly_require,
-                gem_require_block(&["markly"])
-            );
-        }
-    }
-
-    crate::runtime_files::walk_into("runtime/spinel/scaffold/ruby_overlay",
-        "",
-        &mut files,
-    )?;
-
-    // Controllers with the layout wrap — same pairing as the CRuby
-    // tree: this main.rb ships `controller.body` verbatim (see
-    // ruby_runtime_files).
-    files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout(app)));
-
-    // The scaffold README → SPECIMEN rename already happened in `spinel_files`.
-    let mut files = dedupe_last_wins(files);
-    // Same lazy-dispatch rewrite as the CRuby tree — the ruby_overlay
-    // main.rb superseded the base's eagerly-rewritten one at dedupe.
-    apply_controller_dispatch(&mut files, app, true);
-    // Same cable strip as the CRuby tree (this walk re-added cable.rb +
-    // the config.ru seams; the Gemfile trim already ran in spinel_files).
-    apply_cable_strip(&mut files, app)?;
-    apply_makefile_test_list(&mut files, app);
-    apply_runtime_gem_wiring(&mut files);
-    Ok(files)
-}
 
 /// The spinel file set BEFORE `spin_shape` re-points it at the spin
 /// package layout — i.e. the tree `make spinel-test` drives, with the
