@@ -31,23 +31,30 @@
 #                    the same allocator
 #     spinel         the roundhouse spinel BINARY, workers autodetected
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
-#                    the same tree over JDBC), ONE process, as many Puma
-#                    threads as Rails' formula gives this box in total
-#                    (workers x 5) — JRuby has no GVL, so one process
-#                    is the whole machine. Heap pinned at 1 GB.
+#                    the same tree over JDBC), ONE process, one Puma
+#                    thread per hardware thread — JRuby has no GVL, so
+#                    one process is the whole machine. Heap pinned at
+#                    1 GB. (Ladder on the box, 2026-09-21, /rooms/1:
+#                    6 threads 1,398 · 12 1,730 · 24 1,586 · 40 1,406
+#                    req/s — the "workers x 5 = 40" shape Rails'
+#                    formula implies costs it 19%.)
 #     truffleruby    the `ruby` tree UNMODIFIED under TruffleRuby (it
-#                    compiles the C extensions itself), one process, the
-#                    same thread count. Heap pinned at 1 GB.
+#                    compiles the C extensions itself), in the
+#                    `ruby-1p` shape: one process x --threads. TruffleRuby
+#                    keeps a GIL for Ruby code, so more threads only
+#                    contend (ladder: 4 threads 458 · 8 416 · 12 384 ·
+#                    40 293 req/s), and the row it is read against is
+#                    `ruby-1p`. Heap pinned at 1 GB.
 #
 #   THE OTHER RUNTIME'S STOCK BASELINE:
 #
 #     rails-truffleruby  once-campfire itself under TruffleRuby — the
 #                    oracle tree, its own compiled bundle, one Puma
-#                    process (no fork: neither campfire's worker formula
-#                    nor resque-pool can run), no Thruster, 2 GB heap.
-#                    This is a runtime swap on the one-process
-#                    `rails-1p` row, not on `rails`, and the page says
-#                    so. No `rails-jruby`: AR-JDBC drives Rails 8.0 only
+#                    process x --threads (no fork: neither campfire's
+#                    worker formula nor resque-pool can run), no
+#                    Thruster, 2 GB heap. This is a runtime swap on the
+#                    one-process `rails-1p` row, not on `rails`, and the
+#                    page says so. No `rails-jruby`: AR-JDBC drives Rails 8.0 only
 #                    and campfire tracks rails/rails main.
 #
 #   WHY THE JVM-FAMILY EMIT LANES MATTER BEYOND THEIR NUMBER. The
@@ -561,9 +568,11 @@ drop_lane() {   # $1 = lane, $2 = stage, $3 = reason, $4 = log
 }
 wants_lane() { local _l; for _l in "${LANES[@]}"; do [[ "$_l" == "$1" ]] && return 0; done; return 1; }
 
-# The same forty app threads Rails' worker formula gives this box, in
-# one process: the JVM lanes have no fork and need none.
-jvm_threads() { echo $(( $(deployed_worker_count) * THREADS )); }
+# One Puma thread per hardware thread for the JVM lane: no GVL, no fork,
+# so one process is the whole box and threads past the cores only queue
+# (the ladder is in the header). The TruffleRuby lanes take --threads,
+# the one-process shape of the rows they are read against.
+jvm_threads() { getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1; }
 
 if wants_lane jruby; then
     if ! command -v jruby >/dev/null 2>&1; then
@@ -724,11 +733,12 @@ start_lane() {
             SERVER_PID=$!
             ;;
         jruby)
-            # One process, forty threads, no GVL: the JVM runs Ruby
-            # threads in parallel, so the shape Rails reaches with eight
-            # forked workers is one process here — and unlike the `ruby`
-            # row, the in-process cable registry and job queue are shared
-            # by every thread, so this shape is one campfire could deploy.
+            # One process, a thread per hardware thread, no GVL: the JVM
+            # runs Ruby threads in parallel, so the shape Rails reaches
+            # with eight forked workers is one process here — and unlike
+            # the `ruby` row, the in-process cable registry and job queue
+            # are shared by every thread, so this shape is one campfire
+            # could deploy.
             # Heap pinned (Xms=Xmx) so RSS is a working set, not lazy
             # growth. No jemalloc: the JVM does not malloc its heap.
             local jt; jt="$(jvm_threads)"
@@ -742,11 +752,11 @@ start_lane() {
             ;;
         truffleruby)
             # The `ruby` tree, unmodified, under TruffleRuby: same emit,
-            # same Puma, same database. One process (no fork), the same
-            # thread count as the jruby row for symmetry — though
-            # TruffleRuby keeps a GIL for Ruby code, so this is one core
-            # of Ruby execution plus the compiler and GC threads.
-            local tt; tt="$(jvm_threads)"
+            # same Puma, same database, the `ruby-1p` shape (one process
+            # x --threads). TruffleRuby keeps a GIL for Ruby code, so this
+            # is one core of Ruby execution plus the compiler and GC
+            # threads, and more threads only contend (header ladder).
+            local tt="$THREADS"
             printf 'runtime=truffleruby\nheap=%s\nworkers=0 (one process, no fork)\nthreads=%s\n' \
                 "$JVM_HEAP" "$tt" > "$shape"
             ( cd "$EMIT" && exec env RAILS_ENV=production \
@@ -760,7 +770,7 @@ start_lane() {
             # compiled bundle, one Puma process. See campfire-oracle's
             # `cmd_serve_truffleruby` for what cannot be the same.
             scripts/campfire-oracle serve --runtime truffleruby --heap "$RAILS_TR_HEAP" \
-                --out "$ORACLE" --port "$port" --threads "$(jvm_threads)" \
+                --out "$ORACLE" --port "$port" --threads "$THREADS" \
                 --shape-report "$shape" > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
@@ -980,8 +990,9 @@ for lane in "${LANES[@]}"; do
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
-        jruby|truffleruby)   shape_note="one process x $(jvm_threads) threads, heap $JVM_HEAP" ;;
-        rails-truffleruby)   shape_note="one process x $(jvm_threads) threads, heap $RAILS_TR_HEAP, no thruster, no resque-pool" ;;
+        jruby)               shape_note="one process x $(jvm_threads) threads (one per hardware thread), heap $JVM_HEAP" ;;
+        truffleruby)         shape_note="one process x $THREADS threads (the ruby-1p shape), heap $JVM_HEAP" ;;
+        rails-truffleruby)   shape_note="one process x $THREADS threads (the rails-1p shape), heap $RAILS_TR_HEAP, no thruster, no resque-pool" ;;
         *)                   shape_note="1 worker x $THREADS threads" ;;
     esac
     step "start $lane on :$port ($shape_note)"
@@ -1424,9 +1435,12 @@ env["notes"] = [
    "<code>--target jruby</code> (identical app and framework; SQLite over " \
    "JDBC instead of the C extension), <code>truffleruby</code> the " \
    "<code>ruby</code> tree unmodified with a bundle TruffleRuby compiled " \
-   "itself. Both are ONE process with as many Puma threads as Rails' " \
-   "worker formula gives this box in total (workers × 5), because neither " \
-   "can fork and neither needs to. That makes <code>jruby</code> the one " \
+   "itself. Both are ONE process, because neither can fork: " \
+   "<code>jruby</code> with a Puma thread per hardware thread (no GVL — " \
+   "measured on this box, 12 threads beat 40 by 19%), " \
+   "<code>truffleruby</code> in the <code>ruby-1p</code> shape of one " \
+   "process × 5 threads (it keeps a GIL for Ruby code, and 4 threads " \
+   "beat 40 by 56%). That makes <code>jruby</code> the one " \
    "multi-core CRuby-family row campfire could actually deploy: the JVM " \
    "has no GVL, and one process means one Action Cable registry, one " \
    "fragment cache and one job queue shared by every thread — the exact " \
@@ -1440,15 +1454,18 @@ env["notes"] = [
    "0.85 µs per row stepped, 2026-09-21, same box) while pure-Ruby work " \
    "is an order of magnitude faster. The blog's pages cross that boundary " \
    "a handful of times per request and gain 1.8× on Truffle; campfire's " \
-   "room page steps a few hundred rows and pays for each one. This row is " \
-   "the per-core runtime comparison for a row-heavy page." if tr_ran),
+   "room page steps a few hundred rows and pays for each one. Read it " \
+   "against <code>ruby-1p</code>, the same one-process shape on CRuby: " \
+   "this row is the per-core runtime comparison for a row-heavy " \
+   "page." if tr_ran),
   ("<code>rails-truffleruby</code> is once-campfire ITSELF under " \
    "TruffleRuby: the same oracle tree, rows, production config and Redis " \
    "fragment cache, with a second bundle whose C extensions TruffleRuby " \
-   "compiled. It is ONE Puma process — TruffleRuby has no <code>fork</code>, " \
-   "so neither campfire's worker formula nor resque-pool can run, and " \
-   "Thruster is not in front — which makes it a runtime swap on the " \
-   "one-process <code>rails-1p</code> row, not on <code>rails</code>. Heap " \
+   "compiled. It is ONE Puma process × 5 threads — TruffleRuby has no " \
+   "<code>fork</code>, so neither campfire's worker formula nor " \
+   "resque-pool can run, and Thruster is not in front — which makes it a " \
+   "runtime swap on the one-process <code>rails-1p</code> row, not on " \
+   "<code>rails</code>. Heap " \
    "pinned at 2 GB, twice the blog's stock-Rails budget, for twice the " \
    "working set. There is no <code>rails-jruby</code>: the AR-JDBC adapter " \
    "drives Rails 8.0 only and campfire tracks rails/rails main, a gap " \
