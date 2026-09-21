@@ -986,6 +986,32 @@ module ActionView
                 pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
+          elsif v.is_a?(Array)
+            # Rails' conditional-class form reaching the runtime whole:
+            # `class: [ "direct", unread: membership.unread? ]` forwarded
+            # through a helper's `**attributes` (campfire's
+            # `link_to_room`), where the compile-time loops see no
+            # literal to collapse. Rendered `class="[&quot;direct&quot;,
+            # {unread: false}]"` before this arm. Rails'
+            # `build_tag_values`, MEASURED against 8.1: a String is
+            # itself, a Hash contributes the keys whose value is
+            # truthy, nil and "" are dropped, nothing is deduplicated.
+            # Truthiness is asked as the boolean arm below asks it.
+            # INLINE rather than a helper taking the array: the
+            # narrowed `v` is a `List<*>` on Kotlin, which no declared
+            # parameter type accepts. Not modelled: a NESTED Array
+            # (Rails flattens it; no corpus site nests one).
+            tokens = []
+            v.each do |item|
+              if item.is_a?(Hash)
+                item.each do |ik, iv|
+                  tokens << ik.to_s unless iv.nil? || iv.to_s == "false"
+                end
+              elsif !item.nil?
+                tokens << item.to_s unless item.to_s == ""
+              end
+            end
+            pairs << " #{name}=\"#{html_escape(tokens.join(" "))}\""
           elsif boolean_attr?(name)
             # A boolean attribute's mere presence is its value — Rails
             # renders `hidden: true` as `hidden="hidden"` and OMITS a

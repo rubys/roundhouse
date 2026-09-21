@@ -896,6 +896,18 @@ module ActiveRecord
       count == 1
     end
 
+    # `many?` — MORE than one row, ActiveSupport's Enumerable addition
+    # Rails answers on a relation with `limit_value ? records.many? :
+    # size > 1`. Loaded answers from the cache like `any?`; unloaded
+    # pays the COUNT. campfire's sidebar asks it of a direct room's
+    # `users.without(user)` to pick the avatar-group layout — a site
+    # that was never reached until the helper's block-form `link_to`
+    # rendered its block.
+    def many?
+      r = @records
+      r.nil? ? count > 1 : r.length > 1
+    end
+
     # Block form of Enumerable#all? over the materialized rows (the
     # runtime `Base.where` fallback returns a Relation, and dynamic
     # call-sites treat it as the array Rails hands back).

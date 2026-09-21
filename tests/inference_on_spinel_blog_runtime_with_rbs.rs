@@ -793,7 +793,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // each one `first` self-send under the same declared `untyped`
     // return `first` has always had. What it buys: the Rails 8
     // authentication generator's `User.take` test setup.
-    const CEILING: usize = 933;
+    // 2026-09-21 933 -> 937, +4: `ViewHelpers.render_attrs`'s `class:`
+    // Array arm — the `item`/`ik`/`iv` reads under the attribute bag's
+    // `Hash[Symbol, untyped]`, the same shape its Hash arm already
+    // carries (the other gate, runtime_src_integration, counts the
+    // same arm at ten). What it buys: a conditional class array
+    // forwarded through a helper's `**attributes` renders as Rails'
+    // token list instead of its `inspect`.
+    const CEILING: usize = 937;
 
     assert!(
         all_untyped.len() <= CEILING,

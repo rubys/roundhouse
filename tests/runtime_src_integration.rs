@@ -1278,7 +1278,21 @@ fn every_runtime_method_body_concretely_typed() {
     // campfire's two mutating content filters (`inner_html=`,
     // `at_css(...)["class"] =`) run — opengraph-embed 7/8,
     // content_filters 12/14.
-    const CEILING: usize = 425;
+    //
+    // 425 -> 435: `ViewHelpers.render_attrs`, the `class:` ARRAY arm —
+    // Rails' conditional-class form reaching the runtime whole,
+    // `class: [ "direct", unread: membership.unread? ]` forwarded
+    // through campfire's `link_to_room(**attributes)`. TEN sites, all
+    // reads of the one value under `Hash[Symbol, untyped]` that the
+    // method's Hash arm already reads the same way: each `item` of the
+    // array (`is_a?`, `nil?`, `to_s` twice) and each `ik`/`iv` of a
+    // Hash item (`to_s`, `nil?`, `to_s`). `untyped` because that is the
+    // attribute bag's declared contract — the compile-time loops
+    // collapse a LITERAL class array, and this is the value that was
+    // not a literal. What it bought: the sidebar's room links render
+    // `class="direct"` instead of the array's `inspect`, and the
+    // block-form `link_to` in a helper renders its block at all.
+    const CEILING: usize = 435;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

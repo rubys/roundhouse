@@ -125,6 +125,7 @@ module ActiveRecord
     def presence: () -> Relation?
     def none?: () -> bool
     def one?: () -> bool
+    def many?: () -> bool
     def all?: () { (untyped) -> bool } -> bool
     def exists?: (?Integer? id) -> bool
     def length: () -> Integer

@@ -669,8 +669,17 @@ fn polymorphic_route_call(
 /// Markup comes from [`link_to_wrapper_markup`], the same owner the
 /// view walker calls.
 ///
-/// Declines when there is no URL argument or when the options are not
-/// a literal Hash, leaving the site loud rather than guessed at.
+/// Options that are not a literal Hash — campfire's `link_to_room`
+/// forwards `**attributes` merged with its own `data:`, which arrives
+/// as a `merge` chain — render through the runtime's `render_attrs` at
+/// run time, the same deferral the view lowering makes for a computed
+/// `data:`. Before that arm existed the site was neither rewritten nor
+/// ledgered: the qualified positional call bound the option hash to
+/// `href` and every sidebar room link rendered as
+/// `<a href="{…inspect…}">/rooms/1</a>` — and no test read the anchor.
+///
+/// Declines when there is no URL argument, leaving the site loud
+/// rather than guessed at.
 fn rewrite_link_to_block(
     expr: &mut Expr,
     models: &std::collections::HashSet<String>,
@@ -721,15 +730,28 @@ fn rewrite_link_to_block(
     if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }) {
         return false;
     }
-    let opts = match args.get(1).map(|a| &*a.node) {
-        None => Vec::new(),
-        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
-        Some(_) => return false,
-    };
     let span = expr.span;
     let block = block.clone();
-    let (mut parts, suffix) =
-        crate::lower::view_to_library::helpers::link_to_wrapper_markup(url, opts);
+    let (mut parts, suffix) = match args.get(1).map(|a| &*a.node) {
+        None => crate::lower::view_to_library::helpers::link_to_wrapper_markup(url, Vec::new()),
+        Some(ExprNode::Hash { entries, .. }) => {
+            crate::lower::view_to_library::helpers::link_to_wrapper_markup(url, entries.clone())
+        }
+        // Computed options: the runtime renders them, in Rails' order
+        // (options first, `href` last — the same order the literal arm
+        // writes).
+        Some(_) => {
+            let opts = args[1].clone();
+            let parts = vec![
+                InterpPart::Text { value: "<a".to_string() },
+                InterpPart::Expr { expr: view_helpers_call("render_attrs", vec![opts]) },
+                InterpPart::Text { value: " href=\"".to_string() },
+                InterpPart::Expr { expr: view_helpers_call("html_escape", vec![url]) },
+                InterpPart::Text { value: "\">".to_string() },
+            ];
+            (parts, vec![InterpPart::Text { value: "</a>".to_string() }])
+        }
+    };
     // Rails treats what the block yields as the anchor's HTML content,
     // so it is CAPTURED, not escaped — the same rule the `button_to`
     // twin follows, and campfire's blocks are an `image_tag` plus a
