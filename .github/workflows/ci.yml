@@ -212,6 +212,18 @@ jobs:
         # `require "json"` in runtime code (runtime/spinel/json.rb since
         # 72029f0a) silently resolves NOTHING without it, and every
         # spinel job goes red on `undefined method 'generate'`.
+        # `builtins/` is the same lesson a third time: since spinel
+        # 50e2d7bf the core Enumerable methods (`partition`, `group_by`,
+        # `each_with_object`, …) are Ruby in `builtins/enumerable.rb`,
+        # spliced by the compiler from `<lib-parent>/builtins`, and their
+        # C emitters are gone. A toolchain staged without the directory
+        # compiles SILENTLY with no such methods: campfire's two
+        # `relation.partition { }` sites became an unconditional
+        # `undefined method 'partition' for an instance of Array` whose
+        # carrier failed the C build (`sp_int` into `sp_PolyArray *`),
+        # while the same emit built clean from any full checkout — a day
+        # spent on a spinel regression that was this `cp`. Upstream's own
+        # `make install` ships it; this list must mirror that target.
         run: |
           mkdir spinel-dist
           cp -L spinel-src/spinel               spinel-dist/spinel
@@ -219,6 +231,7 @@ jobs:
           cp    spinel-src/build/spinel_rbs_extract spinel-dist/
           cp -R spinel-src/lib                  spinel-dist/lib
           cp -R spinel-src/packages             spinel-dist/packages
+          cp -R spinel-src/builtins             spinel-dist/builtins
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
