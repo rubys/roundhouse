@@ -1770,7 +1770,103 @@ pub(super) fn ingest_library_method(
 /// `ApplicationRecord` or `ActiveRecord::Base`? If yes the file is a
 /// model; otherwise it's a library class. Files with no class at all
 /// return `None`.
-pub fn classify_class_file(source: &[u8]) -> Option<ClassKind> {
+/// `self.abstract_class = true` or `primary_abstract_class` in a class
+/// body.
+///
+/// Both spellings: the marker is what Rails 7 added, and the
+/// assignment is what its own multiple-database guide still writes.
+fn declares_abstract_class(class: &ruby_prism::ClassNode<'_>) -> bool {
+    let Some(body) = class.body() else { return false };
+    let Some(stmts) = body.as_statements_node() else { return false };
+    stmts.body().iter().any(|stmt| {
+        let Some(call) = stmt.as_call_node() else { return false };
+        let name = constant_id_str(&call.name());
+        if call.receiver().is_none() {
+            return name == "primary_abstract_class";
+        }
+        if call.receiver().and_then(|r| r.as_self_node()).is_none() || name != "abstract_class=" {
+            return false;
+        }
+        call.arguments()
+            .and_then(|a| a.arguments().iter().next())
+            .is_some_and(|arg| arg.as_true_node().is_some())
+    })
+}
+
+/// The classes an app declares as ActiveRecord bases, resolved
+/// transitively.
+///
+/// `classify_class_file` matched a superclass against two literals, so
+/// a model descending through the app's OWN abstract base — the shape
+/// Rails' multiple-database guide prescribes, and what an engine or a
+/// packwerk package gets by default — was ingested as a plain library
+/// class and lost its associations, validations and scopes.
+///
+/// Seeded with the two names, then closed over the `class X < Y` pairs
+/// the pre-pass collects, so a chain of any depth resolves.
+#[derive(Debug, Default, Clone)]
+pub struct ModelBases {
+    names: std::collections::HashSet<String>,
+}
+
+impl ModelBases {
+    pub fn new() -> Self {
+        let mut names = std::collections::HashSet::new();
+        names.insert("ApplicationRecord".to_string());
+        names.insert("ActiveRecord::Base".to_string());
+        Self { names }
+    }
+
+    /// One file's `class X < Y` pairs, for the closure below — but
+    /// only for classes that declare themselves ABSTRACT.
+    ///
+    /// Closing over every model would reclassify a single-table
+    /// inheritance subclass (`class Rooms::Open < Room`) as a model,
+    /// which it is in Rails but not in this ingest: STI is handled
+    /// elsewhere, and the library-class path is what feeds it. A
+    /// concrete parent with a table of its own means STI; an abstract
+    /// one means a base chain. The full suite caught the difference
+    /// after targeted tests missed it.
+    pub fn record(&mut self, source: &[u8], pairs: &mut Vec<(String, String)>) {
+        let result = parse(source);
+        let root = result.node();
+        for (scope, class) in find_all_classes_with_scope(&root) {
+            let Some(path) = class_name_path(&class) else { continue };
+            let mut full = scope.clone();
+            full.extend(path);
+            let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n)) else {
+                continue;
+            };
+            if !declares_abstract_class(&class) {
+                continue;
+            }
+            pairs.push((full.join("::"), parent.join("::")));
+        }
+    }
+
+    /// Close the set: anything whose parent is already a base is one.
+    /// Iterated rather than recursive because the pairs arrive in file
+    /// order, and a base can be declared after its user.
+    pub fn close_over(&mut self, pairs: &[(String, String)]) {
+        loop {
+            let before = self.names.len();
+            for (child, parent) in pairs {
+                if self.names.contains(parent) {
+                    self.names.insert(child.clone());
+                }
+            }
+            if self.names.len() == before {
+                break;
+            }
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+}
+
+pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
@@ -1793,7 +1889,9 @@ pub fn classify_class_file(source: &[u8]) -> Option<ClassKind> {
         .map(|p| p.join("::"));
 
     Some(match parent_path.as_deref() {
-        Some("ApplicationRecord") | Some("ActiveRecord::Base") => ClassKind::Model,
+        // Resolved through the app's own bases, not against two
+        // literals: `Gauge < PkgRecord < ApplicationRecord` is a model.
+        Some(p) if bases.contains(p) => ClassKind::Model,
         // A superclass-less class that `include`s the ActiveModel
         // validation surface (lobsters' Search) is a tableless model:
         // the model path lowers its `validates` DSL and synthesizes
