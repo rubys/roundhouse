@@ -194,6 +194,11 @@ fn real_blog_spinel_tests_pass() {
         // file had shipped in every emit with nothing running it.
         "test/cgi_io_test.rb",
         "test/hash_to_query_test.rb",
+        // The ruby family's Array attribute value
+        // (runtime/attr_value_text.rb): Rails' `class:` conditional
+        // list, forwarded whole by campfire's `link_to_room`, measured
+        // against Rails 8.1's `link_to`. Rides in the same way.
+        "test/attr_value_text_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

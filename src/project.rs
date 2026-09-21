@@ -3236,6 +3236,16 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/hash_to_query.rbs".to_string(), rbs));
     }
 
+    // Array attribute-value sidecar — the reopen in
+    // runtime/attr_value_text.rb renders an Array value as Rails does
+    // (space-joined; the `class:` conditional list); the .rbs keeps the
+    // reopened method's signature the shared one's.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/attr_value_text.rbs")
+            .map_err(|e| format!("read runtime/spinel/attr_value_text.rbs: {e}"))?;
+        files.push(("sig/runtime/attr_value_text.rbs".to_string(), rbs));
+    }
+
     // SecureRandom stub-slot sidecar — the reopen in
     // runtime/secure_random_stub.rb replaces the package's
     // `alphanumeric`/`uuid` with stub-first arms; the .rbs pins the

@@ -1,0 +1,7 @@
+# Typing for runtime/spinel/attr_value_text.rb — the Array-aware reopen
+# of the shared method (runtime/ruby/action_view/view_helpers.rbs).
+module ActionView
+  module ViewHelpers
+    def self.attr_value_text: (String name, untyped v) -> String
+  end
+end

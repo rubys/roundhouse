@@ -1279,20 +1279,17 @@ fn every_runtime_method_body_concretely_typed() {
     // `at_css(...)["class"] =`) run — opengraph-embed 7/8,
     // content_filters 12/14.
     //
-    // 425 -> 435: `ViewHelpers.render_attrs`, the `class:` ARRAY arm —
-    // Rails' conditional-class form reaching the runtime whole,
-    // `class: [ "direct", unread: membership.unread? ]` forwarded
-    // through campfire's `link_to_room(**attributes)`. TEN sites, all
-    // reads of the one value under `Hash[Symbol, untyped]` that the
-    // method's Hash arm already reads the same way: each `item` of the
-    // array (`is_a?`, `nil?`, `to_s` twice) and each `ik`/`iv` of a
-    // Hash item (`to_s`, `nil?`, `to_s`). `untyped` because that is the
-    // attribute bag's declared contract — the compile-time loops
-    // collapse a LITERAL class array, and this is the value that was
-    // not a literal. What it bought: the sidebar's room links render
-    // `class="direct"` instead of the array's `inspect`, and the
-    // block-form `link_to` in a helper renders its block at all.
-    const CEILING: usize = 435;
+    // 425 -> 428: `ViewHelpers.attr_value_text(name, v)`, the one
+    // method an attribute's TEXT now goes through — `v.to_s` here, and
+    // the ruby family's reopen (runtime/spinel/attr_value_text.rb)
+    // renders an Array as Rails does. THREE sites, all the one value
+    // under the attribute bag's `Hash[Symbol, untyped]` that
+    // `render_attrs` already read: the argument at the call, the
+    // parameter, and its `to_s`. The Array walk itself is OFF this
+    // tree on purpose: an `is_a?(Array)` arm here red the Rust, C# and
+    // Elixir lanes on one push. What it bought: campfire's sidebar room
+    // links render `class="direct"` instead of the array's `inspect`.
+    const CEILING: usize = 428;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

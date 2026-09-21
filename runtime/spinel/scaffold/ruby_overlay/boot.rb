@@ -104,6 +104,10 @@ require_relative "runtime/action_controller"
 # ViewHelpers' scalar `to_query_value`, so AFTER action_controller's
 # require chain has defined the shared one; the spinel boot's twin line.
 require_relative "runtime/hash_to_query"
+# An Array attribute value — Rails' space-joined form and the `class:`
+# conditional list — a reopen of the shared scalar `attr_value_text`,
+# for the same reason and at the same point as the line above.
+require_relative "runtime/attr_value_text"
 # `Rails.application.executor.wrap` — a DB lease for work on a thread the
 # framework did not start (campfire's web-push invalidation handler).
 # After rails and db, which it reopens and calls. The other boot requires

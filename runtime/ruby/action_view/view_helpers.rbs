@@ -182,6 +182,7 @@ module ActionView
     # (rust2 `HashMap<String, Value>`, TS `Record<string, …>`), and
     # Crystal's already-Symbol-keyed callers finally match the param.
     def self.render_attrs: (Hash[Symbol, untyped] attrs) -> String
+    def self.attr_value_text: (String name, untyped v) -> String
 
     # Rails' BOOLEAN_ATTRIBUTES membership — presence-is-the-value
     # attributes render `name="name"` when truthy and vanish when

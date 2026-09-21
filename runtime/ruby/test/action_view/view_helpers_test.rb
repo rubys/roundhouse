@@ -223,20 +223,6 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<a class="btn" href="/articles/42">Show</a>), out
   end
 
-  # A `class:` Array reaching the runtime whole — Rails' conditional
-  # form, forwarded through a helper's `**attributes`. Measured against
-  # Rails 8.1: Hash keys by truthiness, nil and "" dropped, no dedup,
-  # and an empty list is `class=""`. (A nested Array, which Rails
-  # flattens, is the one shape left out — see `render_attrs`.)
-  def test_link_to_renders_a_class_array_as_rails_token_list
-    out = ViewHelpers.link_to("x", "/r", class: ["direct", { unread: false }])
-    assert_equal %(<a class="direct" href="/r">x</a>), out
-    out = ViewHelpers.link_to("x", "/r", class: ["direct", { unread: true, other: nil }, "direct", nil, ""])
-    assert_equal %(<a class="direct unread direct" href="/r">x</a>), out
-    out = ViewHelpers.link_to("x", "/r", class: [])
-    assert_equal %(<a class="" href="/r">x</a>), out
-  end
-
   def test_link_to_puts_the_options_before_the_href
     out = ViewHelpers.link_to("Title", "https://example.com/page", rel: "noreferrer", target: "_blank")
     assert_equal %(<a rel="noreferrer" target="_blank" href="https://example.com/page">Title</a>), out
