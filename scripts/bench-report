@@ -557,10 +557,30 @@ jvm_cells = %w[jruby kotlin] & measured_targets
 net_cells = %w[csharp csharp-aot] & measured_targets
 tr_cells  = %w[truffleruby rails-truffleruby] & measured_targets
 code_list = ->(ts) { ts.map { |t| "<code>#{t}</code>" }.join(', ') }
+# A harness that records what each lane ACTUALLY got (campfire's
+# `heap=` shape line) names those budgets; the blog's fixed ones are
+# the fallback for a run that recorded none.
+shape_heap = ->(t) {
+  parts = env.is_a?(Hash) ? Array(env.dig('lane_shapes', t)) : []
+  parts.map { |l| l[/\Aheap=(.+)\z/, 1] }.compact.first
+}
+heap_list = ->(ts) { ts.map { |t| "<code>#{t}</code> #{shape_heap.(t)}" }.join(', ') }
 budget_clauses = []
-budget_clauses << "the JVM #{jvm_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(jvm_cells)}) via <code>-Xmx512m=-Xms512m</code>" unless jvm_cells.empty?
+unless jvm_cells.empty?
+  budget_clauses << if jvm_cells.all? { |t| shape_heap.(t) }
+    "the JVM #{jvm_cells.size == 1 ? 'cell' : 'cells'} via <code>-Xmx=-Xms</code> (#{heap_list.(jvm_cells)})"
+  else
+    "the JVM #{jvm_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(jvm_cells)}) via <code>-Xmx512m=-Xms512m</code>"
+  end
+end
 budget_clauses << "the .NET #{net_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(net_cells)}) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB)" unless net_cells.empty?
-budget_clauses << "the TruffleRuby #{tr_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(tr_cells)}) via <code>--vm.Xmx</code> — 512&nbsp;MB for the emitted tree, 1&nbsp;GB for stock Rails, which runs out of a 512&nbsp;MB heap under TruffleRuby within a minute of load" unless tr_cells.empty?
+unless tr_cells.empty?
+  budget_clauses << if tr_cells.all? { |t| shape_heap.(t) }
+    "the TruffleRuby #{tr_cells.size == 1 ? 'cell' : 'cells'} via <code>--vm.Xmx</code> (#{heap_list.(tr_cells)})"
+  else
+    "the TruffleRuby #{tr_cells.size == 1 ? 'cell' : 'cells'} (#{code_list.(tr_cells)}) via <code>--vm.Xmx</code> — 512&nbsp;MB for the emitted tree, 1&nbsp;GB for stock Rails, which runs out of a 512&nbsp;MB heap under TruffleRuby within a minute of load"
+  end
+end
 heap_note = budget_clauses.empty? ? '' : " The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: #{budget_clauses.join(', and ')}."
 
 # #16 is about the BLOG fixture specifically. Pointing campfire's readers
@@ -589,7 +609,7 @@ html << <<~METHOD
     <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>#{harness_name}</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout.#{heap_note}#{appendix_ref}
     #{fixture_caveat}#{harness_notes}
     #{(measured_targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
-    #{(measured_targets.include?('rails-truffleruby') ? %(<p class="caveat"><code>rails-truffleruby</code> is the stock-Rails-on-TruffleRuby baseline — the <strong>same Rails 8.1 fixture</strong> the <code>rails</code> lane serves, since TruffleRuby compiles the <code>sqlite3</code> C extension and needs no JDBC adapter; <code>truffleruby</code> is the <code>ruby</code> lane's tree, unmodified, under the same interpreter. Both run the native standalone, single process, threads only (no <code>fork</code>).</p>) : '')}
+    #{(measured_targets.include?('rails-truffleruby') && (benchmark.nil? || benchmark == 'blog') ? %(<p class="caveat"><code>rails-truffleruby</code> is the stock-Rails-on-TruffleRuby baseline — the <strong>same Rails 8.1 fixture</strong> the <code>rails</code> lane serves, since TruffleRuby compiles the <code>sqlite3</code> C extension and needs no JDBC adapter; <code>truffleruby</code> is the <code>ruby</code> lane's tree, unmodified, under the same interpreter. Both run the native standalone, single process, threads only (no <code>fork</code>).</p>) : '')}
     #{(measured_targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but compiled by <a href="https://github.com/matz/spinel">Spinel</a> behind its thread-per-connection server (a green thread per connection on the runtime's autodetected OS worker count) rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
     #{(measured_targets.include?('spinel-fiber') ? %(<p class="caveat"><code>spinel-fiber</code> is the <em>same spinel binary</em> started with <code>TEP_SERVER=fiber</code>: its previous fiber-per-connection server, one poll loop on one thread. Nothing else differs — same compiler, same emitted tree, same database and pool — so the <code>spinel</code> / <code>spinel-fiber</code> pair measures the scheduler design alone (<a href="https://github.com/matz/spinel/issues/4306">matz/spinel#4306</a>).</p>) : '')}
   </div>
@@ -727,14 +747,39 @@ if (%w[ruby rails] - measured_targets).empty?
   # Rails' metaprogramming on its own, so stock Rails gains MORE from
   # the runtime swap than the emit does. The page states the ratio it
   # measured either way; the interpretation belongs to the post.
-  rb = by['/articles']['ruby']&.dig('req_sec').to_f
-  rl = by['/articles']['rails']&.dig('req_sec').to_f
+  #
+  # THE CRuby OPERANDS DEPEND ON THE PAGE. The blog's `ruby`/`rails` are
+  # one process each, so they are the swap's baseline as they stand.
+  # campfire's are eight-worker deployments, and its JVM-family lanes
+  # are one process (no fork), so the like-for-like baseline there is
+  # the one-process pair, `ruby-1p`/`rails-1p`. The sentence names the
+  # pair it used. The endpoint is the page's first, not `/articles`.
+  swap_ep = endpoints.first
+  cruby_emit, cruby_rails =
+    if benchmark == 'campfire' && (%w[ruby-1p rails-1p] - measured_targets).empty?
+      %w[ruby-1p rails-1p]
+    else
+      %w[ruby rails]
+    end
+  rb = by[swap_ep][cruby_emit]&.dig('req_sec').to_f
+  rl = by[swap_ep][cruby_rails]&.dig('req_sec').to_f
   { 'jruby' => ['rails-jruby', 'on the JVM'], 'truffleruby' => ['rails-truffleruby', 'on TruffleRuby'] }.each do |emit_t, (rails_t, where)|
     next unless ([emit_t, rails_t] - measured_targets).empty?
-    e = by['/articles'][emit_t]&.dig('req_sec').to_f
-    r = by['/articles'][rails_t]&.dig('req_sec').to_f
+    e = by[swap_ep][emit_t]&.dig('req_sec').to_f
+    r = by[swap_ep][rails_t]&.dig('req_sec').to_f
     next unless e > 0 && r > 0 && rl > 0 && rb > 0
-    html << %(<p>The same comparison <em>#{where}</em>: emitted <code>#{emit_t}</code> beats stock <code>#{rails_t}</code> by <strong>#{fmt_dec(e / r, 1)}×</strong> on <code>/articles</code>, against <strong>#{fmt_dec(rb / rl, 1)}×</strong> for <code>ruby</code> over <code>rails</code> on CRuby — and the runtime swap alone is worth <strong>#{fmt_dec(r / rl, 1)}×</strong> to stock Rails, <strong>#{fmt_dec(e / rb, 1)}×</strong> to the emit.</p>\n)
+    html << %(<p>The same comparison <em>#{where}</em>: emitted <code>#{emit_t}</code> beats stock <code>#{rails_t}</code> by <strong>#{fmt_dec(e / r, 1)}×</strong> on <code>#{swap_ep}</code>, against <strong>#{fmt_dec(rb / rl, 1)}×</strong> for <code>#{cruby_emit}</code> over <code>#{cruby_rails}</code> on CRuby — and the runtime swap alone is worth <strong>#{fmt_dec(r / rl, 1)}×</strong> to stock Rails, <strong>#{fmt_dec(e / rb, 1)}×</strong> to the emit.</p>\n)
+  end
+  # The JVM emit against the CRuby DEPLOYMENT, when the page has one:
+  # one process with the JVM's real threads against eight forked
+  # workers is the comparison a deployer would make.
+  if benchmark == 'campfire' && (%w[jruby ruby rails] - measured_targets).empty?
+    j = by[swap_ep]['jruby']&.dig('req_sec').to_f
+    rd = by[swap_ep]['ruby']&.dig('req_sec').to_f
+    rr = by[swap_ep]['rails']&.dig('req_sec').to_f
+    if j > 0 && rd > 0 && rr > 0
+      html << %(<p>Against the deployed shapes on <code>#{swap_ep}</code>: one <code>jruby</code> process is <strong>#{fmt_dec(j / rd, 2)}×</strong> the eight-worker <code>ruby</code> row and <strong>#{fmt_dec(j / rr, 1)}×</strong> the deployed <code>rails</code> row — and, unlike <code>ruby</code>, it is a shape campfire could run (one registry, one cache, one queue).</p>\n)
+    end
   end
 end
 

@@ -69,6 +69,10 @@
 #                                              by default) + its cookie file,
 #                                              leaving the oracle untouched
 #   scripts/campfire-oracle check-lock          diff the lockfile vs the pin
+#   scripts/campfire-oracle bundle --runtime truffleruby
+#                                              install the oracle's gems under
+#                                              another Ruby, into its own
+#                                              BUNDLE_PATH beside the CRuby one
 #
 # Options:
 #   --app PATH      campfire checkout to export from (default ~/git/once-campfire)
@@ -100,6 +104,18 @@
 #                   malloc implementations. Ignored where no jemalloc is
 #                   installed — `serve` says so rather than pretending.
 #   --no-yjit       boot without YJIT (the baseline lane)
+#   --runtime NAME  which Ruby serves: `cruby` (default) or `truffleruby`.
+#                   TruffleRuby has no `fork`, so it serves ONE Puma
+#                   process, threads only — `--workers` is ignored,
+#                   `--deployed` is refused (campfire's worker formula and
+#                   resque-pool both fork), jemalloc is not preloaded (the
+#                   native image has its own heap; see `--heap`), and the
+#                   gems come from `bundle --runtime truffleruby`'s
+#                   BUNDLE_PATH (`<out>-bundle-truffleruby`, beside the
+#                   tree so it survives `prepare`) rather than the
+#                   CRuby bundle's.
+#   --heap SIZE     the managed heap for `--runtime truffleruby`
+#                   (`--vm.Xmx`, default 2g). Recorded in the shape report.
 #   --env NAME      RAILS_ENV for `serve` (default production). Development
 #                   is 12x slower on this app and is not a benchmark.
 #   --no-fragment-cache
@@ -151,6 +167,10 @@ FRAGMENT_CACHE=1
 # single-worker diagnostic lanes stay exactly what they were.
 DEPLOYED=0
 JEMALLOC=1
+# Which Ruby `serve` boots. `truffleruby` is a one-process shape by
+# construction (no fork) with its own bundle; see the header.
+RUNTIME="cruby"
+HEAP="2g"
 # Where `serve` records which parts of the deployed shape it achieved.
 SHAPE_REPORT=""
 JAR=""
@@ -181,6 +201,8 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --no-jemalloc) JEMALLOC=0; shift ;;
         --no-yjit)  YJIT=0; shift ;;
+        --runtime)  RUNTIME="$2"; shift 2 ;;
+        --heap)     HEAP="$2"; shift 2 ;;
         --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
         --env)      RAILS_ENV_NAME="$2"; shift 2 ;;
         --jar)      JAR="$2"; shift 2 ;;
@@ -189,7 +211,7 @@ while [[ $# -gt 0 ]]; do
         --seed-db)      SEED_DB="$2"; shift 2 ;;
         --seed-cookies) SEED_COOKIES="$2"; shift 2 ;;
         --force)        FORCE=1; shift ;;
-        -h|--help)  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '2,134p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "campfire-oracle: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -330,6 +352,13 @@ cmd_serve() {
     if [[ "$RAILS_ENV_NAME" == "production" && ! -f "$OUT/storage/db/production.sqlite3" ]]; then
         die "no production DB — run 'prepare' (it stages one from the seed)"
     fi
+    case "$RUNTIME" in
+        cruby) ;;
+        truffleruby)
+            (( DEPLOYED )) && die "--deployed needs fork (campfire's worker formula, resque-pool); TruffleRuby has none — serve the one-process shape"
+            cmd_serve_truffleruby; return ;;
+        *) die "unknown --runtime $RUNTIME (cruby | truffleruby)" ;;
+    esac
     (( DEPLOYED )) && { cmd_serve_deployed; return; }
     step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT, fragment-cache=$FRAGMENT_CACHE"
     cd "$OUT"
@@ -372,6 +401,82 @@ cmd_serve() {
     )
     [[ -n "$jem" ]] && pre+=( LD_PRELOAD="$jem" )
     exec env "${pre[@]}" bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
+}
+
+# ── stock campfire on TruffleRuby ────────────────────────────────────
+#
+# The same oracle tree, the same rows, the same production config and
+# the same fragment cache in the same Redis — under a different Ruby.
+# What CANNOT be the same is recorded rather than approximated:
+#
+#   * ONE PROCESS. TruffleRuby has no `fork`, so Puma runs in single mode
+#     (WEB_CONCURRENCY=0) with RAILS_MAX_THREADS threads. campfire's own
+#     worker formula and resque-pool both fork, so neither runs; this is
+#     the `--workers 1` diagnostic shape, not the deployed one, and the
+#     lane that measures it is named for that (rails-truffleruby is a
+#     runtime swap on the one-process rails-1p row, not on `rails`).
+#   * NO jemalloc. The native image allocates on its own managed heap;
+#     LD_PRELOAD would wrap only the C extensions' mallocs and say
+#     nothing comparable. The heap is pinned instead (`--heap`, the
+#     `--vm.Xmx` the blog bench's rails-truffleruby lane also pins), and
+#     the shape report says which.
+#   * ITS OWN BUNDLE. The CRuby bundle's C extensions are CRuby's;
+#     TruffleRuby compiles its own (see `bundle`). The lockfile is
+#     shared — same gem versions, same Rails revision — so the runtime
+#     is the only variable.
+#   * YJIT is an MRI flag; RUBY_YJIT_ENABLE is simply not set.
+#
+# The bundle lives BESIDE the oracle, not inside it: `prepare` starts
+# with `rm -rf "$OUT"` every night, and a bundle inside the tree would
+# mean re-cloning rails/rails and recompiling six C extensions nightly.
+# `bundle check` against the (re-exported) lockfile is what keeps a
+# surviving bundle honest.
+tr_bundle_path() { echo "${OUT%/}-bundle-truffleruby"; }
+cmd_serve_truffleruby() {
+    command -v truffleruby >/dev/null || die "truffleruby not on PATH"
+    local bp; bp="$(tr_bundle_path)"
+    [[ -d "$bp" ]] || die "no TruffleRuby bundle at $bp — run 'bundle --runtime truffleruby' first"
+    step "puma :$PORT — $RAILS_ENV_NAME, truffleruby, one process, $THREADS thread(s), heap $HEAP, fragment-cache=$FRAGMENT_CACHE"
+    cd "$OUT"
+    report_shape "runtime=truffleruby"
+    report_shape "jemalloc=n/a (managed heap, --vm.Xmx$HEAP)"
+    report_shape "heap=$HEAP"
+    report_shape "workers=0 (one process, no fork)"
+    report_shape "fragment-cache=$FRAGMENT_CACHE"
+    local pre=(
+        WEB_CONCURRENCY=0 RAILS_MAX_THREADS="$THREADS"
+        RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
+        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
+        RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
+        BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test"
+        TRUFFLERUBYOPT="--vm.Xmx$HEAP"
+    )
+    exec env "${pre[@]}" truffleruby -S bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
+}
+
+# Install the oracle's gems under another Ruby, into a BUNDLE_PATH of its
+# own beside the CRuby bundle. Idempotent: `bundle check` first, install
+# only when something is missing. The C extensions (sqlite3, bcrypt,
+# nokogiri, nio4r, puma, websocket-driver) compile under that Ruby, which
+# is minutes the first time and nothing after.
+cmd_bundle() {
+    [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
+    case "$RUNTIME" in
+        truffleruby)
+            command -v truffleruby >/dev/null || die "truffleruby not on PATH"
+            local bp; bp="$(tr_bundle_path)"
+            if (cd "$OUT" && BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test" \
+                    truffleruby -S bundle check >/dev/null 2>&1); then
+                step "truffleruby bundle satisfied at $bp"
+            else
+                step "installing the truffleruby bundle into $bp (compiles the C extensions)"
+                (cd "$OUT" && BUNDLE_PATH="$bp" BUNDLE_WITHOUT="development:test" \
+                    truffleruby -S bundle install >/dev/null) || die "truffleruby bundle install failed"
+            fi
+            ;;
+        cruby) step "the CRuby bundle is prepare's; nothing to do" ;;
+        *) die "unknown --runtime $RUNTIME (cruby | truffleruby)" ;;
+    esac
 }
 
 # ── the deployed shape ───────────────────────────────────────────────
@@ -662,6 +767,7 @@ case "$CMD" in
     login)      cmd_login ;;
     cookies)    cmd_cookies ;;
     check-lock) cmd_check_lock ;;
-    ""|-h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|socket-seed|check-lock)" ;;
+    bundle)     cmd_bundle ;;
+    ""|-h|--help) sed -n '2,134p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)          die "unknown command '$CMD' (prepare|serve|login|cookies|socket-seed|check-lock|bundle)" ;;
 esac
