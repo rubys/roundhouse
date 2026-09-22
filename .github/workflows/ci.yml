@@ -1237,9 +1237,22 @@ jobs:
       # 356/397 — a ratchet with a hundred and twenty tests of slack in
       # it, every one of them free to break again without failing this
       # step. Set to what this runner measured, as the notice said.
+      #
+      # 376/61 -> 382/64, on the notice `4042b19b`'s run emitted (the
+      # helper test's `view`, the logger stack behind campfire's
+      # formatter, `squish` and the identity assertions). Three files
+      # turned and nothing else moved.
+      #
+      # NOT raised to the 391 measured locally in the same session: the
+      # vips loader-policy commit after this one turns nine more, and
+      # every one of them asks the LOCAL libvips which formats it
+      # compiled in. A Linux runner's build is not this laptop's, so
+      # that number is a prediction until a runner prints it — and the
+      # rule this ratchet is built on is that a floor goes up by the
+      # notice, never by prediction.
         env:
-          FLOOR_TESTS: 376
-          FLOOR_FILES: 61
+          FLOOR_TESTS: 382
+          FLOOR_FILES: 64
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

@@ -39,12 +39,15 @@ require_relative "../runtime/action_controller"
 require_relative "../runtime/action_view"
 require_relative "../runtime/json_builder"
 require_relative "../runtime/broadcasts"
+# `Logger::Formatter` — a LOAD-time reference for an app that
+# subclasses it (campfire's `LogScrubbingFormatter`), so it precedes
+# app/models.rb below.
+require_relative "../runtime/logger"
 # The cable half the channel harness stands on: `ActionCable::Channel
 # .build` / `Connection.build` (the generated factories the server
 # resolves a frame through) and `Turbo::StreamsChannel` with the
 # stream-name signer, which also reopens `turbo_stream_from` for this
 # family — the same order boot.rb loads them in.
-require_relative "../runtime/logger"
 require_relative "../runtime/action_cable"
 require_relative "../runtime/turbo_streams"
 require_relative "../runtime/importmap"
@@ -55,6 +58,24 @@ require_relative "../config/routes"
 # LOAD-time deps; tests reach the rest (and fixtures reach their models)
 # through this line, mirroring main.rb's boot order.
 require_relative "../app/models"
+# The image processor, AND with it the app's libvips loader policy —
+# `config/initializers/vips.rb`'s `Vips.block_untrusted(true)` plus its
+# `Vips.block("<op>", true)` list, lifted at ingest onto the
+# Application reopen and applied at the bottom of that file, once,
+# process-wide.
+#
+# THE HARNESS HAS TO LOAD IT TOO, which is the whole point: the policy
+# is what decides whether a crafted image reaches an exotic libvips
+# loader, and a test process that never applied it measures a server
+# that did not exist. campfire's `vips_loader_policy_test` asks
+# `Vips.vips_foreign_find_load` for a BMP and expects nil; without this
+# line it got "VipsForeignLoadMagickFile" and nine tests read as a
+# missing feature rather than a missing require.
+#
+# After app/models.rb, so `Rails.application`'s reopen (the lifted
+# policy) is defined before the file reads it — boot.rb's own order,
+# where this sits well below config/application.rb.
+require_relative "../runtime/active_storage_processor"
 
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3

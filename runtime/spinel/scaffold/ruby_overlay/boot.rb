@@ -122,11 +122,6 @@ require_relative "runtime/rails_executor"
 require_relative "runtime/multipart"
 require_relative "runtime/active_storage"
 require_relative "runtime/active_storage_disk"
-# The image processor behind variants: a comment-only stub unless the
-# app declares `attachable.variant …`, in which case project.rs swaps
-# in the ruby-vips reopen. After config/application — it applies the
-# app's lifted loader policy at load.
-require_relative "runtime/active_storage_processor"
 # The video previewer over ffmpeg — see the file.
 require_relative "runtime/active_storage_previewer"
 # After action_controller: its require chain loads the shared
@@ -200,6 +195,26 @@ begin
   require_relative "config/application"
 rescue LoadError
 end
+# The image processor behind variants: a comment-only stub unless the
+# app declares `attachable.variant …`, in which case project.rs swaps
+# in the ruby-vips reopen.
+#
+# AFTER config/application, AND THAT IS THE WHOLE POINT — the swapped-in
+# file ends with the app's libvips LOADER POLICY (`Vips.block_untrusted
+# (true)` and the `Vips.block("<op>", true)` list from
+# config/initializers/vips.rb, lifted onto the Application reopen), so
+# it reads `Rails.application.vips_block_untrusted` AT LOAD. Required
+# before that reopen it read the framework default `false` and applied
+# NOTHING: an emitted campfire decoded every exotic format its own
+# initializer blocks, with `Rails.application.vips_block_untrusted`
+# answering true the whole time.
+#
+# This file used to require it forty lines above with a comment saying
+# "After config/application", which is why campfire's own
+# `vips_loader_policy_test` read as a test-process artifact for as long
+# as it did — the comment was believed and the order was not measured.
+# The spinel scaffold's boot.rb had it right; only this one was wrong.
+require_relative "runtime/active_storage_processor"
 # Pin the process zone to the app's config.time_zone (ingest
 # synthesizes `config_time_zone` from the one config-DSL line the
 # render layer must honor; absent → "UTC", Rails' default). Rails
