@@ -1296,6 +1296,7 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     // the surface spinel-AOT already compiles in lowered test bodies
     // (`assert_raises`) and `runtime/spinel`.
     writeln!(s, "__failed = 0").unwrap();
+    writeln!(s, "__skipped = 0").unwrap();
     for tm in &test_methods {
         // Zero-arg `.new` — mirrors Crystal's `@type.new.test_X` shape.
         // Spinel doesn't propagate inherited `Minitest::Test#
@@ -1324,6 +1325,20 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // out of the file and took the remaining tests with it.
         // Minitest's own runner rescues Exception here for the same
         // reason.
+        // SKIP BEFORE FAIL, and it is a third outcome rather than a
+        // lenient second. Minitest's `skip` says "this test cannot be
+        // run HERE" — campfire's vips policy test skips the formats
+        // the local libvips did not compile in — and neither answer
+        // the harness could otherwise give is true: counting it failed
+        // reads as a transpiler gap (it took the macOS number to 16 of
+        // 17 and a Linux runner's to 15, for the same emit), and
+        // counting it passed claims a check that never ran. So it is
+        // reported on its own line and taken out of BOTH sides of the
+        // tally by `scripts/campfire-suite`.
+        writeln!(s, "rescue TestSkipped => __e").unwrap();
+        writeln!(s, "  __ok = false").unwrap();
+        writeln!(s, "  __skipped = __skipped + 1").unwrap();
+        writeln!(s, "  puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
         writeln!(s, "rescue Exception => __e").unwrap();
         writeln!(s, "  __ok = false").unwrap();
         writeln!(s, "  __failed = __failed + 1").unwrap();
@@ -1366,7 +1381,34 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     )
     .unwrap();
     writeln!(s, "end").unwrap();
-    writeln!(s, "puts {:?}", format!("{class_name}: {n} tests passed")).unwrap();
+    // The skip count rides the ALL-GREEN line, because a file with
+    // skips and no failures is the case the tally has to read: the
+    // suite subtracts it from both the numerator and the denominator,
+    // so a run on a host missing an optional library reports what it
+    // actually checked. A file with no skips prints the line
+    // `project.rs`'s `.expected` snapshots have always pinned, byte
+    // for byte — the suffix appears only when there is something to
+    // say.
+    writeln!(s, "if __skipped > 0").unwrap();
+    writeln!(
+        s,
+        "  puts {:?} + __skipped.to_s + {:?}",
+        format!("{class_name}: "),
+        " tests skipped"
+    )
+    .unwrap();
+    writeln!(s, "end").unwrap();
+    // The passed count is the test methods MINUS the skips, so the
+    // line never claims a check that did not run. With no skips it is
+    // the literal `project.rs`'s `.expected` snapshots pin, byte for
+    // byte.
+    writeln!(
+        s,
+        "puts {:?} + ({n} - __skipped).to_s + {:?}",
+        format!("{class_name}: "),
+        " tests passed"
+    )
+    .unwrap();
     s
 }
 

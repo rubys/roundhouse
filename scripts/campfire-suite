@@ -313,6 +313,32 @@ pass=0
 fail=0
 unbuilt=0
 tests_total=0
+tests_skip=0
+
+# SKIPS COME OUT OF BOTH SIDES OF THE TALLY. A test that called `skip`
+# — campfire's vips policy test does, once per format the local libvips
+# did not compile in — neither passed nor failed, and the set differs
+# by HOST: two on a Linux runner where a mac has one, for the same
+# emit. Counting it failed reads as a transpiler gap; counting it
+# passed claims a check that never ran. So it leaves the denominator
+# and the run reports what it actually checked.
+#
+# Applied in BOTH branches below, which is the whole reason this is a
+# function: a file whose only non-pass is a skip EXITS ZERO, so the
+# green path is the one that meets skips most often.
+#
+# `n` is this file's denominator in the row; `tests_total` is the
+# suite's, already credited the full count from the shim's
+# `__t.test_*` calls. The shim prints one `SKIP <Class>#<test>: <why>`
+# line per skip (emit/ruby.rs::render_autorun_shim).
+take_skips_out() {
+    local ns
+    ns=$(printf '%s\n' "$1" | grep -cE '^SKIP ' || true)
+    [[ -z "$ns" ]] && ns=0
+    n=$((n - ns))
+    tests_total=$((tests_total - ns))
+    tests_skip=$((tests_skip + ns))
+}
 tests_pass=0
 table=""
 fail_lines=""
@@ -383,6 +409,7 @@ for t in "${TESTS[@]}"; do
         continue
     fi
     if out=$(run_test "$t" 2>&1); then
+        take_skips_out "$out"
         pass=$((pass + 1))
         tests_pass=$((tests_pass + n))
         printf '\033[1;32m  ok  \033[0m %-56s %d/%d\n' "$t" "$n" "$n"
@@ -400,6 +427,7 @@ for t in "${TESTS[@]}"; do
         # the run mid-suite with a partial tally and no summary.
         nf=$(printf '%s\n' "$out" |
              sed -nE 's/.*: ([0-9]+) of [0-9]+ tests failed.*/\1/p' | head -1 || true)
+        take_skips_out "$out"
         if [[ -n "$nf" ]]; then
             ok=$((n - nf))
         else
@@ -454,6 +482,13 @@ if [[ -n "$JSON" ]]; then
 fi
 
 summary_line="$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"
+# Skips are OUT of the two counts above, so say how many — a
+# denominator that moved has to name its reason, or the next reader
+# reads a regression. campfire's vips policy test is the only source
+# today, and how many it skips is a property of the HOST's libvips.
+if (( tests_skip > 0 )); then
+    summary_line="$summary_line, $tests_skip skipped"
+fi
 if [[ "$TARGET" == spinel ]]; then
     summary_line="$summary_line — $unbuilt of $((pass + fail)) never linked"
 fi

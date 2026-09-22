@@ -145,6 +145,9 @@ end
 # Base class for every emitted test. Roundhouse-owned, no Minitest
 # dependency. `setup` / `teardown` are no-op lifecycle hooks the per-
 # test shim invokes; subclasses override and may `super`.
+class TestSkipped < Exception
+end
+
 class TestBase
   def initialize: () -> void
   def setup: () -> void
@@ -193,6 +196,7 @@ class TestBase
   # so unlike `assert_difference` it is not numeric — `from:`/`to:` are
   # whatever the expression answers.
   def assert_changes: (untyped expression, ?String? message, ?from: untyped, ?to: untyped) { () -> void } -> void
+  def skip: (?String message) -> void
 
   # Turbo::Broadcastable::TestHelper. `capture_` answers the LOG
   # entries themselves — Symbol-keyed rows carrying action/stream/

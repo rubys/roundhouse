@@ -703,6 +703,13 @@ end
 # inherit from TestBase directly. Provides the no-op lifecycle hooks
 # the shim calls (`setup` / `teardown`) plus the per-test DB reset
 # (`SchemaSetup.reset!` if defined).
+# What `skip` raises. Minitest's own is `Minitest::Skip < Exception`,
+# deliberately outside StandardError so a test's `rescue => e` cannot
+# swallow it; same rule here, and the autorun shim rescues this arm
+# BEFORE its `rescue Exception` so a skip is never counted a failure.
+class TestSkipped < Exception
+end
+
 class TestBase
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
@@ -945,6 +952,17 @@ class TestBase
   # the value BECOMES nil. Here nil means "unspecified" — asserting a
   # change *to* nil is spelled by letting the plain change check carry
   # it. Nothing in the corpus passes either as nil.
+  # Minitest's `skip` — "this test cannot be run HERE", which is a
+  # different answer from pass and from fail. campfire's
+  # `vips_loader_policy_test` skips the formats the local libvips did
+  # not compile in, and the set differs by host: two on a Linux runner
+  # where this laptop has one. Counted as neither by the shim, and
+  # taken out of both sides of the tally by scripts/campfire-suite, so
+  # the number a run reports is what it actually checked.
+  def skip(message = "skipped")
+    raise TestSkipped, message
+  end
+
   def assert_changes(expression, message = nil, from: nil, to: nil, &block)
     before = expression.call
     if !from.nil? && before != from
