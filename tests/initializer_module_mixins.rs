@@ -268,16 +268,14 @@ fn a_module_an_initializer_defines_and_prepends_is_ingested_and_kept() {
     assert_eq!(app.module_mixins.len(), 1, "the prepend onto WebPush::Request must be kept");
 }
 
-/// The same initializer, EMITTED, on both trees. The CRuby tree keeps
-/// the guard module AND its prepend (the gem supplies `WebPush::Request`).
-/// The spinel tree holds the web-push port out until matz/spinel#4816
-/// closes, so it must hold out both — the prepend would name a class
-/// that is not there, and the module body does not compile without the
-/// gem's methods. The first cut of that hold dropped the MODULE from the
-/// CRuby tree too (the ruby family builds on `spinel_files`) while its
-/// boot still prepended it: `NameError` at boot, campfire-compare red.
+/// The same initializer, EMITTED, on both trees: each carries the guard
+/// module AND its prepend. The gem supplies `WebPush::Request` on CRuby,
+/// runtime/spinel/web_push.rb's port on spinel. Both halves have to
+/// travel together — a tree with the prepend and not the module is a
+/// `NameError` at boot (18775c4f's first cut did that to CRuby), and one
+/// with the module and not the prepend delivers unpinned.
 #[test]
-fn the_web_push_guard_ships_on_cruby_and_is_held_out_of_spinel() {
+fn the_web_push_guard_ships_on_both_trees() {
     use roundhouse::project::{target_files, BuildTarget};
 
     let mut app = {
@@ -311,16 +309,17 @@ fn the_web_push_guard_ships_on_cruby_and_is_held_out_of_spinel() {
 
     let spinel = target_files(&app, &fixture, BuildTarget::Spinel).expect("spinel target files");
     assert!(
-        !spinel.iter().any(|(p, c)| p.ends_with("boot.rb") && c.contains("prepend WebPush::PersistentRequest")),
-        "no prepend onto a class the held-out port would have defined"
+        spinel.iter().any(|(p, c)| p.ends_with("boot.rb")
+            && c.contains("class WebPush::Request\n  prepend WebPush::PersistentRequest\nend")),
+        "the spinel boot must prepend the guard onto the port's Request"
     );
-    assert!(!spinel.iter().any(|(p, _)| p.ends_with("web_push/persistent_request.rb")));
+    assert!(spinel.iter().any(|(p, _)| p.ends_with("web_push/persistent_request.rb")));
     let port = &spinel
         .iter()
         .find(|(p, _)| p.ends_with("runtime/web_push.rb"))
-        .expect("the WebPush anchor still resolves")
+        .expect("the WebPush anchor resolves")
         .1;
-    assert!(!port.contains("web_push_crypto"), "the port (and openssl) must stay out:\n{port}");
+    assert!(port.contains("class Request"), "the spinel anchor must be the port:\n{port}");
 }
 
 /// The mixin's companion: `X.before_action :m` in the same initializer.
