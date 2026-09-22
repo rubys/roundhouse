@@ -1954,6 +1954,26 @@ the two belong in one commit: a request log wired up without
 `config.logger` lifted would write bot keys verbatim, and that is the
 failure that looks like a feature.
 
+### `Tempfile.create` opens by name, not `O_EXCL`
+
+`runtime/ruby/tempfile.rb` is the block form of Ruby's `Tempfile.create`
+for the targets with no stdlib to bind to — the ipaddr/zlib
+arrangement, and the CRuby and JRuby trees take Ruby's own. The name is
+the temp dir, a prefix, the pid and 64 bits from `SecureRandom`.
+
+**What differs.** Ruby's `create` opens with `O_EXCL` and retries on a
+collision, so it cannot be made to clobber a file an attacker
+pre-created in the temp directory. This opens the computed path with
+`File.open(path, "wb+")`, so a pre-created file at that exact path
+would be written to rather than refused.
+
+**What it costs today: nothing, and why that is not the same as safe.**
+Every caller in the corpus is a TEST writing probe bytes to its own
+`TMPDIR`, and the name carries 64 random bits, so guessing it is not a
+practical attack. The difference matters the day a RUNTIME caller
+handles untrusted input through a temp file — at which point the
+exclusive open is the fix, not a wider random component.
+
 ### `strip_tags` leaves entity references alone
 
 `ActionView::ViewHelpers.strip_tags` parses the HTML and serializes the
