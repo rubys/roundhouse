@@ -1,0 +1,63 @@
+# Typing contract for runtime/ruby/logger.rb. The two slots that matter
+# are `@formatter` (declared as the BASE class, so an app's subclass
+# dispatches through it) and `@io` — which is untyped on purpose: it is
+# `STDOUT` in production and a `StringIO` under test, and the only thing
+# either is asked for is `write`.
+class Logger
+  class Formatter
+    # `untyped` for the three that Ruby itself leaves open, and it is
+    # the accurate contract rather than a concession: `severity` is a
+    # String from Ruby's Logger and an Integer from a caller that
+    # passes a level, and `progname`/`message` are ANY object — Ruby's
+    # `msg2str` exists precisely to render an Exception or an arbitrary
+    # value here. `time` is a Time on every path.
+    #
+    # DO NOT NARROW THESE WITHOUT RE-PROBING. Declaring any of the
+    # three as `String` compiled fine on its own and made campfire's
+    # `LogScrubbingFormatter < ::Logger::Formatter` fail its C compile
+    # (`passing 'sp_RbVal' to parameter of incompatible type
+    # 'const char *'`, pointing at this parameter) — an app's override
+    # forwards through `super` and the poly it holds meets the
+    # declared String with no unbox. It did not reproduce in a reduced
+    # four-parameter fixture with the same shape, so what triggers it
+    # is not yet named; the declaration here is the honest one anyway,
+    # which is why this is a note rather than an upstream issue.
+    def call: (untyped severity, ::Time time, untyped progname, untyped message) -> String
+    def self.format_datetime: (::Time time) -> String
+  end
+end
+
+module ActiveSupport
+  class Logger
+    @io: untyped
+    @formatter: ::Logger::Formatter
+    @progname: String
+    def initialize: (untyped io) -> void
+    def formatter: () -> ::Logger::Formatter
+    def formatter=: (::Logger::Formatter value) -> ::Logger::Formatter
+    def write_entry: (String severity, untyped message) -> nil
+    def debug: (untyped message) -> nil
+    def info: (untyped message) -> nil
+    def warn: (untyped message) -> nil
+    def error: (untyped message) -> nil
+    def fatal: (untyped message) -> nil
+  end
+
+  class TaggedLogging
+    @logger: ActiveSupport::Logger
+    # Declared rather than inferred: `@tags = []` is an empty literal,
+    # whose element type the analyzer has nothing to read off, and an
+    # unresolved element leaves every `@tags[i]` an open variable.
+    @tags: Array[String]
+    def initialize: (ActiveSupport::Logger logger) -> void
+    def tagged: (String tag) { () -> untyped } -> untyped
+    def formatter: () -> ::Logger::Formatter
+    def formatter=: (::Logger::Formatter value) -> ::Logger::Formatter
+    def tagged_message: (untyped message) -> String
+    def debug: (untyped message) -> nil
+    def info: (untyped message) -> nil
+    def warn: (untyped message) -> nil
+    def error: (untyped message) -> nil
+    def fatal: (untyped message) -> nil
+  end
+end

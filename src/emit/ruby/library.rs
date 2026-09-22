@@ -5958,6 +5958,13 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if raw == "ActionCable::Channel::Base" || raw == "ActionCable::Connection::Base" {
         return Some("runtime/action_cable".to_string());
     }
+    // `LogScrubbingFormatter < ::Logger::Formatter` — campfire's, and
+    // the same load-time rule the two cable roots above state. The
+    // leading `::` is part of the spelling an app writes, so both
+    // forms resolve.
+    if raw == "Logger::Formatter" || raw == "::Logger::Formatter" {
+        return Some("runtime/logger".to_string());
+    }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
     {
@@ -6140,6 +6147,7 @@ fn require_path_for_body_const(
         // subclasses. Sibling of Broadcasts, not a replacement: the
         // Turbo Stream family still goes through `Broadcasts.append`.
         "ActionCable" => Some("runtime/action_cable".to_string()),
+        "Logger" => Some("runtime/logger".to_string()),
         // `ActionText::Content` / `ActionText::Attachment` — the value
         // half of Action Text. `ActionText::RichText` is NOT here: it
         // is a lowered model and resolves under `app/models/` like any

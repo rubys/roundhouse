@@ -1928,6 +1928,32 @@ guard (`RoomStreamsAreAuthorized`) now stands BEHIND a signature check
 rather than instead of one. What remains is the strict targets' half,
 recorded there.
 
+### The logger stack exists; `Rails.logger` does not use it yet
+
+`runtime/ruby/logger.rb` is Ruby's `Logger::Formatter` plus
+`ActiveSupport::Logger` and `TaggedLogging` — the stack a Rails app's
+`config.logger =` builds, and the parent campfire's
+`LogScrubbingFormatter` subclasses so a bot key in a request path
+(`/rooms/1/5-Ab3xK9mQz1Rt/messages`) is redacted before the line is
+written. It renders Ruby's own line format, pinned against bytes ruby
+minted (`runtime/ruby/test/logger_test.rb`).
+
+**What is not wired.** `Rails.logger` still answers the small
+stderr-prefixing `Rails::Logger` in `runtime/ruby/rails.rb`, and
+`config.logger = …` in an app's `production.rb` is not lifted at
+ingest. So an emitted binary's own log lines (`Rails.logger.error "…"`,
+eight sites in campfire) are neither formatted by this stack nor passed
+through the app's formatter.
+
+**What that costs today: nothing measurable, and the reason matters.**
+The formatter exists to scrub REQUEST log lines, and this runtime
+writes none — there is no `ActionDispatch` request-logging middleware,
+so the path that would carry a bot key is never logged in the first
+place. The exposure appears the day request logging does, which is why
+the two belong in one commit: a request log wired up without
+`config.logger` lifted would write bot keys verbatim, and that is the
+failure that looks like a feature.
+
 ### `strip_tags` leaves entity references alone
 
 `ActionView::ViewHelpers.strip_tags` parses the HTML and serializes the

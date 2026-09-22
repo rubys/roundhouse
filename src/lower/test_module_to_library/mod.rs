@@ -345,6 +345,10 @@ pub fn lower_test_modules_with_inner(
             // `second`…`fifth` on a typed Array — type-directed, so
             // here and not in the pre-typing pass over `app.test_modules`.
             crate::lower::array_ordinal::rewrite_body(&mut method.body);
+            // `squish` on a typed String receiver — type-directed for
+            // the same reason, and after the ordinal rewrite for no
+            // reason but that the two are one re-type apart.
+            crate::lower::enumerable_ext::rewrite_body(&mut method.body);
             crate::lower::typing::type_method_body(method, &classes, &ivars);
         }
         out.push(LoweredTestModule {

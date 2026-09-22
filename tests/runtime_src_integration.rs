@@ -1299,7 +1299,38 @@ fn every_runtime_method_body_concretely_typed() {
     // unread_rooms_channel_test reads `subscription.streams.sole` —
     // the confirmed stream and the assertion that there is exactly
     // one, in one call.
-    const CEILING: usize = 429;
+    //
+    // 429 -> 452: `runtime/ruby/logger.rb`, 23 sites in three seams,
+    // each of which is a place Ruby's own contract is open.
+    //
+    // THE MESSAGE, and it is most of them. Ruby's `Logger` renders ANY
+    // object — `msg2str` is there to turn an Exception or an arbitrary
+    // value into a line — so `message` is untyped at the formatter's
+    // parameter and at each of the ten level methods that forward it
+    // (five on `ActiveSupport::Logger`, five on `TaggedLogging`). Same
+    // for `severity` (a String from Ruby's Logger, an Integer from a
+    // caller passing a level) and `progname`. `time` is concrete
+    // (`::Time`) because every path really does pass one. The .rbs
+    // beside the file carries a note NOT to narrow these without
+    // re-probing: a `String` there made campfire's own
+    // `LogScrubbingFormatter` override fail its C compile.
+    //
+    // `@io` — what an `ActiveSupport::Logger` writes to, `STDOUT` in
+    // production and a `StringIO` under test. Two unrelated classes in
+    // Ruby (StringIO does not subclass IO) with one method in common,
+    // so a declared type would be a claim one of the two callers
+    // falsifies.
+    //
+    // The block `TaggedLogging#tagged` yields to: `logger.tagged("req")
+    // { … }` hands back whatever the block answers, which is the
+    // block's business — the shape `index_by`'s block already pays for.
+    //
+    // What it bought: campfire's `LogScrubbingFormatter <
+    // ::Logger::Formatter` has a `super` to reach, so a bot key in a
+    // request path is redacted before the line is written —
+    // log_scrubbing_formatter_test 6/6, and the stack production.rb
+    // wires exists for the day request logging does.
+    const CEILING: usize = 452;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

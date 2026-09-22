@@ -59,6 +59,11 @@ require_relative "runtime/active_support_duration"
 # type to ground on. Before anything that can hold a `present?` site.
 require_relative "runtime/active_support_ext"
 require_relative "runtime/rails"
+# Ruby's `Logger` + `ActiveSupport::Logger`/`TaggedLogging` — the stack
+# `config.logger =` builds, and the `Logger::Formatter` an app's own
+# formatter subclasses (a LOAD-time reference, so this must precede
+# app/models.rb below).
+require_relative "runtime/logger"
 # `GlobalID::Locator` — the READ side of the gid `runtime/rails.rb` mints
 # one line up. A channel authorizing a subscribe turns the stream name
 # back into a record through it; the two halves live apart because only

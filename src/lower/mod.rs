@@ -102,6 +102,7 @@ pub mod has_json;
 pub mod object_extend;
 pub mod to_sgid;
 pub mod cable_test_case;
+pub mod view_test_case;
 pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
@@ -535,6 +536,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // signer over the spelled name. Consumes shapes no pass produces or
     // reads; no constraints.
     ("cable_test_case", &[]),
+    // `view.<m>` in an ActionView::TestCase -> the helper module the
+    // app's `helper_method_index` names. Consumes a shape no pass
+    // produces or reads; no constraints.
+    ("view_test_case", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -813,6 +818,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("to_sgid");
     diags.extend(cable_test_case::apply_cable_test_case_lowering(app));
     ran!("cable_test_case");
+    diags.extend(view_test_case::apply_view_test_case_lowering(app));
+    ran!("view_test_case");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));

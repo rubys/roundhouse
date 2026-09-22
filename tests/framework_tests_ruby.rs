@@ -346,6 +346,20 @@ fn inflector_test_passes_under_cruby() {
     );
 }
 
+/// Ruby's `Logger` plus the two ActiveSupport wrappers — the stack
+/// campfire's production.rb builds, and the `Logger::Formatter` its
+/// `LogScrubbingFormatter` subclasses to keep a bot key out of the
+/// request log. The expected lines were minted by ruby's own
+/// `Logger::Formatter`, so this is interoperation rather than
+/// self-consistency; see the file header. Ruby-family lanes only —
+/// `logger` is a top-level framework stem outside the strict-target
+/// runtime tables, the same arrangement `action_text_test` has.
+#[test]
+#[ignore]
+fn logger_test_passes_under_cruby() {
+    build_and_run(Path::new("runtime/ruby/test/logger_test.rb"), "logger");
+}
+
 /// `ActionText::Content` — the coder a `has_rich_text` attribute reads
 /// back through. Every `to_plain_text` expectation in the test file was
 /// measured against Rails' own `PlainTextConversion`; see the file

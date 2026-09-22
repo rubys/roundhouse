@@ -26,6 +26,7 @@ module ActiveSupport
   # reason.
   def self.many?: (untyped list) -> bool
   def self.to_sentence: (Array[untyped] list) -> String
+  def self.squish: (String text) -> String
   # `Array[untyped]` rather than `many?`'s `untyped`: the only receiver
   # is a channel's `streams`, a plain Array, and the count checks in
   # the body are typed by it. A Relation receiver would be coerced at

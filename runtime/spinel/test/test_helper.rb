@@ -44,6 +44,7 @@ require_relative "../runtime/broadcasts"
 # resolves a frame through) and `Turbo::StreamsChannel` with the
 # stream-name signer, which also reopens `turbo_stream_from` for this
 # family — the same order boot.rb loads them in.
+require_relative "../runtime/logger"
 require_relative "../runtime/action_cable"
 require_relative "../runtime/turbo_streams"
 require_relative "../runtime/importmap"

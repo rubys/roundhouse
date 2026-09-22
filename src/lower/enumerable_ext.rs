@@ -1,8 +1,9 @@
-//! ActiveSupport's `Enumerable` extensions on a plain collection,
-//! grounded to a runtime function instead of a core_ext reopen.
+//! ActiveSupport's core_ext reopens, grounded to a runtime function
+//! instead of a reopen.
 //!
-//! Rails ships `index_by`, `many?`, `to_sentence` and `sole` by reopening
-//! `Enumerable`/`Array`, which is a shape
+//! Rails ships `index_by`, `many?`, `to_sentence` and `sole` on
+//! `Enumerable`/`Array`, and `squish` on `String`, by reopening the
+//! builtin — which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
 //! reopen a builtin, and spinel AOT cannot dispatch a user-defined
 //! method on one. The runtime already answers `index_by` on
@@ -49,6 +50,15 @@ pub fn apply_enumerable_ext_grounding(app: &mut App) {
     }
 }
 
+/// The same grounding over one TYPED body, for
+/// `test_module_to_library` to run once a test's body has types — a
+/// `<<~HTML.squish` in a test is a String only after that pass, and
+/// this module's own walk runs before it. Sibling of
+/// `array_ordinal::rewrite_body`, called from the same place.
+pub(crate) fn rewrite_body(expr: &mut Expr) {
+    rewrite(expr);
+}
+
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
     let span = expr.span;
@@ -61,7 +71,7 @@ fn rewrite(expr: &mut Expr) {
     // a different question no corpus app asks.
     let wants_block = match method.as_str() {
         "index_by" => true,
-        "many?" | "to_sentence" | "sole" => false,
+        "many?" | "to_sentence" | "sole" | "squish" => false,
         _ => return,
     };
     if !args.is_empty() || block.is_some() != wants_block {
@@ -79,6 +89,13 @@ fn rewrite(expr: &mut Expr) {
     if matches!(method.as_str(), "many?" | "to_sentence")
         && !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. }))
     {
+        return;
+    }
+    // `squish` names a `String` parameter, so only a String receiver
+    // goes — and it is the only one of these whose name a model could
+    // plausibly define itself, which is the second reason to gate on
+    // the analyzer's answer rather than on the spelling.
+    if method.as_str() == "squish" && !matches!(receiver.ty.as_ref(), Some(Ty::Str)) {
         return;
     }
     let receiver = recv.take().expect("checked above");

@@ -139,6 +139,34 @@ module ActiveSupport
     list.length > 1
   end
 
+  # AS `String#squish`: runs of whitespace collapsed to one space, and
+  # the ends stripped. Rails writes it as
+  # `gsub(/[[:space:]]+/, " ").strip` on a `String` reopen — a core_ext
+  # the transpiled runtimes cannot host, and a REGEX the targets do not
+  # all lower, so the scan is spelled out the way `to_sentence` below
+  # is. `[[:space:]]` is the six ASCII whitespace characters; a corpus
+  # that needs Unicode spaces would widen this test, not the shape.
+  #
+  # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
+  # multi-line fixture body on one line before handing it to a filter.
+  def self.squish(text)
+    out = +""
+    pending_space = false
+    i = 0
+    while i < text.length
+      c = text[i]
+      if c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\v"
+        pending_space = !out.empty?
+      else
+        out = out + " " if pending_space
+        pending_space = false
+        out = out + c
+      end
+      i = i + 1
+    end
+    out
+  end
+
   # AS `Enumerable#sole`: THE one element, and a raise for any other
   # count — Rails' `SoleItemExpectedError` with its two messages. A
   # core_ext reopen (`Enumerable`) the transpiled runtimes cannot host,

@@ -3285,6 +3285,13 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // ruby family reaches Ruby's own through a bare `require`, so
         // this one only has to exist where that does not.
         "ipaddr",
+        // Ruby's `Logger` plus the two ActiveSupport wrappers in front
+        // of it. Same arrangement as ipaddr, with one difference the
+        // file's header gives: NOT swapped for Ruby's own on the
+        // CRuby/JRuby trees, because an app SUBCLASSES
+        // `Logger::Formatter` and two definitions of that constant is a
+        // superclass mismatch at load.
+        "logger",
         // The one method of Ruby's resolver `surfguard` calls. Swapped
         // for `require "resolv"` on the CRuby/JRuby trees below, same
         // as ipaddr — and it has to be, or the app's own

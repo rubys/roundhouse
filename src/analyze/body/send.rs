@@ -978,6 +978,13 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
+                // `Process.pid` — the one Process method the corpus
+                // reaches, and it is Ruby's `Logger::Formatter` that
+                // reaches it: every log line carries `#<pid>`. An
+                // Integer on every target that has a process at all.
+                if id.0.as_str() == "Process" && method.as_str() == "pid" {
+                    return Ty::Int;
+                }
                 // JSON stdlib — `JSON.generate` and `JSON.dump` return
                 // String; `JSON.parse` / `JSON.load` return parsed
                 // structure (untyped — the body is genuinely
@@ -2049,7 +2056,13 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `String.new(response.body).force_encoding("UTF-8")`, and
         // `Opengraph::Metadata::Fetching` writes the same line for
         // fxtwitter's encoding-less HTML.
-        | "force_encoding" | "b" | "scrub" | "unicode_normalize" => Ty::Str,
+        | "force_encoding" | "b" | "scrub" | "unicode_normalize"
+        // Padding to a width: `severity.rjust(5)` is how Ruby's
+        // `Logger::Formatter` right-aligns a level in its `%5s` field,
+        // and the runtime's port spells it the same way (a `%` format
+        // on a String is a shape the transpiled targets do not all
+        // lower). Both answer a String whatever the width.
+        | "rjust" | "ljust" | "center" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,

@@ -20,6 +20,8 @@
 //!   - `refute_includes c, x` / `assert_not_includes c, x`
 //!                                      → `raise "…" if c.include?(x)`
 //!   - `assert_kind_of K, x`            → `raise "…" if !x.is_a?(K)`
+//!   - `assert_same a, b`               → `raise "…" if !a.equal?(b)`
+//!   - `assert_not_same a, b` / `refute_same a, b` → `raise "…" if a.equal?(b)`
 //!   - `assert_instance_of K, x`        → `raise "…" if !x.instance_of?(K)`
 //!   (`assert_match` and `assert_operator` deliberately not lowered —
 //!   nilable-value handling and Class-subclass `<` checks aren't
@@ -320,6 +322,33 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 span,
                 not_expr(span, send_method(span, val, "is_a?", vec![klass])),
                 "assert_kind_of failed".to_string(),
+            ))
+        }
+        // OBJECT IDENTITY, which is a different question from `==` and
+        // the only one these tests are asking: campfire's
+        // `content_filters_test` proves `SanitizeAttributes` builds a
+        // FRESH sanitizer per call rather than sharing ActionText's
+        // process-wide one, and `assert_equal` would pass on two
+        // equivalent-but-distinct objects. `equal?` is Ruby's identity
+        // predicate and spinel answers it on a heap object (verified),
+        // so the inlined form is the definition rather than an
+        // approximation.
+        "assert_same" if args.len() >= 2 => {
+            let expected = args[0].clone();
+            let actual = args[1].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, expected, "equal?", vec![actual])),
+                "assert_same failed".to_string(),
+            ))
+        }
+        "assert_not_same" | "refute_same" if args.len() >= 2 => {
+            let expected = args[0].clone();
+            let actual = args[1].clone();
+            Some(raise_if(
+                span,
+                send_method(span, expected, "equal?", vec![actual]),
+                "assert_not_same failed".to_string(),
             ))
         }
         "assert_instance_of" if args.len() >= 2 => {
