@@ -1095,20 +1095,27 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 out_path,
                 &fixture_siblings,
             );
-            // Class-body constant assignments (`TABLE = [...]`) hoist
-            // to file scope above the test class so bare-name refs
-            // inside test methods resolve. CRuby's lexical constant
-            // lookup finds top-level constants from anywhere; the
-            // emitted form preserves the test's original semantics
-            // without nesting back inside the class.
+            // Class-body constant assignments (`TABLE = [...]`) go back
+            // INSIDE the class, at the top of its body — the source's
+            // own scope. They used to hoist to file scope so bare-name
+            // reads in test methods resolved, which CRuby's lexical
+            // lookup allows; it also made every one of them a
+            // TOP-LEVEL constant, and campfire's vips_loader_policy_test
+            // declares `SVG = "<svg …>"` where `runtime/gem_facades.rb`
+            // already has `module SVG` — a reassignment warning on CRuby
+            // and "SVG is not a module" on spinel, which refused the
+            // whole file. Inside the class, a bare read in a method of
+            // that class resolves lexically to the class's own constant
+            // first, on both runtimes, and a name the file shares with
+            // the runtime is no longer a collision.
             if !lowered.constants.is_empty() {
                 let mut consts_block = String::new();
                 for (name, value) in &lowered.constants {
                     let value_s = super::ruby::expr::emit_expr(value);
-                    writeln!(consts_block, "{} = {}", name.as_str(), value_s).unwrap();
+                    writeln!(consts_block, "  {} = {}", name.as_str(), value_s).unwrap();
                 }
                 consts_block.push('\n');
-                emitted.content = splice_after_requires(&emitted.content, &consts_block);
+                emitted.content = splice_after_class_header(&emitted.content, &consts_block);
             }
             // Inner classes (declared inside the test class body in
             // Ruby — `class Validatable; include …; end` inside
@@ -1389,6 +1396,36 @@ fn strip_require_headers(content: &str) -> String {
 /// `require_relative` headers (and the blank line that separates
 /// them from the body). When `content` has no requires, the block
 /// is prepended.
+/// Insert `block` directly after the test class's `class … <` header
+/// line — the first line of the class body — so a class-scoped
+/// constant is declared before any method that reads it.
+///
+/// A namespaced test (`module Push; class SubscriptionTest < TestBase`)
+/// has its header indented under the module, so the match is on the
+/// trimmed line and the block takes the header's indentation. `block`'s
+/// lines arrive at two spaces — the body indent of a top-level class.
+fn splice_after_class_header(content: &str, block: &str) -> String {
+    let mut out = String::with_capacity(content.len() + block.len());
+    let mut done = false;
+    for line in content.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && line.trim_start().starts_with("class ") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            for b in block.split_inclusive('\n') {
+                if b.trim().is_empty() {
+                    out.push_str(b);
+                } else {
+                    out.push_str(indent);
+                    out.push_str(b);
+                }
+            }
+            done = true;
+        }
+    }
+    debug_assert!(done, "no class header to splice constants after:\n{content}");
+    out
+}
+
 fn splice_after_requires(content: &str, block: &str) -> String {
     let mut split_at = 0usize;
     let mut idx = 0usize;

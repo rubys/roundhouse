@@ -68,15 +68,16 @@
       "slug": "view-test-case",
       "title": "`ActionView::TestCase` — `view` with the app's helpers on it",
       "owner": "compiler",
-      "match": "undefined local variable or method 'view' for an instance of \\S*Test\\b",
-      "note": "campfire's test/helpers, never in the tally before 2026-09-20. `MessagesHelperTest` calls `view.message_presentation(message)`: Rails' ActionView::TestCase hands the test a view object with every app helper mixed in. The parent now exists so the file loads; `view` does not. ContentFiltersTest, in the same directory, is 8 of 14 without it, because it calls the filters directly."
+      "match": "undefined local variable or method 'view' for an instance of \\S*Test\\b|undefined method '\\w+' for unknown",
+      "note": "campfire's test/helpers, never in the tally before 2026-09-20. `MessagesHelperTest` calls `view.message_presentation(message)`: Rails' ActionView::TestCase hands the test a view object with every app helper mixed in. The parent now exists so the file loads; `view` does not. ContentFiltersTest, in the same directory, is 8 of 14 without it, because it calls the filters directly. On the compiled lane `view` is an unresolved self-send, so the message names the METHOD called on it instead — `undefined method 'message_presentation' for unknown` — and this rule is pinned to helper tests (`match_test`) so that wording cannot swallow an unrelated nil receiver elsewhere.",
+      "match_test": "HelperTest#"
     },
     {
       "slug": "rails-test-support-classes",
       "title": "A Rails support class a test constructs by name — `ActionDispatch::TestRequest`, `ActiveSupport::Logger`",
       "owner": "compiler",
-      "match": "uninitialized constant (ActionDispatch::TestRequest|ActiveSupport::Logger|ActiveSupport::TaggedLogging)",
-      "note": "`Current.set request: ActionDispatch::TestRequest.create(\"HTTP_HOST\" => …)` is how the opengraph-embed test names this Campfire's own host; `ActiveSupport::Logger.new(io)` wrapped in `TaggedLogging` is how the log-scrubbing test reproduces production's logger stack. Neither is app code, and neither exists in the emit."
+      "match": "uninitialized constant (ActionDispatch::TestRequest|ActiveSupport::Logger|ActiveSupport::TaggedLogging)|opengraph_embed_test\\.rb:\\d+: unsupported call: node \\d+ \\(CallNode `set`\\) recv=ConstantReadNode|super: no superclass method 'call' for an instance of \\w*Formatter|undefined method 'formatter=' for an instance of Rails::Logger",
+      "note": "`Current.set request: ActionDispatch::TestRequest.create(\"HTTP_HOST\" => …)` is how the opengraph-embed test names this Campfire's own host; `ActiveSupport::Logger.new(io)` wrapped in `TaggedLogging` is how the log-scrubbing test reproduces production's logger stack. Neither is app code, and neither exists in the emit. The compiled lane reports the same two sites earlier and differently. The opengraph-embed line is `Current.set request: ActionDispatch::TestRequest.create(...) do ... end`, and spinel refuses the CALL (`CallNode `set`` on the `Current` constant, a block-taking class method the runtime's CurrentAttributes does not declare) before it reaches the constant inside it — the whole file, 8 tests. The log-scrubbing formatter is `class LogScrubbingFormatter < ActiveSupport::Logger::SimpleFormatter` with `def call(...) = super`: the runtime has the parent by name and not its `call`, so five tests hit `super: no superclass method 'call'` and the sixth `Logger#formatter=`. Both are the same debt this rule names — Rails' own logger and request stand-ins — so both spellings live here."
     },
     {
       "slug": "kwargs-splat-forwarding",
@@ -111,19 +112,34 @@
       "at_zero": "served 2026-09-21 (guard 24/24 on the ruby lane); the rule stays as the tripwire for a runtime IPAddr method the stdlib facade does not mirror."
     },
     {
+      "slug": "vips-image-construction",
+      "title": "`Vips::Image.black(8, 8).add(128).cast(\"uchar\").write_to_buffer(\".png\")` — building a pixel image in code, on the compiled lane",
+      "owner": "gem",
+      "match": "undefined method '(write_to_buffer|add|cast|black)' for unknown",
+      "match_test": "VipsLoaderPolicyTest#",
+      "note": "The loader-policy test does not ship fixture images; it MAKES one per format with libvips' arithmetic API and writes it to a buffer with the format's suffix. The ruby family runs the real ruby-vips gem, so on that lane these tests reach the policy question (`vips-policy-not-applied-in-tests`). The compiled lane runs spinel-ruby-vips, the spin-index package this project wrote for what campfire's SERVER calls (`new_from_buffer`, `thumbnail_image`, `write_to_buffer`, the loader lookup and the two `block` policies) — `Image.black`, `#add` and `#cast` are not on it, the chain answers unknown and its last call is what the test reports. Every one of the seventeen stops here, before the file's first assertion about a loader. Serving it is three methods in the package (spinel-ruby-vips, matz/spin-index), not the emit; until then the compiled lane says nothing about the policy."
+    },
+    {
+      "slug": "tempfile-stdlib",
+      "title": "`Tempfile.create(%w[loader_probe .img], binmode: true) do |file| … end` — a stdlib class the compiled lane has no port of",
+      "owner": "compiler",
+      "match": "uninitialized constant Tempfile",
+      "note": "The loader-policy test writes each probe to a temp file because `Vips.vips_foreign_find_load` takes a PATH. The ruby family has Ruby's `tempfile`; the compiled lane has no such constant, so the twelve tests that hand the helper literal bytes (and so get past `vips-image-construction`) stop here instead. Same arrangement `ipaddr` and `zlib` took: a port under runtime/ruby for the targets with no stdlib to bind to, swapped for the real one on the CRuby/JRuby trees."
+    },
+    {
       "slug": "vips-policy-not-applied-in-tests",
       "title": "The libvips loader policy is applied by the image processor's file, which the test process never loads",
       "owner": "harness",
       "match": "assert_(nil|match) failed",
       "match_test": "VipsLoaderPolicyTest#test_denies_",
-      "note": "campfire's config/initializers/vips.rb (`Vips.block_untrusted(true)`, `Vips.block(\"VipsForeignLoadOpenslide\", true)`) is lifted at ingest onto the Application reopen and applied in runtime/active_storage_processor.rb — once, process-wide, where the server loads it. The emitted test_helper does not load that file, so in the test process the policy is simply absent: `Vips.vips_foreign_find_load` picks magickload for a BMP and the ten `denies …` tests fail, while the seven `loads …` pass. In Rails the initializer runs at boot for tests too. The fix is the harness applying the app's boot-time policy the way the server does; nothing here says the SERVER is unguarded."
+      "note": "campfire's config/initializers/vips.rb (`Vips.block_untrusted(true)`, `Vips.block(\"VipsForeignLoadOpenslide\", true)`) is lifted at ingest onto the Application reopen and applied in runtime/active_storage_processor.rb — once, process-wide, where the server loads it. The emitted test_helper does not load that file, so in the test process the policy is simply absent: `Vips.vips_foreign_find_load` picks magickload for a BMP and the ten `denies …` tests fail, while the seven `loads …` pass. In Rails the initializer runs at boot for tests too. The fix is the harness applying the app's boot-time policy the way the server does; nothing here says the SERVER is unguarded. The compiled lane could not even reach the policy until 2026-09-22: the test's class-scoped `SVG = \"<svg …>\"` was emitted at FILE scope and collided with `runtime/gem_facades.rb`'s `module SVG` (`SVG is not a module`, the whole file). Test-class constants are emitted inside the class now, so the file links there and the failures are this rule's, on both lanes."
     },
     {
       "slug": "test-harness-surface",
       "title": "The emitted test base class is missing Rails' test surface",
       "owner": "compiler",
-      "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body|skip)' for an instance of \\S*Test\\b",
-      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls. `skip` joined the list on 2026-09-20 with test/lib: `VipsLoaderPolicyTest` skips a loader libvips was not built with.",
+      "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body|skip)' for an instance of \\S*Test\\b|unsupported call: node \\d+ \\(CallNode `(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body|skip)`\\) recv=-",
+      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls. `skip` joined the list on 2026-09-20 with test/lib: `VipsLoaderPolicyTest` skips a loader libvips was not built with. ON THE COMPILED LANE the same gap reads differently: a receiverless call the harness does not define is a spinel COMPILE error — `unsupported call: node N (CallNode `assert_not_same`) recv=-` — and it takes the whole file, so the count is the file's, not the test's (content_filters, 14, at `assert_not_same`). Same cause, second spelling, matched here so the two lanes rank it as one thing.",
       "at_zero": "the family landed over several commits, `fixture_file_upload` last in f86ac0b6; the rule stays as a regression tripwire."
     },
     {
