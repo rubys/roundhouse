@@ -1,5 +1,15 @@
 //! `record.to_sgid(expires_in: nil, for: ActionText::Attachable::LOCATOR_NAME).to_s`
-//! → `ActionText::SignedGlobalId.generate("Room", record.id)`.
+//! → `ActionText::SignedGlobalId.generate("Room", record.id)`, and
+//! `record.to_gid.to_s` → `GlobalID.uri("User", record.id)`.
+//!
+//! TWO MINTS, ONE RULE, which is why they share a pass: both are a
+//! globalid method on a record whose MODEL NAME is a compile-time fact,
+//! and both are spelled `.to_s` because the object they return has no
+//! other use here. `to_gid` is the unsigned half — campfire's
+//! attachables test builds a Rails-7-shaped sgid payload around
+//! `@user.to_gid.to_s` to prove the old envelope still resolves — and
+//! `GlobalID.uri` is the runtime function that already spells it for
+//! `to_gid_param`, which is that same URI base64'd.
 //!
 //! globalid's `to_sgid(**options)` mints a `SignedGlobalID` for any
 //! record — the object ActionText's `attachable_sgid` calls it for
@@ -47,42 +57,149 @@ pub fn apply_to_sgid_lowering(app: &mut App) -> Vec<Diagnostic> {
         .map(|f| (f.name.as_str().to_string(), crate::naming::classify_path(f.path.as_str())))
         .collect();
     let mut diags = Vec::new();
+    let empty: BTreeMap<String, String> = BTreeMap::new();
     super::for_each_model_body_named(app, &mut |model, body| {
-        rewrite(body, Some(model), &fixtures, &mut diags)
+        rewrite(body, Some(model), &fixtures, &empty, &mut diags)
     });
     for tm in &mut app.test_modules {
+        // `@user = users(:david)` in the SETUP, which the lowerer inlines
+        // ahead of every test but has not yet — so the ivar's model is
+        // not on the body this pass walks, and is one field away. Read
+        // here rather than inferred later: the receiver of a mint is
+        // routinely an ivar (campfire's attachables test writes
+        // `@user.to_gid.to_s`), and without this it is the "model the
+        // pass cannot name" case the header describes.
+        let ivars = setup_ivar_models(tm.setup.as_ref(), &fixtures);
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup, None, &fixtures, &mut diags);
+            rewrite(setup, None, &fixtures, &ivars, &mut diags);
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body, None, &fixtures, &mut diags);
+            rewrite(&mut t.body, None, &fixtures, &ivars, &mut diags);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body, None, &fixtures, &mut diags);
+            rewrite(&mut m.body, None, &fixtures, &ivars, &mut diags);
         }
     }
     diags
 }
 
-fn rewrite(e: &mut Expr, model: Option<&str>, fixtures: &BTreeMap<String, String>, diags: &mut Vec<Diagnostic>) {
+/// `{"user" => "User"}` from a setup's `@user = users(:david)` lines.
+/// Only a bare fixture call, which is the one shape that names a model
+/// with no types in hand.
+fn setup_ivar_models(
+    setup: Option<&Expr>,
+    fixtures: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(setup) = setup else { return out };
+    fn walk(e: &Expr, fixtures: &BTreeMap<String, String>, out: &mut BTreeMap<String, String>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node {
+            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*value.node {
+                if args.len() == 1 {
+                    if let Some(model) = fixtures.get(method.as_str()) {
+                        out.insert(name.as_str().to_string(), model.clone());
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, fixtures, out));
+    }
+    walk(setup, fixtures, &mut out);
+    out
+}
+
+fn rewrite(
+    e: &mut Expr,
+    model: Option<&str>,
+    fixtures: &BTreeMap<String, String>,
+    ivars: &BTreeMap<String, String>,
+    diags: &mut Vec<Diagnostic>,
+) {
     // Top-down: the `.to_s` wraps the `to_sgid`, and the pair is read
     // as one shape. A pair the pass declines is reported once, here,
     // and the walk goes on beneath the `to_sgid` rather than into it.
     if is_sgid_to_s(e) {
-        if let Some(replacement) = rewritten(e, model, fixtures, diags) {
+        if let Some(replacement) = rewritten(e, model, fixtures, ivars, diags) {
             *e = replacement;
             return;
         }
         let ExprNode::Send { recv: Some(inner), .. } = &mut *e.node else { unreachable!() };
-        inner.node.for_each_child_mut(&mut |c| rewrite(c, model, fixtures, diags));
+        inner.node.for_each_child_mut(&mut |c| rewrite(c, model, fixtures, ivars, diags));
         return;
+    }
+    // `record.to_gid.to_s` — the unsigned mint, and the same shape one
+    // method shorter: no options to check, because globalid's `to_gid`
+    // takes none that this corpus passes.
+    if let Some(recv) = gid_to_s_receiver(e) {
+        if let Some(model_name) = model_of(recv, model, fixtures, ivars) {
+            let span = e.span;
+            *e = gid_uri_call(span, &model_name, recv.clone());
+            return;
+        }
+        let span = e.span;
+        let mut d = Diagnostic::unsupported(
+            span,
+            None,
+            "to_gid",
+            "`to_gid.to_s` is served only on a record whose model is known here: read off the receiver's type, a fixture call, or an ivar the setup bound to one".to_string(),
+        );
+        d.severity = Severity::Warning;
+        diags.push(d);
     }
     if let ExprNode::Send { method, .. } = &*e.node {
         if method.as_str() == "to_sgid" {
             decline(e, diags);
         }
     }
-    e.node.for_each_child_mut(&mut |c| rewrite(c, model, fixtures, diags));
+    e.node.for_each_child_mut(&mut |c| rewrite(c, model, fixtures, ivars, diags));
+}
+
+/// The receiver of `<x>.to_gid.to_s`, or None.
+fn gid_to_s_receiver(e: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(inner), method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "to_s" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(record), method: m, args: a, block: None, .. } = &*inner.node
+    else {
+        return None;
+    };
+    (m.as_str() == "to_gid" && a.is_empty()).then_some(record)
+}
+
+/// `GlobalID.uri("User", <record>.id)` — the runtime function
+/// `to_gid_param` already base64s, so the two mints agree by
+/// construction rather than by two spellings kept in step.
+fn gid_uri_call(span: Span, model_name: &str, record: Expr) -> Expr {
+    let mut model_lit = Expr::new(
+        span,
+        ExprNode::Lit { value: Literal::Str { value: model_name.to_string() } },
+    );
+    model_lit.ty = Some(Ty::Str);
+    let id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(record),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let mut call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("GlobalID")] })),
+            method: Symbol::from("uri"),
+            args: vec![model_lit, id],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    call.ty = Some(Ty::Str);
+    call
 }
 
 /// `<x>.to_sgid(…).to_s`.
@@ -98,6 +215,7 @@ fn rewritten(
     e: &Expr,
     model: Option<&str>,
     fixtures: &BTreeMap<String, String>,
+    ivars: &BTreeMap<String, String>,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Expr> {
     let ExprNode::Send { recv: Some(inner), .. } = &*e.node else { return None };
@@ -161,7 +279,7 @@ fn rewritten(
     }
     let (model_name, record) = match recv {
         None => (model.map(str::to_string), self_ref(span)),
-        Some(r) => (model_of(r, model, fixtures), r.clone()),
+        Some(r) => (model_of(r, model, fixtures, ivars), r.clone()),
     };
     let Some(model_name) = model_name else {
         report("the receiver's model is not known", diags);
@@ -220,7 +338,12 @@ fn is_locator_name(v: &Expr) -> bool {
 
 /// The model a receiver is: its static type when the analyzer stamped
 /// one, a fixture call's model, or `self` in a model body.
-fn model_of(r: &Expr, model: Option<&str>, fixtures: &BTreeMap<String, String>) -> Option<String> {
+fn model_of(
+    r: &Expr,
+    model: Option<&str>,
+    fixtures: &BTreeMap<String, String>,
+    ivars: &BTreeMap<String, String>,
+) -> Option<String> {
     if let Some(Ty::Class { id, .. }) = r.ty.as_ref().map(|t| t.clone().strip_nil()) {
         return Some(id.0.as_str().to_string());
     }
@@ -229,6 +352,7 @@ fn model_of(r: &Expr, model: Option<&str>, fixtures: &BTreeMap<String, String>) 
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.len() == 1 => {
             fixtures.get(method.as_str()).cloned()
         }
+        ExprNode::Ivar { name } => ivars.get(name.as_str()).cloned(),
         _ => None,
     }
 }
@@ -263,6 +387,35 @@ mod tests {
         [("rooms".to_string(), "Room".to_string())].into_iter().collect()
     }
 
+    /// `@user.to_gid.to_s` — the unsigned mint, with the model read off
+    /// the ivar the SETUP bound to a fixture. campfire's attachables
+    /// test writes exactly this to build a Rails-7-shaped payload.
+    #[test]
+    fn to_gid_on_a_setup_bound_ivar_becomes_the_runtime_uri() {
+        let record = Expr::new(sp(), ExprNode::Ivar { name: Symbol::from("user") });
+        let gid = send(Some(record), "to_gid", vec![]);
+        let mut e = send(Some(gid), "to_s", vec![]);
+        let mut ivars = BTreeMap::new();
+        ivars.insert("user".to_string(), "User".to_string());
+        let mut diags = Vec::new();
+        rewrite(&mut e, None, &fixtures(), &ivars, &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(crate::emit::ruby::emit_expr(&e), "GlobalID.uri(\"User\", @user.id)");
+    }
+
+    /// The same call with nothing naming the model: reported, left as
+    /// written, and the runtime has no `to_gid` to answer it.
+    #[test]
+    fn to_gid_on_an_unknown_receiver_is_reported_and_left() {
+        let record = Expr::new(sp(), ExprNode::Ivar { name: Symbol::from("thing") });
+        let gid = send(Some(record), "to_gid", vec![]);
+        let mut e = send(Some(gid), "to_s", vec![]);
+        let mut diags = Vec::new();
+        rewrite(&mut e, None, &fixtures(), &BTreeMap::new(), &mut diags);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(crate::emit::ruby::emit_expr(&e), "@thing.to_gid.to_s");
+    }
+
     #[test]
     fn a_fixture_records_attachable_sgid_spelled_out_becomes_the_runtime_mint() {
         // rooms(:pets).to_sgid(expires_in: nil, for: ActionText::Attachable::LOCATOR_NAME).to_s
@@ -270,7 +423,7 @@ mod tests {
         let sgid = send(Some(record), "to_sgid", vec![opts(vec![("expires_in", nil()), ("for", locator())])]);
         let mut e = send(Some(sgid), "to_s", vec![]);
         let mut diags = Vec::new();
-        rewrite(&mut e, None, &fixtures(), &mut diags);
+        rewrite(&mut e, None, &fixtures(), &BTreeMap::new(), &mut diags);
         assert!(diags.is_empty(), "{diags:?}");
         let ExprNode::Send { recv: Some(k), method, args, .. } = &*e.node else { panic!("{:?}", e.node) };
         assert!(matches!(&*k.node, ExprNode::Const { path } if path.len() == 2 && path[1].as_str() == "SignedGlobalId"));
@@ -286,7 +439,7 @@ mod tests {
         let sgid = send(Some(record), "to_sgid", vec![opts(vec![("for", sym("transfer"))])]);
         let mut e = send(Some(sgid), "to_s", vec![]);
         let mut diags = Vec::new();
-        rewrite(&mut e, None, &fixtures(), &mut diags);
+        rewrite(&mut e, None, &fixtures(), &BTreeMap::new(), &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("not the attachable locator"), "{}", diags[0].message);
         assert!(matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "to_s"));
@@ -298,7 +451,7 @@ mod tests {
         let record = send(None, "rooms", vec![sym("pets")]);
         let mut e = send(Some(record), "to_sgid", vec![opts(vec![("for", locator())])]);
         let mut diags = Vec::new();
-        rewrite(&mut e, None, &fixtures(), &mut diags);
+        rewrite(&mut e, None, &fixtures(), &BTreeMap::new(), &mut diags);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("only its String"));
     }

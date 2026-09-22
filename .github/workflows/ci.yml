@@ -1257,9 +1257,16 @@ jobs:
       # the ONLY difference is the skip count — two formats the Linux
       # libvips did not compile in against one here. Files green agree
       # at 65, which is what the `skip` commit was for.
+      #
+      # 390/65 -> 391/66, on the notice `6992754a`'s run emitted
+      # (`Current.set` and `ActionDispatch::TestRequest`, which turned
+      # the opengraph-embed file). Not raised to the 393 measured
+      # locally after it: that number includes `to_gid`, which lands in
+      # THIS commit and whose runner figure is not in yet — same rule
+      # as last time.
         env:
-          FLOOR_TESTS: 390
-          FLOOR_FILES: 65
+          FLOOR_TESTS: 391
+          FLOOR_FILES: 66
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
