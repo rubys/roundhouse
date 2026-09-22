@@ -185,11 +185,11 @@ fn a_mixin_onto_a_runtime_class_is_kept() {
     );
 }
 
-/// THE OTHER HALF OF THE SAME FILE, and the reason the lowering reports
-/// at Warning rather than Error: campfire's `web_push.rb` prepends onto
-/// `WebPush::Request`, a GEM class no tree here will ever define.
-/// Emitting it would `NameError` at require time; refusing to emit the
-/// app over it would block the tree forever.
+/// The reason the lowering reports at Warning rather than Error: a
+/// prepend onto a GEM class no tree here defines. Emitting it would
+/// `NameError` at require time; refusing to emit the app over it would
+/// block the tree forever. (campfire's `WebPush::Request` was this
+/// case until the runtime defined it — see the test below.)
 #[test]
 fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
     let mut app = {
@@ -198,7 +198,7 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
             ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
             (
                 "config/initializers/mixins.rb",
-                "WebPush::Request.prepend WebPush::PersistentRequest\n",
+                "Stripe::Client.prepend Stripe::PinnedClient\n",
             ),
             GUARD,
         ];
@@ -215,7 +215,7 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
     // "neither X nor Y" arm, which carries its own negation.
     let reported = diags.iter().any(|d| {
         d.message
-            .contains("neither WebPush::Request nor WebPush::PersistentRequest is defined")
+            .contains("neither Stripe::Client nor Stripe::PinnedClient is defined")
     });
     assert!(
         reported,
@@ -223,6 +223,49 @@ fn a_mixin_naming_an_undefined_constant_is_dropped_and_reported() {
          diagnostics were:\n{:#?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
+}
+
+/// campfire's `config/initializers/web_push.rb`: the module is DEFINED
+/// in the initializer that prepends it, onto the web-push gem's
+/// `WebPush::Request`. No autoload path holds the module, so it has to
+/// be ingested from the initializer itself, or the mixin names nothing
+/// and is dropped — taking the app's SSRF guard with it (delivery then
+/// connects to the endpoint's host instead of the vetted address). The
+/// target is the gem's class on the ruby family and the runtime's port
+/// on spinel, so the mixin is kept.
+#[test]
+fn a_module_an_initializer_defines_and_prepends_is_ingested_and_kept() {
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/web_push.rb",
+                "require \"web-push\"\n\
+                 \n\
+                 module WebPush::PersistentRequest\n\
+                 \x20 def perform\n\
+                 \x20   @options[:endpoint_ip]\n\
+                 \x20 end\n\
+                 end\n\
+                 \n\
+                 module WebPush::Unrelated\n\
+                 end\n\
+                 \n\
+                 WebPush::Request.prepend WebPush::PersistentRequest\n",
+            ),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
+    let names: Vec<&str> = app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect();
+    assert!(names.contains(&"WebPush::PersistentRequest"), "library classes: {names:?}");
+    assert!(
+        !names.contains(&"WebPush::Unrelated"),
+        "only the mixed-in module is ingested from an initializer: {names:?}"
+    );
+
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    assert_eq!(app.module_mixins.len(), 1, "the prepend onto WebPush::Request must be kept");
 }
 
 /// The mixin's companion: `X.before_action :m` in the same initializer.

@@ -6202,6 +6202,15 @@ fn require_path_for_body_const(
         // so every file that names the client loads the reopen; the ruby
         // family's copy of the file is a bare `require "net/http"`.
         "Net" => Some("runtime/net_http".to_string()),
+        // `WebPush` — the web-push gem. On spinel, runtime/spinel/
+        // web_push.rb: the façade's stub slot plus a port of the gem's
+        // delivery over the openssl package. On the ruby family the
+        // file is the façade alone, which guarded-requires the real
+        // gem. Anchored rather than left to load order: campfire's
+        // `WebPush::Notification` names the module without requiring
+        // anything, and the port is what defines `WebPush::Request`,
+        // the class its initializer prepends the SSRF guard onto.
+        "WebPush" => Some("runtime/web_push".to_string()),
         // `Surfguard` — basecamp/surfguard's address policy, ported into
         // `runtime/ruby/surfguard.rb`. Anchored for every target: the
         // gem is a GIT dependency, so no `gem install` and no bare

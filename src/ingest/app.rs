@@ -794,7 +794,23 @@ end
                 // Y`. Recorded whether or not either constant is in the
                 // tree — `lower::module_mixins` decides that, because it
                 // runs after every class the tree will have exists.
-                app.module_mixins.extend(extract_module_mixins(&bytes, &path_str));
+                let mixins = extract_module_mixins(&bytes, &path_str);
+                // A module the initializer DEFINES and mixes in, in the
+                // same file: campfire's `WebPush::PersistentRequest`,
+                // the SSRF guard its `web_push.rb` prepends onto the
+                // gem's Request. No autoload path holds it, so without
+                // this the mixin named a module nothing ingested and
+                // was dropped with the guard. Only the mixed-in names
+                // are kept — anything else an initializer defines stays
+                // un-ingested, as before.
+                if !mixins.is_empty() {
+                    if let Ok(classes) = ingest_library_classes(&bytes, &path_str) {
+                        app.library_classes.extend(classes.into_iter().filter(|lc| {
+                            mixins.iter().any(|m| m.module.as_str() == lc.name.0.as_str())
+                        }));
+                    }
+                }
+                app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
             }
         }

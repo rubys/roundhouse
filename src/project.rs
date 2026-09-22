@@ -1742,6 +1742,21 @@ fn ruby_family_runtime_files(
         if path == "runtime/net_http.rb" {
             *content = NET_HTTP_STDLIB.to_string();
         }
+        // `WebPush`: the gem itself. The spinel file ports the gem's
+        // delivery over spinel's openssl package, whose byte-level key
+        // API CRuby's openssl does not spell; here the façade file
+        // guarded-requires the real gem and aliases its `payload_send`
+        // under the stub slot, so the anchor needs only that.
+        if path == "runtime/web_push.rb" {
+            *content = "# The web-push gem's own — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/spinel/web_push.rb exists for spinel;\n\
+                        # gem_facades.rb requires the real gem on this tree.\n\
+                        require_relative \"gem_facades\"\n"
+                .to_string();
+        }
+        if path == "runtime/web_push_crypto.rb" {
+            *content = "# Spinel only — the gem's own cryptography runs on this tree.\n".to_string();
+        }
         // `Concurrent`: the same swap as ipaddr, for the same two
         // reasons. concurrent-ruby is already in this bundle (sentry-ruby
         // depends on it) and loads part of itself under any app that

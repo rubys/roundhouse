@@ -145,6 +145,7 @@ module WebPush
   end
 
   def self.payload_send: (message: String, endpoint: String, p256dh: String, auth: String, vapid: Hash[Symbol, String], ?connection: untyped, ?urgency: String, ?endpoint_ip: String?) -> String
+  def self.deliver: (String message, String endpoint, String p256dh, String auth, Hash[Symbol, String] vapid, untyped connection, String? urgency, String? endpoint_ip) -> String
   # The `lower::mocha` stub slot — see the .rb.
   def self.stub_payload_send: () -> nil
   def self.stub_payload_send_any: (untyped value) -> nil

@@ -176,8 +176,20 @@ fn module_defines(app: &App, name: &Symbol, method: &Symbol) -> bool {
 /// included guard to the 401 on both lanes, and
 /// `tests/initializer_module_mixins.rs` pins the ingest, the lowering
 /// and the generated reopen.
-const RUNTIME_MIXIN_TARGETS: [&str; 3] =
-    ["Turbo::StreamsChannel", "ActiveStorage::DirectUploadsController", "ActiveStorage::DiskController"];
+///
+/// `WebPush::Request` is the web-push gem's request — the GEM's own
+/// class on the ruby family, and runtime/spinel/web_push.rb's port of it
+/// on spinel. campfire prepends `WebPush::PersistentRequest` onto it to
+/// pin delivery to the address `Push::Subscription` vetted; the suite's
+/// `web_push_persistent_request_test` asserts the socket opens to that
+/// address and never to the endpoint's host, through the prepended
+/// `perform`.
+const RUNTIME_MIXIN_TARGETS: [&str; 4] = [
+    "Turbo::StreamsChannel",
+    "ActiveStorage::DirectUploadsController",
+    "ActiveStorage::DiskController",
+    "WebPush::Request",
+];
 
 /// The runtime controllers whose `process_action` asks
 /// `initializer_filters(action_name)` before the action — the seam an

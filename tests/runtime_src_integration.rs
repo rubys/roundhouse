@@ -1373,7 +1373,17 @@ fn every_runtime_method_body_concretely_typed() {
     // compiled lane can report, and the note beside `many?` in the
     // .rbs had already said why. A ceiling is a ledger of debt, not a
     // budget to fit a declaration into.
-    const CEILING: usize = 474;
+    //
+    // 474 -> 475: `WebPush.deliver`'s `connection`, ONE site. The
+    // façade's `payload_send` already took it untyped — it is the
+    // caller's `Net::HTTP::Persistent`, a class no strict target has
+    // and none should claim — and passing it on to the unstubbed hook
+    // is the read. spinel's port (runtime/spinel/web_push.rb) hands it
+    // to the gem's `@options`, which campfire's prepended
+    // `PersistentRequest#perform` reads. What it bought: the hook the
+    // port redefines, so push delivery on the compiled lane is the
+    // gem's rather than a raise.
+    const CEILING: usize = 475;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

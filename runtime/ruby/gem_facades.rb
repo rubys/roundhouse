@@ -368,9 +368,12 @@ end
 # secret from the subscription's P-256 key (ECDH), encrypts the JSON
 # body with AES128GCM, signs a VAPID JWT with the server's private key,
 # and POSTs the result to the endpoint the browser handed out. None of
-# those three primitives exists in this runtime, and a stand-in that
-# returned success would report notifications as delivered that no
-# browser will ever see — the failure that looks like success.
+# those three primitives exists in the runtime every target shares, and
+# a stand-in that returned success would report notifications as
+# delivered that no browser will ever see — the failure that looks like
+# success. So `deliver` below fails; spinel, whose openssl package has
+# all three, redefines it over a port of the gem
+# (runtime/spinel/web_push.rb).
 #
 # The app REOPENS this namespace (`WebPush::Notification`,
 # `WebPush::Pool` are campfire's own classes), so this is a reopen too:
@@ -539,6 +542,15 @@ module WebPush
       raise_named(EXPECT_RAISE_NAME[0]) if EXPECT_RAISE_NAME[0] != ""
       return STUB_VALUE[0]
     end
+    deliver(message, endpoint, p256dh, auth, vapid, connection, urgency, endpoint_ip)
+  end
+
+  # The unstubbed call: the gem's own delivery. Here it fails as loudly
+  # as it always has, because a target this file is transpiled to has
+  # no cryptography to write it over. spinel's
+  # `runtime/spinel/web_push.rb` redefines it over the ported gem —
+  # last definition wins there — and the ruby family has the gem.
+  def self.deliver(message, endpoint, p256dh, auth, vapid, connection, urgency, endpoint_ip)
     GemFacade.fail!("WebPush.payload_send")
     ""
   end
