@@ -1250,9 +1250,16 @@ jobs:
       # that number is a prediction until a runner prints it — and the
       # rule this ratchet is built on is that a floor goes up by the
       # notice, never by prediction.
+      #
+      # 382/64 -> 390/65, on the notice `08e2e163`'s run emitted. That
+      # prediction is now settled and worth recording: this runner
+      # measured 390 of 395 where the laptop measured 391 of 396, and
+      # the ONLY difference is the skip count — two formats the Linux
+      # libvips did not compile in against one here. Files green agree
+      # at 65, which is what the `skip` commit was for.
         env:
-          FLOOR_TESTS: 382
-          FLOOR_FILES: 64
+          FLOOR_TESTS: 390
+          FLOOR_FILES: 65
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

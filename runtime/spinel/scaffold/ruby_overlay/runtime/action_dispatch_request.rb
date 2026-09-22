@@ -16,6 +16,17 @@
 require "stringio"
 
 module ActionDispatch
+  # `ActionDispatch::TestRequest.create(env)` — see the twin in
+  # `runtime/ruby/action_dispatch/request.rb` for what it is for. This
+  # lane's Request IS env-backed, so `create` is the constructor and
+  # every key the env carries is readable, not just the ones a mapping
+  # thought to name.
+  module TestRequest
+    def self.create(env)
+      Request.new(env.each_with_object({}) { |(k, v), h| h[k.to_s] = v })
+    end
+  end
+
   class Request
     attr_reader :env
     attr_accessor :params

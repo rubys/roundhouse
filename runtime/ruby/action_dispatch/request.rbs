@@ -14,6 +14,14 @@ module ActionDispatch
     def eof?: () -> bool
   end
 
+  # See the .rb. A Rack env's KEYS are Strings by the spec, which is
+  # what lets the mapping compare them without coercing; its VALUES are
+  # not (`rack.input` is an IO, `rack.errors` a stream), so they stay
+  # untyped and the mapping `.to_s` each one it takes.
+  module TestRequest
+    def self.create: (Hash[String, untyped] env) -> Request
+  end
+
   class Request
     @remote_ip: String
     @path: String

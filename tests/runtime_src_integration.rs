@@ -1330,7 +1330,20 @@ fn every_runtime_method_body_concretely_typed() {
     // request path is redacted before the line is written —
     // log_scrubbing_formatter_test 6/6, and the stack production.rb
     // wires exists for the day request logging does.
-    const CEILING: usize = 452;
+    //
+    // 452 -> 459: `ActionDispatch::TestRequest.create(env)`, SEVEN
+    // sites, all one value: a Rack env's. Its KEYS are Strings by the
+    // spec and declared so; its VALUES are not — `rack.input` is an
+    // IO, `rack.errors` a stream — so the parameter is
+    // `Hash[String, untyped]` and each value the mapping takes is
+    // `.to_s`'d at the assignment. The block's pair, the seven
+    // comparisons' right-hand side and the `env=` that keeps the whole
+    // env readable carry the consequence. What it bought: campfire's
+    // opengraph-embed test can name the host its own links must be
+    // dropped for (`Current.set request: TestRequest.create("HTTP_HOST"
+    // => …)`), which is the only way that file states the rule it is
+    // testing.
+    const CEILING: usize = 459;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

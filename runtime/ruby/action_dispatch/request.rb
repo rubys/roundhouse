@@ -65,6 +65,54 @@ module ActionDispatch
     end
   end
 
+  # `ActionDispatch::TestRequest.create(env)` — the Request a test
+  # builds by hand, from a Rack env rather than from a transport.
+  # campfire's opengraph-embed test names the host its own links must
+  # be dropped for:
+  #
+  #   Current.set request: ActionDispatch::TestRequest.create("HTTP_HOST" => "once.campfire.test")
+  #
+  # ONE PER REQUEST SHAPE, which is why this is not in the shared test
+  # harness: the two ruby-family trees run genuinely different Request
+  # classes (see the header of `runtime/action_dispatch_request.rb`, the
+  # CRuby overlay's env-backed twin, which carries its own `create`).
+  # This one is the accessor-backed class below, so `create` maps the
+  # env keys that class models and leaves the rest in `env` — where a
+  # reader that wants them can still find them, exactly as Rails would.
+  #
+  # RAILS' OWN DEFAULTS for what the env omits, which the class's
+  # `initialize` already supplies: "localhost", "/", GET. A test that
+  # names only a host gets a request that is otherwise ordinary.
+  module TestRequest
+    # NO DEFAULT on `env`, though Rails' has one: an optional
+    # parameter widens the slot on a strict target (spinel typed the
+    # hash `sp_RbVal` and the `env=` below would not take it), and
+    # every caller names an env — a `TestRequest` with no env is a
+    # `Request.new`.
+    def self.create(env)
+      r = Request.new
+      r.env = env
+      env.each do |k, value|
+        if k == "HTTP_HOST"
+          r.host = value.to_s
+        elsif k == "PATH_INFO"
+          r.path = value.to_s
+        elsif k == "REQUEST_METHOD"
+          r.request_method = value.to_s
+        elsif k == "QUERY_STRING"
+          r.query_string = value.to_s
+        elsif k == "SCRIPT_NAME"
+          r.script_name = value.to_s
+        elsif k == "HTTP_REFERER"
+          r.referer = value.to_s
+        elsif k == "REMOTE_ADDR"
+          r.remote_ip = value.to_s
+        end
+      end
+      r
+    end
+  end
+
   class Request
     attr_accessor :remote_ip
     attr_accessor :path

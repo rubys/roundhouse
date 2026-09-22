@@ -103,6 +103,7 @@ pub mod object_extend;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
+pub mod current_set;
 pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
@@ -540,6 +541,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // app's `helper_method_index` names. Consumes a shape no pass
     // produces or reads; no constraints.
     ("view_test_case", &[]),
+    // `Current.set(k: v) { … }` -> save / assign / begin-ensure-restore
+    // over the flattened accessors. Consumes a shape no pass produces
+    // or reads; no constraints.
+    ("current_set", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -820,6 +825,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("cable_test_case");
     diags.extend(view_test_case::apply_view_test_case_lowering(app));
     ran!("view_test_case");
+    diags.extend(current_set::apply_current_set_lowering(app));
+    ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));
