@@ -1273,7 +1273,11 @@ module WebPush
   EXPECT_RAISE_NAME = [ "" ]
 
   class << self
-    alias_method :payload_send_without_stub, :payload_send if respond_to?(:payload_send)
+    # `method_defined?`, not `respond_to?`: inside `class << self` the
+    # receiver is the singleton class, which never responds to the
+    # gem's `payload_send` — so the alias never ran and every real
+    # delivery raised "not installed" with the gem loaded.
+    alias_method :payload_send_without_stub, :payload_send if method_defined?(:payload_send)
 
     def stub_payload_send
       STUB_ON[0] = true
@@ -3885,7 +3889,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         (Marker::Constant("Concurrent"), "concurrent-ruby"),
         // The gem those pools deliver through. `WEB_PUSH_STUB_REOPEN`
         // was written to sit on top of it — `alias_method
-        // :payload_send_without_stub, :payload_send if respond_to?` —
+        // :payload_send_without_stub, :payload_send if method_defined?` —
         // and nothing had ever put the gem underneath: the app's
         // `WebPush::Pool#deliver` rescues `WebPush::ExpiredSubscription`,
         // a constant only the gem defines on this lane, and its suite
@@ -6594,6 +6598,34 @@ mod tests {
             files[0].1.contains("module Greetable\n  include Loud\nend"),
             "a module target was reopened as a class:\n{}",
             files[0].1
+        );
+    }
+
+    /// With the gem loaded underneath, an UNSTUBBED `payload_send`
+    /// must reach the gem's own. The guard once asked `respond_to?`
+    /// from inside `class << self` — the singleton class, which never
+    /// responds — so the alias was never taken and every real campfire
+    /// notification on the CRuby tree raised "web-push is not
+    /// installed". A stand-in module plays the gem so the test needs
+    /// neither the gem nor the network.
+    #[test]
+    fn web_push_stub_reopen_delegates_to_the_loaded_gem() {
+        let script = format!(
+            "module WebPush\n  def self.payload_send(**o) = \"delivered:#{{o[:endpoint]}}\"\nend\n{WEB_PUSH_STUB_REOPEN}\n\
+             print WebPush.payload_send(endpoint: \"e\")\n\
+             WebPush.stub_payload_send\n\
+             print \" \", WebPush.payload_send(endpoint: \"e\").inspect\n"
+        );
+        let out = std::process::Command::new("ruby")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("ruby");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "delivered:e \"\"",
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }
