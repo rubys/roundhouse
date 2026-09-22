@@ -142,9 +142,10 @@ require_relative "runtime/active_job"
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
 require_relative "runtime/tep/tep"
-# Spinel-only CGI shim (escape/unescape_html/parse) — CRuby/JRuby use stdlib
-# `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes
-# to) is defined.
+# Spinel-only CGI reopen: `require "cgi"` reaches spinel's bundled package
+# and this adds `parse`, which upstream moved to `cgi/core`. CRuby/JRuby use
+# the stdlib. No longer needs to follow tep — the escapes were routed to
+# `Url.escape`, which truncated a multi-byte character to its first byte.
 require_relative "runtime/cgi_spinel"
 # Spinel-only resolver: reopens runtime/resolv's `Resolv.resolve` over
 # `Socket.getaddrinfo`. CRuby/JRuby have the stdlib's own Resolv.

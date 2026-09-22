@@ -32,20 +32,28 @@ module Tep
     # Percent-encode the bytes that are unsafe in cookie values, query
     # strings, and similar contexts. RFC 3986 unreserved set:
     # ALPHA / DIGIT / `-._~`. Everything else gets `%XX` (uppercase hex).
+    # A space is `%20`, not `+`: the counterpart above reads `+` back as
+    # a space, so a literal one has to arrive as `%2B`.
+    #
+    # BY BYTE, AND THAT IS THE FIX. This walked CHARACTERS and encoded
+    # `c.bytes[0]` — the FIRST byte of the character — so every byte but
+    # one of a multi-byte character was DROPPED: "café" became "caf%C3"
+    # and an emoji became "%F0", neither of which unescapes back to what
+    # went in. `response.rb` percent-encodes cookie VALUES through here,
+    # so the loss was on the wire. `bytesize`/`getbyte` also spares the
+    # per-character `bytes` Array this allocated for every escaped byte.
     def self.escape(s)
       out = +""
       i = 0
-      while i < s.length
-        c = s[i]
-        if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") ||
-           (c >= "0" && c <= "9") || c == "-" || c == "." ||
-           c == "_" || c == "~"
-          out << c
+      n = s.bytesize
+      while i < n
+        b = s.getbyte(i)
+        if (b >= 0x61 && b <= 0x7A) || (b >= 0x41 && b <= 0x5A) ||
+           (b >= 0x30 && b <= 0x39) || b == 0x2D || b == 0x2E ||
+           b == 0x5F || b == 0x7E
+          out << b.chr
         else
-          b = c.bytes[0]
-          hi = b / 16
-          lo = b % 16
-          out << "%" + Url.hex_char(hi) + Url.hex_char(lo)
+          out << "%" + Url.hex_char(b / 16) + Url.hex_char(b % 16)
         end
         i += 1
       end

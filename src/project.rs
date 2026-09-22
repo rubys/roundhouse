@@ -3071,6 +3071,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
     let mut files = spinel_files(app, fixture)?;
+
     write_bundled_requires(&mut files);
     Ok(files)
 }
@@ -3120,9 +3121,11 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/active_support_duration.rbs".to_string(), rbs));
     }
 
-    // CGI shim sidecar — spinel has no stdlib CGI; the flat walk emits
-    // runtime/cgi_spinel.rb but only .rb, so pair its typing contract (escape ->
-    // String, parse -> Hash[String, Array[String]]) here.
+    // CGI sidecar — the flat walk emits runtime/cgi_spinel.rb but only
+    // .rb, so pair its typing contract here. Since spinel's bundled
+    // `cgi` package landed (matz/spinel#4812) the file is a REOPEN and
+    // the contract is one method: `parse -> Hash[String, Array[String]]`.
+    // The escapes are the package's own Ruby and are inferred from it.
     {
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/cgi_spinel.rbs")
             .map_err(|e| format!("read runtime/spinel/cgi_spinel.rbs: {e}"))?;
@@ -3346,6 +3349,45 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
                 format!("sig/runtime/{stem}.rbs"),
                 crate::runtime_files::read_to_string(&rbs)?,
             ));
+        }
+    }
+
+    // `Tempfile`: spinel has the library now (matz/spinel#4811, merged
+    // 2026-09-22 as be8d7db1), so every tree built from here takes it —
+    // the spinel lanes reach `packages/tempfile` and the ruby family's
+    // own swap below restates the same require against Ruby's stdlib.
+    // The port at `runtime/ruby/tempfile.rb` stays, and keeps its typing
+    // gate, for the strict targets that still have no stdlib to bind to;
+    // this is the three-branch shape `ipaddr` would have if there were a
+    // `packages/ipaddr`.
+    //
+    // THE REASON IS THE ONE THE PORT'S OWN HEADER NAMES. Ruby's `create`
+    // opens `O_EXCL` and retries, so it cannot be made to clobber a file
+    // an attacker pre-created; the port opens by name.
+    // `packages/tempfile` opens `"wx+"`, which IS that exclusive create,
+    // so the lane that ships as a binary is no longer the one running
+    // the weaker of the two.
+    //
+    // THE .rbs GOES WITH IT, and that is not tidiness: the port is a
+    // `module Tempfile` and both libraries are a `class`, so a signature
+    // left behind reopens a class as a module — the collision
+    // `runtime/spinel/erb_spinel.rb`'s header records, which cost the
+    // lobsters AOT lane ten days.
+    //
+    // HERE rather than in `spin_shape`, because `spin_shape` is not the
+    // only tree that ships: `spinel_base_files` is what
+    // `tests/spinel_toolchain.rs` compiles, and the bundled-require
+    // table's own comment records what it cost to have the two disagree.
+    // A lane is evidence only if it runs the same code.
+    files.retain(|(p, _)| p != "sig/runtime/tempfile.rbs");
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/tempfile.rb" {
+            *content = "# The bundled tempfile library — see `project::spinel_files`.\n\
+                        # The port at runtime/ruby/tempfile.rb exists for the strict\n\
+                        # targets that have no stdlib to bind to, and opens by name\n\
+                        # where this one opens O_EXCL.\n\
+                        require \"tempfile\"\n"
+                .to_string();
         }
     }
 

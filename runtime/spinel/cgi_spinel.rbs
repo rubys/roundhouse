@@ -1,7 +1,11 @@
-# Typing contract for cgi.rb (spinel-only CGI shim).
-module CGI
-  def self.escape: (String s) -> String
-  def self.unescape_html: (String s) -> String
-  def self.decode_entity: (String ent) -> String?
+# Typing contract for cgi_spinel.rb — the ONE method this file adds on
+# top of spinel's bundled `cgi` package. `escape`, `unescape`,
+# `escapeHTML` and `unescapeHTML` are the package's own Ruby and are
+# inferred from it, so declaring them here would be a second, drifting
+# statement of a contract that already exists.
+#
+# A `class`, matching the package (and CRuby). `module` here reopens
+# the package's class as a module.
+class CGI
   def self.parse: (String qs) -> Hash[String, Array[String]]
 end

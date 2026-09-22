@@ -6182,6 +6182,19 @@ fn require_path_for_body_const(
         // same reason IPAddr is: `resolv` is not in `project::BUNDLED`,
         // so nothing inserts a bare `require "resolv"` of its own.
         "Resolv" => Some("runtime/resolv".to_string()),
+        // `Tempfile` — anchored for the same reason IPAddr and Resolv
+        // are, and it was MISSING: the port landed in `spinel_files`
+        // with no entry here, so nothing in any emitted tree ever
+        // required `runtime/tempfile` and the file shipped dead. The
+        // interpreted lane hid it — under CRuby something in the bundle
+        // loads the stdlib's `tempfile` on its own, so the constant
+        // resolved without the anchor — while on spinel the name went
+        // into inference unresolved, which is a failure far from its
+        // cause rather than a missing require. matz/spinel#4811 added
+        // `Tempfile` to spinel's own missing-require table and the
+        // diagnostic named it at campfire's
+        // `vips_loader_policy_test.rb:163`.
+        "Tempfile" => Some("runtime/tempfile".to_string()),
         // `Net::HTTP` — a real client on both lanes (`project::BUNDLED`
         // writes the `require "net/http"`), REOPENED on spinel by
         // `runtime/spinel/net_http.rb` to add the block form of
