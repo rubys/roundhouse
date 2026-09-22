@@ -4529,6 +4529,15 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
 const BUNDLED: [(&str, &str); 12] = [
+    // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
+    // defines `Base64` without requiring the library, which the second
+    // condition below reads as "the program defines it" and drops the
+    // row for the whole tree. So the port answers every lane and
+    // spinel's C `packages/base64` is never reached. The row stays as
+    // the statement of what WOULD happen without the port — re-arming
+    // it means giving base64 the three-branch ipaddr treatment, which
+    // nothing has asked for. Same for `ERB` and `runtime/spinel/
+    // erb_spinel.rb`.
     ("Base64", "base64"),
     ("CSV", "csv"),
     ("Digest", "digest"),
@@ -4580,10 +4589,10 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
         // The program defines the constant itself, so the bundled
         // library is not what the name refers to. A file that REQUIRES
         // the library and then opens the constant is not that: it is a
-        // reopen over the bundled one (`runtime/net_http.rb` adds the
-        // block form of `#request` on top of spinel's `packages/net`),
-        // and every other file naming the constant still needs the
-        // require.
+        // reopen over the bundled one (`runtime/net_http.rb` puts the
+        // stub table and the socket seam in front of spinel's
+        // `packages/net`, keeping the package's classes), and every
+        // other file naming the constant still needs the require.
         if files.iter().any(|(p, c)| {
             p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
         }) {
