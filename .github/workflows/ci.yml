@@ -1264,8 +1264,14 @@ jobs:
       # locally after it: that number includes `to_gid`, which lands in
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
+      #
+      # 391/66 -> 392/66, on the notice `eb2a4d09`'s run emitted (the
+      # `to_gid` mint). Files green did not move: the test it turned
+      # shares a file with `object-extend`, which is outside the subset
+      # and will keep that file red for as long as a compiled target
+      # has no per-object method table.
         env:
-          FLOOR_TESTS: 391
+          FLOOR_TESTS: 392
           FLOOR_FILES: 66
         run: |
           set -euo pipefail

@@ -1,0 +1,10 @@
+# Typing contract for runtime/ruby/tempfile.rb. `basename` is a String
+# or a two-element Array (prefix, suffix) — Ruby accepts either, and
+# the array form is how a caller asks for a suffix — so it is untyped
+# at the parameter and narrowed by `split_basename`. The block takes
+# the open File and answers whatever the caller wants out of it.
+module Tempfile
+  def self.create: (untyped basename, ?binmode: bool) { (untyped file) -> untyped } -> untyped
+  def self.split_basename: (untyped basename) -> Array[String]
+  def self.tmpdir: () -> String
+end

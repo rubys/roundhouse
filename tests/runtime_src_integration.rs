@@ -1343,7 +1343,37 @@ fn every_runtime_method_body_concretely_typed() {
     // dropped for (`Current.set request: TestRequest.create("HTTP_HOST"
     // => …)`), which is the only way that file states the rule it is
     // testing.
-    const CEILING: usize = 459;
+    //
+    // 459 -> 465: `runtime/ruby/tempfile.rb`, SIX sites in two seams.
+    // The FILE — `File.open` answers untyped because this runtime has
+    // no File type and wants none: what a caller does with the handle
+    // is `write`/`flush`/`path`/`close`, and a declared class here
+    // would be a claim about a CRuby object the ported targets do not
+    // have. The open, the local, the close and the argument the block
+    // is yielded carry it. The other is the BLOCK: `create` hands back
+    // whatever its block answers, which is the block's business —
+    // `index_by` and `TaggedLogging#tagged` already pay the same.
+    // `basename` is untyped for a stated reason rather than a shrug:
+    // Ruby takes a String or a two-element Array there, and
+    // `split_basename` is the narrowing.
+    // What it bought: campfire's vips policy test writes each probe
+    // image to a temp file, because `vips_foreign_find_load` takes a
+    // path — twelve tests on the compiled lane that had no `Tempfile`
+    // to reach for.
+    //
+    // 465 -> 474: `ActiveSupport.sole`'s parameter goes back to
+    // `untyped` from `Array[untyped]`, and the nine sites are the
+    // price of not over-claiming. The narrower form was declared to
+    // SAVE these nine, which is not a reason to declare anything: the
+    // one receiver in the corpus is a channel's `streams`, an
+    // `Array[String]`, and spinel refuses that against a declared
+    // `Array[untyped]` — "a seed is trusted, so the emitted code would
+    // reinterpret the value rather than convert it". The whole
+    // `unread_rooms_channel_test` stopped linking, which only the
+    // compiled lane can report, and the note beside `many?` in the
+    // .rbs had already said why. A ceiling is a ledger of debt, not a
+    // budget to fit a declaration into.
+    const CEILING: usize = 474;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

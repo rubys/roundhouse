@@ -1686,6 +1686,21 @@ fn ruby_family_runtime_files(
                         require \"zlib\"\n"
                 .to_string();
         }
+        // `Tempfile`: the same swap again, and the one place the port
+        // is not merely slower. Ruby's `create` opens with `O_EXCL` and
+        // retries on a collision, so it cannot be made to clobber a
+        // file an attacker pre-created; the port opens by name (see its
+        // header). Every corpus caller is a test writing to its own
+        // TMPDIR, but the tree that HAS the exclusive open should use
+        // it.
+        if path == "runtime/tempfile.rb" {
+            *content = "# Ruby's own tempfile — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/ruby/tempfile.rb exists for the targets\n\
+                        # that have no stdlib to bind to, and opens by name where\n\
+                        # this one opens O_EXCL.\n\
+                        require \"tempfile\"\n"
+                .to_string();
+        }
         // `Resolv`: the same swap as ipaddr, and for both of ipaddr's
         // reasons at once. net/http loads the stdlib's resolver over
         // here, so a second `Resolv` beside it is a superclass mismatch
@@ -3292,6 +3307,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // `Logger::Formatter` and two definitions of that constant is a
         // superclass mismatch at load.
         "logger",
+        // Ruby's `Tempfile.create` block form. Same arrangement as
+        // ipaddr and zlib, swap included: the CRuby/JRuby trees take
+        // Ruby's own (below), and the targets with no stdlib take
+        // this. campfire's vips policy test writes each probe image to
+        // one, because `vips_foreign_find_load` takes a path.
+        "tempfile",
         // The one method of Ruby's resolver `surfguard` calls. Swapped
         // for `require "resolv"` on the CRuby/JRuby trees below, same
         // as ipaddr — and it has to be, or the app's own

@@ -27,9 +27,15 @@ module ActiveSupport
   def self.many?: (untyped list) -> bool
   def self.to_sentence: (Array[untyped] list) -> String
   def self.squish: (String text) -> String
-  # `Array[untyped]` rather than `many?`'s `untyped`: the only receiver
-  # is a channel's `streams`, a plain Array, and the count checks in
-  # the body are typed by it. A Relation receiver would be coerced at
-  # the call (the over-claim `many?` describes) — none reaches here.
-  def self.sole: (Array[untyped] list) -> untyped
+  # `untyped`, and this one was learned the hard way: it said
+  # `Array[untyped]` for a day, on the reasoning that the only receiver
+  # is a channel's `streams`, a plain Array. It is — an
+  # `Array[String]`, and spinel refuses that against a DECLARED
+  # `Array[untyped]`: "a seed is trusted, so the emitted code would
+  # reinterpret the value rather than convert it". The whole
+  # `unread_rooms_channel_test` stopped linking, which only the
+  # compiled lane can say. Exactly the over-claim the `many?` note
+  # above describes, made anyway because the narrower declaration saved
+  # nine sites against the untyped ceiling — which is not a reason.
+  def self.sole: (untyped list) -> untyped
 end
