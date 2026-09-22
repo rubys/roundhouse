@@ -861,7 +861,13 @@ jobs:
         # so it is a LOAD-time reach, and without it the emit never
         # comes up either. This job took the run red on the commit that
         # added the require (a73d7ccd) exactly as the two above did.
-        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt ruby-vips concurrent-ruby --no-document
+        #
+        # web-push (with net-http-persistent beside it), a fourth time:
+        # boot ends with campfire's `WebPush::Request.prepend
+        # WebPush::PersistentRequest`, a load-time reach into the gem's
+        # class, since the initializer's guard is now carried rather
+        # than dropped. bed66113 took this job red on it.
+        run: gem install puma nio4r websocket-driver rack sqlite3 bcrypt ruby-vips concurrent-ruby net-http-persistent web-push --no-document
       - name: scripts/campfire-compare
         run: scripts/campfire-compare /tmp/campfire
 

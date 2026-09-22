@@ -268,6 +268,61 @@ fn a_module_an_initializer_defines_and_prepends_is_ingested_and_kept() {
     assert_eq!(app.module_mixins.len(), 1, "the prepend onto WebPush::Request must be kept");
 }
 
+/// The same initializer, EMITTED, on both trees. The CRuby tree keeps
+/// the guard module AND its prepend (the gem supplies `WebPush::Request`).
+/// The spinel tree holds the web-push port out until matz/spinel#4816
+/// closes, so it must hold out both — the prepend would name a class
+/// that is not there, and the module body does not compile without the
+/// gem's methods. The first cut of that hold dropped the MODULE from the
+/// CRuby tree too (the ruby family builds on `spinel_files`) while its
+/// boot still prepended it: `NameError` at boot, campfire-compare red.
+#[test]
+fn the_web_push_guard_ships_on_cruby_and_is_held_out_of_spinel() {
+    use roundhouse::project::{target_files, BuildTarget};
+
+    let mut app = {
+        let files = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+            (
+                "config/initializers/web_push.rb",
+                "module WebPush::PersistentRequest\n\
+                 \x20 def perform\n\
+                 \x20   verify_response(nil)\n\
+                 \x20 end\n\
+                 end\n\
+                 \n\
+                 WebPush::Request.prepend WebPush::PersistentRequest\n",
+            ),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("ingest")
+    };
+    roundhouse::session::analyze_and_lower(&mut app);
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
+    let guard = "app/models/web_push/persistent_request.rb";
+
+    let ruby = target_files(&app, &fixture, BuildTarget::Ruby).expect("ruby target files");
+    let boot = &ruby.iter().find(|(p, _)| p == "boot.rb").expect("boot.rb").1;
+    assert!(boot.contains("WebPush::Request.prepend WebPush::PersistentRequest"), "{boot}");
+    assert!(
+        ruby.iter().any(|(p, _)| p == guard),
+        "the CRuby boot prepends the guard, so the tree must define it"
+    );
+
+    let spinel = target_files(&app, &fixture, BuildTarget::Spinel).expect("spinel target files");
+    assert!(
+        !spinel.iter().any(|(p, c)| p.ends_with("boot.rb") && c.contains("prepend WebPush::PersistentRequest")),
+        "no prepend onto a class the held-out port would have defined"
+    );
+    assert!(!spinel.iter().any(|(p, _)| p.ends_with("web_push/persistent_request.rb")));
+    let port = &spinel
+        .iter()
+        .find(|(p, _)| p.ends_with("runtime/web_push.rb"))
+        .expect("the WebPush anchor still resolves")
+        .1;
+    assert!(!port.contains("web_push_crypto"), "the port (and openssl) must stay out:\n{port}");
+}
+
 /// The mixin's companion: `X.before_action :m` in the same initializer.
 /// campfire's `active_storage_authentication.rb` includes a session
 /// check into Active Storage's two direct-upload controllers and adds

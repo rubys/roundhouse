@@ -726,7 +726,7 @@ pub fn target_files(
     report_unsupported_keys(app, target);
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
+        BuildTarget::Spinel => spinel_tree_files(app, fixture).and_then(spin_shape),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
@@ -3089,10 +3089,68 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // got it — one layer down. A lane is evidence only if it runs the
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
-    let mut files = spinel_files(app, fixture)?;
+    let mut files = spinel_tree_files(app, fixture)?;
 
     write_bundled_requires(&mut files);
     Ok(files)
+}
+
+/// `spinel_files` for a SPINEL tree. The ruby family builds on
+/// `spinel_files` too (`ruby_runtime_files`), so what only spinel must
+/// not have is taken out here, not there — the first cut of this hold
+/// did it inside `spinel_files` and dropped campfire's guard module
+/// from the CRuby tree while its boot still prepended it.
+fn spinel_tree_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
+    let held;
+    let app = if app.module_mixins.iter().any(|m| m.target.as_str() == WEB_PUSH_REQUEST) {
+        held = without_web_push_guard(app);
+        &held
+    } else {
+        app
+    };
+    let mut files = spinel_files(app, fixture)?;
+    // The web-push port (runtime/spinel/web_push.rb) is HELD OUT of the
+    // tree, and the anchor gets the façade alone — unstubbed delivery
+    // raises, as it did before the port. The port's `require "openssl"`
+    // brings the package's `Buffering#getbyte` into the program, and
+    // once any class defines `getbyte` spinel drops String's builtin
+    // from a poly receiver's dispatch: every `GET /` on the campfire
+    // binary answered 500 (`undefined method 'getbyte' for an instance
+    // of String`). matz/spinel#4816 has a nine-line repro that needs no
+    // openssl. Restore the port (and `without_web_push_guard`'s caller)
+    // when it closes; the crypto half is still pinned by
+    // tests/spinel_web_push_crypto.rs meanwhile.
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/web_push.rb" {
+            *content = "# The web-push port is held out of spinel trees — see\n\
+                        # `project::spinel_tree_files`. The façade's delivery raises.\n\
+                        require_relative \"gem_facades\"\n"
+                .to_string();
+        }
+    }
+    Ok(files)
+}
+
+const WEB_PUSH_REQUEST: &str = "WebPush::Request";
+
+/// The app WITHOUT the mixins onto `WebPush::Request` and the modules
+/// they bring, for as long as the web-push port is held out of spinel
+/// trees (see the note in `spinel_tree_files`). With no port the class does
+/// not exist, and the module's body self-sends the gem's
+/// `verify_response`, which spinel refuses to compile even unreached.
+/// Nothing is unguarded by dropping it: without the port the façade's
+/// delivery raises, so no request is ever sent for the guard to pin.
+fn without_web_push_guard(app: &App) -> App {
+    let mut app = app.clone();
+    let modules: Vec<String> = app
+        .module_mixins
+        .iter()
+        .filter(|m| m.target.as_str() == WEB_PUSH_REQUEST)
+        .map(|m| m.module.as_str().to_string())
+        .collect();
+    app.module_mixins.retain(|m| m.target.as_str() != WEB_PUSH_REQUEST);
+    app.library_classes.retain(|lc| !modules.iter().any(|m| m == lc.name.0.as_str()));
+    app
 }
 
 /// Spinel-target files: lowered emit (app/, config/, test/) plus
