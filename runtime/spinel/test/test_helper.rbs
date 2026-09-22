@@ -227,12 +227,25 @@ end
 
 module ActionCable
   module Channel
+    # The channel harness (see the .rb). `subscribe_to` is what
+    # `lower::cable_test_case` rewrites a test's `subscribe k: v` to;
+    # `subscription` is the channel it built, typed as the base class
+    # the generated factory answers.
     class TestCase < TestBase
+      def stub_connection: (?current_user: untyped) -> void
+      def self.identifier: (String channel, Array[String] keys, Array[String] values) -> String
+      def subscribe_to: (String channel, Array[String] keys, Array[String] values) -> void
+      def subscription: () -> ActionCable::Channel::Base
+      def unsubscribe: () -> void
+      def assert_has_stream: (untyped stream) -> void
     end
   end
 
   module Connection
     class TestCase < TestBase
+      def cookies: () -> ActionController::CookieJar
+      def connect: () -> void
+      def assert_reject_connection: () { () -> void } -> void
     end
   end
 end

@@ -39,6 +39,13 @@ require_relative "../runtime/action_controller"
 require_relative "../runtime/action_view"
 require_relative "../runtime/json_builder"
 require_relative "../runtime/broadcasts"
+# The cable half the channel harness stands on: `ActionCable::Channel
+# .build` / `Connection.build` (the generated factories the server
+# resolves a frame through) and `Turbo::StreamsChannel` with the
+# stream-name signer, which also reopens `turbo_stream_from` for this
+# family — the same order boot.rb loads them in.
+require_relative "../runtime/action_cable"
+require_relative "../runtime/turbo_streams"
 require_relative "../runtime/importmap"
 require_relative "../config/importmap"
 require_relative "../config/routes"
@@ -972,18 +979,12 @@ module ActionDispatch
   end
 end
 
-# The other three test-case parents a Rails app writes against, so a
-# file declaring one LOADS. That is all they do so far: every test
-# under them fails on its first `stub_connection` / `view` /
-# `connect` — a per-test NoMethodError in the tally, which is the
-# honest reading of "the harness has no such thing yet", and a
-# better one than a NameError taking the file whole. The tests that
-# need them (campfire's `test/channels`, `test/helpers`) were never
-# in any tally before this, so the count they add is red until the
-# harness under each is written — Channel::TestCase's `subscribe`/
-# `subscription`/`assert_has_stream(_for)` and a recording pubsub,
-# Connection::TestCase's `cookies.signed`/`connect`/
-# `assert_reject_connection`, ActionView::TestCase's `view`.
+# The other three test-case parents a Rails app writes against.
+# `ActionView::TestCase` LOADS and nothing more so far: every test under
+# it fails on its first `view` — a per-test NoMethodError in the tally,
+# which is the honest reading of "the harness has no such thing yet",
+# and a better one than a NameError taking the file whole. The two
+# cable parents carry their harness below.
 module ActionView
   class TestCase < TestBase
   end
@@ -991,12 +992,167 @@ end
 
 module ActionCable
   module Channel
+    # `ActionCable::Channel::TestCase` — Rails' way of exercising a
+    # channel's `subscribed` with no socket under it. campfire's
+    # test/channels (four files, seventeen tests) is written against it.
+    #
+    # THE CHANNEL IS BUILT THE WAY A FRAME BUILDS IT. `subscribe_to`
+    # spells the subscribe frame's identifier —
+    # `{"channel":"PresenceChannel","room_id":"5"}` — and hands it to
+    # `ActionCable::Channel.build`, the same generated factory
+    # `Cable.subscribe` resolves a client's frame through, over the same
+    # connection class `Cable.identify` builds. So a test here asks the
+    # runtime the question a browser would, and a channel confirmed
+    # here is one the server would confirm; the harness adds nothing a
+    # frame could not have said. Rails' own `TestCase` builds the
+    # channel with `channel_class.new(connection, identifier, params)`
+    # and mixes a `ChannelStub` in for `confirmed?`/`rejected?`/
+    # `streams`; those three live on `Channel::Base` here, because the
+    # slot below is typed as that class.
+    #
+    # `subscribe room_id: room.id` in the test source lowers to
+    # `subscribe_to("PresenceChannel", ["room_id"], [room.id.to_s])`
+    # (`lower::cable_test_case`): the channel class is the `tests`
+    # macro's or the test class's name minus `Test`, as Rails resolves
+    # it, and the values ride as Strings because a frame's `params`
+    # read as Strings on every lane (`Parameters` in action_cable.rb —
+    # Rails' own `params` are string-valued one hop earlier, for the
+    # same reason). `assert_has_stream_for record` lowers to
+    # `assert_has_stream(PresenceChannel.broadcasting_for(record))`,
+    # which is Rails' definition with the class named.
     class TestCase < TestBase
+      # `stub_connection(current_user: users(:david))` — the identified
+      # connection the channel will read `current_user` off. The app's
+      # own connection class, built the way the handshake builds it and
+      # then told who it is, rather than a stand-in: the channel's
+      # connection slot holds one class per tree (see
+      # `Cable.build_connection`), and a test that handed it another
+      # would be the two-spellings case that widens the slot to poly.
+      # An empty jar because nothing reads it — `connect` is not run;
+      # that is `Connection::TestCase`'s question.
+      def stub_connection(current_user: nil)
+        conn = ActionCable::Connection.build(ActionController::CookieJar.new)
+        conn.current_user = current_user
+        @__connection = conn
+        nil
+      end
+
+      # A `subscribe` with no `stub_connection` before it: Rails
+      # memoizes an anonymous `ConnectionStub`, so the channel sees a
+      # connection with no identifiers rather than nil.
+      def __connection
+        stub_connection if @__connection.nil?
+        @__connection
+      end
+
+      # The identifier a client would send, from the lowered keys and
+      # values. Every value a JSON STRING — see the class comment.
+      def self.identifier(channel, keys, values)
+        out = "{\"channel\":" + JSON.generate(channel)
+        i = 0
+        while i < keys.length
+          out = out + "," + JSON.generate(keys[i]) + ":" + JSON.generate(values[i])
+          i = i + 1
+        end
+        out + "}"
+      end
+
+      # Rails' `subscribe(params = {})`: build, `subscribed`, the
+      # subscribe callbacks (after `subscribed` and before the verdict
+      # is read, `Cable.subscribe`'s order and Rails'), and keep the
+      # channel for `subscription`. A second `subscribe` in one test —
+      # campfire revokes a membership and subscribes again — replaces
+      # the first, as Rails' does.
+      #
+      # A name the factory does not know is a raise, not a rejection:
+      # a client naming a nonexistent channel is refused by
+      # `Cable.subscribe`, but a TEST naming one has the wrong `tests`
+      # line, and Rails answers that with `NameError` too.
+      def subscribe_to(channel, keys, values)
+        identifier = ActionCable::Channel::TestCase.identifier(channel, keys, values)
+        built = ActionCable::Channel.build(channel, __connection, identifier)
+        if built.nil?
+          raise "no such channel: #{channel} (is it under app/channels?)"
+        end
+        built.subscribed
+        built.after_subscribe
+        @__subscription = built
+        nil
+      end
+
+      # Rails: `check_subscribed!` — "Must be subscribed!".
+      def subscription
+        sub = @__subscription
+        if sub.nil?
+          raise "Must be subscribed!"
+        end
+        sub
+      end
+
+      # Rails' `unsubscribe`: `unsubscribe_from_channel`, which runs the
+      # unsubscribe callbacks around `unsubscribed`. The same pair
+      # `Cable::WsClose` runs when a socket goes away, in the same order.
+      def unsubscribe
+        sub = subscription
+        sub.unsubscribed
+        sub.after_unsubscribe
+        nil
+      end
+
+      def assert_has_stream(stream)
+        name = stream.to_s
+        if !subscription.streams.include?(name)
+          raise "Stream #{name} has not been started"
+        end
+        nil
+      end
     end
   end
 
   module Connection
+    # `ActionCable::Connection::TestCase` — Rails' way of running an
+    # app's `connect` against a cookie jar the test seeded, with no
+    # socket. `cookies.signed[:session_token] = token` writes the jar,
+    # `connect` builds the app's connection class over it (the same
+    # factory `Cable.identify` uses, so this IS the handshake's code
+    # path minus the socket) and runs `connect`; `connection` is the
+    # identified object, and `assert_reject_connection` is the
+    # `reject_unauthorized_connection` raise, caught.
     class TestCase < TestBase
+      def cookies
+        @__cookies = ActionController::CookieJar.new if @__cookies.nil?
+        @__cookies
+      end
+
+      def connect
+        conn = ActionCable::Connection.build(cookies)
+        conn.connect
+        @__connection = conn
+        nil
+      end
+
+      # Rails: `check_connected!` — "Must be connected!".
+      def connection
+        conn = @__connection
+        if conn.nil?
+          raise "Must be connected!"
+        end
+        conn
+      end
+
+      # Rails' spelling, verbatim: the block must raise the refusal.
+      def assert_reject_connection
+        rejected = false
+        begin
+          yield
+        rescue ActionCable::Connection::Authorization::UnauthorizedError
+          rejected = true
+        end
+        if !rejected
+          raise "Expected to reject connection but no rejection was made"
+        end
+        nil
+      end
     end
   end
 end

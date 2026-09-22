@@ -2038,9 +2038,10 @@ fn push_jruby_markly_shim(files: &mut Vec<(String, String)>) -> Result<(), Strin
     Ok(())
 }
 
-/// Rewrite `runtime/cable.rb`'s `Cable.build_connection` factory from
-/// the ingested app, so a `/cable` handshake is identified by running
-/// the app's OWN `ApplicationCable::Connection#connect`.
+/// Rewrite `runtime/action_cable.rb`'s `ActionCable::Connection.build`
+/// factory from the ingested app, so a `/cable` handshake — and a
+/// `Connection::TestCase`'s `connect` — is identified by running the
+/// app's OWN `ApplicationCable::Connection#connect`.
 ///
 /// THE SHAPE, and why it is a generated factory rather than a lookup:
 /// `Cable.upgrade` has to reach a class the ingested app named, on a
@@ -2052,7 +2053,7 @@ fn push_jruby_markly_shim(files: &mut Vec<(String, String)>) -> Result<(), Strin
 /// reachable, so nothing that arrives on the wire can widen the set.
 ///
 /// NO-OP when the app declares no `ApplicationCable::Connection` — the
-/// default arm in `cable.rb` connects anonymously, which is what an app
+/// default arm connects anonymously, which is what an app
 /// that never asked for identity needs. `ApplicationCable::Connection`
 /// is Rails' fixed convention name, the same convention
 /// `runtime/action_cable.rb` already encodes by giving
@@ -2062,8 +2063,8 @@ fn push_jruby_markly_shim(files: &mut Vec<(String, String)>) -> Result<(), Strin
 /// reason `patch_harness_dispatch` gives: a match on the default body's
 /// text would freeze this at today's spelling while `cable.rb` moved on.
 fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
-    const HEAD: &str = "  # >>> generated: cable-connection\n";
-    const TAIL: &str = "  # <<< generated: cable-connection\n";
+    const HEAD: &str = "    # >>> generated: cable-connection\n";
+    const TAIL: &str = "    # <<< generated: cable-connection\n";
     const CONNECTION_CLASS: &str = "ApplicationCable::Connection";
 
     if !app
@@ -2074,10 +2075,10 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
         return;
     }
     let generated = format!(
-        "{HEAD}  def self.build_connection(cookies)\n    {CONNECTION_CLASS}.new(cookies)\n  end\n{TAIL}"
+        "{HEAD}    def self.build(cookies)\n      {CONNECTION_CLASS}.new(cookies)\n    end\n{TAIL}"
     );
     for (path, content) in files.iter_mut() {
-        if !path.ends_with("cable.rb") || path.ends_with("action_cable.rb") {
+        if !path.ends_with("/action_cable.rb") {
             continue;
         }
         let Some(start) = content.find(HEAD) else { continue };
@@ -2262,9 +2263,10 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     }
 }
 
-/// Write one arm per app channel into `runtime/cable.rb`'s
-/// `Cable.build_channel`, so a subscribe frame reaches the class it
-/// NAMES and the app's own `subscribed` runs.
+/// Write one arm per app channel into `runtime/action_cable.rb`'s
+/// `ActionCable::Channel.build`, so a subscribe frame — and a
+/// `Channel::TestCase`'s `subscribe` — reaches the class it NAMES and
+/// the app's own `subscribed` runs.
 ///
 /// THE THIRD EAGER-ARM FACTORY, after `apply_controller_dispatch` and
 /// `apply_cable_connection`, and for the identical reason: the name
@@ -2290,12 +2292,12 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
 /// hierarchy does not carry.
 ///
 /// `Turbo::StreamsChannel` is spelled in the DEFAULT body in
-/// `runtime/cable.rb` rather than generated here: it is a runtime class,
-/// not an app one, so no descent over `library_classes` finds it, and
-/// every tree carries it.
+/// `runtime/action_cable.rb` rather than generated here: it is a runtime
+/// class, not an app one, so no descent over `library_classes` finds it,
+/// and every tree carries it.
 fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
-    const HEAD: &str = "  # >>> generated: cable-channels\n";
-    const TAIL: &str = "  # <<< generated: cable-channels\n";
+    const HEAD: &str = "    # >>> generated: cable-channels\n";
+    const TAIL: &str = "    # <<< generated: cable-channels\n";
     const ROOT: &str = "ActionCable::Channel::Base";
 
     let mut channels: Vec<&str> = Vec::new();
@@ -2323,20 +2325,20 @@ fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
     channels.sort_unstable();
 
     let mut generated = String::from(HEAD);
-    generated.push_str("  def self.build_channel(name, connection, identifier)\n");
+    generated.push_str("    def self.build(name, connection, identifier)\n");
     for name in channels.iter().chain(["Turbo::StreamsChannel"].iter()) {
         generated.push_str(&format!(
-            "    if name == \"{name}\"\n\
-             \x20     return {name}.new(\n\
-             \x20       connection, identifier, ActionCable::Channel::Parameters.new(identifier))\n\
-             \x20   end\n",
+            "      if name == \"{name}\"\n\
+             \x20       return {name}.new(\n\
+             \x20         connection, identifier, ActionCable::Channel::Parameters.new(identifier))\n\
+             \x20     end\n",
         ));
     }
-    generated.push_str("    nil\n  end\n");
+    generated.push_str("      nil\n    end\n");
     generated.push_str(TAIL);
 
     for (path, content) in files.iter_mut() {
-        if !path.ends_with("cable.rb") || path.ends_with("action_cable.rb") {
+        if !path.ends_with("/action_cable.rb") {
             continue;
         }
         let Some(start) = content.find(HEAD) else { continue };
@@ -6311,11 +6313,11 @@ mod tests {
         }
     }
 
-    /// `Cable.build_connection` is rewritten from the app, and the text
-    /// it is rewritten to is the text `tests/spinel_cable_identity.rb`
+    /// `ActionCable::Connection.build` is rewritten from the app, and the
+    /// text it is rewritten to is the text `tests/spinel_cable_identity.rb`
     /// exercises.
     ///
-    /// Reads the REAL `runtime/spinel/cable.rb`, so a rename of either
+    /// Reads the REAL `runtime/spinel/action_cable.rb`, so a rename of either
     /// marker fails here rather than silently shipping a tree whose
     /// `/cable` handshake identifies nobody — a failure mode with no
     /// symptom short of an unauthenticated socket, since the default arm
@@ -6326,7 +6328,7 @@ mod tests {
         use crate::dialect::LibraryClass;
         use crate::ident::{ClassId, Symbol};
 
-        let cable = crate::runtime_files::read_to_string("runtime/spinel/cable.rb").unwrap();
+        let cable = crate::runtime_files::read_to_string("runtime/spinel/action_cable.rb").unwrap();
         let connection_class = |name: &str| LibraryClass {
             name: ClassId(Symbol::from(name)),
             is_module: false,
@@ -6342,7 +6344,7 @@ mod tests {
         // The app declares one: the arm names it.
         let mut app = App::new();
         app.library_classes.push(connection_class("ApplicationCable::Connection"));
-        let mut files = vec![("runtime/cable.rb".to_string(), cable.clone())];
+        let mut files = vec![("runtime/action_cable.rb".to_string(), cable.clone())];
         apply_cable_connection(&mut files, &app);
         let out = &files[0].1;
         // VERBATIM the body `tests/spinel_cable_identity.rb` installs
@@ -6351,7 +6353,7 @@ mod tests {
         // default arm's comment block names that class too, in prose.
         assert!(
             out.contains(
-                "  def self.build_connection(cookies)\n    ApplicationCable::Connection.new(cookies)\n  end\n"
+                "    def self.build(cookies)\n      ApplicationCable::Connection.new(cookies)\n    end\n"
             ),
             "generated arm not written:\n{out}"
         );
@@ -6368,18 +6370,23 @@ mod tests {
 
         // No connection class: the file ships its default arm untouched,
         // and the blog fixture keeps connecting anonymously.
-        let mut files = vec![("runtime/cable.rb".to_string(), cable.clone())];
+        let mut files = vec![("runtime/action_cable.rb".to_string(), cable.clone())];
         apply_cable_connection(&mut files, &App::new());
-        assert_eq!(files[0].1, cable, "a channel-less app had its cable.rb rewritten");
+        assert_eq!(files[0].1, cable, "a channel-less app had its action_cable.rb rewritten");
 
-        // `action_cable.rb` also ends in `cable.rb` and carries no
-        // markers; the suffix test must not claim it.
+        // The transport file is a DELEGATION to the factory and carries
+        // no markers of its own; a second copy of the arm there would be
+        // two spellings of one class per tree.
         let mut app2 = App::new();
         app2.library_classes.push(connection_class("ApplicationCable::Connection"));
-        let action_cable = crate::runtime_files::read_to_string("runtime/spinel/action_cable.rb").unwrap();
-        let mut files = vec![("runtime/action_cable.rb".to_string(), action_cable.clone())];
+        let transport = crate::runtime_files::read_to_string("runtime/spinel/cable.rb").unwrap();
+        assert!(
+            transport.contains("    ActionCable::Connection.build(cookies)\n"),
+            "cable.rb no longer delegates to the generated factory:\n{transport}"
+        );
+        let mut files = vec![("runtime/cable.rb".to_string(), transport.clone())];
         apply_cable_connection(&mut files, &app2);
-        assert_eq!(files[0].1, action_cable, "action_cable.rb was rewritten");
+        assert_eq!(files[0].1, transport, "cable.rb was rewritten");
     }
 
     /// `Content#to_s` renders through the app's own content layout —

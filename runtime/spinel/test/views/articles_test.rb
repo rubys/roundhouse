@@ -114,9 +114,12 @@ class ViewsArticlesTest < Minitest::Test
   def test_index_subscribes_to_articles_stream
     html = Views::Articles.index([@article])
     assert_includes html, %(<turbo-cable-stream-source)
-    # base64(JSON("articles")) — matches Rails' signed-stream-name shape
-    # after the compare harness strips the `--<sig>` suffix.
-    assert_includes html, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
+    # base64(JSON("articles")), signed the way Rails signs it
+    # (`Turbo::Streams::StreamName.signed`, keyed off the harness's
+    # empty `secret_key_base`). Both lanes derive the same key and the
+    # same HMAC, so the digest is pinned whole; a lane whose verifier
+    # drifted from Rails' would fail here before the compare did.
+    assert_includes html, %(signed-stream-name="ImFydGljbGVzIg==--12c6b97f1ee5ef2f5a891bc23a2be37ddfaea83fc269c55b4677e86225e66dd7")
   end
 
   # ── show.rb ─────────────────────────────────────────────────────
@@ -148,8 +151,9 @@ class ViewsArticlesTest < Minitest::Test
     # and ends up at id=3, which would shift the encoded stream-name.
     fixture_article = ArticlesFixtures.one
     html = Views::Articles.show(fixture_article)
-    # base64(JSON("article_1_comments")) → ImFydGljbGVfMV9jb21tZW50cyI=
-    assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--unsigned")
+    # base64(JSON("article_1_comments")) → ImFydGljbGVfMV9jb21tZW50cyI=,
+    # signed as in `test_index_subscribes_to_articles_stream`.
+    assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--21986ce1c948225d25f5be71fcd498633c89f10e2bad709fdec6b0c09030d11f")
   end
 
   def test_show_renders_comments

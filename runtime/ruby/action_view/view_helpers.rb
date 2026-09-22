@@ -727,13 +727,10 @@ module ActionView
       parts.join("\n")
     end
   
-    # Matches Rails' `turbo_stream_from` byte-output: the channel
-    # name travels base64-encoded-JSON through `signed-stream-name`
-    # so the Action Cable client can decode it server-side. Rails
-    # additionally HMAC-signs the value with a `--<sig>` suffix; we
-    # emit `--unsigned` (matches the other targets' runtimes), and
-    # the compare harness's existing ignore rule strips the suffix
-    # so the unsigned base64 value matches Rails' signed value.
+    # Matches Rails' `turbo_stream_from` byte-output: the stream name
+    # travels through `signed-stream-name` as `signed_stream_name`
+    # below spells it, and the channel that will be asked for it is
+    # named beside it.
     # `channel` is the class the SUBSCRIBER will name in its identifier,
     # and it is load-bearing rather than decorative. turbo-rails 2.0.16:
     #
@@ -751,8 +748,23 @@ module ActionView
     # the lowering, which knows the answer, and an omitted optional
     # parameter is its own hazard on the strict targets.
     def self.turbo_stream_from(stream, channel)
-      encoded = Base64.strict_encode64(JSON.generate(stream))
-      %(<turbo-cable-stream-source channel="#{channel}" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
+      %(<turbo-cable-stream-source channel="#{channel}" signed-stream-name="#{signed_stream_name(stream)}"></turbo-cable-stream-source>)
+    end
+
+    # The attribute's value: base64 of the JSON-serialized name, which
+    # is the payload half of what Rails' `Turbo.signed_stream_verifier
+    # .generate` writes, under a suffix that says whether it is signed.
+    #
+    # `--unsigned` HERE, for the targets with no `MessageVerifier` to
+    # sign with (docs/pipeline/runtime.md, "A Turbo stream name is not
+    # signed"). The ruby family reopens this in
+    # runtime/spinel/turbo_streams.rb to write Rails' own HMAC suffix,
+    # so on those lanes the value verifies under a real Rails and a
+    # spelled name is refused. One writer per tree either way: this is
+    # the only method that spells the suffix, and the reader
+    # (`Turbo::Streams::StreamName.verified`) lives beside the reopen.
+    def self.signed_stream_name(stream)
+      Base64.strict_encode64(JSON.generate(stream)) + "--unsigned"
     end
   
     # ── form_with primitives ─────────────────────────────────────────

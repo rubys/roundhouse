@@ -1621,41 +1621,46 @@ the runtime already stores, so the type stays.
   text to match. Those sites stay dynamic and join the
   `errors_index` residue ledger.
 
-### A Turbo stream name is not signed
+### A Turbo stream name is not signed — CLOSED on the ruby family
 
-`ActionView::ViewHelpers.turbo_stream_from` writes
-`signed-stream-name="<base64-of-JSON>--unsigned"`, and both readers —
-`Cable::Connection#decode_stream_name` and
-`Turbo::Streams::StreamName.verified` — split on `--` and ignore the
-suffix. Rails HMAC-signs the value with `Turbo.signed_stream_verifier`
-and refuses a name that does not verify.
+**CLOSED 2026-09-22 on the ruby family (spinel + CRuby overlay).**
+`Turbo::Streams::StreamName.signed` / `.verified`
+(`runtime/spinel/turbo_streams.rb`) are turbo-rails' verifier
+reproduced: `ActiveSupport::MessageVerifier.new(key, digest: "SHA256",
+serializer: JSON)` with the key derived from `secret_key_base` under
+the gem's own salt (`turbo/signed_stream_verifier_key`), and no
+`_rails` metadata envelope because turbo signs with no purpose and no
+expiry. The bytes are pinned against campfire's Rails —
+`runtime/spinel/test/turbo_streams_test.rb` holds two names Rails
+minted for a known secret — so a name this runtime writes verifies
+under Rails and a name Rails signed verifies here.
 
-**Why.** Signing is not the hard part; agreeing on the key is. That
-reason has EXPIRED as of 2026-09-04: `MessageVerifier::ITERATIONS` is
-1_000 now and a Rails-minted cookie verifies here (see "Signed cookies
-interoperate with Rails" below), so the key question is settled and only
-the three-ended change is left. It is still all three ends or none —
-`turbo_stream_from`, `decode_stream_name` and `Turbo::Streams::StreamName`
-in one commit — because two of them agreeing and the third not is the
-failure that looks like it works.
+**Both ends in one file.** `ActionView::ViewHelpers.turbo_stream_from`
+spells the attribute through `ViewHelpers.signed_stream_name`, which
+`turbo_streams.rb` reopens for this family to write the signed name;
+`verified` is the reader a subscribe reaches through the channel it
+named. A spelled name, a tampered digest, a name signed under another
+secret, and the old `--unsigned` encoding are all refused before any
+channel's guard runs (`tests/overlay_cable_dispatch.rb`). The
+`decode_stream_name` this section used to name as a third end was
+removed by channel dispatch (below).
 
-**What it costs.** A stream name is tamperable: a client can subscribe
-to any stream whose name it can spell. Signing would close that, and
-nothing else — a verified name still carries no expiry and no binding
-to a user, which is why campfire guards its room streams with a channel
-rather than with the signature. That guard is a separate divergence,
-and it is the one below.
-
-Real signing lands in one commit across all three ends —
-`turbo_stream_from`, `decode_stream_name`, and
-`Turbo::Streams::StreamName` — or not at all: two of them agreeing and
-the third not is the failure that looks like it works.
+**What is still open — the strict targets.** The shared
+`runtime/ruby/action_view/view_helpers.rb` writes
+`signed-stream-name="<base64-of-JSON>--unsigned"` for the targets
+that have no `MessageVerifier` (rust, go, typescript, python, crystal,
+kotlin, swift, csharp, elixir — none carries `message_verifier.rb`),
+and their cable glue, where it exists, ignores the suffix. On those
+lanes a client can still subscribe to any stream it can spell. Signing
+there is a per-target port of PBKDF2 + HMAC-SHA256, and it should
+arrive with the rest of the verifier (signed cookies, signed ids), not
+alone.
 
 ### A cable subscribe is not authorized on the SPINEL lane — CLOSED
 
 **CLOSED 2026-08-30 on BOTH lanes.** `Cable.subscribe`
 (`runtime/spinel/cable.rb`) now reads the `channel` the identifier
-names, builds it through the generated `Cable.build_channel`
+names, builds it through the generated `ActionCable::Channel.build`
 (`project::apply_cable_channels` — one eager arm per class descending
 from `ActionCable::Channel::Base`, found by transitive descent, plus
 `Turbo::StreamsChannel`), runs the app's own `subscribed`, and
@@ -1915,24 +1920,13 @@ either. The two have to close in that order.
 line and the reason, so the absence names itself in the file someone
 would read.
 
-### A cable stream name is not signed, on either lane
+### A cable stream name is not signed, on either lane — CLOSED
 
-`turbo_stream_from` writes `<base64-of-JSON>--unsigned` and
-`Turbo::Streams::StreamName.verified` reads it back by splitting on
-`--` and ignoring the suffix. Rails HMAC-signs the value.
-
-**What it costs.** A client can subscribe to any stream it can SPELL,
-and the names are guessable — they are GlobalIDs. On the CRuby lane the
-app's own channel guard is what stands between a spelled name and its
-fan-out (campfire's `RoomMessagesChannel` re-derives the room from the
-name and asks `user.rooms.find_by`), which is a real check but an
-app-supplied one: an app that guards nothing is wide open. On spinel
-nothing stands there at all.
-
-Real HMAC signing belongs in `runtime/spinel/turbo_streams.rb`, with
-`turbo_stream_from` and `verified` changed in the same commit, once the
-key-derivation question (`message_verifier.rb`'s iteration count vs
-Rails') is settled.
+**CLOSED 2026-09-22.** See "A Turbo stream name is not signed" above:
+the ruby family signs and verifies with Rails' bytes, and the channel
+guard (`RoomStreamsAreAuthorized`) now stands BEHIND a signature check
+rather than instead of one. What remains is the strict targets' half,
+recorded there.
 
 ### `strip_tags` leaves entity references alone
 

@@ -122,8 +122,9 @@ decision, recorded with its reasoning in the architecture docs:
 The ones a user is most likely to meet: an unsaved record's `id` is
 `0`, not `nil`; attribute writers do not type-cast (the column type
 is enforced at the boundary instead); conditional GET always answers
-fresh; a Turbo stream name is not signed; the query cache replays
-small results only; `increment!` is a read-modify-write.
+fresh; a Turbo stream name is signed only on the Ruby-family targets
+(elsewhere it carries an `--unsigned` placeholder); the query cache
+replays small results only; `increment!` is a read-modify-write.
 
 Anything not in that section that differs from Rails is a bug, and the
 [compare oracle](verifying.md) is how to demonstrate it.

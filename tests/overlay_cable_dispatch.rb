@@ -40,9 +40,15 @@ load "#{root}/runtime/ruby/rails.rb"
 # (`apply_application_reopen` synthesizes `global_id_app` from the module
 # wrapping `class Application < Rails::Application`). campfire's is
 # "campfire", which is half of every gid below.
+# `secret_key_base` beside it: stream names are SIGNED now, and the
+# verifier keys off it. The verifier and its digests ride in as the
+# real files, so the names this driver signs are the names a page
+# would carry.
 module Rails
-  def self.application = @application ||= Struct.new(:global_id_app).new("campfire")
+  def self.application = @application ||= Struct.new(:global_id_app, :secret_key_base).new("campfire", "a" * 64)
 end
+load "#{root}/runtime/spinel/message_digest_cruby.rb"
+load "#{root}/runtime/ruby/action_controller/message_verifier.rb"
 
 # action_cable.rb's one require; the transport half is not under test.
 $LOADED_FEATURES << File.expand_path(
@@ -195,24 +201,29 @@ Room::ALL[2] = Room.new(2)
 MEMBER = User.new(7, [1])          # a member of room 1 only
 OUTSIDER = User.new(8, [])
 
-# The identity a `/cable` handshake resolved, and the connection stub
-# that carries it. `Dispatch` reads nothing else off a connection.
-Identity = Struct.new(:current_user)
-Conn = Struct.new(:identity)
+# The connection a channel is built against. A channel asks it ONE
+# thing — `current_user` — and both real connections answer it: the
+# reactor's `Cable::Connection` off the identity the handshake
+# resolved, and the app's own `ApplicationCable::Connection` directly
+# (which is what `Channel::TestCase` hands a channel).
+Conn = Struct.new(:current_user)
 
 # `turbo_stream_from @room, :messages` mints exactly this, and
 # `ActionView::ViewHelpers.turbo_stream_from` base64s the JSON of it
 # into the page's `signed-stream-name`.
 def stream_name(room, suffix) = "#{room.to_gid_param}:#{suffix}"
 
-def signed(name) = "#{Base64.strict_encode64(JSON.generate(name))}--unsigned"
+# Signed the way the page signs it — `turbo_stream_from` writes
+# `Turbo::Streams::StreamName.signed`, and a name the channel refuses
+# to verify never reaches the membership check.
+def signed(name) = Turbo::Streams::StreamName.signed(name)
 
 def subscribe(channel_name, params, user)
   identifier = { "channel" => channel_name }.merge(params)
   json = JSON.generate(identifier)
   klass = ActionCable::Channel::Base.lookup(channel_name)
   return :no_such_channel if klass.nil?
-  Cable::Dispatch.subscribe(klass, Conn.new(Identity.new(user)), json, identifier)
+  Cable::Dispatch.subscribe(klass, Conn.new(user), json, identifier)
 end
 
 def streams_of(outcome)
@@ -282,6 +293,22 @@ check("a non-member is refused by RoomMessagesChannel",
 check("a member of another room is refused",
       streams_of(subscribe("RoomMessagesChannel",
                            { "signed_stream_name" => signed(stream_name(Room::ALL[2], "messages")) },
+                           MEMBER)),
+      :rejected)
+
+# THE SIGNATURE IS CHECKED, not just the membership: a member who can
+# SPELL the stream they are entitled to still has to present the page's
+# signed name. Under the old `--unsigned` wire either of these was a
+# confirmed subscription.
+check("a bare stream name a member could spell is refused",
+      streams_of(subscribe("RoomMessagesChannel",
+                           { "signed_stream_name" => stream_name(Room::ALL[1], "messages") },
+                           MEMBER)),
+      :rejected)
+check("the old unsigned encoding is refused",
+      streams_of(subscribe("RoomMessagesChannel",
+                           { "signed_stream_name" =>
+                             "#{Base64.strict_encode64(JSON.generate(stream_name(Room::ALL[1], "messages")))}--unsigned" },
                            MEMBER)),
       :rejected)
 

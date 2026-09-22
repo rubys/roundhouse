@@ -46,40 +46,21 @@ module Cable
 
   # THE APP'S OWN `ApplicationCable::Connection`, built against the
   # handshake's cookie jar — or an anonymous one when the app declares
-  # no connection class.
-  #
-  # GENERATED. `project::apply_cable_connection` rewrites the span
-  # between the two markers below from the ingested app, the same way
-  # `apply_controller_dispatch` rewrites `Main.instantiate_controller`:
-  # the class name arrives as a STRING off the wire nowhere here, but
-  # the class itself cannot be reached by `const_get` on a target that
-  # resolves every call statically. An eager arm is the whole answer.
-  #
-  # THE DEFAULT ARM IS NOT A STUB. An app with no
-  # `app/channels/application_cable/connection.rb` — the blog fixture —
-  # connects ANONYMOUSLY, and must: Turbo Stream fan-out predates
-  # identity and has to keep working for an app that never asked for
-  # it. `Connection::Base#connect` is a no-op and its `current_user` is
-  # nil, so a channel that needs a user fails on nil rather than
-  # silently getting somebody else's.
-  #
-  # NO REQUIRE, deliberately: this is a method BODY reference, and
-  # `app/models.rb` (boot.rb, well before any request) has loaded the
-  # class by the time a handshake arrives. Requiring it here would
-  # invert the load order — `ApplicationCable::Connection`'s superclass
-  # is `ActionCable::Connection::Base`, a LOAD-time reference into
-  # `runtime/action_cable`, which requires this file back.
+  # no connection class. The factory itself lives in
+  # `runtime/action_cable.rb` (`ActionCable::Connection.build`, a
+  # generated arm) beside the class it builds, because the test harness
+  # builds the same object: a `Connection::TestCase` runs the app's
+  # `connect` against a jar it seeded, and one factory per tree is what
+  # keeps the connection slot one class per tree (below).
   #
   # ONE RETURN TYPE PER TREE, which is why `WsMessage#initialize` builds
   # its placeholder through here too rather than naming the base class
   # directly: two spellings would make the handler's connection slot
   # poly for no gain: a base class is a union point, and a slot with
   # two spellings in it is one the emitter can no longer monomorphize.
-  # >>> generated: cable-connection
   def self.build_connection(cookies)
-    ActionCable::Connection::Base.new(cookies)
+    ActionCable::Connection.build(cookies)
   end
-  # <<< generated: cable-connection
 
   # Resolve the handshake's identity by running the APP's own `connect`.
   #
@@ -120,37 +101,16 @@ module Cable
     conn
   end
 
-  # THE CHANNEL A SUBSCRIBE FRAME NAMES.
-  #
-  # GENERATED, between the markers, by `project::apply_cable_channels`
-  # — one arm per class in the tree that descends from
-  # `ActionCable::Channel::Base`, found by TRANSITIVE descent (campfire's
-  # channels are two and three levels deep behind
-  # `ApplicationCable::Channel`, so a one-level check finds none of
-  # them). The same eager-arm answer `build_connection` above gives, for
-  # the same reason: the name arrives as a STRING off the wire and this
-  # target has no `const_get`. Only a class the generator wrote an arm
-  # for is reachable, so nothing on the wire can widen the set.
-  #
-  # `Turbo::StreamsChannel` IS ALWAYS AN ARM, and it is not found by
-  # descent: it lives in `runtime/turbo_streams.rb`, not in the app.
-  # It is also the channel that matters most — a
-  # `<turbo-cable-stream-source>` names it unless the page said
-  # otherwise, so an app with no channels of its own still needs this
-  # one to receive anything at all.
-  #
-  # nil for a name nothing defined. `subscribe` answers that with
-  # `reject_subscription`, which is what Action Cable's client expects
-  # and what stops it waiting forever for a confirmation.
-  # >>> generated: cable-channels
+  # THE CHANNEL A SUBSCRIBE FRAME NAMES — `ActionCable::Channel.build`,
+  # the generated arm-per-channel factory in `runtime/action_cable.rb`,
+  # which the test harness shares (`Channel::TestCase#subscribe` builds
+  # the channel the same way, with no socket). nil for a name nothing
+  # defined; `subscribe` answers that with `reject_subscription`, which
+  # is what Action Cable's client expects and what stops it waiting
+  # forever for a confirmation.
   def self.build_channel(name, connection, identifier)
-    if name == "Turbo::StreamsChannel"
-      return Turbo::StreamsChannel.new(
-        connection, identifier, ActionCable::Channel::Parameters.new(identifier))
-    end
-    nil
+    ActionCable::Channel.build(name, connection, identifier)
   end
-  # <<< generated: cable-channels
 
   # Route one subscribe frame to the channel it NAMES, run the app's own
   # `subscribed`, and register whatever streams it asked for.

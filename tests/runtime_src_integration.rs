@@ -1289,7 +1289,17 @@ fn every_runtime_method_body_concretely_typed() {
     // tree on purpose: an `is_a?(Array)` arm here red the Rust, C# and
     // Elixir lanes on one push. What it bought: campfire's sidebar room
     // links render `class="direct"` instead of the array's `inspect`.
-    const CEILING: usize = 428;
+    //
+    // 428 -> 429: `ActiveSupport.sole(list)`, Rails' `Enumerable#sole`
+    // — the one element, or a raise. ONE site, the element read that
+    // is its answer: the parameter is `Array[untyped]` (so the count
+    // checks are typed), and what an Array of anything holds is the
+    // untyped a generic function returns on this runtime, exactly as
+    // `presence_in` answers its `value`. What it bought: campfire's
+    // unread_rooms_channel_test reads `subscription.streams.sole` —
+    // the confirmed stream and the assertion that there is exactly
+    // one, in one call.
+    const CEILING: usize = 429;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -371,9 +371,16 @@ module ActionCable
       # app whose channels need a user and whose connection class does
       # not identify one has a hole, and swallowing it here would hide
       # the hole rather than the error.
+      #
+      # ASKED OF THE CONNECTION, whichever kind it is: `Cable::Connection`
+      # (the socket wrapper, which answers off the identity it was
+      # upgraded with) or the app's own `ApplicationCable::Connection`
+      # directly, which is what `Channel::TestCase#stub_connection`
+      # hands a channel — the same object the spinel lane's channels
+      # hold. One question, two answerers, so the harness needs no
+      # stand-in with an `identity` of its own.
       def current_user
-        identity = @connection&.identity
-        identity&.current_user
+        @connection&.current_user
       end
 
       def stream_from(broadcasting)
@@ -382,14 +389,36 @@ module ActionCable
       end
 
       def stream_for(record)
-        stream_from(self.class.broadcasting_for(record))
+        stream_from(broadcasting_for(record))
+      end
+
+      # THE INSTANCE'S name, not `self.class.channel_name`: inside this
+      # base class `self.class` is the one dynamic read a strict target
+      # resolves to the class the method is written ON, so every
+      # channel's `stream_for` registered `action_cable:channel:base:…`
+      # — one name shared by all of them, the collision `channel_name`
+      # exists to prevent. `ingest::channel_callbacks::lower_channel_names`
+      # bakes `def channel_name; "presence"; end` into every app channel
+      # (Rails' spelling, computed at ingest); this default is what a
+      # channel with nothing baked in — none in an emitted tree — would
+      # read, and on CRuby it is the dynamic answer.
+      def channel_name
+        self.class.channel_name
+      end
+
+      # `broadcasting_for` on the INSTANCE, so `stream_for` (subscribe)
+      # and `broadcast_to` (publish) spell one name from one method;
+      # the class-level twin below is for a caller that names the class
+      # — `PresenceChannel.broadcasting_for(room)` in a test.
+      def broadcasting_for(record)
+        channel_name + ":" + record.to_gid_param
       end
 
       # The PUBLISH half. Now that `stream_for` really subscribes,
       # `broadcasting_for(record)` has subscribers and this delivers to
       # them — the reason it used to raise is gone.
       def broadcast_to(record, message)
-        ActionCable.server.broadcast(self.class.broadcasting_for(record), message)
+        ActionCable.server.broadcast(broadcasting_for(record), message)
       end
 
       # Refusing is a RECORDED decision rather than a raise: campfire's
@@ -402,6 +431,20 @@ module ActionCable
       end
 
       def subscription_rejected?
+        @rejected
+      end
+
+      # What Rails' `Channel::TestCase` mixes into the channel it built
+      # (`ChannelStub#confirmed?`/`#rejected?`): the verdict `subscribed`
+      # left. `confirmed?` is "the confirmation was sent", which
+      # `subscribe_to_channel` does for every subscription it did not
+      # reject. On the class rather than the harness, as the spinel
+      # sibling has them.
+      def confirmed?
+        !@rejected
+      end
+
+      def rejected?
         @rejected
       end
 
@@ -437,6 +480,19 @@ module ActionCable
       end
     end
 
+    # THE CHANNEL A NAME RESOLVES TO — the spinel sibling's generated
+    # arm factory, answered here from the registry `inherited` filled.
+    # `identifier` is the frame's JSON text, as the spinel factory takes
+    # it; `Parameters` on this lane reads a parsed Hash, so the parse is
+    # here. Shared by `Cable::Dispatch` and `Channel::TestCase
+    # #subscribe`, which builds a channel the way a frame would with no
+    # socket under it. nil for a name nothing registered.
+    def self.build(name, connection, identifier)
+      klass = Base.lookup(name)
+      return nil if klass.nil?
+      klass.new(connection, identifier, Parameters.new(JSON.parse(identifier)))
+    end
+
     # The subscribe frame's identifier, read the way a channel body
     # reads it: `params[:room_id]`, symbol key, against JSON that has
     # only string ones.
@@ -465,6 +521,16 @@ module ActionCable
   end
 
   module Connection
+    # THE APP'S OWN `ApplicationCable::Connection` over a cookie jar, or
+    # an anonymous `Base` when the app declares none — the spinel
+    # sibling's generated arm, answered here by `defined?`. Shared by
+    # `Cable.identify` (the handshake's jar) and
+    # `Connection::TestCase#connect` (the jar the test seeded).
+    def self.build(cookies)
+      return ApplicationCable::Connection.new(cookies) if defined?(ApplicationCable::Connection)
+      Base.new(cookies)
+    end
+
     # What `reject_unauthorized_connection` raises. Rails names it the
     # same way, and `Cable.upgrade` is the one place that rescues it:
     # an unauthorized handshake is answered 401 and never hijacked, so

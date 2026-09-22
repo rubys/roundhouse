@@ -444,6 +444,14 @@ module Cable
     # (`current_user`) is read off it.
     attr_reader :identity
 
+    # What a channel asks of its connection. Answered off the identity
+    # so a channel holds ONE question for either connection it can be
+    # built against — this wrapper on a live socket, or the app's
+    # `ApplicationCable::Connection` itself under `Channel::TestCase`.
+    def current_user
+      @identity&.current_user
+    end
+
     def initialize(env, socket, identity = nil)
       @socket = socket
       @buffer = +""
@@ -705,11 +713,10 @@ module Cable
   # Turbo stream fan-out predates identity and must keep working for an
   # app that never asked for it.
   def self.identify(env)
-    klass = connection_class
-    return NO_IDENTITY if klass.nil?
+    return NO_IDENTITY if connection_class.nil?
 
     jar = ActionController::CookieJar.new(CgiIo.parse_cookies(env["HTTP_COOKIE"]))
-    connection = klass.new(jar)
+    connection = ActionCable::Connection.build(jar)
     connection.connect
     connection
   rescue ActionCable::Connection::Authorization::UnauthorizedError

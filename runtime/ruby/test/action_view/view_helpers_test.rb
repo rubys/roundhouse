@@ -396,9 +396,11 @@ class ViewHelpersTest < Minitest::Test
   def test_turbo_stream_from
     out = ViewHelpers.turbo_stream_from("articles", "Turbo::StreamsChannel")
     assert_includes out, %(<turbo-cable-stream-source)
-    # signed-stream-name carries base64(JSON("articles")) +
-    # `--unsigned` suffix; the compare harness strips the HMAC
-    # suffix so this aligns with Rails' signed value.
+    # signed-stream-name carries base64(JSON("articles")) under the
+    # `--unsigned` placeholder the SHARED helper writes for the targets
+    # with no verifier; the ruby family reopens `signed_stream_name`
+    # (runtime/spinel/turbo_streams.rb) to write Rails' HMAC instead,
+    # and that lane's test is runtime/spinel/test/turbo_streams_test.rb.
     assert_includes out, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
     assert_includes out, %(channel="Turbo::StreamsChannel")
   end

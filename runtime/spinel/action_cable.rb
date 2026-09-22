@@ -38,19 +38,11 @@
 #   apart. A reader that inspects `payload` gets text on this target and
 #   a Hash on CRuby; that divergence is in docs/pipeline/runtime.md.
 #
-# SUBSCRIPTION DISPATCH IS NOT IMPLEMENTED, same as the overlay. A client
-# naming a channel (`{"channel":"UnreadRoomsChannel"}`) is not routed to
-# an instance, so `subscribed` never runs and `stream_from` never
-# registers. Turbo's own subscriptions do not come through here at all —
-# they arrive carrying a `signed_stream_name` and `Cable.handle_message`
-# subscribes them directly, which is why Turbo Stream fan-out works
-# without any of this. Until it lands, a raw broadcast reaches every
-# connection that subscribed to the same stream name by other means, and
-# nobody else.
-#
-# The instance side therefore RAISES rather than returning quietly: a
-# channel that accepts a subscription it will never deliver on is the
-# failure that looks like success.
+# SUBSCRIPTION DISPATCH: a subscribe frame is routed to the channel it
+# NAMES through `Channel.build` below (one generated arm per app
+# channel), `subscribed` runs and the streams it asked for are
+# registered — `Cable.subscribe` on the server, `Channel::TestCase
+# #subscribe` in the emitted harness, both through the same factory.
 # The bundled `json` (spinel: the native binding to sp_json.c, activated
 # by this require; CRuby: the stdlib) parses subscribe frames and quotes
 # envelope fields. The flat-key decoder this glue used to carry is gone.
@@ -260,6 +252,38 @@ module ActionCable
   end
 
   module Channel
+    # THE CHANNEL A NAME OFF THE WIRE RESOLVES TO.
+    #
+    # GENERATED, between the markers, by `project::apply_cable_channels`
+    # — one arm per class in the tree that descends from
+    # `ActionCable::Channel::Base`, found by TRANSITIVE descent (campfire's
+    # channels are two and three levels deep behind
+    # `ApplicationCable::Channel`, so a one-level check finds none of
+    # them). The same eager-arm answer `Connection.build` below gives,
+    # for the same reason: the name arrives as a STRING — off the wire in
+    # `Cable.subscribe`, out of a test's identifier in
+    # `Channel::TestCase#subscribe` — and this target has no `const_get`.
+    # Only a class the generator wrote an arm for is reachable, so
+    # nothing on the wire can widen the set.
+    #
+    # `Turbo::StreamsChannel` IS ALWAYS AN ARM, and it is not found by
+    # descent: it lives in `runtime/turbo_streams.rb`, not in the app.
+    # It is also the channel that matters most — a
+    # `<turbo-cable-stream-source>` names it unless the page said
+    # otherwise, so an app with no channels of its own still needs this
+    # one to receive anything at all.
+    #
+    # nil for a name nothing defined.
+    # >>> generated: cable-channels
+    def self.build(name, connection, identifier)
+      if name == "Turbo::StreamsChannel"
+        return Turbo::StreamsChannel.new(
+          connection, identifier, ActionCable::Channel::Parameters.new(identifier))
+      end
+      nil
+    end
+    # <<< generated: cable-channels
+
     class Base
       # A channel is an ORDINARY OBJECT with no transport in it: it is
       # built against a connection, `subscribed` runs, and the caller
@@ -385,7 +409,29 @@ module ActionCable
       # publishes on it: two spellings would be a subscription nobody
       # ever reaches, and only the browser would notice.
       def stream_for(record)
-        stream_from(self.class.broadcasting_for(record))
+        stream_from(broadcasting_for(record))
+      end
+
+      # THE INSTANCE'S name, not `self.class.channel_name`: inside this
+      # base class `self.class` is the one dynamic read a strict target
+      # resolves to the class the method is written ON, so every
+      # channel's `stream_for` registered `action_cable:channel:base:…`
+      # — one name shared by all of them, the collision `channel_name`
+      # exists to prevent. `ingest::channel_callbacks::lower_channel_names`
+      # bakes `def channel_name; "presence"; end` into every app channel
+      # (Rails' spelling, computed at ingest); this default is what a
+      # channel with nothing baked in — none in an emitted tree — would
+      # read, and on CRuby it is the dynamic answer.
+      def channel_name
+        self.class.channel_name
+      end
+
+      # `broadcasting_for` on the INSTANCE, so `stream_for` (subscribe)
+      # and `broadcast_to` (publish) spell one name from one method;
+      # the class-level twin below is for a caller that names the class
+      # — `PresenceChannel.broadcasting_for(room)` in a test.
+      def broadcasting_for(record)
+        channel_name + ":" + record.to_gid_param
       end
 
       # The PUBLISH half of the channel API — `broadcast_to @room,
@@ -405,7 +451,7 @@ module ActionCable
       # MVP — so this is correct-and-unreachable rather than a stub, and
       # nothing has to change here when an action is first routed.
       def broadcast_to(record, message)
-        ActionCable.server.broadcast(self.class.broadcasting_for(record), message)
+        ActionCable.server.broadcast(broadcasting_for(record), message)
       end
 
       # A rejection is recorded, not raised. The caller turns it into
@@ -418,6 +464,21 @@ module ActionCable
       end
 
       def subscription_rejected?
+        @rejected
+      end
+
+      # What Rails' `Channel::TestCase` mixes into the channel it built
+      # (`ChannelStub#confirmed?`/`#rejected?`): the verdict `subscribed`
+      # left. On the base class rather than the harness because the
+      # harness holds the channel in a slot typed as this class.
+      # `confirmed?` is "the confirmation was sent", which
+      # `subscribe_to_channel` does for every subscription it did not
+      # reject.
+      def confirmed?
+        !@rejected
+      end
+
+      def rejected?
         @rejected
       end
 
@@ -541,6 +602,37 @@ module ActionCable
   end
 
   module Connection
+    # THE APP'S OWN `ApplicationCable::Connection`, built against a
+    # cookie jar — the handshake's in `Cable.identify`, a test's own in
+    # `Connection::TestCase#connect` — or an anonymous one when the app
+    # declares no connection class.
+    #
+    # GENERATED. `project::apply_cable_connection` rewrites the span
+    # between the two markers below from the ingested app, the same way
+    # `apply_controller_dispatch` rewrites `Main.instantiate_controller`:
+    # the class itself cannot be reached by `const_get` on a target that
+    # resolves every call statically. An eager arm is the whole answer.
+    #
+    # THE DEFAULT ARM IS NOT A STUB. An app with no
+    # `app/channels/application_cable/connection.rb` — the blog fixture —
+    # connects ANONYMOUSLY, and must: Turbo Stream fan-out predates
+    # identity and has to keep working for an app that never asked for
+    # it. `Base#connect` is a no-op and its `current_user` is nil, so a
+    # channel that needs a user fails on nil rather than silently
+    # getting somebody else's.
+    #
+    # NO REQUIRE, deliberately: this is a method BODY reference, and
+    # `app/models.rb` (boot.rb, well before any request) has loaded the
+    # class by the time a handshake arrives. Requiring it here would
+    # invert the load order — `ApplicationCable::Connection`'s superclass
+    # is `ActionCable::Connection::Base`, a LOAD-time reference into this
+    # file.
+    # >>> generated: cable-connection
+    def self.build(cookies)
+      ActionCable::Connection::Base.new(cookies)
+    end
+    # <<< generated: cable-connection
+
     # What `reject_unauthorized_connection` raises. Rails names it the
     # same way, and `Cable.upgrade` is the one place that rescues it: an
     # unauthorized handshake is answered before the socket is taken over,

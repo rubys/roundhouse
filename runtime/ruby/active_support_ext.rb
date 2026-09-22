@@ -139,6 +139,21 @@ module ActiveSupport
     list.length > 1
   end
 
+  # AS `Enumerable#sole`: THE one element, and a raise for any other
+  # count — Rails' `SoleItemExpectedError` with its two messages. A
+  # core_ext reopen (`Enumerable`) the transpiled runtimes cannot host,
+  # same home and same rule as `many?` above. campfire's
+  # unread_rooms_channel_test reads `subscription.streams.sole` — the
+  # stream a channel confirmed, and the assertion that it confirmed
+  # exactly one, in one call; `first` would keep the read and drop the
+  # assertion.
+  def self.sole(list)
+    n = list.length
+    raise "no item found" if n == 0
+    raise "multiple items found" if n > 1
+    list[0]
+  end
+
   # AS `Array#to_sentence`, default :en connectors: "", "a", "a and b",
   # "a, b, and c". Another core_ext reopen (`Array`) the transpiled
   # runtimes cannot host — same home and same rule as `index_by`, the

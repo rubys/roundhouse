@@ -48,6 +48,23 @@
 //! virtual call on the strict targets' path — an ancestor's callbacks are
 //! copied into the child's method ahead of its own. Same order, same
 //! effect, one resolvable body.
+//!
+//! ## The channel's NAME is a literal too
+//!
+//! `stream_for record` subscribes to `broadcasting_for(record)` =
+//! `"#{channel_name}:#{record.to_gid_param}"`, and Action Cable spells
+//! `channel_name` off the class (`name.sub(/Channel$/, "").gsub("::",
+//! ":").underscore`). Inside `Channel::Base#stream_for` that is
+//! `self.class` — the one dynamic read a strict target resolves to the
+//! class the method is WRITTEN on: on spinel every channel's `stream_for
+//! @room` registered `action_cable:channel:base:<gid>`, one shared name
+//! for every channel, which is exactly the collision `channel_name`
+//! exists to prevent. Invisible on the server while nothing broadcasts
+//! to a channel by name; campfire's own `assert_has_stream_for room`
+//! found it on the compiled lane. So every channel gets
+//! `def channel_name; "presence"; end` — a compile-time fact baked in,
+//! the same rule `lower::broadcasts::push_to_gid_param` states for the
+//! model name — and the runtime base reads the instance method.
 
 use crate::dialect::{LibraryClass, MethodDef};
 use crate::expr::{ExprNode, Literal};
@@ -137,6 +154,45 @@ pub fn lower_channel_callbacks(app: &mut crate::App) {
     for (i, methods) in generated {
         app.library_classes[i].methods.extend(methods);
     }
+}
+
+/// `def channel_name; "<literal>"; end` on every channel that does not
+/// define one. Rails' `Channel::Base.channel_name`, evaluated here.
+pub fn lower_channel_names(app: &mut crate::App) {
+    let channels = channel_class_names(app);
+    let name_sym = Symbol::from("channel_name");
+    for lc in app.library_classes.iter_mut() {
+        let name = lc.name.0.as_str().to_string();
+        if !channels.contains(&name) {
+            continue;
+        }
+        if lc.methods.iter().any(|m| {
+            m.name == name_sym && m.receiver == crate::dialect::MethodReceiver::Instance
+        }) {
+            continue;
+        }
+        let src = format!(
+            "class {name}\n  def channel_name\n    \"{}\"\n  end\nend\n",
+            channel_name_of(&name)
+        );
+        match crate::ingest::ingest_library_classes(src.as_bytes(), "<channel>") {
+            Ok(classes) => lc.methods.extend(classes.into_iter().flat_map(|c| c.methods)),
+            Err(err) => super::survey::record(&err),
+        }
+    }
+}
+
+/// actioncable 8.0's `Channel::Base.channel_name`:
+/// `name.sub(/Channel$/, "").gsub("::", ":").underscore`. `underscore`
+/// on a `::`-free string is the CamelCase-to-snake_case half alone; the
+/// `:` the gsub put in is kept as written.
+pub fn channel_name_of(class_name: &str) -> String {
+    let stripped = class_name.strip_suffix("Channel").unwrap_or(class_name);
+    stripped
+        .split("::")
+        .map(crate::naming::snake_case)
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Every app class descending from `ActionCable::Channel::Base`, by
@@ -296,4 +352,19 @@ fn synthesized_source(class: &str, chain: &[Callback]) -> String {
         body.push_str("    nil\n  end\n\n");
     }
     format!("class {class}\n{body}end\n")
+}
+
+#[cfg(test)]
+mod channel_name_tests {
+    use super::channel_name_of;
+
+    /// The four shapes the corpus has, against what Rails answers.
+    #[test]
+    fn channel_name_matches_action_cable() {
+        assert_eq!(channel_name_of("PresenceChannel"), "presence");
+        assert_eq!(channel_name_of("RoomMessagesChannel"), "room_messages");
+        assert_eq!(channel_name_of("Turbo::StreamsChannel"), "turbo:streams");
+        assert_eq!(channel_name_of("ApplicationCable::Channel"), "application_cable:");
+        assert_eq!(channel_name_of("TypingNotificationsChannel"), "typing_notifications");
+    }
 }

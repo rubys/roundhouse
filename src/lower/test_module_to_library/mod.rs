@@ -833,6 +833,21 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     // Minitest's throw/catch assertion — answers the thrown value.
     ("assert_throws", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
     ("assert_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    // ActionCable::Channel::TestCase / Connection::TestCase — the
+    // harness in runtime/spinel/test/test_helper.rb. `subscribe` is
+    // rewritten to `subscribe_to` by `lower::cable_test_case`;
+    // `subscription`/`connection` are the objects it built.
+    ("stub_connection", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("subscribe_to", || crate::lower::typing::fn_sig(
+        vec![(Symbol::from("channel"), Ty::Str), (Symbol::from("keys"), Ty::Untyped), (Symbol::from("values"), Ty::Untyped)],
+        Ty::Nil,
+    )),
+    ("subscription", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("unsubscribe", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
+    ("assert_has_stream", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("connect", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
+    ("connection", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("assert_reject_connection", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
     ("assert_no_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
     ("refute", || fn_sig_one(Ty::Untyped, Ty::Nil)),
     ("refute_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),

@@ -62,17 +62,21 @@ fn the_include_carries_a_require_for_the_module_it_names() {
     assert!(src.contains("runtime/turbo_streams"), "{src}");
 }
 
-/// TWO ends now, where there were three: `turbo_stream_from` writes the
-/// `--unsigned` suffix and `Turbo::Streams::StreamName.verified` reads
-/// it. The overlay's `cable.rb` used to carry a THIRD — its own
-/// `decode_stream_name`, because a subscribe decoded the name itself
-/// instead of routing to the channel that owns it. Channel dispatch
-/// removed that reason, and the decoder with it, so this asserts the
-/// spelling is gone from cable.rb rather than matching there too.
+/// TWO ends, where there were three: `turbo_stream_from` writes the
+/// signed name through `ViewHelpers.signed_stream_name` (the shared
+/// helper's `--unsigned` placeholder, reopened by
+/// `runtime/spinel/turbo_streams.rb` to sign for real) and
+/// `Turbo::Streams::StreamName.verified` reads it. The overlay's
+/// `cable.rb` used to carry a THIRD — its own `decode_stream_name`,
+/// because a subscribe decoded the name itself instead of routing to
+/// the channel that owns it. Channel dispatch removed that reason, and
+/// the decoder with it, so this asserts the spelling is gone from
+/// cable.rb rather than matching there too.
 #[test]
 fn the_runtime_module_shares_the_unsigned_encoding() {
     let module = std::fs::read_to_string("runtime/spinel/turbo_streams.rb").expect("read");
-    assert!(module.contains(r#"split("--", 2)"#), "{module}");
+    assert!(module.contains(r#"index("--")"#), "{module}");
+    assert!(module.contains("def self.signed_stream_name(stream)"), "{module}");
     let cable = std::fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/cable.rb")
         .expect("read cable");
     assert!(

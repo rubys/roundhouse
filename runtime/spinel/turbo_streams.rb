@@ -7,18 +7,32 @@
 # out and verifies on the way in, so a name the user edited is refused
 # before it reaches a channel.
 #
-# THIS RUNTIME DOES NOT SIGN, and says so at both ends: the value
-# `ActionView::ViewHelpers.turbo_stream_from` writes is
-# `<base64-of-JSON>--unsigned`, and `StreamName.verified` below reads it
-# back by splitting on `--` and ignoring the suffix. Both ends of the
-# wire are in this file now: a subscribe reaches `verified` through the
-# channel it named, so the decoder Cable used to keep of its own is
-# gone and there is one spelling instead of two.
+# THIS RUNTIME SIGNS, the way turbo-rails does. `Turbo.signed_stream
+# _verifier` is
 #
-# WHAT THAT COSTS. An unsigned name is tamperable: a client can
-# subscribe to any stream it can spell. Real HMAC signing belongs here,
-# with `turbo_stream_from` and `verified` changed in the same commit, once the key derivation question (message_verifier.rb's
-# iteration count vs Rails') is settled.
+#   ActiveSupport::MessageVerifier.new(key, digest: "SHA256", serializer: JSON)
+#   key = Rails.application.key_generator.generate_key("turbo/signed_stream_verifier_key")
+#
+# (turbo-rails 2.0.23, lib/turbo-rails.rb + lib/turbo/engine.rb), and a
+# bare `MessageVerifier#generate` with no purpose and no expiry writes
+# no `_rails` metadata envelope: the signed text is
+#
+#   strict_base64(JSON(name)) + "--" + hex(HMAC-SHA256(key, that base64))
+#
+# with the key PBKDF2-derived exactly as `ActionController::
+# MessageVerifier.derive_key` derives every other Rails key in this
+# runtime. Measured against campfire under Rails 8.2 rather than
+# inferred — `test/turbo_streams_test.rb` pins the bytes Rails minted
+# for a known secret — so a name this runtime writes into a page is one
+# Rails would accept, and a name Rails signed verifies here.
+#
+# BOTH ENDS OF THE WIRE ARE IN THIS FILE: `StreamName.signed` is what
+# `ActionView::ViewHelpers.turbo_stream_from` writes (reopened below,
+# ruby family only — the shared helper in runtime/ruby writes the
+# `--unsigned` placeholder for the targets with no verifier, see
+# docs/pipeline/runtime.md), and `StreamName.verified` is what a
+# subscribe reaches through the channel it named. A name the client
+# edited fails the digest before any channel sees it.
 #
 # AUTHORIZATION IS A SEPARATE QUESTION, and it is answered below rather
 # than here: signing decides whether the name was TAMPERED WITH,
@@ -50,21 +64,48 @@ require_relative "broadcasts"
 module Turbo
   module Streams
     module StreamName
-      # The inverse of `turbo_stream_from`'s encoding. `nil` for
-      # anything that is not one of our names, which is what a caller
-      # checking `if stream_name = verified_stream_name_from_params`
-      # expects — campfire's channel rejects the subscription on nil.
+      # turbo-rails' `signed_stream_verifier` is an ordinary
+      # `MessageVerifier` keyed off this salt; the salt is the gem's, not
+      # ours (lib/turbo/engine.rb).
+      SALT = "turbo/signed_stream_verifier_key"
+
+      # `Turbo.signed_stream_verifier.generate(name)`: the base64 of the
+      # JSON-serialized name, signed. What `turbo_stream_from` writes
+      # into the page and what `Turbo::StreamsChannel.signed_stream_name`
+      # answers a test.
+      def self.signed(name)
+        payload = Base64.strict_encode64(JSON.generate(name))
+        payload + "--" + ActionController::MessageVerifier.digest_for(
+          Rails.application.secret_key_base, SALT, payload, false)
+      end
+
+      # `Turbo.signed_stream_verifier.verified(signed)`: the name back,
+      # or nil for anything that does not verify — no `--`, a digest
+      # that does not match, a payload that is not base64 or not a JSON
+      # string. nil is what a caller checking `if stream_name =
+      # verified_stream_name_from_params` expects; campfire's channel
+      # rejects the subscription on it.
+      #
+      # A STRING OR NOTHING. Rails' verifier hands back whatever JSON
+      # was signed; turbo only ever signs the `:`-joined name, so a
+      # payload that decodes to anything else was not minted by
+      # `signed` and reads as tampered.
       def self.verified(signed)
         return nil if signed.nil?
-
-        encoded = signed.to_s.split("--", 2)[0]
-        return nil if encoded.nil? || encoded.empty?
-
+        text = signed.to_s
+        sep = text.index("--")
+        return nil if sep.nil? || sep == 0
+        payload = text[0, sep]
+        digest = text[sep + 2, text.length - sep - 2]
+        expected = ActionController::MessageVerifier.digest_for(
+          Rails.application.secret_key_base, SALT, payload, false)
+        return nil if digest != expected
         begin
-          JSON.parse(Base64.strict_decode64(encoded))
+          value = JSON.parse(Base64.strict_decode64(payload))
         rescue ArgumentError, JSON::ParserError
-          nil
+          return nil
         end
+        value.is_a?(String) ? value : nil
       end
 
       # Mixed into a channel with `include Turbo::Streams::StreamName
@@ -87,6 +128,46 @@ module Turbo
         end
       end
     end
+  end
+end
+
+# The WRITER, reopened for the ruby family: `turbo_stream_from` in the
+# shared `runtime/ruby/action_view/view_helpers.rb` spells the attribute
+# through this one method, and the shared definition writes an
+# `--unsigned` placeholder for the targets that have no verifier. Here
+# the verifier exists, so the page carries the same bytes Rails would
+# write and `StreamName.verified` above is the reader for them. Last
+# definition wins on spinel as on CRuby; this file loads after
+# action_view on both boot chains (boot.rb, test_helper.rb).
+module ActionView
+  module ViewHelpers
+    def self.signed_stream_name(stream)
+      Turbo::Streams::StreamName.signed(stream)
+    end
+  end
+end
+
+# `Turbo.signed_stream_verifier` — the object an app's own test asks
+# to `verified` a name it minted (campfire's room_messages_channel_test
+# hands the channel the VERIFIED, unsigned name to prove it is
+# refused). turbo-rails memoizes a `MessageVerifier` here; this
+# runtime's verifier is the pair of module functions above, so the
+# object is a stateless facade over them.
+module Turbo
+  class SignedStreamVerifier
+    def generate(name)
+      Turbo::Streams::StreamName.signed(name)
+    end
+
+    def verified(signed)
+      Turbo::Streams::StreamName.verified(signed)
+    end
+  end
+
+  SIGNED_STREAM_VERIFIER = SignedStreamVerifier.new
+
+  def self.signed_stream_verifier
+    SIGNED_STREAM_VERIFIER
   end
 end
 
@@ -121,6 +202,14 @@ end
 module Turbo
   class StreamsChannel < ActionCable::Channel::Base
     include Turbo::Streams::StreamName::ClassMethods
+
+    # What `lower_channel_names` bakes into an app channel, spelled here
+    # by hand because this class is the runtime's, not the app's:
+    # `"Turbo::StreamsChannel".sub(/Channel$/, "").gsub("::", ":")
+    # .underscore`.
+    def channel_name
+      "turbo:streams"
+    end
 
     def subscribed
       if stream_name = verified_stream_name_from_params

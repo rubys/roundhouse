@@ -5,13 +5,16 @@
 # no socket: `ruby tests/spinel_cable_channel.rb .` reproduces it by
 # hand.
 #
-# WHY THIS FILE EXISTS. Until now every method on this Base raised
+# WHY THIS FILE EXISTS. Every method on this Base used to raise
 # ("channel subscriptions are not dispatched yet"), which was true, and
-# which is why the campfire conformance run says nothing about this
+# which is why the campfire conformance run said nothing about this
 # lane: Rails' `ActionCable::Channel::TestCase` builds the channel
 # ITSELF and asserts `stream_for` was called, so a green
-# `presence_channel_test.rb` is fully compatible with a runtime that
-# cannot build a channel at all.
+# `presence_channel_test.rb` was fully compatible with a runtime that
+# could not build a channel at all. Since 2026-09-22 the emitted
+# harness builds a channel through the SAME `ActionCable::Channel
+# .build` the server uses, so campfire's test/channels is a real gate
+# on this lane; this probe stays as the one that needs no emit.
 #
 # The channels below are campfire's EMITTED forms, copied from the
 # transpiled tree rather than from campfire's source — the same rule

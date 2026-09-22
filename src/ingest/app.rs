@@ -1219,6 +1219,7 @@ end
     // is: this turns a class-body macro into real methods, and every
     // later pass reads methods.
     super::channel_callbacks::lower_channel_callbacks(&mut app);
+    super::channel_callbacks::lower_channel_names(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
     // After the splice, so a class method a concern contributed gets

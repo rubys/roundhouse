@@ -1,7 +1,7 @@
 //! ActiveSupport's `Enumerable` extensions on a plain collection,
 //! grounded to a runtime function instead of a core_ext reopen.
 //!
-//! Rails ships `index_by`, `many?` and `to_sentence` by reopening
+//! Rails ships `index_by`, `many?`, `to_sentence` and `sole` by reopening
 //! `Enumerable`/`Array`, which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
 //! reopen a builtin, and spinel AOT cannot dispatch a user-defined
@@ -32,6 +32,21 @@ pub fn apply_enumerable_ext_grounding(app: &mut App) {
     for view in &mut app.views {
         rewrite(&mut view.body);
     }
+    // Test bodies too — untyped at this point (they are typed in
+    // `test_module_to_library`), so only the untyped-gated methods
+    // ground there; `many?`/`to_sentence` want a typed Array receiver
+    // and stay as written, as they always did in a test.
+    for tm in &mut app.test_modules {
+        if let Some(setup) = &mut tm.setup {
+            rewrite(setup);
+        }
+        for t in &mut tm.tests {
+            rewrite(&mut t.body);
+        }
+        for m in &mut tm.helpers {
+            rewrite(&mut m.body);
+        }
+    }
 }
 
 fn rewrite(expr: &mut Expr) {
@@ -46,7 +61,7 @@ fn rewrite(expr: &mut Expr) {
     // a different question no corpus app asks.
     let wants_block = match method.as_str() {
         "index_by" => true,
-        "many?" | "to_sentence" => false,
+        "many?" | "to_sentence" | "sole" => false,
         _ => return,
     };
     if !args.is_empty() || block.is_some() != wants_block {

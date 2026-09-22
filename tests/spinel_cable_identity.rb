@@ -151,13 +151,16 @@ module ApplicationCable
 end
 
 # VERBATIM what `project::apply_cable_connection` splices between the
-# `generated: cable-connection` markers. Pinned from the Rust side by
-# `tests/spinel_cable_identity.rs`, so a change to the generator that
-# did not change this file fails there rather than leaving this test
-# quietly exercising a shape nothing emits.
-module Cable
-  def self.build_connection(cookies)
-    ApplicationCable::Connection.new(cookies)
+# `generated: cable-connection` markers (in `runtime/action_cable.rb`;
+# `Cable.build_connection` delegates there). Pinned from the Rust side
+# by `project.rs`'s generator unit test, so a change to the generator
+# that did not change this file fails there rather than leaving this
+# test quietly exercising a shape nothing emits.
+module ActionCable
+  module Connection
+    def self.build(cookies)
+      ApplicationCable::Connection.new(cookies)
+    end
   end
 end
 

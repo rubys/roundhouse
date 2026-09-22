@@ -199,6 +199,11 @@ fn real_blog_spinel_tests_pass() {
         // list, forwarded whole by campfire's `link_to_room`, measured
         // against Rails 8.1's `link_to`. Rides in the same way.
         "test/attr_value_text_test.rb",
+        // The ruby family's Turbo stream-name signer
+        // (runtime/turbo_streams.rb): two names Rails minted for a known
+        // secret, so a match is interoperation rather than
+        // self-consistency, plus the refusals. Rides in the same way.
+        "test/turbo_streams_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }
