@@ -40,13 +40,36 @@
 #                    formula implies costs it 19%.)
 #     truffleruby    the `ruby` tree UNMODIFIED under TruffleRuby (it
 #                    compiles the C extensions itself), in the
-#                    `ruby-1p` shape: one process x --threads. TruffleRuby
-#                    keeps a GIL for Ruby code, so more threads only
-#                    contend (ladder: 4 threads 458 · 8 416 · 12 384 ·
-#                    40 293 req/s), and the row it is read against is
-#                    `ruby-1p`. Heap pinned at 1 GB.
+#                    `ruby-1p` shape: one process x --threads, heap 1 GB,
+#                    read against `ruby-1p`.
+#
+#                    THE DEFAULT SHAPE IS LOCKED, AND THAT IS THE POINT.
+#                    TruffleRuby has NO GVL for Ruby code (it has not for
+#                    a decade — Benoit Daloze, 2026-09-22). What serializes
+#                    its threads here is the GLOBAL C-EXTENSION LOCK it
+#                    gives any extension that does not declare
+#                    `rb_ext_ractor_safe()` / `rb_ext_thread_safe()`, and
+#                    `sqlite3` 2.9.3 declares neither — so every row every
+#                    thread steps queues behind every other thread's, and
+#                    the ladder INVERTS (4 threads 458 · 8 416 · 12 384 ·
+#                    40 293 req/s).
+#
+#                    `--cexts-lock=false` (TruffleRuby's own documented
+#                    benchmarking advice) removes it and is worth 2.5x on
+#                    /rooms/1: 432 -> 1,078 req/s at 5 threads, 393 -> 977
+#                    at 12, 0 non-2xx, identical tag counts. Single-threaded
+#                    it is worth ~3% (2.44 -> 2.36 us/row), which is how it
+#                    hides from a microbenchmark.
+#
+#                    THE LANE RUNS THE DEFAULT anyway, because that is what
+#                    `bundle install` gives a deployer, and `BENCH_CEXTS_LOCK=0`
+#                    runs the other one. The shape report names which.
 #
 #   THE OTHER RUNTIME'S STOCK BASELINE:
+#
+#                    (Stock Rails barely notices the lock — 89 vs 93 req/s,
+#                    inside its own run-to-run spread: at ~18 req/s/thread
+#                    it never reaches the lock.)
 #
 #     rails-truffleruby  once-campfire itself under TruffleRuby — the
 #                    oracle tree, its own compiled bundle, one Puma
@@ -757,11 +780,19 @@ start_lane() {
             # is one core of Ruby execution plus the compiler and GC
             # threads, and more threads only contend (header ladder).
             local tt="$THREADS"
-            printf 'runtime=truffleruby\nheap=%s\nworkers=0 (one process, no fork)\nthreads=%s\n' \
-                "$JVM_HEAP" "$tt" > "$shape"
+            # See the header: the C-extension lock, not a GVL, is what
+            # serializes this lane. Default = locked (what a deployer
+            # gets); BENCH_CEXTS_LOCK=0 measures the other shape. Either
+            # way the shape report says which one ran.
+            local tropt="--vm.Xmx$JVM_HEAP" cexts=1
+            if [[ "${BENCH_CEXTS_LOCK:-1}" == "0" ]]; then
+                tropt="$tropt --experimental-options --cexts-lock=false"; cexts=0
+            fi
+            printf 'runtime=truffleruby\nheap=%s\nworkers=0 (one process, no fork)\nthreads=%s\ncexts-lock=%s\n' \
+                "$JVM_HEAP" "$tt" "$cexts" > "$shape"
             ( cd "$EMIT" && exec env RAILS_ENV=production \
                 RAILS_MAX_THREADS="$tt" WEB_CONCURRENCY=0 PORT="$port" \
-                TRUFFLERUBYOPT="--vm.Xmx$JVM_HEAP" \
+                TRUFFLERUBYOPT="$tropt" \
                 truffleruby -S bundle exec puma -C config/puma.rb config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
@@ -1450,16 +1481,22 @@ env["notes"] = [
    "pinned at 1 GB (512 MB, the blog's budget, holds the tree but costs " \
    "it 24% to GC pressure)." if jvm_ran),
   ("<code>truffleruby</code> reads the other way from the blog page, and " \
-   "the reason is measured rather than guessed: TruffleRuby keeps a GIL " \
-   "for Ruby code, so one process is one core of Ruby execution, and the " \
-   "<code>sqlite3</code> gem's C boundary is 2.6× dearer there (2.2 vs " \
-   "0.85 µs per row stepped, 2026-09-21, same box) while pure-Ruby work " \
-   "is an order of magnitude faster. The blog's pages cross that boundary " \
-   "a handful of times per request and gain 1.8× on Truffle; campfire's " \
-   "room page steps a few hundred rows and pays for each one. Read it " \
-   "against <code>ruby-1p</code>, the same one-process shape on CRuby: " \
-   "this row is the per-core runtime comparison for a row-heavy " \
-   "page." if tr_ran),
+   "the cause is the GEM, not the runtime. TruffleRuby has no GVL for " \
+   "Ruby code; it gives a GLOBAL C-EXTENSION LOCK to any extension that " \
+   "has not declared itself thread-safe, and <code>sqlite3</code> 2.9.3 " \
+   "declares neither <code>rb_ext_ractor_safe()</code> nor " \
+   "<code>rb_ext_thread_safe()</code> — so every row every thread steps " \
+   "queues behind every other thread's. This lane runs the DEFAULT, " \
+   "locked, because that is what <code>bundle install</code> gives a " \
+   "deployer; <code>--cexts-lock=false</code>, TruffleRuby's own " \
+   "documented benchmarking advice, is worth 2.5× on this page (432 → " \
+   "1,078 req/s at 5 threads, 393 → 977 at 12, measured 2026-09-22), " \
+   "which puts the emit at 2.3× the CRuby one-process row rather than " \
+   "0.9×. What the flag does NOT remove is the per-call cost: " \
+   "single-threaded, a row stepped through the gem is 2.4 µs here " \
+   "against CRuby's 0.83, and the lock is only ~3% of that. Read this " \
+   "row against <code>ruby-1p</code>, the same one-process shape on " \
+   "CRuby." if tr_ran),
   ("<code>rails-truffleruby</code> is once-campfire ITSELF under " \
    "TruffleRuby: the same oracle tree, rows, production config and Redis " \
    "fragment cache, with a second bundle whose C extensions TruffleRuby " \
