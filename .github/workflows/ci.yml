@@ -748,6 +748,13 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: cargo test --test framework_tests_spinel -- --ignored
         run: cargo test --test framework_tests_spinel -- --ignored --nocapture
+      # The web-push gem's crypto ported onto spinel's openssl package
+      # (runtime/spinel/web_push_crypto.rb), pinned against the gem's
+      # own bytes. Same staged spinel; the package links the runner's
+      # system libssl.
+      - name: cargo test --test spinel_web_push_crypto -- --ignored
+        if: always()
+        run: cargo test --test spinel_web_push_crypto -- --ignored --nocapture
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
