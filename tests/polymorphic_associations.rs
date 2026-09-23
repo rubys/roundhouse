@@ -118,6 +118,17 @@ fn polymorphic_reader_switches_on_type_and_writer_stores_pair() {
     for needle in ["notifiable_id", "notifiable_type", "\"Comment\"", "\"Message\""] {
         assert!(writer.contains(needle), "writer must contain {needle}: {writer}");
     }
+
+    // `new(notifiable: obj)` routes the key through that writer, so both
+    // halves land. It was skipped (the plain belongs_to route assigns
+    // only the fk), and lobsters' `ModActivity.create_for!` —
+    // `create! item: item` — then failed `item_type` presence.
+    let init = body_of("initialize");
+    assert!(
+        init.contains("method: Symbol(\"notifiable=\")")
+            && init.contains("Sym { value: Symbol(\"notifiable\") }"),
+        "initialize must route attrs[:notifiable] through `notifiable=`: {init}"
+    );
 }
 
 #[test]

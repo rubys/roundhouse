@@ -2105,8 +2105,37 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // for the `.id` read on strict targets. The fk column above
     // already defaulted (`attrs[:user_id] || 0`), so the object key
     // wins when provided; nil-guarded so a plain `new(user_id: 3)`
-    // does nothing extra at runtime. Polymorphic belongs_to skipped —
-    // the object route would also need the `<name>_type` column.
+    // does nothing extra at runtime.
+    //
+    // POLYMORPHIC belongs_to goes through its public writer instead,
+    // because the fk alone is half the pair: `<name>=` stores the id AND
+    // the `<name>_type` string (a per-target `when` over the resolved
+    // implementors, see `synth_polymorphic_writer`). Skipping the key
+    // dropped it silently: lobsters' `ModActivity.create_for!` does
+    // `create! item: item, …`, and every moderation, category and domain
+    // change then failed `item_type` presence — 42 of its model specs.
+    // Only where a writer exists (resolved implementors, or the model's
+    // own `def`); an unresolved polymorphic has no writer to call.
+    for assoc in model.associations() {
+        if let Association::BelongsTo { name, polymorphic: true, polymorphic_targets, .. } = assoc {
+            let writer = Symbol::from(format!("{}=", name.as_str()));
+            if !polymorphic_targets.is_empty()
+                || super::associations::model_defines_instance_method(model, &writer)
+            {
+                let lookup = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(var_ref(attrs.clone())),
+                        method: Symbol::from("[]"),
+                        args: vec![lit_sym(name.clone())],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                stmts.push(assign_via_writer_unless_nil(writer, lookup));
+            }
+        }
+    }
     for assoc in model.associations() {
         if let Association::BelongsTo { name, target, foreign_key, polymorphic: false, .. } = assoc
         {
