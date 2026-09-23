@@ -18,6 +18,8 @@ module ActiveRecord
     def quote_string: (String str) -> String
     def execute: (String sql) -> Result
     def exec_query: (String sql) -> Result
+    def exec_update: (String sql, ?untyped name, ?Array[untyped] binds) -> Integer
+    def exec_delete: (String sql, ?untyped name, ?Array[untyped] binds) -> Integer
   end
 
   class Base

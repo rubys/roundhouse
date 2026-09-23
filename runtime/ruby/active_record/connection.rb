@@ -80,6 +80,23 @@ module ActiveRecord
     def exec_query(sql)
       execute(sql)
     end
+
+    # Rails' `exec_update(sql, name, binds)` / `exec_delete`: DML with
+    # positional `?` binds, answering the rows affected. lobsters
+    # recomputes a comment's score this way (`UPDATE comments SET …
+    # confidence_order = unhex(?) WHERE id = ?`), on every comment and
+    # vote save. The binds go through `sanitize_sql`, the escaping every
+    # other raw-SQL entry here already uses; `name` is Rails' log label.
+    def exec_update(sql, name = nil, binds = [])
+      ActiveRecord.adapter.execute_ddl(Base.sanitize_sql([sql] + binds))
+      ActiveRecord.adapter.changes
+    end
+
+    # lobsters' FullTextSearch drops an index row this way
+    # (`DELETE FROM … where rowid = ?`).
+    def exec_delete(sql, name = nil, binds = [])
+      exec_update(sql, name, binds)
+    end
   end
 
   # The Base half of the raw-SQL surface. Lives HERE (not base.rb)

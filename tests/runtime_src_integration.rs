@@ -1394,7 +1394,14 @@ fn every_runtime_method_body_concretely_typed() {
     // `<col>_was` exist at all — lobsters' User guards a validation on
     // `username_changed?` that 183 of its model specs reach, and
     // campfire's `direct_rooms_keep_their_type` reads `type_was`.
-    const CEILING: usize = 479;
+    //
+    // 479 -> 480: `Connection#exec_update`'s binds, ONE site. Rails'
+    // `exec_update(sql, name, binds)` takes whatever the caller binds,
+    // and `sanitize_sql` escapes each one by its runtime class — the
+    // same untyped statement tail that method has always taken. What it
+    // bought: lobsters' comment score recompute, reached by every
+    // comment and vote save (18 more of its model specs pass).
+    const CEILING: usize = 480;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

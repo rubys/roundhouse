@@ -808,7 +808,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `attributes[name]` fallback). What it buys: `<col>_changed?` /
     // `<col>_was` answer at all; lobsters' `validate_username_timeouts`
     // stopped 183 of its model specs.
-    const CEILING: usize = 969;
+    // 2026-09-23 969 -> 978, +9, MEASURED by grouping the dump by
+    // method: `Connection#exec_update` (+5) and `#exec_delete` (+4), the
+    // raw-SQL DML-with-binds pair. The binds Array and Rails' `name`
+    // log label are declared untyped (they are anything a caller
+    // binds); the rest is the adapter self-send chain `update_counters`
+    // already carries. What it buys: lobsters' comment score recompute
+    // (`exec_update … unhex(?)`), which every comment and vote save
+    // reaches, and FullTextSearch's index-row delete.
+    const CEILING: usize = 978;
 
     assert!(
         all_untyped.len() <= CEILING,
