@@ -790,6 +790,14 @@ end
     for ivar in ["tags_cache", "tags_loaded", "tags_stale"] {
         assert!(writer_dbg.contains(ivar), "writer must assign {ivar}");
     }
+    // The staged value is MATERIALIZED: a Relation assigned as-is
+    // (`self.tags = Tag.where(…)`, lobsters' story factory) became the
+    // cache, so `tags.to_a` handed the Relation back and `.sum { }`
+    // reached `Relation#sum(expr)`.
+    assert!(
+        writer_dbg.contains("method: Symbol(\"to_a\")"),
+        "writer must cache `values.to_a`: {writer_dbg}"
+    );
     let sync = lc.methods.iter().find(|m| m.name.as_str() == "_sync_tags").unwrap();
     let sync_dbg = format!("{:?}", sync.body);
     // join resolution: sibling through assoc gives Tagging + story_id;

@@ -1293,10 +1293,18 @@ fn synth_belongs_to_writer(
 /// :through` association and mark the join rows stale:
 ///
 ///   def tags=(values)
-///     @tags_cache = values
+///     @tags_cache = values.to_a
 ///     @tags_loaded = true
 ///     @tags_stale = true
 ///   end
+///
+/// `.to_a` because the argument is as often a Relation as an Array
+/// (lobsters: `self.tags = Tag.where(tag: final_tags)` in Story, and
+/// the story factory's `tags { Tag.where(tag: "placeholder") }`).
+/// Stored as-is, the cache WAS the Relation, so the reader's
+/// `preloaded` handed it back from `to_a` and `tags.to_a.sum { }` hit
+/// `Relation#sum(expr)`. Rails' writer materializes too. On an Array
+/// it is the identity every strict emitter already renders.
 ///
 /// The cache/loaded pair is the same one the reader and
 /// `_preload_<name>` use, so a read-after-write returns the assigned
@@ -1315,7 +1323,19 @@ fn synth_through_collection_writer(owner: &ClassId, name: &Symbol, target: &Clas
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value } })
     };
     let body = seq(vec![
-        ivar_assign(format!("{}_cache", name.as_str()), var_ref(values.clone())),
+        ivar_assign(
+            format!("{}_cache", name.as_str()),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(values.clone())),
+                    method: Symbol::from("to_a"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+        ),
         ivar_assign(format!("{}_loaded", name.as_str()), bool_lit(true)),
         ivar_assign(format!("{}_stale", name.as_str()), bool_lit(true)),
     ]);
