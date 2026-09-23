@@ -47,6 +47,7 @@ pub(super) fn push_schema_methods(
     // intrinsic (the write-side sibling of `parse_db_time`/`db_now`,
     // native in every target runtime); hydration keeps writing stored
     // text via `<col>_raw=` directly.
+    let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col));
         if is_temporal_col(col) {
@@ -78,6 +79,28 @@ pub(super) fn push_schema_methods(
             methods.push(synth_column_dirty_pred(owner, col, prev_changed_name(col)));
             methods.push(synth_column_dirty_pred(owner, col, saved_change_name(col)));
             methods.push(synth_column_prev_was(owner, col));
+            // The BEFORE-save half: `<col>_changed?`,
+            // `will_save_change_to_<col>?` and `<col>_was`, read by
+            // validations and before_* hooks. Each delegates to the
+            // runtime Base's `changes_to_save` readers, the same split
+            // the saved-change family above takes. A model's own `def`
+            // of the name wins (a synthesized method would drop it).
+            //
+            // DEMAND-GATED, unlike the saved-change family: synthesized
+            // only when some model body names it (see
+            // `model_body_names`). Three methods per column on every
+            // model is a surface each strict emitter would otherwise
+            // have to learn (rust's hand-written model impl, go's
+            // call-form list), for an answer that is the constant
+            // false/nil on those lanes anyway.
+            let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+            for (name, runtime, ret) in pending_change_methods(col) {
+                if demanded.contains(&name)
+                    && !super::associations::model_defines_instance_method(model, &name)
+                {
+                    methods.push(synth_column_delegate(owner, col, name, runtime, ret));
+                }
+            }
         }
     }
 
@@ -355,6 +378,7 @@ pub fn shakeable_synthesized_names(table: &Table) -> Vec<Symbol> {
             names.push(prev_changed_name(col));
             names.push(saved_change_name(col));
             names.push(prev_was_name(col));
+            names.extend(pending_change_methods(col).into_iter().map(|(n, _, _)| n));
         }
     }
     // Mirrors `synth_update_typed(.., bang: true)`.
@@ -1579,6 +1603,100 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
         params: Vec::new(),
         body,
         signature: Some(fn_sig(vec![], Ty::Untyped)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// The pending-change (before-save) Dirty spellings for one column:
+/// `(name, runtime Base method it delegates to, return type)`.
+/// `<col>_changed?` and `will_save_change_to_<col>?` are the same
+/// question in Rails, as the two saved-change predicates are. Shared
+/// by the synthesis and `shakeable_synthesized_names`, so the two lists
+/// cannot drift.
+fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
+    let n = col.name.as_str();
+    vec![
+        (Symbol::from(format!("{n}_changed?")), "attribute_changed?", Ty::Bool),
+        (Symbol::from(format!("will_save_change_to_{n}?")), "attribute_changed?", Ty::Bool),
+        (Symbol::from(format!("{n}_was")), "attribute_was", Ty::Untyped),
+    ]
+}
+
+/// Every method name a model body SENDS or names as a Symbol (`if:
+/// :will_save_change_to_email?`, `before_save :x, if: …`), across all
+/// the models — the demand set for the pending-change synthesis. The
+/// callers in practice are the models' own validations and callbacks
+/// (lobsters' User `username_changed?`, campfire's Room `type_was`),
+/// sometimes on another model's record. A controller or view calling
+/// `<col>_changed?` is not seen; that is a runtime NoMethodError, the
+/// state every such call was in before this synthesis existed.
+fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
+    use crate::dialect::ModelBodyItem;
+    fn walk(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
+        match &*e.node {
+            ExprNode::Send { method, .. } => {
+                out.insert(method.clone());
+            }
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                out.insert(value.clone());
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = std::collections::HashSet::new();
+    for model in models {
+        for item in &model.body {
+            match item {
+                ModelBodyItem::Method { method, .. } => walk(&method.body, &mut out),
+                ModelBodyItem::Scope { scope, .. } => walk(&scope.body, &mut out),
+                ModelBodyItem::Unknown { expr, .. } => walk(expr, &mut out),
+                ModelBodyItem::Callback { callback, .. } => {
+                    out.extend(callback.targets.iter().cloned());
+                    if let Some(c) = &callback.condition {
+                        walk(c, &mut out);
+                    }
+                }
+                ModelBodyItem::Association { .. } | ModelBodyItem::Validation { .. } => {}
+            }
+        }
+    }
+    out
+}
+
+/// `def <name>; self.<runtime>("<col>"); end` — a per-column Dirty
+/// reader that delegates to a name-taking runtime Base method, as
+/// `synth_column_prev_was` does. STRING key: the diffs are over
+/// `attributes`, keyed by column-name String.
+fn synth_column_delegate(
+    owner: &ClassId,
+    col: &Column,
+    name: Symbol,
+    runtime: &str,
+    ret: Ty,
+) -> MethodDef {
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: Symbol::from(runtime),
+            args: vec![super::lit_str(col.name.as_str().to_string())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    MethodDef {
+        name_span: crate::span::Span::synthetic(),
+        name,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], ret)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

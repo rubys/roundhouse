@@ -669,6 +669,37 @@ module ActiveRecord
       changes[name]
     end
 
+    # ---- Pending-change tracking (the BEFORE-save half of Dirty) ----
+    # `changes_to_save` is what the NEXT save would write:
+    # `<col>_changed?`, `will_save_change_to_<col>?` and `<col>_was`,
+    # read by validations and before_* callbacks (lobsters'
+    # `validate_username_timeouts` is guarded on `username_changed?`
+    # and runs on every User save; campfire's
+    # `direct_rooms_keep_their_type` reads `type_changed?` /
+    # `type_was`). The per-column spellings are synthesized by the
+    # lowering and delegate here, exactly as the saved-change readers
+    # above delegate to `saved_changes`.
+    #
+    # STUBS on the strict lanes for the same reason as `saved_changes`:
+    # the diff is ruby-family-only (connection.rb reopen). Here nothing
+    # is pending, so every `<col>_changed?` answers false and `<col>_was`
+    # answers nil, the same subset `<col>_previously_was` already has.
+    # Same two load-bearing shapes as `saved_change_to_attribute?`:
+    # `key?` rather than a nil test, and the Hash bound to a local.
+    def changes_to_save
+      {}
+    end
+
+    def attribute_changed?(name)
+      changes = changes_to_save
+      changes.key?(name)
+    end
+
+    def attribute_was(name)
+      changes = changes_to_save
+      changes[name]
+    end
+
     # `id` never appears in the subclass `attributes` hash, so the
     # created-vs-updated question is answered by the save path itself
     # rather than the snapshot diff.

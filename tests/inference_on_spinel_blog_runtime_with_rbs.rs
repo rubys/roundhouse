@@ -798,7 +798,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // through (the ruby family reopens it to render an Array as Rails
     // does; the shared body is `v.to_s`). The self-send shape the
     // paragraphs above describe, plus the untyped `v` at both ends.
-    const CEILING: usize = 937;
+    // 2026-09-23 937 -> 969, +32, MEASURED by grouping the dump by
+    // method: the before-save Dirty half. base.rb's `attribute_changed?`
+    // and `attribute_was` stubs (+6 each, exactly what their
+    // `saved_change_to_attribute?`/`saved_change_to_attribute` twins
+    // carry), and connection.rb's real `changes_to_save` (+8, the
+    // `__track_saved_changes` diff over the untyped baseline ivar) and
+    // `attribute_was` (+12, the `[prev, value]` pair and the
+    // `attributes[name]` fallback). What it buys: `<col>_changed?` /
+    // `<col>_was` answer at all; lobsters' `validate_username_timeouts`
+    // stopped 183 of its model specs.
+    const CEILING: usize = 969;
 
     assert!(
         all_untyped.len() <= CEILING,

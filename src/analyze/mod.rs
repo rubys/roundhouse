@@ -360,6 +360,12 @@ impl Analyzer {
                 cls.instance_methods
                     .entry(Symbol::from(format!("saved_change_to_{n}?")))
                     .or_insert(Ty::Bool);
+                // `will_save_change_to_<col>?` — the before-save twin of
+                // `saved_change_to_<col>?`, the same question as
+                // `<col>_changed?`.
+                cls.instance_methods
+                    .entry(Symbol::from(format!("will_save_change_to_{n}?")))
+                    .or_insert(Ty::Bool);
                 cls.instance_methods
                     .entry(Symbol::from(format!("{n}_was")))
                     .or_insert(ty.clone());

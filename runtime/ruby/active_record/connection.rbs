@@ -43,5 +43,7 @@ module ActiveRecord
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void
     def saved_changes: () -> Hash[String, untyped]
+    def changes_to_save: () -> Hash[String, untyped]
+    def attribute_was: (String name) -> untyped
   end
 end

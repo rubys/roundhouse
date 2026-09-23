@@ -1383,7 +1383,18 @@ fn every_runtime_method_body_concretely_typed() {
     // `PersistentRequest#perform` reads. What it bought: the hook the
     // port redefines, so push delivery on the compiled lane is the
     // gem's rather than a raise.
-    const CEILING: usize = 475;
+    //
+    // 475 -> 479: the before-save half of ActiveModel::Dirty, FOUR
+    // sites, all one value: an attribute's, out of the `attributes`
+    // Hash, whose values are heterogeneous by construction — the same
+    // reason `attribute_previously_was` already answers untyped. Base's
+    // `attribute_was` stub reads `changes[name]`; the ruby-family
+    // reopen reads the baseline entry, the pair's `[0]` and the
+    // `attributes[name]` fallback. What it bought: `<col>_changed?` and
+    // `<col>_was` exist at all — lobsters' User guards a validation on
+    // `username_changed?` that 183 of its model specs reach, and
+    // campfire's `direct_rooms_keep_their_type` reads `type_was`.
+    const CEILING: usize = 479;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

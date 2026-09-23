@@ -389,5 +389,37 @@ module ActiveRecord
       @__last_saved_attributes = attributes
       nil
     end
+
+    # The pending diff: current attributes against the baseline the
+    # last save (or hydration) left, in the same `[prev, value]` shape
+    # as `saved_changes`. `save` runs validations and before_* hooks
+    # BEFORE `__track_saved_changes` moves the baseline, so they see
+    # what is about to be written, and after_* hooks see nothing
+    # pending — Rails' order (`changes_applied` precedes the after
+    # callbacks).
+    #
+    # A new record has no baseline, so every non-nil attribute reads as
+    # pending. Rails compares against the column default instead, so a
+    # column still holding its default (a `karma` of 0) over-reports
+    # here; nil-default columns, which is what validations guard on,
+    # agree.
+    def changes_to_save
+      previous = @__last_saved_attributes
+      changes = {}
+      attributes.each do |key, value|
+        prev = previous.nil? ? nil : previous[key]
+        changes[key] = [prev, value] if prev != value
+      end
+      changes
+    end
+
+    # Rails' `<col>_was`: the value before the pending change, or the
+    # current value when nothing is pending. Both halves are the
+    # `attributes` form, so a datetime column answers its raw stored
+    # text, as `attribute_previously_was` already does.
+    def attribute_was(name)
+      pair = changes_to_save[name]
+      pair.nil? ? attributes[name] : pair[0]
+    end
   end
 end

@@ -120,6 +120,9 @@ module ActiveRecord
     def attribute_previously_was: (String name) -> untyped
     def saved_change_to_attribute?: (Symbol name) -> bool
     def saved_change_to_attribute: (Symbol name) -> untyped
+    def changes_to_save: () -> Hash[String, untyped]
+    def attribute_changed?: (String name) -> bool
+    def attribute_was: (String name) -> untyped
     def id_previously_changed?: () -> bool
 
     # Per-model DOM prefix (`"article"`, `"comment"`). Used by
