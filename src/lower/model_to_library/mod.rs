@@ -652,6 +652,31 @@ fn report_unclaimed_unknowns(model: &Model) {
                 }
             }
         }
+        // sorbet's pure ANNOTATIONS. The library-class walk drops
+        // these at ingest; a model never saw them until an abstract
+        // base outside `app/models` started being classified as one,
+        // and then every such base reported its `abstract!` as
+        // unlowered DSL. They carry types and nothing else, and the
+        // emitted tree has no sorbet-runtime to read them.
+        if matches!(
+            name,
+            "abstract!" | "interface!" | "final!" | "sealed!" | "sig" | "type_parameters"
+        ) {
+            continue;
+        }
+        // The mixin spelling of the same thing: `extend T::Helpers`.
+        // (`include` is already skipped above, whatever its argument.)
+        if name == "extend" {
+            if let ExprNode::Send { args, .. } = &*expr.node {
+                if let Some(ExprNode::Const { path }) = args.first().map(|a| &*a.node) {
+                    let written =
+                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                    if matches!(written.as_str(), "T::Sig" | "T::Helpers" | "T::Generic") {
+                        continue;
+                    }
+                }
+            }
+        }
         let mut d = Diagnostic::unsupported(
             expr.span,
             None,
