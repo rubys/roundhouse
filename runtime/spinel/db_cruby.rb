@@ -545,8 +545,19 @@ module Db
   # above; both shims (this gem-backed one and spinel-FFI) now support
   # binding. Inlining stays safe regardless since the lowerer controls
   # every string that flows here.
+  # BYTES go out as a hex BLOB literal, `X'…'`. A NUL cannot ride a
+  # quoted literal at all (it ends the SQL text: "unrecognized token"),
+  # and a binary value stored as TEXT sorts before every BLOB, so a
+  # `t.binary` column filled half one way and half the other orders
+  # wrong. Bytes = BINARY-encoded and not plain ASCII (lobsters'
+  # `[a, b, c].pack("CCC")` confidence_order), or any string holding a
+  # NUL. An ASCII-only BINARY string stays text, as it always was.
   def self.escape_string(s)
-    "'" + s.to_s.gsub("'", "''") + "'"
+    str = s.to_s
+    if str.include?("\0") || (str.encoding == Encoding::BINARY && !str.ascii_only?)
+      return "X'" + str.unpack1("H*") + "'"
+    end
+    "'" + str.gsub("'", "''") + "'"
   end
 
   def self.escape_int(n)
