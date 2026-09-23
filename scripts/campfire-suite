@@ -294,12 +294,19 @@ if [[ "$TARGET" == spinel ]]; then
     # ONE FILE PER COMPILE — never batched, see the header — and one log
     # per file, because a row's `why` is its own first compile error and
     # `make -j` interleaves every file's into a single stream.
+    #
+    # A FAILED COMPILE REMOVES THE BINARY. The run step reads "never
+    # linked" off the binary's absence, and under --reuse the tree still
+    # holds the one an earlier run built: without the rm, a compile that
+    # failed was reported as that stale binary's results, as if they were
+    # this build's.
     printf '%s\n' "${TESTS[@]}" |
         (cd "$OUT" && xargs -P "$JOBS" -I{} sh -c '
             t="$1"; log="$2/$(echo "$t" | tr / _).log"
             if make SPIN_TEST_FLAGS="$3" "build/$t" >"$log" 2>&1; then
                 printf "  \033[32mok   \033[0m %s\n" "$t"
             else
+                rm -f "build/$t"
                 printf "  \033[33mBUILD\033[0m %s\n" "$t"
             fi
         ' _ {} "$BUILD_LOGS" "$SPIN_FLAGS")
