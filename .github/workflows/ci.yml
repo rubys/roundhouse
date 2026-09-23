@@ -1282,7 +1282,8 @@ jobs:
       # `to_gid` mint). Files green did not move: the test it turned
       # shares a file with `object-extend`, which is outside the subset
       # and will keep that file red for as long as a compiled target
-      # has no per-object method table.
+      # has no per-object method table — or until upstream takes
+      # basecamp/once-campfire#280, #279's twin for this file.
         env:
           FLOOR_TESTS: 392
           FLOOR_FILES: 66
