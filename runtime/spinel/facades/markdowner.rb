@@ -26,4 +26,11 @@ class Markdowner
     GemFacade.fail!("Markdowner.to_html")
     ""
   end
+
+  # Plain text with links/images/emphasis stripped (upstream lobsters,
+  # User#raw_about) — the same Commonmarker walk, so the same gap.
+  def self.to_raw(text)
+    GemFacade.fail!("Markdowner.to_raw")
+    ""
+  end
 end

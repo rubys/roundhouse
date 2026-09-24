@@ -283,12 +283,7 @@ fn rewrite_library_partial_render(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(nil));
     }
-    let bound: Vec<Option<Expr>> = contract.extras.iter().map(|n| lookup(n)).collect();
-    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
-        for b in bound.into_iter().take(last + 1) {
-            view_args.push(b.unwrap_or_else(nil));
-        }
-    }
+    view_args.extend(contract.extras_args(lookup, nil, span));
     *expr = Expr::new(
         span,
         ExprNode::Send {
@@ -2307,6 +2302,7 @@ fn is_framework_view_helper(name: &str) -> bool {
             // file. campfire's quick-boost forms carry the emoji this
             // way, one per reaction on every message.
             | "hidden_field_tag"
+            | "text_area_tag"
             // Rails' array-of-fragments concat. campfire's
             // `current_user_meta_tags` builds the two `<meta>` tags the
             // page's `<head>` needs and joins them with it.
@@ -3806,6 +3802,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
             .collect(),
         self_returns: std::collections::HashMap::new(),
         local_records: std::collections::HashMap::new(),
+        self_model: None,
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
     //
@@ -3878,6 +3875,8 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         }
     }
     for lc in lcs.iter_mut() {
+        sig.self_model = Some(lc.name.0.as_str().to_string())
+            .filter(|n| all_models.contains(n));
         for m in &mut lc.methods {
             sig.local_records.clear();
             sig.local_records = collect_local_records(&m.body, &sig);
@@ -4151,6 +4150,9 @@ pub(crate) struct RecordSignals<'a> {
     /// assignment must resolve, and to the same model, or the name
     /// answers nothing.
     local_records: std::collections::HashMap<String, String>,
+    /// The model whose methods are being rewritten, when the enclosing
+    /// class is one — what a bare `self` names there.
+    self_model: Option<String>,
 }
 
 fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
@@ -4289,6 +4291,9 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
         };
     }
     match &*arg.node {
+        // (8) `self` inside a model — lobsters'
+        // `comment_short_id_path(self)` in Comment#as_json.
+        ExprNode::SelfRef => sig.self_model.clone(),
         // (2) A singular association read, or (4) `.first` / `.last` on
         // a has_many read — one record of the collection's type. Both
         // are receiver-ful zero-arg Sends, so they share an arm: a
@@ -4407,9 +4412,17 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
             // writes live in other methods this body-scoped map never
             // saw.
             if matches!(&*arg.node, ExprNode::Var { .. }) {
-                return sig.local_records.get(name.as_str()).cloned();
+                if let Some(model) = sig.local_records.get(name.as_str()) {
+                    return Some(model.clone());
+                }
             }
-            None
+            // (3c) `<qualifier>_<model>` — lobsters' `@reparent_user`,
+            // `parent_comment`: the name ends in a model's singular.
+            // Longest suffix first, so `mod_mail` is ModMail, not Mail.
+            let segs: Vec<&str> = name.as_str().trim_start_matches('@').split('_').collect();
+            (1..segs.len())
+                .map(|i| crate::naming::camelize(&segs[i..].join("_")))
+                .find(|camel| all_models.contains(camel))
         }
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
             let camel = crate::naming::camelize(method.as_str());

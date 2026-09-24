@@ -52,6 +52,7 @@ pub(in crate::analyze) fn register(
         Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) });
     app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
     // HTTP cache-control declarations (`expires_in 3.minutes,
     // public: true`) — side-effecting header writes.

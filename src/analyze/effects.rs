@@ -250,7 +250,7 @@ impl super::Analyzer {
         // renders dispatch with no receiver and never reach here.)
         if id.0.as_str().ends_with("Controller") {
             match method.as_str() {
-                "render" | "redirect_to" | "head" => {
+                "render" | "redirect_to" | "redirect_back_or_to" | "head" => {
                     out.insert(Effect::Io);
                 }
                 _ => {}

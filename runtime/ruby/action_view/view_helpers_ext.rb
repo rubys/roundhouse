@@ -127,6 +127,18 @@ module ActionView
       "<input#{render_attrs(attrs)} />"
     end
 
+    # `text_area_tag(name, content, rows: 5)` — Rails' `content_tag
+    # :textarea` with name/id first, the options after, and the content
+    # escaped behind a leading newline (the newline `content_tag`
+    # prepends to every textarea so a body starting with one survives
+    # the HTML parser). lobsters' story form carries one for the
+    # moderator's comment.
+    def self.text_area_tag(name, content = nil, opts = {})
+      name_s = name.to_s
+      head = { name: name_s, id: sanitize_to_id(name_s) }
+      "<textarea#{render_attrs(head)}#{render_attrs(opts)}>\n#{html_escape(content.to_s)}</textarea>"
+    end
+
     # `number_with_precision(4.5678, precision: 2)` → "4.57" — the
     # overlay number-helper's exact shape; here so the spinel tree
     # carries it (users/show renders karma averages). On CRuby the

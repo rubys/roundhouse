@@ -1,0 +1,9 @@
+# Typing contract for the StoryImage façade (see story_image.rb beside
+# this file). The cache-path readers are real; `generate` raises before
+# its unreachable nil tail.
+class StoryImage
+  def initialize: (untyped short_id_or_story) -> untyped
+  def path: () -> untyped
+  def exists?: () -> bool
+  def generate: (untyped url) -> nil
+end

@@ -826,6 +826,34 @@ impl Analyzer {
         // under-informed answers.
         app.inferred_method_params = self.inferred_params.clone();
 
+        // Render sites inside `app/helpers` modules seed partial locals
+        // too — lobsters' ApplicationHelper#link_post renders
+        // `helpers/_link_post` with `link:` a URL String, and nothing
+        // else renders that partial. Harvested only now, off converged
+        // bodies, and only where no view site already said something.
+        let helper_modules: std::collections::HashSet<ClassId> =
+            app.helper_method_index.values().cloned().collect();
+        let mut helper_sites: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        for lc in app.library_classes.iter().filter(|lc| helper_modules.contains(&lc.name)) {
+            for m in &lc.methods {
+                let mut targets = Vec::new();
+                render::extract_partial_render_sites(
+                    &m.body,
+                    &Symbol::from("application/_helper"),
+                    &mut helper_sites,
+                    &mut targets,
+                );
+            }
+        }
+        for (partial, locals) in helper_sites {
+            let entry = app.partial_local_types.entry(partial).or_default();
+            for (k, ty) in locals {
+                if !ty.is_unknown() {
+                    entry.entry(k).or_insert(ty);
+                }
+            }
+        }
+
         if let Ok(name) = std::env::var("RH_DEBUG_CLASS") {
             let id = ClassId(Symbol::from(name.as_str()));
             if let Some(ci) = self.classes.get(&id) {

@@ -5,7 +5,7 @@
 
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
-use crate::naming::singularize;
+use crate::naming::{singularize, snake_case};
 use crate::span::Span;
 
 use crate::lower::view::{
@@ -243,7 +243,20 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // a constant; their per-target emit will migrate to the
         // method form when each target retires its lowered_importmap
         // emitter.
-        JavascriptImportmapTags => {
+        JavascriptImportmapTags { entry: Some(entry) } => {
+            let pins = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                "pins",
+                vec![],
+                None,
+                true,
+            );
+            Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
+        }
+        JavascriptImportmapTags { entry: None } => {
             let pins = super::send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -675,6 +688,24 @@ fn hash_entries(opts: Option<&Expr>) -> Vec<(Expr, Expr)> {
     entries.clone()
 }
 
+/// `RouteHelpers.<model>_path(record.<param>)` for a record whose TYPE
+/// (not name) says which model it is — when that model has a one-member
+/// route. Projected here rather than left to the ruby emit's route-param
+/// pass: a view's analyzer types do not survive to that pass, and a
+/// whole record interpolated into the path renders `#<User…>`. The
+/// projection is Rails' `to_param`: the model's own override when it
+/// has one (lobsters' User → username), else the id.
+fn typed_record_path(ctx: &ViewCtx, model: &str, record: &Expr) -> Option<Expr> {
+    let singular = snake_case(model);
+    let helper = format!("{singular}_path");
+    if ctx.route_helper_arity.get(helper.as_str()).is_none_or(|n| *n != 1) {
+        return None;
+    }
+    let param = if ctx.slug_models.contains(&singular) { "to_param" } else { "id" };
+    let member = send(Some(record.clone()), param, Vec::new(), None, false);
+    Some(super::member_path_call(ctx, &helper, member))
+}
+
 /// Translate the URL-position argument (`link_to text, URL, opts`)
 /// into spinel shape: literal strings pass through, path-helper calls
 /// rewrite to `RouteHelpers.<name>(...)`, bare local records rewrite
@@ -705,6 +736,13 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if matches!(&*url.node, ExprNode::StringInterp { .. }) {
         return Some(rewrite_helpers_in_expr(url, ctx));
     }
+    // A read `case_class_narrow` pinned to a model (`ma.item` inside
+    // `when ModMail`) links through that model's route.
+    if let ExprNode::Cast { target_ty: crate::ty::Ty::Class { id, .. }, .. } = &*url.node {
+        if let Some(call) = typed_record_path(ctx, id.0.as_str(), url) {
+            return Some(call);
+        }
+    }
     // `{controller: …, action: …, page: …}` — Rails' url-options hash.
     // Resolves through the generated route-table lookup (see
     // `lower_url_option_helpers`).
@@ -722,6 +760,17 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     // `#<User:0x…>` into href.
     if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*url.node {
         if args.is_empty() {
+            // A POLYMORPHIC reader's declared target is the association
+            // name (`item`), which names no route; the analyzer's type
+            // for the read — narrowed by a `case ma.item when ModMail`
+            // arm — names the one that does (lobsters' mod activity log).
+            if let Some(crate::ty::Ty::Class { id, .. }) =
+                url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+            {
+                if let Some(call) = typed_record_path(ctx, id.0.as_str(), url) {
+                    return Some(call);
+                }
+            }
             if let Some(target) = ctx.reference_targets.get(method.as_str()) {
                 return Some(super::member_path_call(
                     ctx,
@@ -751,6 +800,20 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
         }
         ViewUrlArg::RecordRef { name } => {
             let singular = singularize(name);
+            // The NAME is the convention; when it names no route
+            // (lobsters' `link_to recipient.username, recipient` over
+            // `mod_mail.recipients`), the analyzer's type for the local
+            // names the one Rails' polymorphic_path would pick. The
+            // record rides whole, like the association-reader arm above.
+            if !ctx.route_helper_arity.contains_key(format!("{singular}_path").as_str()) {
+                if let Some(crate::ty::Ty::Class { id, .. }) =
+                    url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+                {
+                    if let Some(call) = typed_record_path(ctx, id.0.as_str(), url) {
+                        return Some(call);
+                    }
+                }
+            }
             let id_expr = send(
                 Some(var_ref(Symbol::from(name))),
                 "id",

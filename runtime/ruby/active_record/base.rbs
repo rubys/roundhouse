@@ -124,6 +124,7 @@ module ActiveRecord
     def attribute_changed?: (String name) -> bool
     def attribute_was: (String name) -> untyped
     def id_previously_changed?: () -> bool
+    def previously_new_record?: () -> bool
 
     # Per-model DOM prefix (`"article"`, `"comment"`). Used by
     # `ActionView::ViewHelpers.dom_id(record)` to build CSS-id strings

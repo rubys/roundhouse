@@ -208,6 +208,14 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
                     Some((fmt, branch_body)) if fmt.as_str() == "html" => {
                         html = Some(recurse_outer(&branch_body));
                     }
+                    // `format.any` answers every format no earlier arm
+                    // claimed — for the dispatch that is the html
+                    // fallback, unless an explicit `format.html` has it.
+                    Some((fmt, branch_body)) if fmt.as_str() == "any" => {
+                        if html.is_none() {
+                            html = Some(recurse_outer(&branch_body));
+                        }
+                    }
                     Some((fmt, branch_body)) if fmt.as_str() == "json" => {
                         // Narrow mode preserves only simple `render :sym
                         // [, kwargs]` shapes — others fall through and
@@ -257,7 +265,9 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
         // lone `format.html`/`format.json`, or some unrelated shape
         // the pass leaves to the generic walker.
         _ => match classify_format_stmt(body) {
-            Some((fmt, branch_body)) if fmt.as_str() == "html" => recurse_outer(&branch_body),
+            Some((fmt, branch_body)) if matches!(fmt.as_str(), "html" | "any") => {
+                recurse_outer(&branch_body)
+            }
             Some((fmt, branch_body))
                 if fmt.as_str() == "json"
                     && json_arm_drop_reason(&branch_body, with_format_dispatch, breadth).is_none() =>
@@ -870,7 +880,7 @@ pub fn implicit_render_statement(
 /// test failed decoding it: "buffer is not in a known format", which
 /// names the image library and nothing about the terminal.
 const RESPONSE_TERMINALS: &[&str] =
-    &["render", "redirect_to", "head", "send_data", "send_file"];
+    &["render", "redirect_to", "redirect_back_or_to", "head", "send_data", "send_file"];
 
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {

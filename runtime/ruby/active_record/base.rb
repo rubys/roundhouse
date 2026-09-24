@@ -707,6 +707,14 @@ module ActiveRecord
       @id_previously_changed
     end
 
+    # Rails' `previously_new_record?` — the last save was the INSERT.
+    # The same fact `id_previously_changed?` answers from the same flag:
+    # an insert is exactly the save that assigns the id (lobsters'
+    # Comment#log_hat_use runs on a new comment or a changed hat).
+    def previously_new_record?
+      @id_previously_changed
+    end
+
     def save!
       raise RecordInvalid, self unless save
       self

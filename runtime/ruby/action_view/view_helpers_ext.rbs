@@ -9,6 +9,7 @@ module ActionView
     def self.concat: (String string) -> String
     def self.polymorphic_url: (untyped record, ?only_path: bool) -> String
     def self.hidden_field_tag: (untyped name, ?untyped value, ?Hash[Symbol, untyped] opts) -> String
+    def self.text_area_tag: (String | Symbol name, ?String? content, ?Hash[Symbol, untyped] opts) -> String
     def self.number_with_precision: (untyped value, ?precision: Integer) -> String
     def self.number_to_human: (Integer value, ?format: String) -> String
     # `::Time`, not `Time` — these sigs sit inside `module ActionView`,

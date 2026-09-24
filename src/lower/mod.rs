@@ -51,6 +51,11 @@ pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
 pub mod first_or_create;
+mod attr_or_assign;
+mod system_exception;
+mod case_class_narrow;
+mod reset_counters;
+mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
@@ -474,6 +479,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("and_return", &[]),
     ("case_lambda", &[]),
     ("first_or_create", &[]),
+    ("attr_or_assign", &[]),
+    ("system_exception", &[]),
+    ("case_class_narrow", &[]),
+    ("reset_counters", &[]),
+    ("perform_all_later", &[]),
     // `Model.authenticate_by(email: …, password: …)` → bind
     // `find_by(<identifiers>)`, then check `authenticate(<password>)`;
     // macro-inline of a Rails 7.1 name no other pass produces or
@@ -791,6 +801,16 @@ pub fn apply_post_analyze_lowerings(
     ran!("case_lambda");
     first_or_create::apply_first_or_create_lowering(app);
     ran!("first_or_create");
+    attr_or_assign::apply_attr_or_assign_lowering(app);
+    ran!("attr_or_assign");
+    system_exception::apply_system_exception_lowering(app);
+    ran!("system_exception");
+    case_class_narrow::apply_case_class_narrowing(app);
+    ran!("case_class_narrow");
+    reset_counters::apply_reset_counters_lowering(app);
+    ran!("reset_counters");
+    perform_all_later::apply_perform_all_later_lowering(app);
+    ran!("perform_all_later");
     diags.extend(authenticate_by::apply_authenticate_by_lowering(app));
     ran!("authenticate_by");
     group_count::apply_group_count_lowering(app);

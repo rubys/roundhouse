@@ -2231,6 +2231,45 @@ pub struct PartialCallContract {
     pub record: String,
     pub closure: Vec<String>,
     pub extras: Vec<String>,
+    /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
+    /// non-record locals as KEYWORD params (see the strict-locals
+    /// override in the view lowering), not trailing positionals.
+    pub keyword_extras: bool,
+}
+
+impl PartialCallContract {
+    /// The call's trailing arguments for `extras`, given what each name
+    /// binds to. Positional partials take every extra up to the last
+    /// bound one (nil filling the gaps); a strict-locals partial takes
+    /// just the bound ones, by name — its header defaults the rest.
+    pub fn extras_args(
+        &self,
+        lookup: impl Fn(&str) -> Option<Expr>,
+        nil: impl Fn() -> Expr,
+        span: crate::span::Span,
+    ) -> Vec<Expr> {
+        let bound: Vec<Option<Expr>> = self.extras.iter().map(|n| lookup(n)).collect();
+        if self.keyword_extras {
+            let entries: Vec<(Expr, Expr)> = self
+                .extras
+                .iter()
+                .zip(bound)
+                .filter_map(|(n, b)| {
+                    let key = Expr::new(
+                        span,
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } },
+                    );
+                    b.map(|v| (key, v))
+                })
+                .collect();
+            if entries.is_empty() {
+                return Vec::new();
+            }
+            return vec![Expr::new(span, ExprNode::Hash { entries, kwargs: true })];
+        }
+        let Some(last) = bound.iter().rposition(|b| b.is_some()) else { return Vec::new() };
+        bound.into_iter().take(last + 1).map(|b| b.unwrap_or_else(&nil)).collect()
+    }
 }
 
 pub(crate) fn partial_call_contracts(
@@ -2247,10 +2286,35 @@ pub(crate) fn partial_call_contracts(
             continue;
         }
         let stem = base.trim_start_matches('_');
+        let key = (camelize_path(&snake_case(dir)), stem.to_string());
+        // Strict locals declare the whole contract: the first local is
+        // the positional record, the rest are keywords.
+        if let Some(sl) = view.strict_locals.as_ref().filter(|sl| !sl.is_empty()) {
+            let declared: Vec<String> =
+                sl.iter().map(|p| p.name.as_str().to_string()).collect();
+            let closure: Vec<String> = closures
+                .get(&key)
+                .map(|ivs| {
+                    ivs.iter()
+                        .filter(|iv| !declared.iter().any(|d| d == iv.as_str()))
+                        .map(|s| s.as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.insert(
+                key,
+                PartialCallContract {
+                    record: declared[0].clone(),
+                    closure,
+                    extras: declared[1..].to_vec(),
+                    keyword_extras: true,
+                },
+            );
+            continue;
+        }
         let record = singularize(last_segment(dir));
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let mut extras = collect_extra_params(&rewritten, &record);
-        let key = (camelize_path(&snake_case(dir)), stem.to_string());
         let closure: Vec<String> = closures
             .get(&key)
             .map(|ivs| {
@@ -2267,7 +2331,7 @@ pub(crate) fn partial_call_contracts(
                 }
             }
         }
-        out.insert(key, PartialCallContract { record, closure, extras });
+        out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false });
     }
     out
 }
@@ -3132,16 +3196,23 @@ fn declared_local_ty(
     app: &App,
 ) -> crate::ty::Ty {
     let by_name = ivar_ty(name, known_models);
-    if !matches!(by_name, crate::ty::Ty::Untyped) {
-        return by_name;
-    }
-    app.partial_local_types
+    let at_render = app
+        .partial_local_types
         .get(&view.name)
         .and_then(|locals| locals.get(&Symbol::from(name)))
         .filter(|t| !matches!(t, crate::ty::Ty::Untyped))
         .filter(|t| !mentions_relation(t))
-        .cloned()
-        .unwrap_or(by_name)
+        .cloned();
+    // The name is a convention; a render site handing a String is a
+    // fact, and it wins over that convention. lobsters' `helpers/
+    // _link_post` names its URL local `link` — which is also a model.
+    if let Some(crate::ty::Ty::Str) = at_render {
+        return crate::ty::Ty::Str;
+    }
+    if !matches!(by_name, crate::ty::Ty::Untyped) {
+        return by_name;
+    }
+    at_render.unwrap_or(by_name)
 }
 
 /// Does this type mention an unspecialized `Relation`? Such a type is

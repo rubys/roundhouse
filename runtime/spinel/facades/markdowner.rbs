@@ -6,4 +6,5 @@
 # precisely rather than untyped.
 class Markdowner
   def self.to_html: (untyped text, ?untyped opts) -> String
+  def self.to_raw: (untyped text) -> String
 end

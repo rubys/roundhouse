@@ -104,6 +104,32 @@ pub(super) fn push_schema_methods(
         }
     }
 
+    // `<assoc>_previously_changed?` / `<assoc>_changed?` — Rails 7.1's
+    // belongs_to dirty tracking, which asks the FOREIGN KEY's question
+    // (lobsters' Comment: `hat_previously_changed?`). Same bodies as the
+    // key column's predicates; demand-gated like the pending half.
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Association {
+            assoc: crate::dialect::Association::BelongsTo { name, foreign_key, .. },
+            ..
+        } = item
+        else {
+            continue;
+        };
+        let Some(col) = table.columns.iter().find(|c| c.name == *foreign_key) else { continue };
+        let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+        let prev = Symbol::from(format!("{}_previously_changed?", name.as_str()));
+        if demanded.contains(&prev) && !super::associations::model_defines_instance_method(model, &prev) {
+            methods.push(synth_column_dirty_pred(owner, col, prev));
+        }
+        let pending = Symbol::from(format!("{}_changed?", name.as_str()));
+        if demanded.contains(&pending)
+            && !super::associations::model_defines_instance_method(model, &pending)
+        {
+            methods.push(synth_column_delegate(owner, col, pending, "attribute_changed?", Ty::Bool));
+        }
+    }
+
     // def self.table_name
     //
     // `model.table` — the name INGEST computed — not a second
@@ -629,6 +655,29 @@ fn field_storage_setter(table: &Table, field: &Symbol) -> Symbol {
     }
 }
 
+/// A permitted param is a String; a `typed_store` scalar's writer takes
+/// its DECLARED type (`s.integer :avatar_source` → `avatar_source=:
+/// (Integer)`). The gem casts on write the way ActiveModel does, so the
+/// typed factory casts here — handing the String through is what spinel
+/// refused as a contradicted `--rbs` seed on upstream lobsters' User.
+/// Column writers need nothing: their write side is String-shaped.
+fn typed_store_param_value(model: &crate::dialect::Model, field: &Symbol, value: Expr) -> Expr {
+    let attr_ty = crate::lower::typed_store::typed_store_decls(&model.body)
+        .into_iter()
+        .flat_map(|(_, attrs)| attrs)
+        .find(|a| a.name == *field && !a.is_array)
+        .and_then(|a| crate::analyze::typed_store_ty(a.decl_ty.as_str()));
+    match attr_ty {
+        Some(Ty::Int) => no_arg_send(value, "to_i"),
+        Some(Ty::Float) => no_arg_send(value, "to_f"),
+        Some(Ty::Bool) => Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast { value, target_ty: Ty::Bool },
+        ),
+        _ => value,
+    }
+}
+
 /// `recv.<method>` with no arguments or block (e.g. `@col.nil?`, `cond.!`).
 fn no_arg_send(recv: Expr, method: &str) -> Expr {
     Expr::new(
@@ -1100,7 +1149,7 @@ pub(super) fn push_from_params_method(
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
                 method: field_storage_setter(table, field),
-                args: vec![p_field.clone()],
+                args: vec![typed_store_param_value(model, field, p_field.clone())],
                 block: None,
                 parenthesized: false,
             },
@@ -1158,7 +1207,7 @@ pub(super) fn push_from_params_method(
 /// (`rewrite_update_to_typed_variant`) retargets the controller.
 pub(super) fn push_update_typed_variants(
     methods: &mut Vec<MethodDef>,
-    owner: &ClassId,
+    model: &crate::dialect::Model,
     fields: &[Symbol],
     table: &Table,
     spec: &crate::lower::controller_to_library::params::ParamsSpec,
@@ -1166,7 +1215,7 @@ pub(super) fn push_update_typed_variants(
     use crate::lower::controller_to_library::params::model_update_name;
     for bang in [false, true] {
         methods.push(synth_update_typed(
-            owner,
+            model,
             fields,
             table,
             &spec.class_id,
@@ -2836,12 +2885,13 @@ fn column_union_ty(table: &Table) -> Ty {
 ///
 /// Save, return Bool.
 fn synth_update_typed(
-    owner: &ClassId,
+    model: &crate::dialect::Model,
     fields: &[Symbol],
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
 ) -> MethodDef {
+    let owner = &model.name;
     let p = Symbol::from("p");
     let bang = name.as_str().ends_with('!');
 
@@ -2887,7 +2937,7 @@ fn synth_update_typed(
             ExprNode::Send {
                 recv: Some(self_ref()),
                 method: field_storage_setter(table, field),
-                args: vec![p_field],
+                args: vec![typed_store_param_value(model, field, p_field)],
                 block: None,
                 parenthesized: false,
             },

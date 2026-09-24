@@ -100,12 +100,7 @@ pub(super) fn partial_view_call_with_record(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
     }
-    let bound: Vec<Option<Expr>> = contract.extras.iter().map(|n| lookup(n)).collect();
-    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
-        for b in bound.into_iter().take(last + 1) {
-            view_args.push(b.unwrap_or_else(|| nil_expr(span)));
-        }
-    }
+    view_args.extend(contract.extras_args(lookup, || nil_expr(span), span));
     Some(Expr::new(
         span,
         ExprNode::Send {
@@ -1810,7 +1805,10 @@ fn sym_or_str_arg(arg: &Expr) -> Option<String> {
 // args (notice:, status:) pass through unchanged.
 // ---------------------------------------------------------------------------
 
-pub(super) fn rewrite_redirect_to(expr: &Expr) -> Expr {
+pub(super) fn rewrite_redirect_to(
+    expr: &Expr,
+    route_helpers: &std::collections::HashMap<String, Vec<bool>>,
+) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, .. }
             if method.as_str() == "redirect_to" && !args.is_empty() =>
@@ -1826,6 +1824,30 @@ pub(super) fn rewrite_redirect_to(expr: &Expr) -> Expr {
             let first = &args[0];
             let new_first = match &*first.node {
                 ExprNode::Ivar { name } => polymorphic_path(name, e.span),
+                // `redirect_to @mod_mail_message.mod_mail` — a reader on
+                // an ivar, polymorphic the same way, when a one-segment
+                // `<reader>_path` helper exists to name it. That gate is
+                // what keeps `redirect_to @story.url` (a String) intact.
+                // The record goes in whole: emit's route-param pass
+                // projects it (`id`, or `to_param` for a slug model).
+                ExprNode::Send { recv: Some(r), method: m, args: m_args, block: None, .. }
+                    if m_args.is_empty()
+                        && matches!(&*r.node, ExprNode::Ivar { .. })
+                        && route_helpers
+                            .get(&format!("{}_path", m.as_str()))
+                            .is_some_and(|segs| segs.len() == 1) =>
+                {
+                    Expr::new(
+                        first.span,
+                        ExprNode::Send {
+                            recv: Some(const_path(&["RouteHelpers"], first.span)),
+                            method: Symbol::from(format!("{}_path", m.as_str())),
+                            args: vec![first.clone()],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    )
+                }
                 ExprNode::Send { recv: None, method: m, args: m_args, block: m_block, parenthesized }
                     if m.as_str().ends_with("_path") =>
                 {

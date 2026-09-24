@@ -856,7 +856,7 @@ fn build_methods(
             if spec.is_canonical {
                 let writable = writable_permit_fields(model, table, &spec.fields);
                 self::schema::push_update_typed_variants(
-                    &mut methods, &model.name, &writable, table, spec,
+                    &mut methods, model, &writable, table, spec,
                 );
                 continue;
             }
@@ -866,7 +866,7 @@ fn build_methods(
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
             self::schema::push_update_typed_variants(
-                &mut methods, &model.name, &writable, table, spec,
+                &mut methods, model, &writable, table, spec,
             );
         }
         // `create_from_params(p)` / `create_from_params!(p)` — the typed

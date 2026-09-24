@@ -142,6 +142,14 @@ module Base64
     out[0, n].to_s
   end
 
+  # Ruby's lax `decode64` ignores padding and out-of-alphabet bytes
+  # (newlines included) — exactly what `strict_decode64` above already
+  # does, so it is the same body. lobsters' FetchEmailBlocklistJob
+  # decodes a GitHub contents-API payload, which wraps at 60 columns.
+  def self.decode64(s)
+    strict_decode64(s)
+  end
+
   # The inverse: map the URL-safe pair back and hand off to the standard
   # decoder, which already skips padding and any stray byte.
   def self.urlsafe_decode64(s)

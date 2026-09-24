@@ -1,0 +1,9 @@
+# Typing contract for the CachePageJob façade (see cache_page_job.rb
+# beside this file): the job lowering's class-side shape, with a
+# `perform` that raises before its unreachable nil tail.
+class CachePageJob < ApplicationJob
+  def perform: (String path) -> nil
+  def self.perform_later: (String path) -> nil
+  def self.perform_now: (String path) -> nil
+  def self.set: (untyped options) -> CachePageJob
+end

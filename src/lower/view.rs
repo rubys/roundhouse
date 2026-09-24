@@ -36,8 +36,9 @@ pub enum ViewHelperKind<'a> {
     CsrfMetaTags,
     /// `<%= csp_meta_tag %>` — no args.
     CspMetaTag,
-    /// `<%= javascript_importmap_tags %>` — no args.
-    JavascriptImportmapTags,
+    /// `<%= javascript_importmap_tags %>`, or with an explicit entry
+    /// point (`javascript_importmap_tags "user"` — lobsters' layout).
+    JavascriptImportmapTags { entry: Option<&'a Expr> },
     /// `<%= turbo_stream_from "channel" %>` and the multi-streamable
     /// form campfire writes (`turbo_stream_from room, :messages`). The
     /// stream NAME is spelled by `lower::broadcasts::stream_name`,
@@ -474,7 +475,12 @@ pub fn classify_view_helper<'a>(
     match (method, args.len()) {
         ("csrf_meta_tags", 0) => Some(ViewHelperKind::CsrfMetaTags),
         ("csp_meta_tag", 0) => Some(ViewHelperKind::CspMetaTag),
-        ("javascript_importmap_tags", 0) => Some(ViewHelperKind::JavascriptImportmapTags),
+        ("javascript_importmap_tags", 0) => {
+            Some(ViewHelperKind::JavascriptImportmapTags { entry: None })
+        }
+        ("javascript_importmap_tags", 1) => {
+            Some(ViewHelperKind::JavascriptImportmapTags { entry: Some(&args[0]) })
+        }
         ("turbo_stream_from", n) if n >= 1 => {
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })
         }

@@ -31,7 +31,8 @@
 //!   * the module handed at least one instance method to a controller
 //!     (`App::concern_spliced_actions`) — without this a plain helper
 //!     module, which nothing includes either, would lose its body; and
-//!   * nothing else in the emit still says `include <module>` — a MODEL
+//!   * nothing else in the emit still says `include <module>`, and it is
+//!     not an `app/helpers` module (views reach those) — a MODEL
 //!     concern keeps its `include User::Bannable` at the model
 //!     (`splice_concerns_into_models` leaves it), and campfire's
 //!     `Authentication::SessionLookup` is included by
@@ -87,6 +88,11 @@ pub fn apply_spliced_concern_body_prune(app: &mut App) {
             still_included.extend(inner.includes.iter().cloned());
         }
     }
+    // An `app/helpers` module is mixed into every VIEW as well, and the
+    // view lowering calls it as `<Helper>.name(…)`. Upstream lobsters'
+    // ApplicationController `include ApplicationHelper` spliced it, and
+    // the prune left the module empty under ~45 view call sites.
+    still_included.extend(app.helper_method_index.values().cloned());
 
     for lc in &mut app.library_classes {
         if !spliced.contains(&lc.name) || still_included.contains(&lc.name) {

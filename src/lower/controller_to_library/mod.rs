@@ -630,12 +630,53 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
             value,
         } = &*expr.node
         {
+            // A proc constant that reads INSTANCE state is a filter
+            // condition Rails `instance_exec`s on the controller
+            // (upstream lobsters' `CACHE_PAGE = proc { @user.blank? && …
+            // && clear_session_cookie? }` for `caches_page … if:
+            // CACHE_PAGE`). Its consumers are the dropped class-body
+            // calls, and as a class constant the body reads state from no
+            // instance — spinel refuses it. Dropped with them. A body
+            // that reads none (the bench copy's `proc { false }`, after
+            // `bool_fold`) is an ordinary constant and stays.
+            let instance_proc = match &*value.node {
+                ExprNode::Lambda { body, .. } => reads_instance_state(body),
+                ExprNode::Send { recv: None, method, args, block: Some(b), .. }
+                    if args.is_empty() && matches!(method.as_str(), "proc" | "lambda") =>
+                {
+                    reads_instance_state(b)
+                }
+                _ => false,
+            };
             if let [name] = path.as_slice() {
-                out.push((name.clone(), value.clone()));
+                if !instance_proc {
+                    out.push((name.clone(), value.clone()));
+                }
             }
         }
     }
     out
+}
+
+/// Does `body` read the receiver's state — an ivar, or an implicit-self
+/// call? Kernel-ish receiverless calls a class body could also make
+/// (`raise`, `format`) don't count.
+fn reads_instance_state(body: &Expr) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, found: &mut bool) {
+        match &*e.node {
+            ExprNode::Ivar { .. } => *found = true,
+            ExprNode::Send { recv: None, method, .. }
+                if !matches!(method.as_str(), "raise" | "format" | "proc" | "lambda") =>
+            {
+                *found = true
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    walk(body, &mut found);
+    found
 }
 
 /// Define the virtual template hooks `rewrite_render_to_views` called.
@@ -1008,7 +1049,7 @@ fn build_methods(
                 &inherited,
                 controller.name.0.clone(),
                 &deferred_tails,
-                &collect_rescue_handlers(controller, all_controllers),
+                &collect_rescue_handlers(controller, all_controllers, format_breadth),
             ),
         );
     }
@@ -1647,7 +1688,10 @@ fn can_respond_within(
             return;
         }
         if let ExprNode::Send { recv, method, .. } = &*e.node {
-            if matches!(method.as_str(), "render" | "redirect_to" | "head" | "render_404") {
+            if matches!(
+                method.as_str(),
+                "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
+            ) {
                 *found = true;
                 return;
             }
@@ -1776,6 +1820,9 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         .entry(Symbol::from("redirect_to"))
         .or_insert_with(|| positional_with_kwargs("location", Ty::Untyped));
     info.instance_methods
+        .entry(Symbol::from("redirect_back_or_to"))
+        .or_insert_with(|| positional_with_kwargs("fallback_location", Ty::Untyped));
+    info.instance_methods
         .entry(Symbol::from("head"))
         .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
     let _ = kw_rest_opts; // helper retained for future zero-positional kwargs callees
@@ -1834,6 +1881,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
 fn collect_rescue_handlers(
     controller: &Controller,
     all_controllers: &[Controller],
+    format_breadth: FormatBreadth,
 ) -> Vec<RescueHandler> {
     let mut out: Vec<RescueHandler> = Vec::new();
     let mut chain: Vec<&Controller> = vec![controller];
@@ -1925,6 +1973,11 @@ fn collect_rescue_handlers(
                 },
                 (None, None) => continue,
             };
+            // A handler body answers the request the way an action does,
+            // so its `respond_to` flattens the same way — left whole it
+            // reached spinel as a bare `respond_to` in every controller
+            // (upstream lobsters: 41 refusals from three handlers).
+            let body = unwrap_respond_to_with_format_dispatch(&body, format_breadth);
             out.push(RescueHandler { classes: class_args.to_vec(), body });
         }
     }
@@ -2304,7 +2357,7 @@ fn lower_action_body(
     // controller's `<resource>_params` helper body becomes that single
     // call; downstream call sites see a typed value, not a Hash.
     let with_typed_params = self::params::rewrite_to_from_raw(&with_params, params_specs);
-    let with_redirects = rewrite_redirect_to(&with_typed_params);
+    let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
     // up the typed factory shape rather than the legacy attrs-Hash.
