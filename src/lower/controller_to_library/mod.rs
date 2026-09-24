@@ -2167,9 +2167,25 @@ fn action_to_method(
                     .cloned()
                     .unwrap_or(Ty::Untyped)
             };
+            // A defaulted param also holds its DEFAULT whenever a caller
+            // leaves it out, and the call-site unification only sees the
+            // callers that pass it. lobsters' `render_created_comment(
+            // comment, show_tree_lines = true)` had one caller passing a
+            // params String, so the slot said `String?` and the two
+            // one-argument callers handed spinel `true` for a C string.
+            let ty = match &p.default {
+                Some(d) if !p.rest && !matches!(ty, Ty::Untyped) => {
+                    match default_literal_ty(d) {
+                        Some(dt) => union_with(ty, dt),
+                        None => Ty::Untyped,
+                    }
+                }
+                _ => ty,
+            };
             (p.name.clone(), ty)
         })
         .collect();
+    let signature = mark_optional(crate::lower::typing::fn_sig(sig_params, ret_ty), &params);
     // All actions (public + private) are Method — bodies are
     // imperative and computed. AttributeReader is reserved for
     // pure ivar-backed reads that can lower to a TS field.
@@ -2179,13 +2195,64 @@ fn action_to_method(
         receiver: MethodReceiver::Instance,
         params,
         body,
-        signature: Some(crate::lower::typing::fn_sig(sig_params, ret_ty)),
+        signature: Some(signature),
         effects: a.effects.clone(),
         enclosing_class: Some(controller.name.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
             block_param: a.block_param.clone().map(Param::positional),
+    }
+}
+
+/// The type a literal default gives its parameter; `None` for anything
+/// that is not a plain literal (the slot then stays gradual).
+fn default_literal_ty(d: &Expr) -> Option<Ty> {
+    match &*d.node {
+        ExprNode::Lit { value } => Some(match value {
+            Literal::Bool { .. } => Ty::Bool,
+            Literal::Int { .. } => Ty::Int,
+            Literal::Float { .. } => Ty::Float,
+            Literal::Str { .. } => Ty::Str,
+            Literal::Sym { .. } => Ty::Sym,
+            Literal::Nil => Ty::Nil,
+            _ => return None,
+        }),
+        _ => None,
+    }
+}
+
+/// `a | b`, flattening unions and dropping a duplicate.
+fn union_with(a: Ty, b: Ty) -> Ty {
+    let mut variants: Vec<Ty> = Vec::new();
+    for t in [a, b] {
+        match t {
+            Ty::Union { variants: vs } => variants.extend(vs),
+            other => variants.push(other),
+        }
+    }
+    let mut out: Vec<Ty> = Vec::new();
+    for v in variants {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
+}
+
+/// A param with a default is OPTIONAL in the signature — rendered `?T
+/// name` in the RBS — or a caller that leaves it out does not bind.
+fn mark_optional(sig: Ty, params: &[Param]) -> Ty {
+    match sig {
+        Ty::Fn { params: mut tps, block, ret, effects } => {
+            for (tp, p) in tps.iter_mut().zip(params) {
+                if p.default.is_some() && !p.keyword && !p.rest {
+                    tp.kind = crate::ty::ParamKind::Optional;
+                }
+            }
+            Ty::Fn { params: tps, block, ret, effects }
+        }
+        other => other,
     }
 }
 

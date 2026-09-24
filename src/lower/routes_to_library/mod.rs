@@ -919,7 +919,9 @@ fn build_helper_function(
             // SINGULAR key would have been: `user_ids: [ user.id ]`
             // carries ids, and `param_ty` is name-based, so the
             // singular is what it must be asked about.
-            let value_ty = if key.array {
+            let value_ty = if let Some(slug) = key.record_slug {
+                if slug { Ty::Str } else { Ty::Int }
+            } else if key.array {
                 Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
             } else {
                 param_ty(&key.name, false)
@@ -1038,6 +1040,12 @@ pub(crate) struct QueryKey {
     /// reserved, so a helper option spelled that way is the fragment
     /// whatever the caller meant by it.
     pub(crate) anchor: bool,
+    /// Some site passes a model RECORD for this key; Rails renders it
+    /// with `to_param`, and the call-site pass projects it the same way
+    /// (`emit::ruby::library::project_record_arg`). `Some(true)` when
+    /// that model overrides `to_param` (a slug: the key is a String),
+    /// `Some(false)` when it does not (the id: an Integer).
+    pub(crate) record_slug: Option<bool>,
 }
 
 /// Query-string keys each route helper is actually called with —
@@ -1177,12 +1185,28 @@ fn query_param_demand(
     helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
 ) -> std::collections::HashMap<String, Vec<QueryKey>> {
     type Demand = std::collections::HashMap<String, std::collections::BTreeMap<String, bool>>;
+    type Records = std::collections::HashMap<(String, String), bool>;
+    let models: std::collections::HashMap<String, bool> = app
+        .models
+        .iter()
+        .map(|m| {
+            let slug = m.body.iter().any(|item| matches!(
+                item,
+                crate::dialect::ModelBodyItem::Method { method, .. }
+                    if method.name.as_str() == "to_param"
+            ));
+            (m.name.0.as_str().to_string(), slug)
+        })
+        .collect();
     let mut out: Demand = Default::default();
+    let mut records: Records = Default::default();
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
             helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
             out: &mut Demand,
+            models: &std::collections::HashMap<String, bool>,
+            records: &mut Records,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
                 if let Some((segments, required)) = helpers.get(method.as_str()) {
@@ -1195,7 +1219,7 @@ fn query_param_demand(
                         // would only change WHICH error it is, on a page
                         // that renders (a junk URL) today.
                         if args.len() - 1 < *required {
-                            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+                            e.node.for_each_child(&mut |c| walk(c, helpers, out, models, records));
                             return;
                         }
                         if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
@@ -1223,6 +1247,7 @@ fn query_param_demand(
                                     .strip_suffix("_url")
                                     .map(|stem| format!("{stem}_path"))
                                     .unwrap_or_else(|| method.as_str().to_string());
+                                let helper_key = helper.clone();
                                 let seen = out
                                     .entry(helper)
                                     .or_default()
@@ -1231,23 +1256,27 @@ fn query_param_demand(
                                 // Any scalar site demotes the key: see
                                 // `QueryKey`.
                                 *seen = *seen && is_array;
+                                if let Some(slug) = record_model_slug(v, models) {
+                                    records.insert((helper_key.clone(), key.to_string()), slug);
+                                }
                             }
                         }
                     }
                 }
             }
-            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+            e.node.for_each_child(&mut |c| walk(c, helpers, out, models, records));
         }
-        walk(e, helpers, &mut out);
+        walk(e, helpers, &mut out, &models, &mut records);
     };
     for_each_route_call_site(app, &mut collect);
     out.into_iter()
         .map(|(helper, keys)| {
             (
-                helper,
+                helper.clone(),
                 keys.into_iter()
                     .map(|(name, array)| QueryKey {
                         anchor: name == "anchor",
+                        record_slug: records.get(&(helper.clone(), name.clone())).copied(),
                         name,
                         array,
                     })
@@ -1255,6 +1284,27 @@ fn query_param_demand(
             )
         })
         .collect()
+}
+
+/// A query-option value that is a model record: by its analyzed type,
+/// or — for a view body, whose args reach here untyped — by the naming
+/// convention the call-site pass also reads (`@user`, `@showing_user`:
+/// the name, or its `_<model>` suffix, is a model's). Answers whether
+/// that model overrides `to_param`.
+fn record_model_slug(v: &Expr, models: &std::collections::HashMap<String, bool>) -> Option<bool> {
+    if let Some(crate::ty::Ty::Class { id, .. }) = v.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        if let Some(slug) = models.get(id.0.as_str()) {
+            return Some(*slug);
+        }
+    }
+    let name = match &*v.node {
+        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.as_str(),
+        _ => return None,
+    };
+    let segs: Vec<&str> = name.trim_start_matches('@').split('_').collect();
+    (0..segs.len())
+        .map(|i| crate::naming::camelize(&segs[i..].join("_")))
+        .find_map(|camel| models.get(&camel).copied())
 }
 
 /// The `(route, format)` pairs a call site asked for, as

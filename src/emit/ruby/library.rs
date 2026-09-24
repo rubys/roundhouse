@@ -4221,8 +4221,39 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
         // This stayed invisible for as long as `@id` was boxed — a poly
         // interpolates into a path either way. Pinning it (da9c5d89) is
         // what made the contradiction reachable.
-        let slug = sig.slug_models.contains(&model);
-        let wants_str = wants_str_here;
+        project_record_arg(arg, &model, sig, wants_str_here);
+    }
+    // A POSITIONAL empty hash (`new_mod_reparent_path({}, id: …)`) is
+    // Rails' empty options argument. The generated helper takes its
+    // options as keywords only, so the `{}` is an extra positional
+    // there — an ArgumentError under CRuby. It says nothing; drop it.
+    if let ExprNode::Send { args, .. } = &mut *expr.node {
+        args.retain(|a| !matches!(&*a.node,
+            ExprNode::Hash { entries, kwargs: false } if entries.is_empty()));
+    }
+    // Query options (`new_mod_reparent_path({}, id: @reparent_user)`):
+    // Rails renders a record there with `to_param` too. The helper's
+    // query key is typed to match (routes_to_library::query_param_demand
+    // types a record-valued key `String` for a slug model, else `Integer`).
+    if let ExprNode::Send { args, .. } = &mut *expr.node {
+        if let Some(last) = args.last_mut() {
+            if let ExprNode::Hash { entries, kwargs: true } = &mut *last.node {
+                for (_, v) in entries.iter_mut() {
+                    if let Some(model) = arg_record_model(v, sig) {
+                        project_record_arg(v, &model, sig, false);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A record in a route helper's argument, as Rails renders it: the
+/// model's own `to_param` (a slug model), else its id — as text when
+/// the slot is declared `String`.
+fn project_record_arg(arg: &mut Expr, model: &str, sig: &RecordSignals<'_>, wants_str: bool) {
+    {
+        let slug = sig.slug_models.contains(model);
         let span = arg.span;
         let record = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
         let (method, ty) = if slug {

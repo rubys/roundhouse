@@ -53,6 +53,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   resources :domains
   resources :mod_mails
   resources :mod_activities, only: [:index]
+  resources :reparents, only: [:new]
 end
 "#;
 
@@ -150,6 +151,14 @@ end
   end
 end
 "#,
+        ),
+        (
+            "app/controllers/reparents_controller.rb",
+            "class ReparentsController < ApplicationController\n  def new\n    @reparent_user = User.find(params[:id])\n    redirect_to new_reparent_path({}, id: @reparent_user)\n  end\nend\n",
+        ),
+        (
+            "app/controllers/replies_controller.rb",
+            "class RepliesController < ApplicationController\n  def create\n    shown(User.first)\n    shown(User.first, params[:tree])\n  end\n\n  private\n\n  def shown(user, tree = true)\n    head :ok\n  end\nend\n",
         ),
         (
             "app/controllers/domains_controller.rb",
@@ -345,4 +354,27 @@ fn a_job_set_chain_folds_and_no_set_is_synthesized() {
     assert!(!warm.contains("def self.set"), "{warm}");
     let warm_rbs = file(&tree, "app/models/warm_job.rbs");
     assert!(!warm_rbs.contains("def self.set"), "{warm_rbs}");
+}
+
+/// A record in a route helper's QUERY options renders with `to_param`
+/// (User's is its username), the key is typed to match, and Rails'
+/// positional empty-options `{}` is dropped — the generated helper takes
+/// keywords only.
+#[test]
+fn a_record_query_option_projects_to_param_and_the_empty_hash_drops() {
+    let tree = emitted();
+    let ctrl = file(&tree, "app/controllers/reparents_controller.rb");
+    assert!(ctrl.contains("new_reparent_path(id: @reparent_user.to_param)"), "{ctrl}");
+    let rbs = file(&tree, "app/route_helpers.rbs");
+    assert!(rbs.contains("def self.new_reparent_path: (?id: String?) -> String"), "{rbs}");
+}
+
+/// A defaulted param holds its default whenever a caller leaves it out:
+/// the signature is OPTIONAL and includes the default's type, not just
+/// what the passing callers hand it (`String?` from params alone).
+#[test]
+fn a_defaulted_helper_param_is_optional_and_includes_its_default() {
+    let tree = emitted();
+    let rbs = file(&tree, "app/controllers/replies_controller.rbs");
+    assert!(rbs.contains("?(String | bool | nil) tree") || rbs.contains("?(String | nil | bool) tree"), "{rbs}");
 }
