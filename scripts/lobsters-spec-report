@@ -62,6 +62,69 @@ OWNER_LABEL = {
   "unknown" => "untriaged",
 }.freeze
 
+# ── The spinel lane, at its build stage ─────────────────────────────
+# Same checkout, same question, the AOT target. Until the tree links
+# there are no spec results to rank, so the page is the build's result:
+# what stood in the way, where, and the tree to rebuild it from.
+if d["target"] == "spinel"
+  lob = d["lobsters"] || {}
+  rh = d["roundhouse"] || {}
+  b = d["build"] || {}
+  emit = d["emit"] || {}
+  verdict = {
+    "linked" => ["a binary linked", COLOR_OK],
+    "cc_failed" => ["spinel wrote C; cc rejected it", COLOR_FAIL],
+    "refused" => ["spinel refused the program; no C written", COLOR_FAIL],
+    "build_failed" => ["the build failed before cc", COLOR_FAIL],
+  }.fetch(b["result"], [b["result"].to_s, COLOR_FAIL])
+  html = +"<!doctype html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n"
+  html << %(<meta name="viewport" content="width=device-width, initial-scale=1">\n)
+  html << "<title>Lobsters on spinel — build stage</title>\n"
+  html << <<~CSS
+    <style>
+    body { font-family: -apple-system, system-ui, sans-serif; color: #222;
+           max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.5; }
+    h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+    h2 { font-size: 1.2em; margin-top: 2em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
+    .meta { color: #666; font-size: 0.9em; }
+    code { background: #f0f0f0; padding: 0.05em 0.3em; border-radius: 3px; }
+    table { border-collapse: collapse; font-size: 0.9em; }
+    th, td { padding: 4px 10px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    </style>
+  CSS
+  html << "</head>\n<body>\n"
+  html << "<h1>Current lobsters on spinel</h1>\n"
+  html << %(<div class="meta">lobsters <code>#{esc(lob["sha"].to_s[0, 12])}</code>#{lob["dirty"] ? " (dirty)" : ""} · ) +
+          %(roundhouse <code>#{esc(rh["sha"].to_s[0, 12])}</code>#{rh["dirty"] ? " (dirty)" : ""} · ) +
+          %(#{esc(d.dig("spinel", "version"))} · #{esc(d["generated_at"])}</div>\n)
+  html << %(<p style="font-size:1.15em">Build stage: <strong style="color:#{verdict[1]}">#{esc(verdict[0])}</strong> ) +
+          "in #{esc(b["seconds"])} s — #{fmt_int(b["refusals"])} spinel refusal(s), " \
+          "#{fmt_int(b["cc_errors"])} cc error(s), #{fmt_int(emit["type_errors"])} strict type error(s) " \
+          "forced through.</p>\n"
+  html << "<p>Their specs have not run against a compiled tree: #{esc(d.dig("specs", "why"))}. " \
+          "The ruby lane beside this one runs them against the CRuby emit.</p>\n"
+  [["Spinel refusals", b["refusal_groups"]], ["cc errors", b["cc_error_groups"]]].each do |title, groups|
+    next if groups.to_a.empty?
+    html << "<h2>#{title}</h2>\n<table>\n<tr><th class=num>Count</th><th>Message</th><th>Sites</th></tr>\n"
+    groups.each do |g|
+      html << "<tr><td class=num>#{fmt_int(g["count"])}</td><td><code>#{esc(g["message"])}</code></td>" \
+              "<td>#{g["sites"].map { |x| "<code>#{esc(x)}</code>" }.join("<br>")}</td></tr>\n"
+    end
+    html << "</table>\n"
+  end
+  arts = d["artifacts"] || {}
+  html << %(<h2>Reproduce</h2>\n<p><a href="#{esc(arts["tree"])}"><code>#{esc(arts["tree"])}</code></a> ) +
+          "is the emitted tree: unpack it and run <code>spin build</code> in <code>tree/</code>. " +
+          %(The full log is <a href="#{esc(arts["build_log"])}"><code>#{esc(arts["build_log"])}</code></a>.</p>\n)
+  html << %(<div class="meta" style="margin-top:2em">Artifact: <a href="#{esc(File.basename(json_path))}"><code>) +
+          "#{esc(File.basename(json_path))}</code></a> — every number on this page comes from it.</div>\n"
+  html << "</body>\n</html>\n"
+  File.write(out, html)
+  warn "lobsters-spec-report: wrote #{out} (#{fmt_int(File.size(out))} bytes)"
+  exit 0
+end
+
 lob      = d["lobsters"] || {}
 rh       = d["roundhouse"] || {}
 ex       = d["examples"] || {}

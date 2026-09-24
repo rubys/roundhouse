@@ -32,7 +32,15 @@
 #                  Iteration speed only — a stale tree silently reports
 #                  yesterday's compiler, so the JSON records which was used.
 #   --json PATH    write the machine-readable report
-#                  (default build/lobsters-specs/summary.json)
+#                  (default build/lobsters-specs/summary.json, or
+#                  build/lobsters-specs-spinel/summary.json for spinel)
+#   --target T     ruby (default) or spinel. The spinel lane is the same
+#                  question asked of the AOT target, and today it stops at
+#                  its first stage — emit, `spin build`, and a report of
+#                  what stood in the way (spinel refusals, cc errors, or a
+#                  linked binary), with the tree packed beside the JSON as
+#                  the repro. Running their suite against the binary is
+#                  the stage after; the JSON says it was not reached.
 #   --quiet        summary table only
 #
 # Requires: the lobsters checkout's bundle (rspec, factory_bot, faker), and
@@ -52,7 +60,8 @@ opts = {
   src: ENV["LOBSTERS_SRC"] || File.expand_path("~/git/lobsters"),
   suites: [],
   emit: nil,
-  json: File.join(ROOT, "build", "lobsters-specs", "summary.json"),
+  json: nil,
+  target: "ruby",
   quiet: false,
 }
 args = ARGV.dup
@@ -62,6 +71,7 @@ until args.empty?
   when "--suite" then opts[:suites] << args.shift.to_s
   when "--emit"  then opts[:emit] = File.expand_path(args.shift.to_s)
   when "--json"  then opts[:json] = File.expand_path(args.shift.to_s)
+  when "--target" then opts[:target] = args.shift.to_s
   when "--quiet" then opts[:quiet] = true
   when "-h", "--help"
     puts File.readlines(__FILE__).drop(1).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }
@@ -70,6 +80,10 @@ until args.empty?
   end
 end
 opts[:suites] = ["spec/models"] if opts[:suites].empty?
+abort "lobsters-specs: --target is ruby or spinel" unless %w[ruby spinel].include?(opts[:target])
+opts[:json] ||= File.join(ROOT, "build",
+                          opts[:target] == "spinel" ? "lobsters-specs-spinel" : "lobsters-specs",
+                          "summary.json")
 abort "lobsters-specs: no lobsters checkout at #{opts[:src]}" unless Dir.exist?(opts[:src])
 
 def sh(cmd, **kw)
@@ -98,6 +112,114 @@ rh = {
   "sha" => git(ROOT, "rev-parse", "HEAD"),
   "dirty" => !git(ROOT, "status", "--porcelain", "--untracked-files=no").to_s.empty?,
 }
+
+# ── Spinel: the build stage ──────────────────────────────────────────
+# Separate from the ruby path below because nothing after the emit is
+# shared yet: the ruby lane loads the tree into their suite, the spinel
+# lane has to get a binary first. Until it does, the build IS the result,
+# and the tree is published beside the JSON so anyone can rebuild it.
+if opts[:target] == "spinel"
+  out_dir = File.dirname(opts[:json])
+  FileUtils.mkdir_p(out_dir)
+  %w[spinel spin].each do |tool|
+    abort "lobsters-specs: #{tool} not on PATH (add <spinel-checkout>/bin)" unless
+      system("command -v #{tool} > /dev/null 2>&1")
+  end
+  spinel_version = sh(["spinel", "--version"])[0].strip
+  roundhouse = ["cargo", "run", "--release", "--quiet", "--bin", "roundhouse", "--", "--target", "spinel"]
+
+  # Strict first: the count of type errors the forced emit then carries
+  # into spinel. A tree that builds with errors forced through still has
+  # dispatch holes in it, and the number belongs in the report.
+  strict_dir = File.join(out_dir, "strict-emit")
+  FileUtils.rm_rf(strict_dir)
+  log.("strict emit #{opts[:src]} → spinel")
+  _, serr, _ = sh([*roundhouse, opts[:src], "-o", strict_dir], chdir: ROOT)
+  FileUtils.rm_rf(strict_dir)
+  strict = serr.scan(/\berror\[([a-z_]+)\]/).flatten
+  emit_info = {
+    "type_errors" => strict.size,
+    "by_kind" => strict.tally.sort_by { |_, n| -n }.to_h,
+  }
+
+  tree = File.join(out_dir, "tree")
+  FileUtils.rm_rf(tree)
+  log.("forced emit → #{tree}")
+  _, ferr, fst = sh([*roundhouse, "--allow-unsupported", opts[:src], "-o", tree], chdir: ROOT)
+  abort "lobsters-specs: spinel emit failed\n#{ferr}" unless fst.success?
+
+  log.("spin build (analysis + cc; minutes)")
+  t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  bout, berr, bst = sh(["spin", "build"], chdir: tree)
+  seconds = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
+  build_log = bout + berr
+  File.write(File.join(out_dir, "build.log"), build_log)
+
+  # A diagnostic names a file in the TREE; report it relative to it, so
+  # the location reads the same on any machine that unpacks the tarball.
+  rel = ->(path) { path.sub(%r{\A.*?/tree/}, "").sub(%r{\A.*/spinel/bin/\.\./}, "spinel:") }
+  refusals = build_log.scan(/^spinel: (\S+?):(\d+): (?!warning:)(.+)$/).map { |f, l, m|
+    { "file" => rel.(f), "line" => l.to_i, "message" => m.sub(/ node \d+/, "") }
+  }
+  cc_errors = build_log.scan(/^(\S+?):(\d+): error: (.+)$/).map { |f, l, m|
+    { "file" => rel.(f), "line" => l.to_i, "message" => m }
+  }
+  binaries = Dir.glob(File.join(tree, "build", "bin", "*")).select { |f| File.file?(f) && File.executable?(f) }
+  result =
+    if bst.success? && binaries.any? then "linked"
+    elsif build_log.include?("nothing written") || (refusals.any? && cc_errors.empty?) then "refused"
+    elsif cc_errors.any? then "cc_failed"
+    else "build_failed"
+    end
+  group = ->(ds) {
+    ds.group_by { |d| d["message"].gsub(/'sp_\w+ \*' \(aka '[^']*'\)/, "'sp_X *'") }
+      .map { |m, hits| { "message" => m, "count" => hits.size,
+                         "sites" => hits.map { |h| "#{h["file"]}:#{h["line"]}" }.uniq.first(10) } }
+      .sort_by { |g| -g["count"] }
+  }
+
+  # The repro: the emitted tree, without its build products.
+  tarball = File.join(out_dir, "spinel-tree.tgz")
+  FileUtils.rm_f(tarball)
+  sh(["tar", "czf", tarball, "--exclude", "tree/build", "-C", out_dir, "tree"])
+
+  out = {
+    "generated_at" => Time.now.utc.iso8601,
+    "target" => "spinel",
+    "stage" => "build",
+    "lobsters" => lob,
+    "roundhouse" => rh,
+    "spinel" => { "version" => spinel_version },
+    "emit" => emit_info,
+    "build" => {
+      "result" => result,
+      "seconds" => seconds,
+      "refusals" => refusals.size,
+      "cc_errors" => cc_errors.size,
+      "refusal_groups" => group.(refusals),
+      "cc_error_groups" => group.(cc_errors),
+      "last_lines" => build_log.lines.last(3).map(&:rstrip),
+    },
+    "specs" => { "run" => false,
+                 "why" => result == "linked" ? "the spec stage for spinel is not built yet" :
+                                               "the build did not produce a binary" },
+    "artifacts" => { "tree" => File.basename(tarball), "build_log" => "build.log" },
+  }
+  File.write(opts[:json], JSON.pretty_generate(out))
+
+  puts
+  puts "lobsters #{lob["sha"].to_s[0, 12]}#{lob["dirty"] ? " (dirty)" : ""}" \
+       "  ·  roundhouse #{rh["sha"].to_s[0, 12]}#{rh["dirty"] ? " (dirty)" : ""}  ·  #{spinel_version}"
+  puts "spinel build: #{result} in #{seconds}s  ·  #{strict.size} strict type errors" \
+       "  ·  #{refusals.size} refusals  ·  #{cc_errors.size} cc errors"
+  (out["build"]["refusal_groups"] + out["build"]["cc_error_groups"]).first(15).each do |g|
+    puts "  %4d  %s" % [g["count"], g["message"][0, 110]]
+    puts "        #{g["sites"].first(3).join(", ")}"
+  end
+  puts
+  puts "report: #{opts[:json]}  ·  tree: #{tarball}"
+  exit 0
+end
 
 # ── Emit ─────────────────────────────────────────────────────────────
 # `cargo run` rather than target/release: a release binary older than HEAD
