@@ -28,9 +28,9 @@ require "erb"
 # stdlib BigDecimal for app code doing exact decimal math (lobsters'
 # Comment#calculated_confidence — its own comment says the Float
 # version accumulates enough error to go out of range, so a Float
-# shim is not a substitute). Spinel warns-and-ignores this require;
-# BigDecimal call sites remain a compile gap there, tree-shaken off
-# the served routes today.
+# shim is not a substitute). The spinel tree gets the same library as
+# its bundled `packages/bigdecimal`, required per file by the BUNDLED
+# table in src/project.rs.
 require "bigdecimal"
 
 require_relative "runtime/sqlite_adapter"

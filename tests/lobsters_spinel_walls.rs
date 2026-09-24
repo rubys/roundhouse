@@ -75,7 +75,7 @@ fn app_files() -> Vec<(&'static str, &'static str)> {
         ("app/models/hat.rb", "class Hat < ApplicationRecord\nend\n"),
         (
             "app/models/comment.rb",
-            "class Comment < ApplicationRecord\n  belongs_to :hat, optional: true\n  attr_accessor :current_vote\n\n  after_save :log_hat_use\n\n  def log_hat_use\n    return unless previously_new_record? || hat_previously_changed?\n    nil\n  end\nend\n",
+            "class Comment < ApplicationRecord\n  belongs_to :hat, optional: true\n  attr_accessor :current_vote\n\n  after_save :log_hat_use\n\n  def log_hat_use\n    return unless previously_new_record? || hat_previously_changed?\n    nil\n  end\n\n  def confidence\n    (BigDecimal(1) / BigDecimal(\"3\")).to_f\n  end\nend\n",
         ),
         ("app/models/domain.rb", "class Domain < ApplicationRecord\nend\n"),
         (
@@ -320,4 +320,14 @@ fn a_case_when_model_arm_links_through_that_models_route() {
     let view = file(&tree, "app/views/mod_activities/index.rb");
     assert!(!view.contains("item_path"), "{view}");
     assert!(view.contains("RouteHelpers.mod_mail_path(ma.item.to_param)"), "{view}");
+}
+
+/// `BigDecimal(...)` is spinel's bundled `packages/bigdecimal` (and
+/// CRuby's gem); Rails loads it for the app, so the emitted file has to
+/// say `require "bigdecimal"` itself or spinel refuses the call.
+#[test]
+fn a_file_naming_bigdecimal_requires_it() {
+    let tree = emitted();
+    let comment = file(&tree, "app/models/comment.rb");
+    assert!(comment.starts_with("require \"bigdecimal\"\n"), "{comment}");
 }
