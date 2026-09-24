@@ -202,6 +202,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // (`push/subscription.rb` may be read before `push.rb`). One cheap
     // pre-pass over the same files, so the fact is complete when the
     // models loop starts.
+    // Hoisted above the models pre-pass: the base set below has to
+    // cover BOTH trees before either is classified, and the support
+    // roots need this to be enumerated.
+    let lib_ignores: Vec<String> = vfs
+        .read(&dir.join("config/application.rb"))
+        .ok()
+        .map(|s| extract_autoload_lib_ignores(&s))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ignored| !lib_dir_is_explicitly_required(vfs, dir, ignored))
+        .collect();
+
     let mut table_prefixes = super::model::TablePrefixes::new();
     // The same pre-pass answers a second question: which classes are
     // ActiveRecord bases. A model descending through the app's own
@@ -215,6 +227,25 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             let source = vfs.read(&entry)?;
             table_prefixes
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
+            model_bases.record(&source, &mut base_pairs);
+        }
+    }
+    // An abstract base can live outside `app/models` too — in a
+    // package under `lib/`, or in whatever the app adds to its
+    // autoload paths. Collected before anything is classified, so a
+    // model in either tree resolves against a base in either tree.
+    for sub in support_roots(vfs, dir, &lib_ignores) {
+        let support_dir = dir.join(sub.as_str());
+        if !vfs.is_dir(&support_dir) {
+            continue;
+        }
+        let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
+        for entry in entries {
+            let Ok(source) = vfs.read(&entry) else { continue };
+            table_prefixes.extend(super::model::ingest_table_name_prefixes(
+                &source,
+                &entry.display().to_string(),
+            ));
             model_bases.record(&source, &mut base_pairs);
         }
     }
@@ -318,14 +349,6 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // files itself, from an initializer — and dropping them lost
     // `String#all_emoji?`, which every message row calls. A subdir some
     // initializer explicitly requires is app code after all.
-    let lib_ignores: Vec<String> = vfs
-        .read(&dir.join("config/application.rb"))
-        .ok()
-        .map(|s| extract_autoload_lib_ignores(&s))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|ignored| !lib_dir_is_explicitly_required(vfs, dir, ignored))
-        .collect();
     for sub in support_roots(vfs, dir, &lib_ignores) {
         let sub = sub.as_str();
         let support_dir = dir.join(sub);
@@ -345,6 +368,38 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             }
             let Ok(source) = vfs.read(&entry) else { continue };
             let path_str = entry.display().to_string();
+            // An ActiveRecord class is one wherever it lives. A
+            // packwerk package under `lib/`, or an engine's models
+            // reached through an autoload path, used to land here as
+            // plain library classes and lose their associations,
+            // validations and scopes — replayed by the ruby emitter,
+            // dropped by a strict target.
+            //
+            // Only an explicit `Model` classification routes this way.
+            // `None` — a file with no class, a bare module — stays a
+            // library class here, unlike under `app/models` where the
+            // directory itself is the app saying what the file is.
+            if super::library_class::has_active_record_base(&source, &model_bases) {
+                match ingest_model(&source, &path_str, &app.schema, &table_prefixes) {
+                    Ok(Some(model)) => {
+                        let outer = model.name.clone();
+                        app.models.push(model);
+                        // Classes nested in the model's body are classes
+                        // of their own, exactly as under `app/models`.
+                        if let Ok(classes) = ingest_library_classes(&source, &path_str) {
+                            app.library_classes.extend(nested_under(&outer, classes));
+                        }
+                        super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        if survey::is_active() {
+                            survey::record(&err);
+                        }
+                    }
+                }
+            }
             match ingest_library_classes(&source, &path_str) {
                 Ok(classes) => app.library_classes.extend(classes),
                 Err(err) => {

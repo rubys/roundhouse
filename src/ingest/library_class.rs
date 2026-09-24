@@ -1866,6 +1866,27 @@ impl ModelBases {
     }
 }
 
+/// Does this file's first class descend from an ActiveRecord base?
+///
+/// NARROWER than `classify_class_file`, deliberately. That also
+/// answers `Model` for a superclass-less class that includes
+/// `ActiveModel::Model` — a TABLELESS model, which outside
+/// `app/models` is left as a library class on purpose: a reopen of a
+/// framework class from `lib/` includes things the emit handles its
+/// own way, and routing it to the model path breaks that.
+///
+/// So the rule outside `app/models` is ancestry to ActiveRecord, and
+/// nothing else.
+pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
+    let result = parse(source);
+    let root = result.node();
+    let Some(class) = find_first_class(&root) else { return false };
+    class
+        .superclass()
+        .and_then(|n| constant_path_of(&n))
+        .is_some_and(|p| bases.contains(&p.join("::")))
+}
+
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
