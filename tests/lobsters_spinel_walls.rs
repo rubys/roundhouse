@@ -237,8 +237,10 @@ fn redirect_back_or_to_is_a_terminal_the_runtime_defines() {
     let tree = emitted();
     let users = file(&tree, "app/controllers/users_controller.rb");
     assert!(users.contains("redirect_back_or_to(RouteHelpers.root_path)"), "{users}");
-    let base = file(&tree, "runtime/action_controller/base.rb");
-    assert!(base.contains("def redirect_back_or_to"), "runtime lacks it");
+    let reopen = file(&tree, "runtime/redirect_back.rb");
+    assert!(reopen.contains("def redirect_back_or_to"), "runtime lacks it");
+    let boot = file(&tree, "boot.rb");
+    assert!(boot.contains("require_relative \"runtime/redirect_back\""), "boot never loads it");
 }
 
 /// `find_or_initialize_by` in a one-statement method body is inlined

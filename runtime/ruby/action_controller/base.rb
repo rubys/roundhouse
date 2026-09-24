@@ -211,23 +211,6 @@ module ActionController
       nil
     end
 
-    # `redirect_back_or_to(fallback)` — back to the Referer when it names
-    # this site, else to `fallback`. Rails' default refuses another host
-    # (`allow_other_host` follows raise_on_open_redirects, on for new
-    # apps); a prefix match on `base_url` is that check without parsing.
-    def redirect_back_or_to(fallback, notice: nil, alert: nil, status: :found)
-      target = fallback
-      req = ActionController::Current.request
-      unless req.nil?
-        ref = req.referer
-        base = req.base_url
-        if ref == base || ref.start_with?(base + "/")
-          target = ref
-        end
-      end
-      redirect_to(target, notice: notice, alert: alert, status: status)
-    end
-
     # `head(:no_content, content_type: "application/json")` — empty
     # body, status only. The `content_type` kwarg is set by the
     # respond_to-flattener's JSON branch when it preserves a

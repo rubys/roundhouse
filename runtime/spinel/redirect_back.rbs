@@ -1,0 +1,6 @@
+# Typing for runtime/spinel/redirect_back.rb.
+module ActionController
+  class Base
+    def redirect_back_or_to: (String fallback, ?notice: String?, ?alert: String?, ?status: Symbol) -> void
+  end
+end

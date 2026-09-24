@@ -161,6 +161,9 @@ require_relative "runtime/erb_spinel"
 # ViewHelpers' scalar `to_query_value`, for the two lanes whose router
 # parses it back. The CRuby overlay's boot requires the same file.
 require_relative "runtime/hash_to_query"
+# `redirect_back_or_to` — a reopen of ActionController::Base reading the
+# parked request; ruby-family only (see the file).
+require_relative "runtime/redirect_back"
 # An Array attribute value — Rails' space-joined form and the `class:`
 # conditional list — a reopen of the shared scalar `attr_value_text`,
 # for the same reason and at the same point as the line above.

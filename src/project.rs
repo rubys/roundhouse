@@ -3206,6 +3206,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/record_identifier_spinel.rbs".to_string(), rbs));
     }
 
+    // `redirect_back_or_to` sidecar — the ActionController::Base reopen
+    // in runtime/redirect_back.rb (ruby family only).
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/redirect_back.rbs")
+            .map_err(|e| format!("read runtime/spinel/redirect_back.rbs: {e}"))?;
+        files.push(("sig/runtime/redirect_back.rbs".to_string(), rbs));
+    }
+
     // Hash#to_query nesting sidecar — the reopen in
     // runtime/hash_to_query.rb renders a nested Hash/Array value as
     // Rails' bracket grammar; the .rbs keeps the reopened method's

@@ -79,13 +79,6 @@ module ActionController
       ?status: Symbol
     ) -> void
 
-    def redirect_back_or_to: (
-      String fallback,
-      ?notice: String?,
-      ?alert: String?,
-      ?status: Symbol
-    ) -> void
-
     # `head(:no_content, content_type: "application/json")` — empty
     # body, status only; content_type optional.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
