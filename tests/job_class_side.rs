@@ -49,12 +49,63 @@ fn job_classes_gain_inline_class_side_entries() {
             "`{entry}` wraps new.perform: {body}"
         );
     }
-    // set collapses to self (inline semantics), residue-ledgered.
-    let set_body = format!("{:?}", class_method("set").body);
-    assert!(set_body.contains("SelfRef"), "`set` returns self: {set_body}");
+    // Nothing calls `set`, so none is synthesized.
+    assert!(
+        !notify.methods.iter().any(|m| m.name.as_str() == "set"),
+        "no `set` without a caller"
+    );
+    let _ = diags;
+}
+
+/// `Job.set(opts).perform_later(args)` folds to `Job.perform_later(args)`,
+/// the dropped options ledgered at the call site. A `set` whose value is
+/// kept (not chained) still gets the class-side `set`, typed `untyped` —
+/// its value is the class object, which no `Ty` names.
+#[test]
+fn a_set_chain_folds_and_a_kept_set_is_synthesized() {
+    let mut app = app_from(vec![
+        (
+            "app/jobs/application_job.rb",
+            "class ApplicationJob < ActiveJob::Base\nend\n",
+        ),
+        (
+            "app/jobs/notify_job.rb",
+            "class NotifyJob < ApplicationJob\n  def perform(thing)\n    thing\n  end\nend\n",
+        ),
+        (
+            "app/jobs/other_job.rb",
+            "class OtherJob < ApplicationJob\n  def perform(thing)\n    thing\n  end\nend\n",
+        ),
+        (
+            "app/models/caller.rb",
+            "class Caller\n  def go\n    NotifyJob.set(wait: 5).perform_later(1)\n  end\n\n  def keep\n    OtherJob.set(queue: :low)\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    let class = |n: &str| {
+        app.library_classes.iter().find(|lc| lc.name.0.as_str() == n).expect(n)
+    };
+    let go = class("Caller").methods.iter().find(|m| m.name.as_str() == "go").unwrap();
+    let body = format!("{:?}", go.body);
+    assert!(!body.contains("\"set\""), "the chain folds: {body}");
     assert!(
         diags.iter().any(|d| d.message.contains("dropped under inline")),
         "dropped set-options must be ledgered: {diags:?}"
+    );
+    assert!(
+        !class("NotifyJob").methods.iter().any(|m| m.name.as_str() == "set"),
+        "a folded chain leaves no `set` behind"
+    );
+    let set = class("OtherJob")
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "set")
+        .expect("a kept `set` is synthesized");
+    assert!(format!("{:?}", set.body).contains("SelfRef"));
+    assert!(
+        matches!(&set.signature, Some(roundhouse::ty::Ty::Fn { ret, .. })
+            if matches!(**ret, roundhouse::ty::Ty::Untyped)),
+        "`set` is typed untyped, not as an instance: {:?}", set.signature
     );
 }
 

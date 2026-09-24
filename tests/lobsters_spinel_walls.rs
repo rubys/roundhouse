@@ -278,7 +278,7 @@ fn perform_all_later_over_a_map_enqueues_each() {
     let tree = emitted();
     let prefill = file(&tree, "app/models/prefill_job.rb");
     assert!(!prefill.contains("perform_all_later"), "{prefill}");
-    assert!(prefill.contains("WarmJob.set(queue: :default).perform_later(path)"), "{prefill}");
+    assert!(prefill.contains("WarmJob.perform_later(path)"), "{prefill}");
 }
 
 /// `exception: true` is expressed without the options Hash.
@@ -330,4 +330,19 @@ fn a_file_naming_bigdecimal_requires_it() {
     let tree = emitted();
     let comment = file(&tree, "app/models/comment.rb");
     assert!(comment.starts_with("require \"bigdecimal\"\n"), "{comment}");
+}
+
+/// `Job.set(opts).perform_later(args)` folds to `Job.perform_later(args)`:
+/// a class-side `set` would answer the class object, which the RBS
+/// cannot name — lobsters' 13 jobs each failed cc on it. With no
+/// unfolded `set` left, no job grows one.
+#[test]
+fn a_job_set_chain_folds_and_no_set_is_synthesized() {
+    let tree = emitted();
+    let prefill = file(&tree, "app/models/prefill_job.rb");
+    assert!(!prefill.contains(".set("), "{prefill}");
+    let warm = file(&tree, "app/models/warm_job.rb");
+    assert!(!warm.contains("def self.set"), "{warm}");
+    let warm_rbs = file(&tree, "app/models/warm_job.rbs");
+    assert!(!warm_rbs.contains("def self.set"), "{warm_rbs}");
 }

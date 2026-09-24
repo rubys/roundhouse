@@ -10,9 +10,9 @@
 //! `perform_now` gets the identical wrapper (its Rails semantics is
 //! already synchronous). `SendWebmentionJob.set(wait: 5.minutes)`
 //! returns a scheduling proxy in Rails; inline semantics has nothing
-//! to defer, so `set` collapses to `self` (the chained
-//! `.perform_later` then dispatches on the class) with the dropped
-//! options ledgered as residue.
+//! to defer, so `Job.set(…).perform_later(args)` folds to
+//! `Job.perform_later(args)` at the call site, the dropped options
+//! ledgered as residue (see `fold_set_chains`).
 //!
 //! Job classes are those whose parent chain (within the ingested set)
 //! reaches ActiveJob::Base. Same guards as the mailer twin
@@ -58,6 +58,29 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     }
     if jobs.is_empty() {
         return diags;
+    }
+
+    // `Job.set(wait:/queue:/priority:).perform_later(args)` folds to
+    // `Job.perform_later(args)` at the call site. Inline semantics has
+    // nothing to schedule, so the options were always dropped; folding
+    // drops them HERE (ledgered per site) instead of routing through a
+    // class-side `set` answering the class object — which no target's
+    // types can name (the RBS said `-> Job`, an instance, and spinel's
+    // C returned an `sp_Class` through it: 13 cc errors on lobsters).
+    let mut unfolded: BTreeSet<String> = BTreeSet::new();
+    let mut folded: Vec<crate::span::Span> = Vec::new();
+    super::for_each_hook_body(app, &mut |body| {
+        fold_set_chains(body, &jobs, &mut unfolded, &mut folded)
+    });
+    for span in folded {
+        diags.push(crate::lower::residue_diagnostic(
+            "job_class_side",
+            "job-set-options",
+            span,
+            "inline job semantics",
+            "`set(wait:/queue:/priority:)` options are dropped under inline job semantics"
+                .to_string(),
+        ));
     }
 
     for lc in app.library_classes.iter_mut() {
@@ -315,14 +338,14 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             wrappers.push(w);
         }
 
-        // `set(options) → self`: nothing to defer under inline
-        // semantics; the chained `.perform_later` dispatches on the
-        // class value. Options (wait:, queue:, priority:) are dropped
-        // — ledgered so the divergence from Rails' scheduling stays
-        // visible.
-        if !class_side.contains("set") {
+        // `set(options) → self`, only for a job something still calls
+        // `set` on OTHER than in the chain folded above (a scheduling
+        // proxy kept in a variable, say). Its value is the class object,
+        // which `Ty` cannot name, so the signature says `untyped` rather
+        // than claim an instance it does not return.
+        if !class_side.contains("set") && unfolded.contains(lc.name.0.as_str()) {
             let mut body = Expr::new(span, ExprNode::SelfRef);
-            body.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![] });
+            body.ty = Some(Ty::Untyped);
             let mut w = perform.clone();
             w.name = Symbol::from("set");
             w.receiver = crate::dialect::MethodReceiver::Class;
@@ -334,7 +357,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     kind: crate::ty::ParamKind::Required,
                 }],
                 block: None,
-                ret: Box::new(Ty::Class { id: lc.name.clone(), args: vec![] }),
+                ret: Box::new(Ty::Untyped),
                 effects: crate::effect::EffectSet::pure(),
             });
             w.body = body;
@@ -348,6 +371,45 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         lc.methods.extend(wrappers);
     }
     diags
+}
+
+/// Fold `Job.set(…).perform_later(args)` / `.perform_now(args)` to the
+/// class-side call; record every `Job.set` left standing.
+fn fold_set_chains(
+    e: &mut Expr,
+    jobs: &BTreeSet<String>,
+    unfolded: &mut BTreeSet<String>,
+    folded: &mut Vec<crate::span::Span>,
+) {
+    let job_of = |r: &Expr| -> Option<String> {
+        let ExprNode::Const { path } = &*r.node else { return None };
+        let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        jobs.contains(&name).then_some(name)
+    };
+    if let ExprNode::Send { recv: Some(inner), method, .. } = &mut *e.node {
+        if matches!(method.as_str(), "perform_later" | "perform_now") {
+            let job_recv = match &*inner.node {
+                ExprNode::Send { recv: Some(j), method: set, block: None, .. }
+                    if set.as_str() == "set" && job_of(j).is_some() =>
+                {
+                    Some(j.clone())
+                }
+                _ => None,
+            };
+            if let Some(j) = job_recv {
+                folded.push(inner.span);
+                *inner = j;
+            }
+        }
+    }
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if method.as_str() == "set" {
+            if let Some(name) = job_of(r) {
+                unfolded.insert(name);
+            }
+        }
+    }
+    e.node.for_each_child_mut(&mut |c| fold_set_chains(c, jobs, unfolded, folded));
 }
 
 fn residue(m: &crate::dialect::MethodDef, reason: &str) -> Diagnostic {
