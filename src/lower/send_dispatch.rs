@@ -633,28 +633,46 @@ fn collect_hash_providers(app: &App) -> HashProviders {
 /// non-provider) means the call could dispatch elsewhere, so it never
 /// grounds.
 fn defined_method_name_counts(app: &App) -> HashMap<Symbol, usize> {
-    let mut counts: HashMap<Symbol, usize> = HashMap::new();
+    // Counted by DEFINITION SITE, not by copy: a module an app class
+    // `include`s is spliced into it, and each copy keeps the span of the
+    // one `def` it came from. Lobsters' `IntervalHelper#time_interval`
+    // is included into three controllers and a model — four copies, one
+    // definition, one meaning — and counting copies refused every bare
+    // call to it. A synthesized method (no span) counts on its own.
+    let mut sites: HashMap<Symbol, std::collections::HashSet<Option<Span>>> = HashMap::new();
+    let mut synthetic: HashMap<Symbol, usize> = HashMap::new();
     {
-        let mut bump = |n: &Symbol| *counts.entry(n.clone()).or_insert(0) += 1;
+        let mut bump = |n: &Symbol, span: Span| {
+            if span.is_synthetic() {
+                *synthetic.entry(n.clone()).or_insert(0) += 1;
+            } else {
+                sites.entry(n.clone()).or_default().insert(Some(span));
+            }
+        };
         for model in &app.models {
             for item in &model.body {
                 if let ModelBodyItem::Method { method, .. } = item {
-                    bump(&method.name);
+                    bump(&method.name, method.name_span);
                 }
             }
         }
         for lc in &app.library_classes {
             for m in &lc.methods {
-                bump(&m.name);
+                bump(&m.name, m.name_span);
             }
         }
         for c in &app.controllers {
             for item in &c.body {
                 if let ControllerBodyItem::Action { action, .. } = item {
-                    bump(&action.name);
+                    bump(&action.name, action.name_span);
                 }
             }
         }
+    }
+    let mut counts: HashMap<Symbol, usize> =
+        sites.into_iter().map(|(n, s)| (n, s.len())).collect();
+    for (n, k) in synthetic {
+        *counts.entry(n).or_insert(0) += k;
     }
     counts
 }
@@ -747,13 +765,21 @@ fn hash_return_key_sets(
     }
     let mut sets: Option<HashMap<Symbol, BTreeSet<String>>> = None;
     for lit in &literals {
+        // A tail naming a hash CONSTANT answers that constant's literal —
+        // lobsters' `time_interval` returns `PLACEHOLDER` on bad input.
+        let lit: &Expr = match &*lit.node {
+            ExprNode::Const { path } if path.len() == 1 => {
+                unwrap_freeze(consts.get(path[0].as_str())?)
+            }
+            _ => lit,
+        };
         let ExprNode::Hash { entries, .. } = &*lit.node else { return None };
         let mut this: HashMap<Symbol, BTreeSet<String>> = HashMap::new();
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                 continue;
             };
-            if let Some(strs) = string_values_of(v, consts) {
+            if let Some(strs) = string_values_in(v, consts, body, 0) {
                 this.insert(key.clone(), strs);
             }
         }
@@ -779,7 +805,7 @@ fn hash_return_key_sets(
 /// tail is a hash literal pushed into `out`; `None` on any other tail.
 fn collect_return_positions<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> Option<()> {
     match &*e.node {
-        ExprNode::Hash { .. } => {
+        ExprNode::Hash { .. } | ExprNode::Const { .. } => {
             out.push(e);
             Some(())
         }
@@ -804,7 +830,7 @@ fn collect_early_returns<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
     let mut ok = true;
     e.node.for_each_child(&mut |c| {
         if let ExprNode::Return { value } = &*c.node {
-            if matches!(&*value.node, ExprNode::Hash { .. }) {
+            if matches!(&*value.node, ExprNode::Hash { .. } | ExprNode::Const { .. }) {
                 out.push(value);
             } else {
                 ok = false;
@@ -821,6 +847,111 @@ fn collect_early_returns<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
 /// literal is itself; `CONST[x]` where CONST is a (frozen) hash literal
 /// of string values is all of that hash's values.
 fn string_values_of(e: &Expr, consts: &HashMap<&str, &Expr>) -> Option<BTreeSet<String>> {
+    string_values_in(e, consts, e, 0)
+}
+
+/// [`string_values_of`], also following a LOCAL through every write to
+/// it in `body` — a plain assignment, or one slot of a multiple
+/// assignment from an `if` whose branches are array literals:
+///
+/// ```ruby
+/// intv = TIME_INTERVALS[m[2]]
+/// sqlite_dur, sqlite_intv = if intv == "Week" then [dur * 7, "Day"] else [dur, intv] end
+/// { …, intv: sqlite_intv }
+/// ```
+///
+/// (current lobsters' `time_interval`). Any write it cannot classify —
+/// an op-assign, a block parameter, a slot of something that is not an
+/// array literal — makes the whole set unprovable, as does a local with
+/// no write at all (a parameter).
+fn string_values_in(
+    e: &Expr,
+    consts: &HashMap<&str, &Expr>,
+    body: &Expr,
+    depth: usize,
+) -> Option<BTreeSet<String>> {
+    if depth > 8 {
+        return None;
+    }
+    match &*e.node {
+        ExprNode::Var { name, .. } => {
+            let mut out = BTreeSet::new();
+            let mut any = false;
+            let mut ok = true;
+            visit_local_writes(body, name, &mut |w| {
+                any = true;
+                match w {
+                    LocalWrite::Value(v) => match string_values_in(v, consts, body, depth + 1) {
+                        Some(set) => out.extend(set),
+                        None => ok = false,
+                    },
+                    LocalWrite::Slot(v, i) => match slot_values(v, i, consts, body, depth + 1) {
+                        Some(set) => out.extend(set),
+                        None => ok = false,
+                    },
+                    LocalWrite::Other => ok = false,
+                }
+            });
+            (ok && any).then_some(out)
+        }
+        ExprNode::If { then_branch, else_branch, .. } => {
+            let mut out = string_values_in(then_branch, consts, body, depth + 1)?;
+            out.extend(string_values_in(else_branch, consts, body, depth + 1)?);
+            Some(out)
+        }
+        ExprNode::Seq { exprs } => string_values_in(exprs.last()?, consts, body, depth + 1),
+        _ => string_values_const(e, consts),
+    }
+}
+
+/// Slot `i` of a multiple assignment's value, when every way the value
+/// can come out is an array literal.
+fn slot_values(
+    v: &Expr,
+    i: usize,
+    consts: &HashMap<&str, &Expr>,
+    body: &Expr,
+    depth: usize,
+) -> Option<BTreeSet<String>> {
+    match &*v.node {
+        ExprNode::Array { elements, .. } => string_values_in(elements.get(i)?, consts, body, depth),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            let mut out = slot_values(then_branch, i, consts, body, depth)?;
+            out.extend(slot_values(else_branch, i, consts, body, depth)?);
+            Some(out)
+        }
+        ExprNode::Seq { exprs } => slot_values(exprs.last()?, i, consts, body, depth),
+        _ => None,
+    }
+}
+
+enum LocalWrite<'e> {
+    Value(&'e Expr),
+    Slot(&'e Expr, usize),
+    Other,
+}
+
+fn visit_local_writes<'e>(e: &'e Expr, name: &Symbol, f: &mut dyn FnMut(LocalWrite<'e>)) {
+    match &*e.node {
+        ExprNode::Assign { target: crate::expr::LValue::Var { name: n, .. }, value } if n == name => {
+            f(LocalWrite::Value(value))
+        }
+        ExprNode::OpAssign { target: crate::expr::LValue::Var { name: n, .. }, .. } if n == name => {
+            f(LocalWrite::Other)
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            for (i, t) in targets.iter().enumerate() {
+                if matches!(t, crate::expr::LValue::Var { name: n, .. } if n == name) {
+                    f(LocalWrite::Slot(value, i));
+                }
+            }
+        }
+        _ => {}
+    }
+    e.node.for_each_child(&mut |c| visit_local_writes(c, name, f));
+}
+
+fn string_values_const(e: &Expr, consts: &HashMap<&str, &Expr>) -> Option<BTreeSet<String>> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Str { value } } => {
             Some(std::iter::once(value.clone()).collect())

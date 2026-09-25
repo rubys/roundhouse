@@ -242,21 +242,45 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 /// maps to `None` and is never tracked. Consulted only when a registered
 /// scope follows, so a collision with a non-model method of the same
 /// name is inert unless that call ALSO chains into a known scope.
-pub type UserMethodReturns = HashMap<Symbol, Option<ClassId>>;
+///
+/// `class` is the same fact for a model's CLASS methods, keyed by the
+/// model as well, because the receiver there is the constant itself:
+/// lobsters' `Comment.recent_threads(user)` ends in `Comment.joins(…)
+/// .where(…)`, and without the entry the chain after it
+/// (`.merge(…).for_presentation.joins(:story)`) lost its model — the
+/// scope stayed a bare method call and the association join reached
+/// the runtime unresolved.
+#[derive(Default)]
+pub struct UserMethodReturns {
+    pub instance: HashMap<Symbol, Option<ClassId>>,
+    pub class: HashMap<(ClassId, Symbol), ClassId>,
+}
+
+impl UserMethodReturns {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
     let model_ids: HashSet<ClassId> = models.iter().map(|m| m.name.clone()).collect();
-    let mut reg: UserMethodReturns = HashMap::new();
+    let mut reg = UserMethodReturns::new();
     for m in models {
         for item in &m.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
+            if method.receiver == crate::dialect::MethodReceiver::Class {
+                if let Some(target) = relation_return_model(&method.body, &model_ids) {
+                    reg.class.insert((m.name.clone(), method.name.clone()), target);
+                }
+                continue;
+            }
             if method.receiver != crate::dialect::MethodReceiver::Instance {
                 continue;
             }
             let Some(target) = relation_return_model(&method.body, &model_ids) else {
                 continue;
             };
-            reg.entry(method.name.clone())
+            reg.instance.entry(method.name.clone())
                 .and_modify(|t| {
                     if t.as_ref() != Some(&target) {
                         *t = None;
@@ -2950,8 +2974,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     }
                     return Some(m);
                 }
+                let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                 *expr = put(span, Some(r), method, args, block, parenthesized);
-                return None;
+                return returns;
             }
 
             // Scope/chain/terminal on an association read: `self.<has_many>.
@@ -3305,7 +3330,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             };
             let r_model = r_model.or_else(|| match &*r.node {
                 ExprNode::Send { method: rname, .. } => {
-                    ctx.user_returns.get(rname).cloned().flatten()
+                    ctx.user_returns.instance.get(rname).cloned().flatten()
                 }
                 _ => None,
             });

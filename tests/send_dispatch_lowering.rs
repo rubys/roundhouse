@@ -198,3 +198,79 @@ end
         diags[0]
     );
 }
+
+#[test]
+fn provider_returning_a_constant_and_a_multi_assigned_local() {
+    // Current lobsters' `time_interval`: bad input returns the
+    // PLACEHOLDER constant, and `intv:` is a local bound by a multiple
+    // assignment from an `if` of array literals.
+    let (out, diags) = ground_and_emit(
+        r##"
+module IntervalHelper
+  PLACEHOLDER = {param: "1w", dur: 7, intv: "Day", placeholder: true}
+  TIME_INTERVALS = {"h" => "Hour", "w" => "Week", "m" => "Month"}.freeze
+
+  def self.time_interval(param)
+    if (m = param.to_s.match(/\A(\d+)([hwm])\z/))
+      dur = m[1].to_i
+      return PLACEHOLDER unless dur > 0
+      intv = TIME_INTERVALS[m[2]]
+      sqlite_dur, sqlite_intv =
+        if intv == "Week"
+          [dur * 7, "Day"]
+        else
+          [dur, intv]
+        end
+      {param: param, dur: sqlite_dur, intv: sqlite_intv}
+    else
+      PLACEHOLDER
+    end
+  end
+end
+
+class FlaggedCommenters
+  def initialize(interval)
+    length = IntervalHelper.time_interval(interval)
+    @period = length[:dur].send(length[:intv].downcase).ago
+  end
+end
+"##,
+    );
+    for arm in ["when \"day\"", "when \"hour\"", "when \"week\"", "when \"month\""] {
+        assert!(out.contains(arm), "{arm} missing:\n{out}");
+    }
+    assert!(!out.contains(".send("), "dynamic send survived:\n{out}");
+    assert!(diags.is_empty(), "grounded sites must not ledger residue: {diags:?}");
+}
+
+#[test]
+fn a_helper_spliced_into_several_includers_is_still_one_definition() {
+    // `include IntervalHelper` in a controller splices a copy of
+    // `time_interval` into it; the copies share the one `def`'s span and
+    // must not make the bare call in the model look ambiguous.
+    let files: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        (
+            "app/helpers/interval_helper.rb",
+            "module IntervalHelper\n  TIME_INTERVALS = {\"h\" => \"Hour\", \"d\" => \"Day\"}.freeze\n\n  def time_interval(param)\n    {dur: 1, intv: TIME_INTERVALS[param]}\n  end\nend\n",
+        ),
+        (
+            "app/controllers/home_controller.rb",
+            "class HomeController < ActionController::Base\n  include IntervalHelper\n\n  def index\n    @i = time_interval(params[:t])\n  end\nend\n",
+        ),
+        (
+            "app/models/flagged_commenters.rb",
+            "class FlaggedCommenters\n  include IntervalHelper\n\n  def initialize(interval)\n    length = time_interval(interval)\n    @period = length[:dur].send(length[:intv].downcase).ago\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/\" => \"home#index\"\nend\n"),
+    ];
+    let tree = files
+        .into_iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let out = emit_library(&app).into_iter().map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(out.contains("when \"hour\""), "got:\n{out}");
+    assert!(!out.contains(".send("), "dynamic send survived:\n{out}");
+}
