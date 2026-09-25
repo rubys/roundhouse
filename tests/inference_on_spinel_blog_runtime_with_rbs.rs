@@ -816,7 +816,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // already carries. What it buys: lobsters' comment score recompute
     // (`exec_update … unhex(?)`), which every comment and vote save
     // reaches, and FullTextSearch's index-row delete.
-    const CEILING: usize = 978;
+    // 2026-09-25 978 -> 979, +1, MEASURED from the dump: connection.rb's
+    // `Base.none`, the body `Relation.new(self).none` — the same chained
+    // shape its `where` neighbour already carries. What it buys:
+    // lobsters' `searched_model.none` (#132), a NoMethodError before.
+    const CEILING: usize = 979;
 
     assert!(
         all_untyped.len() <= CEILING,
