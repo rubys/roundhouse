@@ -104,6 +104,8 @@ pub(in crate::analyze) fn register(
         "pluralize", "truncate", "simple_format", "highlight", "excerpt",
         "word_wrap", "sanitize", "sanitize_css", "strip_tags",
         "strip_links", "raw", "h", "html_escape", "concat", "safe_join",
+        // A `.builder` template's text / attribute escapes (`crate::builder`).
+        "builder_text", "builder_attr",
         "cycle", "current_cycle", "number_to_currency", "number_to_human",
         "number_to_human_size", "number_to_percentage", "number_to_phone",
         "number_with_delimiter", "number_with_precision",
@@ -251,6 +253,24 @@ pub(in crate::analyze) fn register(
         app.helper_method_index.values().cloned().collect();
     action_view.includes.extend(helper_modules);
     classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
+
+    // `ActionView::ViewHelpers` itself, called by its constant — the
+    // spelling generated templates use (a `.builder` feed's escapes,
+    // `crate::builder`). Its surface is the runtime module's own
+    // signatures, read rather than restated, so the analyzer knows
+    // exactly what every lane ships.
+    {
+        const RBS: &str = include_str!("../../../runtime/ruby/action_view/view_helpers.rbs");
+        if let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) {
+            let id = ClassId(Symbol::from("ActionView::ViewHelpers"));
+            if let Some(methods) = parsed.get(&id) {
+                let cls = classes.entry(id).or_default();
+                for (m, ty) in methods {
+                    cls.class_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+                }
+            }
+        }
+    }
 
     // The FlashHash returned by `flash`. Values are messages (Str); `now`
     // is the same hash scoped to this request (so `flash.now[:x]` types);

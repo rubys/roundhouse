@@ -343,9 +343,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // get the right output path; jbuilder (json) views fan out in the
     // companion loop below.
     let html_views: Vec<&crate::dialect::View> =
-        app.views.iter().filter(|v| v.format.as_str() == "html").collect();
+        app.views.iter().filter(|v| crate::lower::view::lowers_through_view_path(v)).collect();
     for (v, lc) in html_views.iter().zip(view_lcs.iter()) {
-        let out_path = view_output_path(v.name.as_str());
+        let out_path = view_output_path(&crate::lower::view::view_output_stem(v));
         files.push(library::emit_library_class_decl(lc, app, out_path));
     }
 

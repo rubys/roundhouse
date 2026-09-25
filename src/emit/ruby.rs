@@ -686,7 +686,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
         .iter()
         .zip(lcs.iter())
         .flat_map(|(v, lc)| {
-            let out_path = view_output_path(v.name.as_str());
+            let out_path = view_output_path(&crate::lower::view::view_output_stem(v));
             library::emit_library_class_pair(lc, app, out_path)
         })
         .collect()

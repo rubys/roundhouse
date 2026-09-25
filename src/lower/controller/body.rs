@@ -233,7 +233,7 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
                     }
                     Some((fmt, branch_body)) if fmt.as_str() == "rss" => {
                         if breadth.rss {
-                            rss = Some(recurse_outer(&branch_body));
+                            rss = Some(mark_render_format(&recurse_outer(&branch_body), "rss"));
                         } else {
                             report_dropped_format_arm(
                                 "rss",
@@ -284,7 +284,7 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
                 build_format_dispatch(
                     None,
                     None,
-                    Some(recurse_outer(&branch_body)),
+                    Some(mark_render_format(&recurse_outer(&branch_body), "rss")),
                     Vec::new(),
                     body.span,
                 )
@@ -506,8 +506,16 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
             args,
             block,
             parenthesized,
-        } if method.as_str() == "render" && !args.is_empty() => {
-            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } }) {
+        } if matches!(method.as_str(), "render" | "render_to_string")
+            && !args.is_empty() =>
+        {
+            // `render action: "stories", layout: false` names its
+            // template inside the Hash; the marker joins that Hash.
+            let names_template = matches!(&*args[0].node, ExprNode::Hash { entries, .. }
+                if entries.iter().any(|(k, _)| matches!(&*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if matches!(value.as_str(), "action" | "template"))));
+            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } }) || names_template {
                 let new_args = add_format_kwarg(args, fmt, body.span);
                 ExprNode::Send {
                     recv: None,
@@ -548,6 +556,16 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
             then_branch: mark_render_format(then_branch, fmt),
             else_branch: mark_render_format(else_branch, fmt),
         },
+        // Into assignments and blocks, for a feed branch's
+        // `content = Rails.cache.fetch("rss") { render_to_string action:
+        // "stories", layout: false }` — the render sits in a block, under
+        // an assignment. Only the rss/atom/xml marking walks this far;
+        // the json/turbo_stream/svg callers keep their exact reach.
+        _ if matches!(fmt, "rss" | "atom" | "xml") => {
+            let mut out = body.clone();
+            out.node.for_each_child_mut(&mut |c| *c = mark_render_format(c, fmt));
+            return out;
+        }
         _ => return body.clone(),
     };
     Expr::new(body.span, new_node)
@@ -586,6 +604,10 @@ pub(crate) fn mime_for_format(fmt: &str) -> &'static str {
         // response is an image and browsers treat it as one only with
         // this type.
         "svg" => "image/svg+xml",
+        // Feeds (Mime::Type's registrations): lobsters' /rss.
+        "rss" => "application/rss+xml; charset=utf-8",
+        "atom" => "application/atom+xml; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
         _ => "text/html; charset=utf-8",
     }
 }

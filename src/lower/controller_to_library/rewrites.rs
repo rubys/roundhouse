@@ -381,6 +381,9 @@ pub(super) fn rewrite_render_to_views(
                             "json" => {
                                 body = Some((json_render_encode(v), Some("application/json")))
                             }
+                            // The flattener's dispatch marker, read by
+                            // `render_kwargs_have_format` above.
+                            "format" => {}
                             _ => rest.push((k.clone(), v.clone())),
                         }
                     }
@@ -476,7 +479,21 @@ pub(super) fn rewrite_render_to_views(
             // template that is right there.
             let is_svg = render_kwargs_have_format(args, "svg");
             let is_json = render_kwargs_have_format(args, "json");
-            let contract_stem = if is_turbo_stream {
+            // A feed branch (`format.rss { render action: "stories" }`):
+            // the format-qualified template (`stories.rss.builder` →
+            // `stories_rss`) when there is one, else a format-AGNOSTIC
+            // template of the bare name — Rails matches a template with
+            // no format to any requested format (the 2023 lobsters
+            // snapshot's `home/rss.erb`).
+            let feed_fmt = ["rss", "atom", "xml"]
+                .into_iter()
+                .find(|f| render_kwargs_have_format(args, f));
+            let feed_qualified = feed_fmt.is_some_and(|f| {
+                view_ivars.contains_key(&(render_module.clone(), format!("{}_{f}", view_method.as_str())))
+            });
+            let contract_stem = if let (Some(f), true) = (feed_fmt, feed_qualified) {
+                format!("{}_{f}", view_method.as_str())
+            } else if is_turbo_stream {
                 format!("{}_turbo_stream", view_method.as_str())
             } else if is_svg {
                 format!("{}_svg", view_method.as_str())
@@ -631,6 +648,15 @@ pub(super) fn rewrite_render_to_views(
                         Symbol::from(format!("{}_svg", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("svg")),
                     )
+                } else if let Some(f) = feed_fmt {
+                    // The feed's MIME either way; the method is the
+                    // qualified one only when that template exists.
+                    let m = if feed_qualified {
+                        Symbol::from(format!("{}_{f}", view_method.as_str()))
+                    } else {
+                        view_method
+                    };
+                    (m, Some(crate::lower::controller::body::mime_for_format(f)))
                 } else {
                     (view_method, None)
                 };

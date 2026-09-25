@@ -913,9 +913,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // emit-side surface decision.
     let view_funcs = crate::lower::flatten_lcs_to_functions(&view_lcs);
     let html_views: Vec<&crate::dialect::View> =
-        app.views.iter().filter(|v| v.format.as_str() == "html").collect();
+        app.views.iter().filter(|v| crate::lower::view::lowers_through_view_path(v)).collect();
     for (view, func) in html_views.iter().zip(view_funcs.iter()) {
-        let out_path = view_output_path(view.name.as_str());
+        let out_path = view_output_path(&crate::lower::view::view_output_stem(view));
         files.extend(library::emit_function_file(func, app, out_path));
     }
 

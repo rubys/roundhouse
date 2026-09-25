@@ -135,12 +135,23 @@ pub(crate) fn rewrite_time_current(expr: &mut Expr, formats: &TimeFormats) {
     // GMT")` — `getutc`, not `utc`, which mutates its receiver.
     // Shape-directed on the zero-arg name; `httpdate` is
     // Time-specific vocabulary.
-    let is_httpdate = matches!(
-        &*expr.node,
-        ExprNode::Send { recv: Some(_), method, args, block: None, .. }
-            if method.as_str() == "httpdate" && args.is_empty()
-    );
-    if is_httpdate {
+    //
+    // `t.rfc822` / `t.rfc2822` the same way. On Rails' app times (a
+    // TimeWithZone) it is `to_fs(:rfc822)` —
+    // `"%a, %d %b %Y %H:%M:%S %z"` in the app's zone, which is UTC for
+    // the corpus (the premise `Time.current` above rests on), so
+    // `+0000`. lobsters stamps every RSS item's `pubDate` this way.
+    let format = match &*expr.node {
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. } if args.is_empty() => {
+            match method.as_str() {
+                "httpdate" => Some("%a, %d %b %Y %H:%M:%S GMT"),
+                "rfc822" | "rfc2822" => Some("%a, %d %b %Y %H:%M:%S %z"),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(format) = format {
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
         let ExprNode::Send { recv: Some(t), .. } = node else { unreachable!() };
@@ -157,7 +168,7 @@ pub(crate) fn rewrite_time_current(expr: &mut Expr, formats: &TimeFormats) {
         let fmt = Expr::new(
             span,
             ExprNode::Lit {
-                value: crate::expr::Literal::Str { value: "%a, %d %b %Y %H:%M:%S GMT".into() },
+                value: crate::expr::Literal::Str { value: format.into() },
             },
         );
         *expr.node = ExprNode::Send {

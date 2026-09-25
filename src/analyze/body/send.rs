@@ -1486,7 +1486,8 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         "+" | "-" => Ty::Untyped,
         // String renderings.
         "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
-        | "strftime" | "httpdate" | "ctime" | "asctime" | "inspect" | "zone" => Ty::Str,
+        | "strftime" | "httpdate" | "rfc822" | "rfc2822" | "ctime" | "asctime" | "inspect"
+        | "zone" => Ty::Str,
         // Integer components / epoch seconds / spaceship.
         "to_i" | "tv_sec" | "tv_usec" | "tv_nsec" | "year" | "month" | "mon"
         | "day" | "mday" | "hour" | "min" | "sec" | "usec" | "nsec"

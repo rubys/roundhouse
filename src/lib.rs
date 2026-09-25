@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod analyze;
 pub mod app;
+pub mod builder;
 pub mod bytecode;
 pub mod catalog;
 pub mod diagnostic;

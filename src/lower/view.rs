@@ -629,7 +629,30 @@ pub fn renders_through_view_path(format: &str) -> bool {
     // decides whether the template is READ, this one whether it is
     // EMITTED, and a format listed in only one of them is silently
     // dropped somewhere in between.
-    matches!(format, "html" | "turbo_stream" | "svg")
+    // `rss` / `atom` / `xml`: feed templates (lobsters' `home/stories
+    // .rss.builder`), `<action>_rss` beside the html view.
+    matches!(format, "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml")
+}
+
+/// Does this view lower to a view-path class? The one filter every
+/// emitter pairs its lowered classes with — `lower_views_to_library_
+/// classes` builds them from exactly this set, so a caller zipping
+/// views against classes must use it too.
+pub fn lowers_through_view_path(v: &crate::dialect::View) -> bool {
+    !v.analysis_only && renders_through_view_path(v.format.as_str())
+}
+
+/// A view's output file stem: its name, format-qualified when it is not
+/// the html template — `comments/index.rss.builder` writes
+/// `comments/index_rss` BESIDE `comments/index`, the same answer the
+/// method name gives. With the bare name the two collided on one file
+/// and the feed overwrote the page.
+pub fn view_output_stem(v: &crate::dialect::View) -> String {
+    if v.format.as_str() == "html" {
+        v.name.as_str().to_string()
+    } else {
+        format!("{}_{}", v.name.as_str(), v.format.as_str())
+    }
 }
 
 /// The lowered method name for a view, format-qualified when the view

@@ -124,6 +124,40 @@ module ActionView
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
+    # Builder's text escape (`XmlBase#_escape`): `&`, `<`, `>` only — a
+    # quote stays literal in element text, which is where Builder and
+    # HTML part ways. A `.builder` template's runtime text goes through
+    # this (`crate::builder`), marked safe so the HTML escape does not
+    # run on top of it.
+    BUILDER_TEXT_ESCAPES = {
+      "&" => "&amp;",
+      "<" => "&lt;",
+      ">" => "&gt;",
+    }.freeze
+
+    BUILDER_TEXT_PATTERN = /[&<>]/.freeze
+
+    def self.builder_text(s)
+      s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
+    end
+
+    # Builder's attribute escape (`_escape_attribute`): the text escape
+    # plus `"`, newline and carriage return.
+    BUILDER_ATTR_ESCAPES = {
+      "&" => "&amp;",
+      "<" => "&lt;",
+      ">" => "&gt;",
+      '"' => "&quot;",
+      "\n" => "&#10;",
+      "\r" => "&#13;",
+    }.freeze
+
+    BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
+
+    def self.builder_attr(s)
+      s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
+    end
+
     # Rails' `h` — an ALIAS of `html_escape`, not a second escape. One
     # implementation, because the CRuby overlay replaces `html_escape`
     # with an html_safe-aware version and a separately-defined `h` would

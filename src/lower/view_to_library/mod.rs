@@ -1136,6 +1136,8 @@ pub(crate) fn insert_framework_stubs(
         "link_to",
         "button_to",
         "html_escape",
+        "builder_text",
+        "builder_attr",
         "truncate",
         "dom_id",
         "dom_class",
@@ -2403,8 +2405,16 @@ pub(crate) fn action_view_ivar_map(
         // record from the parent's collection expression, never from an
         // ivar of its own. The jbuilder lowerer derives its PARAMS from
         // the same call, so the two sides cannot disagree about arity.
-        let ivars = closures
-            .get(&key)
+        // The closure map is keyed the way `build_library_class` reads
+        // it — `view_key_of`, the UNQUALIFIED stem — so a non-html view
+        // must be looked up that way too. Reading it under the
+        // format-qualified contract key missed, fell back to the ivars
+        // in READ order, and the call passed them in a different order
+        // than the lowered view declares (lobsters' `stories.rss.builder`
+        // got `@title` where it takes `stories`).
+        let ivars = view_key_of(v)
+            .and_then(|k| closures.get(&k))
+            .or_else(|| closures.get(&key))
             .cloned()
             .unwrap_or_else(|| view_read_ivars(&v.body));
         out.insert(

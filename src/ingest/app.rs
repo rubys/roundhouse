@@ -3113,6 +3113,11 @@ fn walk_erb<V: Vfs + ?Sized>(
                 if stem.ends_with(".html")
                     || !stem.contains('.')
                     || matches!(format, Some("turbo_stream" | "svg" | "text" | "json"))
+                    // Feeds: `.rss.builder` / `.atom.builder` (lobsters'
+                    // `home/stories.rss.builder`), lowered as
+                    // `<action>_rss` beside the html template, the same
+                    // naming answer `_json` and `_svg` use.
+                    || matches!(format, Some("rss" | "atom" | "xml"))
                 {
                     out.push((path, engine));
                 } else {
@@ -3124,7 +3129,7 @@ fn walk_erb<V: Vfs + ?Sized>(
             // so the hole is visible to `--continue` and the LSP/MCP.
             // Moving one of these into `ViewEngine::from_extension` (above)
             // is the whole walker-side change to support a new engine.
-            Some("slim" | "ruby" | "builder" | "rabl") => {
+            Some("slim" | "ruby" | "rabl") => {
                 record_skipped_view(&path, ext.expect("matched a Some arm"));
             }
             _ => {}

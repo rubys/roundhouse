@@ -45,6 +45,8 @@ pub type CompileFn = fn(&str) -> (String, Vec<TemplateSegment>);
 pub enum ViewEngine {
     Erb,
     Haml,
+    /// `.builder` — Ruby `xml.*` markup (`crate::builder`).
+    Builder,
 }
 
 impl ViewEngine {
@@ -55,6 +57,7 @@ impl ViewEngine {
         match ext {
             "erb" => Some(ViewEngine::Erb),
             "haml" => Some(ViewEngine::Haml),
+            "builder" => Some(ViewEngine::Builder),
             _ => None,
         }
     }
@@ -64,6 +67,7 @@ impl ViewEngine {
         match self {
             ViewEngine::Erb => erb::compile_erb_mapped,
             ViewEngine::Haml => haml::compile_haml_mapped,
+            ViewEngine::Builder => crate::builder::compile_builder_mapped,
         }
     }
 }
