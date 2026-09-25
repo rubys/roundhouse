@@ -255,7 +255,16 @@ module ActionDispatch
           end
           params[name] = ap
         elsif pp != ap
-          return nil
+          # A literal PREFIX before the `:name` in the same segment —
+          # lobsters' `/~:username` and `/@:username`. Rails binds the
+          # rest of the segment after the prefix. Checked only on a
+          # mismatch, and behind `include?`, so a plain literal segment
+          # costs what it did.
+          return nil unless pp.include?(":")
+          plen = param_prefix_length(pp)
+          return nil if plen <= 0 || ap.length <= plen
+          return nil unless ap.start_with?(pp[0, plen].to_s)
+          params[pp[plen + 1, pp.length].to_s] = ap[plen, ap.length].to_s
         end
         i += 1
       end
@@ -275,6 +284,18 @@ module ActionDispatch
         j += 1
       end
       rest.join("/")
+    end
+
+    # Where the `:` of a prefixed param segment (`~:username`) sits —
+    # the prefix's length; -1 when the segment has none. Its own method
+    # for the same one-`while`-per-method reason as `glob_rest`.
+    def self.param_prefix_length(segment)
+      i = 0
+      while i < segment.length
+        return i if segment[i, 1].to_s == ":"
+        i += 1
+      end
+      -1
     end
 
     # Is `name` one of the route's digit-constrained params?

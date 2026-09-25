@@ -130,6 +130,21 @@ class RouterTest < Minitest::Test
     assert_equal 1, h.length
   end
 
+  # Lobsters' `/~:username` — a literal prefix before the param, inside
+  # one segment. Rails binds the rest of the segment.
+  def test_match_pattern_captures_a_prefixed_param
+    h = ActionDispatch::Router.match_pattern("/~:username/threads", "/~alice/threads")
+    raise "expected match" if h.nil?
+    assert_equal "alice", h["username"]
+    assert_equal 1, h.length
+  end
+
+  def test_match_pattern_rejects_a_missing_prefix_or_empty_value
+    assert_nil ActionDispatch::Router.match_pattern("/~:username", "/alice")
+    assert_nil ActionDispatch::Router.match_pattern("/~:username", "/~")
+    assert_nil ActionDispatch::Router.match_pattern("/~:username", "/@alice")
+  end
+
   def test_match_pattern_captures_multiple_params
     h = ActionDispatch::Router.match_pattern("/articles/:article_id/comments/:id", "/articles/7/comments/3")
     raise "expected match" if h.nil?

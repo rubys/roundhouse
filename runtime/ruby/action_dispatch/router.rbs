@@ -72,6 +72,7 @@ module ActionDispatch
     # calls with the route's precomputed `pattern_parts`, so a table walk
     # allocates no segment arrays per candidate.
     def self.glob_rest: (Array[String] path_parts, Integer from) -> String
+    def self.param_prefix_length: (String segment) -> Integer
     def self.match_parts: (
       Array[String] pattern_parts,
       Array[String] path_parts,

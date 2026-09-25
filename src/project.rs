@@ -3844,6 +3844,9 @@ const GEM_REQUIRES: &[&str] = &[
     "htmlentities",
     "rotp",
     "markly",
+    // Current lobsters' Markdowner renders through commonmarker 2.x (the
+    // ruby-bench snapshot used markly).
+    "commonmarker",
     "nokogiri",
     "parslet",
     "typeid",
@@ -3879,11 +3882,12 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 14] = [
+    const RUNTIME_GEMS: [(Marker, &str); 15] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
         (Marker::Constant("Markly"), "markly"),
+        (Marker::Constant("Commonmarker"), "commonmarker"),
         (Marker::Constant("Nokogiri"), "nokogiri"),
         (Marker::Constant("Parslet"), "parslet"),
         (Marker::Constant("TypeID"), "typeid"),

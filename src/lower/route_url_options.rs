@@ -95,6 +95,11 @@ pub fn apply_route_url_options_lowering(app: &mut App) {
     if helpers.is_empty() {
         return;
     }
+    let params = helper_path_params(app);
+    super::for_each_hook_body(app, &mut |e| position_path_params(e, &params));
+    for view in &mut app.views {
+        position_path_params(&mut view.body, &params);
+    }
     super::for_each_hook_body(app, &mut |e| rewrite(e, &helpers));
     for view in &mut app.views {
         rewrite(&mut view.body, &helpers);
@@ -113,6 +118,120 @@ pub fn apply_route_url_options_lowering(app: &mut App) {
             rewrite(&mut m.body, &helpers);
         }
     }
+}
+
+/// Each named helper's path params, in slot order. A name several
+/// flattened routes share (lobsters' `/s/:id/(:title)` flattens to
+/// `/s/:id/:title` and `/s/:id`) answers its longest list — the helper
+/// the generator builds takes every slot.
+fn helper_path_params(app: &App) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for route in super::routes::flatten_routes(app) {
+        if !route.named {
+            continue;
+        }
+        for suffix in ["_path", "_url"] {
+            let slot = out.entry(format!("{}{suffix}", route.as_name)).or_default();
+            if route.path_params.len() > slot.len() {
+                *slot = route.path_params.clone();
+            }
+        }
+    }
+    out
+}
+
+/// `story_short_id_path(id, title: slug)` → `story_short_id_path(id,
+/// slug)`. Rails fills a path param from the option hash as readily as
+/// from a positional argument — lobsters names the optional `(:title)`
+/// segment on every story link — but the generated helper takes path
+/// params positionally, and the keyword reached it as an unknown one.
+/// A keyword naming a path param moves into that param's slot; a slot
+/// skipped on the way (an optional one nothing names) is filled with
+/// `nil`, which is what the helper's own default would have been.
+fn position_path_params(
+    expr: &mut Expr,
+    params: &std::collections::HashMap<String, Vec<String>>,
+) {
+    expr.node.for_each_child_mut(&mut |c| position_path_params(c, params));
+    let span = expr.span;
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    let Some(names) = params.get(method.as_str()) else { return };
+    let Some(last) = args.last() else { return };
+    if let Some(spread) = spread_options_local(last, args.len() - 1, names) {
+        args.pop();
+        args.extend(spread);
+        return;
+    }
+    let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return };
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let positional = args.len() - 1;
+    let named: Vec<usize> = (positional..names.len())
+        .filter(|i| entries.iter().any(|(k, _)| key_of(k).as_deref() == Some(names[*i].as_str())))
+        .collect();
+    let Some(&furthest) = named.last() else { return };
+    let Some(last) = args.pop() else { return };
+    let ExprNode::Hash { mut entries, .. } = *last.node else { unreachable!() };
+    for i in positional..=furthest {
+        let taken = entries
+            .iter()
+            .position(|(k, _)| key_of(k).as_deref() == Some(names[i].as_str()))
+            .map(|at| entries.remove(at).1);
+        args.push(taken.unwrap_or_else(|| {
+            Expr::new(span, ExprNode::Lit { value: Literal::Nil })
+        }));
+    }
+    if !entries.is_empty() {
+        args.push(Expr::new(last.span, ExprNode::Hash { entries, kwargs: true }));
+    }
+}
+
+/// `story_short_id_path(story, options)` where `options` is a local
+/// Hash — lobsters' `comment_target_path` builds `{anchor: …}` and
+/// adds `title:` conditionally. Rails reads a trailing Hash as the
+/// option hash; the generated helper, with nothing to tell it so, bound
+/// the whole Hash to the `title` slot. Spread into the path slots the
+/// call left open plus `anchor:` — the keys this lowering knows the
+/// helper to take. `None` unless the argument is a Hash-typed local
+/// sitting IN a path slot (a local, so reading it once per key is
+/// free of effects).
+fn spread_options_local(arg: &Expr, index: usize, names: &[String]) -> Option<Vec<Expr>> {
+    if index >= names.len() || index == 0 {
+        return None;
+    }
+    let ExprNode::Var { .. } = &*arg.node else { return None };
+    let Some(crate::ty::Ty::Hash { value, .. }) = &arg.ty else { return None };
+    let read = |key: &str| {
+        let mut e = Expr::new(
+            arg.span,
+            ExprNode::Send {
+                recv: Some(arg.clone()),
+                method: Symbol::from("[]"),
+                args: vec![Expr::new(
+                    arg.span,
+                    ExprNode::Lit { value: Literal::Sym { value: Symbol::from(key) } },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        e.ty = Some(crate::ty::Ty::Union { variants: vec![(**value).clone(), crate::ty::Ty::Nil] });
+        e
+    };
+    let mut out: Vec<Expr> = names[index..].iter().map(|n| read(n)).collect();
+    let anchor_key = Expr::new(
+        arg.span,
+        ExprNode::Lit { value: Literal::Sym { value: Symbol::from("anchor") } },
+    );
+    out.push(Expr::new(
+        arg.span,
+        ExprNode::Hash { entries: vec![(anchor_key, read("anchor"))], kwargs: true },
+    ));
+    Some(out)
 }
 
 fn rewrite(expr: &mut Expr, helpers: &std::collections::HashSet<String>) {

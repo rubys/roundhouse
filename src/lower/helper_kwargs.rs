@@ -58,6 +58,7 @@ use crate::ident::Symbol;
 
 pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
     apply_to_test_modules(app);
+    apply_to_library_class_calls(app);
     let params = helper_param_names(app);
     if params.is_empty() {
         return;
@@ -67,6 +68,52 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
     for view in &mut app.views {
         rewrite_calls(&mut view.body, &params);
     }
+}
+
+/// The same repair for a library class's CLASS method called through
+/// its constant — lobsters' `Routes.title_path(story, anchor: a)`
+/// against `def title_path story, anchor: nil` (in `class << self`),
+/// which ingest flattened to `title_path(story, anchor = nil)`. The
+/// trailing `{anchor: a}` bound to `anchor` whole, and the redirect
+/// for a merged story rendered its fragment as `#{anchor: "…"}`.
+///
+/// Narrower than the helper rule on purpose: only slots ingest marked
+/// `from_keyword` may be named. A class method's genuine optional
+/// positional (`def f(x, opts = {})`) called with `f(x, opts: 1)` is
+/// handed the Hash `{opts: 1}` by Ruby, and must keep it.
+fn apply_to_library_class_calls(app: &mut App) {
+    let mut params: HashMap<(String, Symbol), Vec<Slot>> = HashMap::new();
+    for lc in &app.library_classes {
+        for m in &lc.methods {
+            if m.receiver != crate::dialect::MethodReceiver::Class
+                || m.params.iter().any(|p| p.rest || p.keyword)
+                || !m.params.iter().any(|p| p.from_keyword)
+            {
+                continue;
+            }
+            params.insert(
+                (lc.name.0.as_str().to_string(), m.name.clone()),
+                m.params.iter().map(slot_of).collect(),
+            );
+        }
+    }
+    if params.is_empty() {
+        return;
+    }
+    let mut rewrite = |e: &mut Expr| rewrite_class_calls(e, &params);
+    super::for_each_hook_body(app, &mut rewrite);
+    for view in &mut app.views {
+        rewrite_class_calls(&mut view.body, &params);
+    }
+}
+
+fn rewrite_class_calls(e: &mut Expr, params: &HashMap<(String, Symbol), Vec<Slot>>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_class_calls(c, params));
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &mut *e.node else { return };
+    let ExprNode::Const { path } = &*recv.node else { return };
+    let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let Some(slots) = params.get(&(class, method.clone())) else { return };
+    respell(args, slots, true);
 }
 
 /// The same repair inside a TEST CLASS.
@@ -127,10 +174,11 @@ fn apply_to_test_modules(app: &mut App) {
 struct Slot {
     name: Symbol,
     default: Option<Expr>,
+    from_keyword: bool,
 }
 
 fn slot_of(p: &crate::dialect::Param) -> Slot {
-    Slot { name: p.name.clone(), default: p.default.clone() }
+    Slot { name: p.name.clone(), default: p.default.clone(), from_keyword: p.from_keyword }
 }
 
 /// Helper name → its parameter slots, in declaration order.
@@ -178,6 +226,13 @@ fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Slot>>) {
         return;
     }
     let Some(slots) = params.get(method) else { return };
+    respell(args, slots, false);
+}
+
+/// Move a call's trailing keywords into the positional slots they
+/// name. `keyword_slots_only` limits the names to slots ingest
+/// flattened from keywords.
+fn respell(args: &mut Vec<Expr>, slots: &[Slot], keyword_slots_only: bool) {
     let Some(last) = args.last() else { return };
     let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return };
     if entries.is_empty() {
@@ -191,6 +246,9 @@ fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Slot>>) {
     for (k, v) in entries {
         let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else { return };
         let Some(pos) = slots.iter().position(|s| s.name == *value) else { return };
+        if keyword_slots_only && !slots[pos].from_keyword {
+            return;
+        }
         if pos < filled {
             return;
         }
