@@ -1745,6 +1745,18 @@ pub(super) fn ingest_library_method(
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
+    // `def f(*args, **opts)` — the `**opts` flattening above (a trailing
+    // `opts = {}`) cannot follow a rest param: `(*args, opts = {})` does
+    // not parse. With a rest param present a caller's keywords already
+    // land in it as a trailing Hash, so when the body never reads the
+    // kwrest the slot carries nothing and is dropped. Lobsters'
+    // `Telebugs` no-ops (`def self.user *args, **kwargs; end`) are the
+    // shape. A body that does read it keeps the slot (and the parse
+    // error) until Param can say "kwrest".
+    if params.iter().any(|p| p.rest) {
+        params.retain(|p| !p.from_kwrest || expr_reads_local(&body, &p.name));
+    }
+
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
         name,
@@ -2489,4 +2501,27 @@ pub(super) fn expand_props_bases(app: &mut crate::App) {
         synthesized.append(&mut lc.methods);
         lc.methods = synthesized;
     }
+}
+
+/// Does `expr` read the local `name` anywhere (a bare identifier ingests
+/// as a `Var`, or as a receiverless zero-arg `Send` when ingest could not
+/// tell it was a local)?
+fn expr_reads_local(expr: &Expr, name: &Symbol) -> bool {
+    let hit = match &*expr.node {
+        ExprNode::Var { name: n, .. } => n == name,
+        ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            method == name && args.is_empty()
+        }
+        _ => false,
+    };
+    if hit {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && expr_reads_local(c, name) {
+            found = true;
+        }
+    });
+    found
 }

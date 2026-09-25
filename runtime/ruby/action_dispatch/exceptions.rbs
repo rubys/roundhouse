@@ -1,0 +1,13 @@
+module ActionDispatch
+  module RemoteIp
+    class IpSpoofAttackError < StandardError
+    end
+  end
+
+  module Http
+    module MimeNegotiation
+      class InvalidType < StandardError
+      end
+    end
+  end
+end

@@ -20,4 +20,17 @@ module ActionController
       @param
     end
   end
+
+  # Named by `rescue_from` clauses (lobsters answers both with a 400 or a
+  # 404). No runtime path raises either yet: strong-params filtering
+  # does not reject unpermitted keys, and a format an action does not
+  # answer is resolved by the lowering. They exist because a rescue
+  # clause evaluates its class list whenever an exception passes
+  # through it — an undefined name there turns every other error the
+  # action raises into a NameError that hides the real one.
+  class UnpermittedParameters < StandardError
+  end
+
+  class UnknownFormat < StandardError
+  end
 end

@@ -1,0 +1,4 @@
+module ActiveRecord
+  class ConnectionNotEstablished < StandardError
+  end
+end

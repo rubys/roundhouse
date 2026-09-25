@@ -126,6 +126,65 @@ pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming
     out
 }
 
+/// A module or class an initializer defines at the top level, kept
+/// when the app's own code names it and nothing else defines it.
+///
+/// Rails runs every initializer at boot, so a constant defined there
+/// is as live as one in `app/`. Lobsters' `telebugs.rb` is the shape:
+/// `module Telebugs` with no-op `user`/`context`/`message` (reopened to
+/// forward to Sentry only when credentials exist — that reopen sits
+/// inside an `if` and is not a top-level definition), called from
+/// `authenticate_user` on every signed-in request. Dropping it made
+/// each of those requests a NameError.
+///
+/// The reference test keeps what an initializer defines for the
+/// framework's own use (lobsters' `SneakWrapperIntoPath`, prepended
+/// into `rails dbconsole`) out of the tree. Core classes and framework
+/// roots are never taken from here: a top-level definition of one is a
+/// reopen of something the runtime already provides.
+fn keep_initializer_defined(app: &mut App, dir: &Path, candidates: Vec<LibraryClass>) {
+    const FRAMEWORK_ROOTS: &[&str] = &[
+        "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
+        "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
+        "ActionMailer", "ActionMailbox", "ActionCable", "ActionText", "Rack",
+    ];
+    const CORE: &[&str] = &[
+        "Object", "BasicObject", "Kernel", "Module", "Class", "Comparable",
+        "Enumerable", "Integer", "Float", "Numeric", "String", "Symbol",
+        "Array", "Hash", "NilClass", "TrueClass", "FalseClass", "Time",
+        "Date", "DateTime", "Range", "Regexp", "Proc", "Struct", "Exception",
+        "StandardError",
+    ];
+    let root = dir.display().to_string();
+    let root = root.trim_end_matches('/');
+    let referenced = |name: &str| {
+        app.sources.iter().any(|f| {
+            let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
+            (rel.starts_with("app/") || rel.starts_with("lib/"))
+                && f.text.match_indices(name).any(|(i, _)| {
+                    let before = f.text[..i].chars().next_back();
+                    let after = f.text[i + name.len()..].chars().next();
+                    !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
+                        && matches!(after, Some('.') | Some(':'))
+                })
+        })
+    };
+    for lc in candidates {
+        let name = lc.name.0.as_str().to_string();
+        if name.contains("::")
+            || FRAMEWORK_ROOTS.contains(&name.as_str())
+            || CORE.contains(&name.as_str())
+            || app.library_classes.iter().any(|c| c.name == lc.name)
+            || app.models.iter().any(|m| m.name == lc.name)
+            || app.controllers.iter().any(|c| c.name == lc.name)
+            || !referenced(&name)
+        {
+            continue;
+        }
+        app.library_classes.push(lc);
+    }
+}
+
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
     // Front-end dispatch: a rack app with no config/routes.rb whose
     // app.rb subclasses Roda takes the Roda + Sequel walker (issue
@@ -815,6 +874,11 @@ end
         }
     }
 
+    // Top-level constants an initializer defines that are not mixins —
+    // kept or dropped after every app file is read (see
+    // `keep_initializer_defined`).
+    let mut initializer_defined: Vec<LibraryClass> = Vec::new();
+
     // `Time::DATE_FORMATS[:name] = ->(t) { … }` in an initializer —
     // read independently of config/application.rb above, since an app
     // can define a format without any of that file's config surface.
@@ -856,13 +920,15 @@ end
                 // gem's Request. No autoload path holds it, so without
                 // this the mixin named a module nothing ingested and
                 // was dropped with the guard. Only the mixed-in names
-                // are kept — anything else an initializer defines stays
-                // un-ingested, as before.
-                if !mixins.is_empty() {
-                    if let Ok(classes) = ingest_library_classes(&bytes, &path_str) {
-                        app.library_classes.extend(classes.into_iter().filter(|lc| {
-                            mixins.iter().any(|m| m.module.as_str() == lc.name.0.as_str())
-                        }));
+                // are kept here; the rest wait in `initializer_defined`
+                // for the referenced-by-app test below.
+                if let Ok(classes) = ingest_library_classes(&bytes, &path_str) {
+                    for lc in classes {
+                        if mixins.iter().any(|m| m.module.as_str() == lc.name.0.as_str()) {
+                            app.library_classes.push(lc);
+                        } else {
+                            initializer_defined.push(lc);
+                        }
                     }
                 }
                 app.module_mixins.extend(mixins);
@@ -1271,6 +1337,7 @@ end
     }
 
     app.sources = super::sources::drain();
+    keep_initializer_defined(&mut app, dir, initializer_defined);
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
@@ -3263,28 +3330,25 @@ fn synthesize_redirect_controller(
     let body = redirects
         .iter()
         .map(|redirect| {
-            let location = Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Str { value: redirect.location.clone() } },
+            // Built from Ruby source so the action body is ingested the
+            // way a hand-written `redirect_to` would be.
+            let src = format!(
+                "def __redirect\n  redirect_to({}, status: :{})\nend\n",
+                redirect_location_source(&redirect.location),
+                redirect_status_symbol(redirect.status),
             );
-            let location_for_target = location.clone();
-            let status = Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Int { value: i64::from(redirect.status) } },
-            );
-            let kwargs = Expr::new(
-                Span::synthetic(),
-                ExprNode::Hash {
-                    entries: vec![(
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("status") } },
-                        ),
-                        status,
-                    )],
-                    kwargs: true,
-                },
-            );
+            let body = crate::runtime_src::parse_methods(&src)
+                .ok()
+                .and_then(|m| m.into_iter().next())
+                .map(|m| m.body)
+                .expect("synthesized redirect action parses");
+            let location_for_target = match &*body.node {
+                ExprNode::Send { args, .. } => args[0].clone(),
+                _ => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Str { value: redirect.location.clone() } },
+                ),
+            };
             ControllerBodyItem::Action {
                 action: Action {
                     name: redirect.action.clone(),
@@ -3293,16 +3357,7 @@ fn synthesize_redirect_controller(
                     kw_params: Vec::new(),
                     block_param: None,
                     name_span: Span::synthetic(),
-                    body: Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Send {
-                            recv: None,
-                            method: Symbol::from("redirect_to"),
-                            args: vec![location, kwargs],
-                            block: None,
-                            parenthesized: true,
-                        },
-                    ),
+                    body,
                     // The action IS the redirect, which is what the
                     // render target says.
                     renders: RenderTarget::Redirect { to: location_for_target },
@@ -3326,6 +3381,52 @@ fn synthesize_redirect_controller(
         body,
         layout: crate::dialect::LayoutDecl::default(),
         sibling_classes: Vec::new(),
+    }
+}
+
+/// A routing redirect's target as a Ruby string literal. Rails'
+/// `redirect("/~%{username}")` fills each `%{name}` from the matched
+/// path parameters, so the placeholder becomes `#{params[:name]}`.
+/// (Rails also URI-escapes the value; the emitted action does not.)
+fn redirect_location_source(location: &str) -> String {
+    let mut out = String::from("\"");
+    let mut rest = location;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("%{") {
+            if let Some(close) = after.find('}') {
+                let name = &after[..close];
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    out.push_str(&format!("#{{params[:{name}]}}"));
+                    rest = &after[close + 1..];
+                    continue;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        match c {
+            '"' | '\\' | '#' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    out.push('"');
+    out
+}
+
+/// The Rack symbol for a redirect status, so the synthesized
+/// `redirect_to` passes the Symbol form `resolve_status` takes.
+fn redirect_status_symbol(status: u16) -> &'static str {
+    match status {
+        300 => "multiple_choices",
+        302 => "found",
+        303 => "see_other",
+        304 => "not_modified",
+        307 => "temporary_redirect",
+        308 => "permanent_redirect",
+        _ => "moved_permanently",
     }
 }
 

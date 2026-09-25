@@ -54,8 +54,9 @@ fn a_root_redirect_is_served_by_a_synthesized_action() {
     let app = app_with("  get \"/reports\", to: \"reports#index\"\n  root to: redirect(\"/reports\")\n");
     let emitted = redirect_controller(&app);
     assert!(
-        emitted.contains("redirect_to(\"/reports\", status: 301)"),
-        "Rails' routing redirect answers 301; got:\n{emitted}"
+        emitted.contains("redirect_to(\"/reports\", status: :moved_permanently)"),
+        "Rails' routing redirect answers 301, passed in the Symbol form \
+         `resolve_status` takes; got:\n{emitted}"
     );
     // The route table points at the action, so no emitter needs a route
     // kind for the redirect itself.
@@ -94,7 +95,7 @@ fn an_explicit_verb_redirect_carries_its_status_and_its_own_action() {
     assert!(emitted.contains("def old"), "got:\n{emitted}");
     assert!(emitted.contains("def root"), "got:\n{emitted}");
     assert!(
-        emitted.contains("redirect_to(\"/reports\", status: 302)"),
+        emitted.contains("redirect_to(\"/reports\", status: :found)"),
         "an explicit `status:` is carried; got:\n{emitted}"
     );
 }
@@ -124,5 +125,21 @@ fn a_block_redirect_is_still_dropped_with_its_ledger_line() {
         )),
         "routes = {:?}",
         app.routes.entries
+    );
+}
+
+#[test]
+fn a_path_placeholder_is_filled_from_the_matched_params() {
+    // Lobsters: `get "/u/:username", to: redirect("/~%{username}",
+    // status: 301)`. Emitted literally, every old profile link answered
+    // a Location of `/~%{username}`.
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/u/:username\", to: redirect(\"/~%{username}\", status: 301)\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(!emitted.contains("%{username}"), "got:\n{emitted}");
+    assert!(
+        emitted.contains("redirect_to(\"/~#{@params[\"username\"]}\", status: :moved_permanently)"),
+        "got:\n{emitted}"
     );
 }

@@ -215,10 +215,12 @@ end
 # The login identity is fixed by the benchmark (route_generator.rb logs
 # in as this user before every run). Story/comment ids are sampled from
 # the DB so the replay survives a benchmark-DB refresh; lowest-id
-# non-deleted rows keep the choice deterministic.
-BENCH_EMAIL    = "wiegand.michell@mertz-vonrueden.test"
-BENCH_PASSWORD = "ji3W36xR"
-BENCH_USERNAME = "michell_wiegand"
+# non-deleted rows keep the choice deterministic. The LOBSTERS_BENCH_*
+# overrides serve a DB that is not ruby-bench's: current upstream's
+# fake_data gives every user the password "fake".
+BENCH_EMAIL    = ENV["LOBSTERS_BENCH_EMAIL"]    || "wiegand.michell@mertz-vonrueden.test"
+BENCH_PASSWORD = ENV["LOBSTERS_BENCH_PASSWORD"] || "ji3W36xR"
+BENCH_USERNAME = ENV["LOBSTERS_BENCH_USERNAME"] || "michell_wiegand"
 
 # Sample through the tree's own adapter (already configured above) so
 # the replay runs wherever the tree runs — the sqlite3 C gem doesn't
