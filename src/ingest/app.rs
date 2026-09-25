@@ -1992,7 +1992,7 @@ fn dedup_repeated_filters(app: &mut App) {
                 let crate::dialect::ControllerBodyItem::Filter { filter, .. } = item else {
                     return false;
                 };
-                if matches!(filter.kind, crate::dialect::FilterKind::Skip) {
+                if filter.kind.is_skip() {
                     return false;
                 }
                 body[i + 1..].iter().any(|later| {
@@ -2428,6 +2428,8 @@ fn filter_from_send(
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
+        "skip_around_action" => FilterKind::SkipAround,
+        "skip_after_action" => FilterKind::SkipAfter,
         _ => return None,
     };
 

@@ -70,7 +70,31 @@ const ASSIGNERS: &[&str] = &["update", "update!", "assign_attributes"];
 /// declaring the name agrees on it. A disagreement removes the entry.
 type BelongsTo = HashMap<Symbol, Symbol>;
 
+/// Class-level lookups that take a CONDITION hash. `where` is not here:
+/// `scope_chain` already translates its keys wherever it seeds a
+/// relation, but it visits only bodies that mention a scope or an
+/// association lookup — a bare `Vote.find_by(user: @user, story:
+/// @story, comment: nil)` (lobsters' story page) reached SQL as
+/// `WHERE user = '#<User…>'`.
+const FINDERS: &[&str] = &["find_by", "find_by!", "exists?"];
+
+/// Per-model belongs_to name -> foreign key, polymorphic ones left out
+/// (their condition needs the type column too).
+type ModelBelongsTo = HashMap<crate::ident::ClassId, HashMap<Symbol, Symbol>>;
+
 pub fn apply_assoc_attr_key_lowering(app: &mut App) -> Vec<Diagnostic> {
+    let mut per_model: ModelBelongsTo = HashMap::new();
+    for m in &app.models {
+        for a in m.associations() {
+            if let Association::BelongsTo { name, foreign_key, polymorphic: false, .. } = a {
+                per_model.entry(m.name.clone()).or_default().insert(name.clone(), foreign_key.clone());
+            }
+        }
+    }
+    if !per_model.is_empty() {
+        super::for_each_hook_body(app, &mut |b| rewrite_conditions(b, &per_model));
+        super::for_each_test_body(app, &mut |b| rewrite_conditions(b, &per_model));
+    }
     let mut table: BelongsTo = HashMap::new();
     let mut conflicted: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     for m in &app.models {
@@ -124,6 +148,34 @@ fn residue(expr: &Expr, assoc: &str, reason: &str) -> Diagnostic {
              `{assoc}_id:` or give the value a resolvable model type"
         ),
     )
+}
+
+/// `Vote.find_by(user: u, comment: nil)` → `Vote.find_by(user_id: u,
+/// comment_id: nil)`. Only the KEY changes: the runtime's condition
+/// builder reads a record value as its id and `nil` as `IS NULL`
+/// (`Relation#column_predicate`), which is exactly what Rails renders
+/// for each — so unlike a write, a literal nil is correct here.
+fn rewrite_conditions(expr: &mut Expr, per_model: &ModelBelongsTo) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_conditions(c, per_model));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if !FINDERS.contains(&method.as_str()) || args.len() != 1 {
+        return;
+    }
+    let ExprNode::Const { path } = &*r.node else { return };
+    let class = crate::ident::ClassId(Symbol::from(
+        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str(),
+    ));
+    let Some(belongs) = per_model.get(&class) else { return };
+    let ExprNode::Hash { entries, .. } = &mut *args[0].node else { return };
+    for (k, _) in entries.iter_mut() {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+        let Some(fk) = belongs.get(key) else { continue };
+        let mut new_key = Expr::new(k.span, ExprNode::Lit { value: Literal::Sym { value: fk.clone() } });
+        new_key.ty = Some(Ty::Sym);
+        *k = new_key;
+    }
 }
 
 fn rewrite(expr: &mut Expr, table: &BelongsTo, diags: &mut Vec<Diagnostic>) {

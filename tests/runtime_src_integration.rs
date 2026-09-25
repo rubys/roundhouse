@@ -1413,7 +1413,14 @@ fn every_runtime_method_body_concretely_typed() {
     // `Connection#exec_insert`, ONE: Rails' `name` log label passed on to
     // `exec_update`, the site that method already carries; lobsters'
     // FullTextSearch indexes new rows through it.
-    const CEILING: usize = 487;
+    //
+    // 487 -> 489: `Relation#touch_all`, TWO sites — `escape_value`'s
+    // answer (it escapes whatever it is handed, so it answers untyped)
+    // and the adapter's `changes`, the same pair `update_all` beside it
+    // carries (4). What it bought: lobsters' inbox marks itself read
+    // (`after_action :update_read_at`), which runs now that after
+    // filters reach the dispatcher.
+    const CEILING: usize = 489;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

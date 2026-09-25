@@ -55,6 +55,20 @@ pub(super) struct RescueHandler {
     pub body: Expr,
 }
 
+/// The around and after filters that fire for this controller, each
+/// already narrowed by any `skip_*` that names it.
+#[derive(Default)]
+pub(super) struct WrapFilters {
+    /// Declaration order, inherited first — the first is OUTERMOST
+    /// (ActiveSupport runs arounds in the order they were set).
+    pub around: Vec<Filter>,
+    /// Declaration order; emitted REVERSED, since ActiveSupport runs
+    /// after callbacks in reverse (`callbacks.rb`: "then runs the after
+    /// callbacks in reverse order"). Named targets and block-form
+    /// (`after_action only: [...] do … end`) alike.
+    pub after: Vec<PreambleStmt>,
+}
+
 pub(super) fn synthesize_process_action(
     preamble: &[PreambleStmt],
     publics: &[Action],
@@ -62,6 +76,7 @@ pub(super) fn synthesize_process_action(
     enclosing_class: Symbol,
     deferred_tails: &std::collections::HashMap<Symbol, Expr>,
     rescues: &[RescueHandler],
+    wraps: &WrapFilters,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -90,7 +105,51 @@ pub(super) fn synthesize_process_action(
     }
 
     if !publics.is_empty() || !inherited.is_empty() {
-        stmts.push(case_dispatch(publics, inherited, deferred_tails));
+        // `around_action :m` — `m` runs the action by yielding, so the
+        // dispatch becomes the block it is handed. Under the filter's
+        // own guards; where they fail, the action runs unwrapped, which
+        // is what Rails' skipped callback does. lobsters'
+        // `track_story_reads` loads the story and the read ribbon the
+        // story page renders, then bumps the ribbon after it.
+        let mut dispatch = case_dispatch(publics, inherited, deferred_tails);
+        for f in wraps.around.iter().rev() {
+            let wrapped = syn(ExprNode::Send {
+                recv: None,
+                method: f.target.clone(),
+                args: vec![],
+                block: Some(syn(ExprNode::Lambda {
+                    params: vec![],
+                    rest_param: None,
+                    block_param: None,
+                    body: dispatch.clone(),
+                    block_style: crate::expr::BlockStyle::Do,
+                })),
+                parenthesized: false,
+            });
+            dispatch = match filter_cond(f) {
+                Some(cond) => syn(ExprNode::If { cond, then_branch: wrapped, else_branch: dispatch }),
+                None => wrapped,
+            };
+        }
+        stmts.push(dispatch);
+        // `after_action :m` — after the action returns (a halted chain
+        // returned above; an action that raised is in the rescue).
+        for a in wraps.after.iter().rev() {
+            stmts.push(match a {
+                PreambleStmt::Call { filter, .. } => filter_dispatch_stmt(filter),
+                PreambleStmt::Block { body, only, except, .. } => {
+                    if only.is_empty() && except.is_empty() {
+                        body.clone()
+                    } else {
+                        syn(ExprNode::If {
+                            cond: include_check(only, except),
+                            then_branch: body.clone(),
+                            else_branch: empty_seq(),
+                        })
+                    }
+                }
+            });
+        }
     }
 
     let mut body = match stmts.len() {
@@ -187,6 +246,18 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
         block: None,
         parenthesized: false,
     });
+    match filter_cond(f) {
+        Some(cond) => syn(ExprNode::If {
+            cond,
+            then_branch: target_call,
+            else_branch: empty_seq(),
+        }),
+        None => target_call,
+    }
+}
+
+/// The guard a filter runs under, `None` when it always runs.
+fn filter_cond(f: &Filter) -> Option<Expr> {
     // Guard conjunction, in Rails' own order: the only/except action
     // check, then the `if:` / `unless:` conditions in BOTH spellings.
     //
@@ -238,20 +309,13 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
     if let Some(c) = &f.unless_cond_expr {
         conds.push(negate(c.clone()));
     }
-    let Some(cond) = conds.into_iter().reduce(|l, r| {
+    conds.into_iter().reduce(|l, r| {
         syn(ExprNode::BoolOp {
             op: crate::expr::BoolOpKind::And,
             surface: crate::expr::BoolOpSurface::Symbol,
             left: l,
             right: r,
         })
-    }) else {
-        return target_call;
-    };
-    syn(ExprNode::If {
-        cond,
-        then_branch: target_call,
-        else_branch: empty_seq(),
     })
 }
 

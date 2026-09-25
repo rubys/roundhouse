@@ -1113,7 +1113,31 @@ pub enum FilterKind {
     Before,
     Around,
     After,
+    /// `skip_before_action`.
     Skip,
+    /// `skip_around_action` — narrows around filters only, as each
+    /// `skip_*` narrows its own kind in Rails.
+    SkipAround,
+    /// `skip_after_action` (lobsters' LoginController keeps its session
+    /// cookie this way).
+    SkipAfter,
+}
+
+impl FilterKind {
+    /// Any of the three `skip_*` declarations.
+    pub fn is_skip(&self) -> bool {
+        matches!(self, FilterKind::Skip | FilterKind::SkipAround | FilterKind::SkipAfter)
+    }
+
+    /// The kind of filter a skip removes; `None` for a filter itself.
+    pub fn skipped_kind(&self) -> Option<FilterKind> {
+        match self {
+            FilterKind::Skip => Some(FilterKind::Before),
+            FilterKind::SkipAround => Some(FilterKind::Around),
+            FilterKind::SkipAfter => Some(FilterKind::After),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

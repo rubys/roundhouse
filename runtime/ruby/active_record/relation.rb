@@ -484,6 +484,15 @@ module ActiveRecord
       self
     end
 
+    # Rails' `load_async` schedules the query on a background pool and
+    # answers the relation; the first read waits for the rows. Loading
+    # now is the same observable answer — this runtime has no async
+    # executor to overlap the query with, and lobsters' story page
+    # (`@story.comments…load_async`) reads the records a few lines on.
+    def load_async
+      load
+    end
+
     # An eager load's records, handed to the relation that would have
     # gone and fetched them. A `has_many :through` reader answers a
     # Relation (the join lives on the intermediate table, so there is no
@@ -1004,6 +1013,23 @@ module ActiveRecord
       end
       sql = "UPDATE #{@table} SET #{set_sql}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
+      ActiveRecord.adapter.changes
+    end
+
+    # `touch_all(:col)` — Rails' bulk touch: `updated_at` (when the table
+    # has one) and the named column set to the current time, by one
+    # UPDATE scoped like `update_all`, no callbacks. lobsters marks its
+    # inbox read this way after every inbox page (`@notifications
+    # .where(read_at: nil).touch_all(:read_at)`). One column rather than
+    # Rails' `*names`: that is every corpus call, and a splat of names
+    # would reach the SQL untyped.
+    def touch_all(name = nil)
+      now = ActiveRecord.adapter.escape_value(ActiveSupport.db_now)
+      parts = []
+      parts.push("updated_at = #{now}") if @model.schema_columns.include?(:updated_at)
+      parts.push("#{name} = #{now}") unless name.nil?
+      return 0 if parts.empty?
+      ActiveRecord.adapter.execute_ddl("UPDATE #{@table} SET #{parts.join(", ")}#{scoped_write_where}")
       ActiveRecord.adapter.changes
     end
 

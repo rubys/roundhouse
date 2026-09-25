@@ -474,7 +474,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut typed: Vec<(String, crate::ty::Ty)> = Vec::new();
     if is_action_view {
         for iv in &closure_ivars {
-            typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+            typed.push((iv.clone(), closure_ivar_ty(view, iv, &known_models, lx.app)));
         }
     } else {
         // Partial/layout: record/body arg from the render/yield call site,
@@ -496,7 +496,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             if iv == &arg_name {
                 continue;
             }
-            typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+            typed.push((iv.clone(), closure_ivar_ty(view, iv, &known_models, lx.app)));
         }
         // Layouts render in the controller's view context, where `flash`
         // is live — thread it as a param when the template reads it bare
@@ -585,7 +585,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             new_params.push(Param::positional(Symbol::from(iv.clone())));
             sig_params.push(TyParam {
                 name: Symbol::from(iv.clone()),
-                ty: ivar_ty(iv, &known_models),
+                ty: closure_ivar_ty(view, iv, &known_models, lx.app),
                 kind: ParamKind::Required,
             });
         }
@@ -3213,6 +3213,28 @@ fn declared_local_ty(
         return by_name;
     }
     at_render.unwrap_or(by_name)
+}
+
+/// A threaded closure ivar's param type: the naming convention first,
+/// as for a declared local ([`declared_local_ty`]), and where it yields
+/// nothing, the type the analyzer computed for that ivar in this view
+/// (`App::view_ivar_types`). lobsters' story page threads
+/// `@merged_stories` — `[@story, @story.merged_stories.….includes(…)]
+/// .flatten`, an `Array[Story]` — whose NAME singularizes to no model,
+/// so the param was `untyped` and every read inside the loop
+/// (`ms.comments.build`) was gradual.
+fn closure_ivar_ty(view: &View, name: &str, known_models: &[String], app: &App) -> crate::ty::Ty {
+    let by_name = ivar_ty(name, known_models);
+    if !matches!(by_name, crate::ty::Ty::Untyped) {
+        return by_name;
+    }
+    app.view_ivar_types
+        .get(&view.name)
+        .and_then(|ivars| ivars.get(&Symbol::from(name)))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }))
+        .filter(|t| !mentions_relation(t))
+        .cloned()
+        .unwrap_or(by_name)
 }
 
 /// Does this type mention an unspecialized `Relation`? Such a type is

@@ -31,7 +31,38 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         // `Array.isArray(stringField)` to `never` and rejects the
         // subsequent `.length` access.
         let attr_ty = model.attributes.fields.get(&v.attribute);
+        // `validates :user, presence: true` on a `belongs_to :user` (or
+        // `has_one`) names the ASSOCIATION, and Rails asks its reader —
+        // `user.blank?`, nil for a record. There is no `@user` slot: the
+        // writer sets `@user_id` and caches the record, so the column
+        // check below read an ivar nothing writes and rejected every
+        // record. The 2023 lobsters snapshot's ReadRibbon validates this
+        // way, and its story page (reached once `around_action` ran)
+        // could never save a ribbon.
+        let is_assoc = model.associations().any(|a| {
+            matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
+                if name == &v.attribute)
+        });
         for rule in &v.rules {
+            if is_assoc && matches!(rule, ValidationRule::Presence) {
+                let reader = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: None,
+                        method: v.attribute.clone(),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                let mut check = if_with_nil_else(
+                    send(reader, "nil?", vec![]),
+                    errors_push(format!("{} can't be blank", humanize(v.attribute.as_str()))),
+                );
+                check.inherit_span(span);
+                stmts.push(check);
+                continue;
+            }
             for mut check in validation_rule_to_calls(&v.attribute, rule, attr_ty) {
                 // Each expanded check attributes to its `validates` line.
                 check.inherit_span(span);

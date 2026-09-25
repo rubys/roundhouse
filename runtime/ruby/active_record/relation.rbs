@@ -62,6 +62,7 @@ module ActiveRecord
     def none: () -> Relation
     def reload: () -> Relation
     def load: () -> Relation
+    def load_async: () -> Relation
     # `records` is `untyped`, NOT `Array[untyped]`: the body only stores
     # the argument (`@records = records if loaded`), so it does not care
     # about the array's REPRESENTATION — and that is all
@@ -136,6 +137,7 @@ module ActiveRecord
     def destroy_by: (untyped conditions) -> Array[untyped]
     def delete_by: (untyped conditions) -> Integer
     def update_all: (untyped updates) -> Integer
+    def touch_all: (?Symbol? name) -> Integer
     # The WHERE a bulk write takes — a plain clause, or an
     # `IN (SELECT …)` subquery when the scope carries a join.
     def scoped_write_where: () -> String

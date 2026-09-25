@@ -2073,7 +2073,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             FilterKind::Before => "before",
             FilterKind::Around => "around",
             FilterKind::After => "after",
-            FilterKind::Skip => continue, // annotates the hop it removes
+            FilterKind::Skip | FilterKind::SkipAround | FilterKind::SkipAfter => continue, // annotates the hop it removes
         };
         let gated_in = crate::analyze::before_filter_applies(&rf.filter, &action_name);
         // `skip_before_action` removes before callbacks only.
@@ -2689,6 +2689,8 @@ fn kind_word(kind: &crate::dialect::FilterKind) -> &'static str {
         FilterKind::Around => "around_action",
         FilterKind::After => "after_action",
         FilterKind::Skip => "skip_before_action",
+        FilterKind::SkipAround => "skip_around_action",
+        FilterKind::SkipAfter => "skip_after_action",
     }
 }
 

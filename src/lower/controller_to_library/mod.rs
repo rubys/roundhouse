@@ -1005,7 +1005,7 @@ fn build_methods(
     // outside campfire's one bot controller — and an empty set leaves
     // both the bodies and the dispatcher byte-identical.
     let deferred_renders = actions_reached_by_super(controller, all_controllers);
-    let mut pending_dispatcher: Option<Vec<PreambleStmt>> = None;
+    let mut pending_dispatcher: Option<(Vec<PreambleStmt>, process_action::WrapFilters)> = None;
 
     if !publics_inlined.is_empty() || !inherited.is_empty() {
         // The before_action preamble: everything the body-inlining above
@@ -1040,7 +1040,7 @@ fn build_methods(
             &deferred_renders, &mut deferred_tails,
         ));
     }
-    if let Some(preamble) = pending_dispatcher {
+    if let Some((preamble, wraps)) = pending_dispatcher {
         methods.insert(
             dispatcher_at,
             synthesize_process_action(
@@ -1050,6 +1050,7 @@ fn build_methods(
                 controller.name.0.clone(),
                 &deferred_tails,
                 &collect_rescue_handlers(controller, all_controllers, format_breadth),
+                &wraps,
             ),
         );
     }
@@ -1291,7 +1292,7 @@ fn build_filter_preamble(
     all_controllers: &[Controller],
     own_privs: &[Action],
     own_privs_inlined: bool,
-) -> Vec<PreambleStmt> {
+) -> (Vec<PreambleStmt>, process_action::WrapFilters) {
     let chain = ancestor_chain(controller, all_controllers);
 
     // Skips, kept whole rather than reduced to a set of names: a skip
@@ -1305,7 +1306,7 @@ fn build_filter_preamble(
         .copied()
         .chain(std::iter::once(controller))
         .flat_map(|c| c.filters())
-        .filter(|f| matches!(f.kind, FilterKind::Skip))
+        .filter(|f| f.kind.is_skip())
         .collect();
 
     // Resolve a filter target's body — self first, then nearest ancestor
@@ -1324,15 +1325,19 @@ fn build_filter_preamble(
     };
 
     let mut preamble: Vec<PreambleStmt> = Vec::new();
-    let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
-        // Apply every skip naming this target. An unscoped skip removes
-        // the filter; a scoped one narrows where it still runs, which
-        // the dispatcher already enforces per action (`filter_dispatch_stmt`
-        // emits the only/except guard).
+    let mut wraps = process_action::WrapFilters::default();
+    // Apply every skip naming this target. An unscoped skip removes the
+    // filter; a scoped one narrows where it still runs, which the
+    // dispatcher already enforces per action (`filter_cond` emits the
+    // only/except guard).
+    let narrow = |f: &Filter| -> Option<Filter> {
         let mut f = f.clone();
-        for skip in skips.iter().filter(|s| s.target == f.target) {
+        for skip in skips
+            .iter()
+            .filter(|s| s.target == f.target && s.kind.skipped_kind().as_ref() == Some(&f.kind))
+        {
             if skip.only.is_empty() && skip.except.is_empty() {
-                return;
+                return None;
             }
             for a in &skip.only {
                 if !f.except.contains(a) {
@@ -1348,10 +1353,14 @@ fn build_filter_preamble(
                     f.only.iter().filter(|a| skip.except.contains(a)).cloned().collect()
                 };
                 if f.only.is_empty() {
-                    return;
+                    return None;
                 }
             }
         }
+        Some(f)
+    };
+    let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
+        let Some(f) = narrow(f) else { return };
         let f = &f;
         let Some(target) = find_target(&f.target) else {
             return;
@@ -1390,17 +1399,37 @@ fn build_filter_preamble(
                     }
                     push_call(filter, &mut preamble);
                 }
+                // `around_action` / `after_action` — carried to the
+                // dispatcher, which wraps the case dispatch in the one
+                // and runs the other after it. They used to be dropped:
+                // lobsters' story page never loaded its read ribbon, and
+                // `clear_session_cookie` never ran on any page.
+                ControllerBodyItem::Filter { filter, .. }
+                    if matches!(filter.kind, FilterKind::Around | FilterKind::After) =>
+                {
+                    let Some(f) = narrow(filter) else { continue };
+                    if find_target(&f.target).is_none() {
+                        continue;
+                    }
+                    if matches!(f.kind, FilterKind::Around) {
+                        wraps.around.push(f);
+                    } else {
+                        wraps.after.push(PreambleStmt::Call { filter: f, halt_check: false });
+                    }
+                }
                 ControllerBodyItem::Unknown { expr, .. } => {
-                    if let Some((body, only, except)) = block_form_filter(expr) {
+                    if let Some((body, only, except)) = block_form_filter(expr, "before_action") {
                         let halt_check = can_respond(&body);
                         preamble.push(PreambleStmt::Block { body, only, except, halt_check });
+                    } else if let Some((body, only, except)) = block_form_filter(expr, "after_action") {
+                        wraps.after.push(PreambleStmt::Block { body, only, except, halt_check: false });
                     }
                 }
                 _ => {}
             }
         }
     }
-    preamble
+    (preamble, wraps)
 }
 
 /// Method names ending in `_path` / `_url` that this controller or one
@@ -1719,11 +1748,11 @@ fn can_respond_within(
 /// in an Unknown body item — the block form has no symbol target, so the
 /// ingester round-trips it verbatim instead of producing a `Filter`.
 /// Returns the block body plus the only/except scoping.
-fn block_form_filter(expr: &Expr) -> Option<(Expr, Vec<Symbol>, Vec<Symbol>)> {
+fn block_form_filter(expr: &Expr, kind: &str) -> Option<(Expr, Vec<Symbol>, Vec<Symbol>)> {
     let ExprNode::Send { recv: None, method, args, block: Some(b), .. } = &*expr.node else {
         return None;
     };
-    if method.as_str() != "before_action" {
+    if method.as_str() != kind {
         return None;
     }
     let ExprNode::Lambda { body, .. } = &*b.node else {
@@ -2444,6 +2473,7 @@ fn lower_action_body(
     // a fallback for anything Arel doesn't recognize. See
     // project_arel_compile_time_first.md.
     let with_destroy = rewrite_destroy_bang(&with_assoc);
+    let with_destroy = rewrites::rewrite_request_format(&with_destroy);
     let with_routes = rewrite_route_helpers(&with_destroy, shadows, route_id_segments);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The

@@ -408,6 +408,8 @@ pub(super) fn parse_filter_call(
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
+        "skip_around_action" => FilterKind::SkipAround,
+        "skip_after_action" => FilterKind::SkipAfter,
         _ => return None,
     };
 

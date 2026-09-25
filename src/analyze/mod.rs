@@ -1917,7 +1917,7 @@ impl Analyzer {
                 let filter_chain: Vec<crate::app::ResolvedFilter> = chained_filters
                     .iter()
                     .map(|(filter, defined_in, included_via)| {
-                        let runs = !matches!(filter.kind, FilterKind::Skip);
+                        let runs = !filter.kind.is_skip();
                         let assigns: HashMap<Symbol, Ty> = if runs {
                             chained_bindings
                                 .get(&filter.target)

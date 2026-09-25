@@ -1588,6 +1588,80 @@ pub(super) fn rewrite_destroy_bang(expr: &Expr) -> Expr {
     })
 }
 
+/// `request.format.html?` → `self.request_format == :html`, and
+/// `request.format = :html` → `self.request_format = :html`.
+///
+/// Rails' `request.format` is a `Mime::Type` whose predicates answer
+/// "is this the negotiated format"; the controller already carries that
+/// answer as `request_format`, the Symbol main.rb seeds from the path
+/// suffix and the route's `format:` and every flattened `respond_to`
+/// branches on. Asking the Request object instead reached a different
+/// question on each lane — the CRuby overlay Request has no `format`,
+/// so the call fell through to `Kernel#format` (private: a NoMethodError
+/// on lobsters' story page, which canonicalizes its title only for
+/// html), and the shared Request's is a String with no predicates.
+pub(super) fn rewrite_request_format(expr: &Expr) -> Expr {
+    fn is_request_format(e: &Expr) -> bool {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else {
+            return false;
+        };
+        method.as_str() == "format"
+            && args.is_empty()
+            && matches!(&*r.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+                if method.as_str() == "request" && args.is_empty())
+    }
+    fn request_format(span: Span) -> Expr {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: Symbol::from("request_format"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && method.as_str().ends_with('?') && is_request_format(r) =>
+        {
+            let fmt = method.as_str().trim_end_matches('?');
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(request_format(e.span)),
+                    method: Symbol::from("=="),
+                    args: vec![Expr::new(
+                        e.span,
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(fmt) } },
+                    )],
+                    block: None,
+                    parenthesized: false,
+                },
+            ))
+        }
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value }
+            if name.as_str() == "format"
+                && matches!(&*recv.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+                    if method.as_str() == "request" && args.is_empty())
+                && matches!(&*value.node, ExprNode::Lit { value: Literal::Sym { .. } }) =>
+        {
+            Some(Expr::new(
+                e.span,
+                ExprNode::Assign {
+                    target: LValue::Attr {
+                        recv: Expr::new(e.span, ExprNode::SelfRef),
+                        name: Symbol::from("request_format"),
+                    },
+                    value: value.clone(),
+                },
+            ))
+        }
+        _ => None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // `params` rewrites. Spinel controllers don't have the magic `params`
 // method — request params arrive as a plain Hash on `@params`. The two

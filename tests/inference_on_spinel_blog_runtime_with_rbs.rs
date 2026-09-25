@@ -828,7 +828,13 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `execute(sql)` forward `exec_query` already carries). What it
     // buys: lobsters' vote lookup tables on every comment listing, its
     // FullTextSearch index insert and TrafficHelper's activity range.
-    const CEILING: usize = 991;
+    // 2026-09-25 991 -> 1001, +10, MEASURED from the dump: all
+    // `Relation#touch_all` — the adapter self-sends (`escape_value`,
+    // `execute_ddl`, `changes`) and the `now` / `name` reads in its SQL
+    // interpolation, the shape `update_all` beside it already carries.
+    // `load_async` (a forward to `load`) adds none. What it buys:
+    // lobsters' inbox `after_action :update_read_at`, which now runs.
+    const CEILING: usize = 1001;
 
     assert!(
         all_untyped.len() <= CEILING,

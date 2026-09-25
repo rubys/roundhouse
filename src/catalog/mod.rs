@@ -1151,6 +1151,15 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
+    // Rails schedules the query; the runtime loads now (same records,
+    // no executor to overlap with). lobsters' story page.
+    CatalogedMethod {
+        name: "load_async",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
     CatalogedMethod {
         name: "reload",
         receiver: ReceiverContext::Relation,
@@ -1777,7 +1786,7 @@ mod tests {
             "joins", "left_outer_joins", "distinct", "group", "having",
             "references", "eager_load", "readonly", "reorder", "rewhere",
             "merge", "merge!", "extending", "unscope", "not", "or", "and",
-            "none", "load", "reload", "reselect",
+            "none", "load", "load_async", "reload", "reselect",
             "page", "per", "padding", "without_count", "paginate",
         ] {
             let entry = lookup(m, ReceiverContext::Relation)

@@ -1698,8 +1698,15 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
         },
         // `each`, predicates, and shape-preserving transforms keep elem.
+        // `flatten` (no depth): nested Arrays unwrap, and a Relation
+        // element contributes its RECORDS — Ruby splices anything with
+        // `to_ary`, which a Relation answers. lobsters' story page builds
+        // `[@story, @story.merged_stories.….includes(:votes)].flatten`
+        // and renders every element as a Story; left at the union, each
+        // read off it (`ms.comments.build`) was gradual.
+        "flatten" => Ty::Array { elem: Box::new(flatten_elem(elem)) },
         "each" | "reverse_each" | "select" | "filter" | "reject"
-        | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq"
+        | "sort" | "sort_by" | "reverse" | "compact" | "uniq"
         // `drop`/`take` (and their block forms) return a same-element
         // sub-array — the tail of a splat destructuring (`a, *rest =`
         // desugars `rest` to `arr.drop(n)`) among other uses.
@@ -2312,5 +2319,18 @@ pub(super) fn bool_method(method: &Symbol) -> Ty {
         "to_s" => Ty::Str,
         "inspect" => Ty::Str,
         _ => unknown(),
+    }
+}
+
+/// The element type after a full `flatten`.
+fn flatten_elem(t: &Ty) -> Ty {
+    match t {
+        Ty::Array { elem } => flatten_elem(elem),
+        Ty::Relation { of } => Ty::Class { id: of.clone(), args: vec![] },
+        Ty::Union { variants } => variants
+            .iter()
+            .map(flatten_elem)
+            .fold(Ty::Bottom, union_of),
+        other => other.clone(),
     }
 }
