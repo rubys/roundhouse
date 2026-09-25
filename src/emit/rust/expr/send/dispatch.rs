@@ -281,14 +281,18 @@ pub(super) fn dispatch_method_by_recv_ty(
             "chars" if args.is_empty() => Some(format!(
                 "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
             )),
+            // The argument is borrowed as `&*(…)`: `str`'s pattern
+            // methods take `&str` (and `char`), not `String`, so a
+            // computed argument (`ap.start_with?(pp[0, n])`) did not
+            // compile. `&*` is a no-op reborrow on a literal `&str`.
             "start_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.starts_with({})", args_s[0]))
+                Some(format!("{recv_s}.starts_with(&*({}))", args_s[0]))
             }
             "end_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.ends_with({})", args_s[0]))
+                Some(format!("{recv_s}.ends_with(&*({}))", args_s[0]))
             }
             "include?" if args.len() == 1 => {
-                Some(format!("{recv_s}.contains({})", args_s[0]))
+                Some(format!("{recv_s}.contains(&*({}))", args_s[0]))
             }
             _ => None,
         },

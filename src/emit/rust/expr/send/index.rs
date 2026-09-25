@@ -185,8 +185,18 @@ pub(super) fn try_recv_typed_method(
             let recv_s = emit_expr(r);
             let start_s = emit_expr(&args[0]);
             let len_s = emit_expr(&args[1]);
+            // Ruby semantics, not a raw byte range: characters, a
+            // negative start counting from the end, and the slice
+            // CLAMPED to the string (`"abc"[1, 10]` is "bc") — a
+            // `[a..b]` range panics past the end and on a non-char
+            // boundary. Ruby answers nil for a start past the end;
+            // the emit is typed String, so that case answers "".
             return Some(format!(
-                "(&{recv_s}[({start_s}) as usize..(({start_s}) + ({len_s})) as usize]).to_string()"
+                "{{ let __s: &str = &*({recv_s}); let __n = __s.chars().count() as i64; \
+                 let mut __b = ({start_s}) as i64; if __b < 0 {{ __b += __n; }} \
+                 let __l = ({len_s}) as i64; \
+                 if __b < 0 || __b > __n || __l < 0 {{ String::new() }} \
+                 else {{ __s.chars().skip(__b as usize).take(__l as usize).collect::<String>() }} }}"
             ));
         }
         if method == "[]=" && args.len() == 2 {

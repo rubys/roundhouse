@@ -1128,10 +1128,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 
     // `arr.include?(x)` → `Enum.member?(arr, x)` for an Array receiver.
     // (Hash `include?` is key-membership — handled in the Map block.)
+    // `s.include?(sub)` → `String.contains?` for a String receiver —
+    // the router's `ext.include?("/")` and prefixed-param check. A
+    // segment read out of an `Array[String]` types as `String?`, so the
+    // nilable form counts: Ruby would raise on nil there too.
     if method == "include?" && args.len() == 1 {
         if let Some(r) = recv {
             if recv_is_array(r) {
                 return format!("Enum.member?({}, {})", emit_expr(r), emit_expr(&args[0]));
+            }
+            if recv_is_string(r) || recv_is_nilable_string(r) {
+                return format!("String.contains?({}, {})", emit_expr(r), emit_expr(&args[0]));
             }
         }
     }
@@ -1944,6 +1951,16 @@ fn recv_is_array(e: &Expr) -> bool {
 
 /// True when `e` is a `String` (or a string literal) — its `empty?`
 /// becomes `== ""` (Elixir has no `String.empty?`).
+fn recv_is_nilable_string(e: &Expr) -> bool {
+    match effective_recv_ty(e) {
+        Some(crate::ty::Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, crate::ty::Ty::Str))
+                && variants.iter().all(|v| matches!(v, crate::ty::Ty::Str | crate::ty::Ty::Nil))
+        }
+        _ => false,
+    }
+}
+
 fn recv_is_string(e: &Expr) -> bool {
     matches!(effective_recv_ty(e), Some(crate::ty::Ty::Str))
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
@@ -2643,6 +2660,25 @@ mod tests {
         Expr::new(crate::span::Span::synthetic(), ExprNode::Const {
             path: vec![Symbol::from(name)],
         })
+    }
+
+    #[test]
+    fn string_include_is_string_contains() {
+        // A String receiver, and the `String?` an `Array[String]`
+        // element read types as (the router's `pp.include?(":")`),
+        // both map to `String.contains?` — not a struct dispatch.
+        let lit = |v: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+            value: Literal::Str { value: v.to_string() },
+        });
+        assert_eq!(
+            emit_expr(&call(var_t("s", Ty::Str), "include?", vec![lit(":")])),
+            "String.contains?(s, \":\")"
+        );
+        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        assert_eq!(
+            emit_expr(&call(var_t("pp", nilable), "include?", vec![lit(":")])),
+            "String.contains?(pp, \":\")"
+        );
     }
 
     #[test]

@@ -1234,17 +1234,14 @@ pub(super) fn emit_send(
                 return format!("{recv_s}[{begin_s}:{end_s}]");
             }
         }
-        // `str[start, length]` — Ruby's two-arg substring form. Map
-        // to Go's `recv[start : start+length]`. Note: `start` is
-        // emitted twice; safe for simple values (literal, var) but
-        // re-evaluates side effects. Lowered runtime bodies don't
-        // hit this pattern with side-effecting starts today; if
-        // they do later, introduce a temp binding (needs statement
-        // context, deferred).
+        // `str[start, length]` — Ruby's two-arg substring form,
+        // through the runtime's `RhStrSlice` (strings.go): Ruby
+        // clamps to the string and indexes characters, where Go's
+        // `s[a:a+n]` panics past the end and indexes bytes.
         if args.len() == 2 {
             let start = &args_s[0];
             let length = &args_s[1];
-            return format!("{recv_s}[{start}:{start}+{length}]");
+            return format!("RhStrSlice({recv_s}, {start}, {length})");
         }
         return format!("{recv_s}[{}]", args_s.join(", "));
     }

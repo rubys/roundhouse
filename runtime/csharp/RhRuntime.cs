@@ -16,6 +16,18 @@ public static partial class RuntimeConstants { }
 // no direct C# operator: `Hash#merge` and the `rescue` modifier.
 public static class RhRuntime
 {
+    // Ruby's `str[start, length]`: a negative start counts from the end,
+    // and the slice is CLAMPED to the string (`"abc"[1, 10]` is "bc"),
+    // where `Substring` throws. Ruby answers nil for a start past the
+    // end; the emitted call is typed string, so that case answers "".
+    public static string StrSlice(string s, long start, long length)
+    {
+        long n = s.Length;
+        if (start < 0) start += n;
+        if (start < 0 || start > n || length < 0) return "";
+        return s.Substring((int)start, (int)Math.Min(length, n - start));
+    }
+
     // `a.merge(b)` → a new dictionary, b winning on key collisions.
     public static Dictionary<string, object?> Merge(object? a, object? b)
     {

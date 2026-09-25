@@ -1368,7 +1368,8 @@ fn emit_send(
             if args.len() == 2 {
                 let start = &args_s[0];
                 let len = &args_s[1];
-                return format!("{rs}.Substring((int)({start}), (int)({len}))");
+                // Ruby clamps; `Substring` throws past the end.
+                return format!("RhRuntime.StrSlice({rs}, {start}, {len})");
             }
         }
     }

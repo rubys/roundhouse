@@ -44,6 +44,8 @@ const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
 const RT_V2_ERRORS: &str =
     include_str!("../../runtime/go/v2/errors.go");
+const RT_V2_STRINGS: &str =
+    include_str!("../../runtime/go/v2/strings.go");
 const RT_V2_MODELER: &str =
     include_str!("../../runtime/go/v2/modeler.go");
 const RT_V2_DB: &str =
@@ -96,6 +98,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         ("param_value.go", RT_V2_PARAM_VALUE),
         ("params.go", RT_V2_PARAMS),
         ("errors.go", RT_V2_ERRORS),
+        ("strings.go", RT_V2_STRINGS),
         ("modeler.go", RT_V2_MODELER),
         // Per-goroutine slot store for content_for/yield — owns the
         // six ActionViewViewHelpers_<slot-method> package-level

@@ -1377,7 +1377,11 @@ fn emit_slice_range(
             } else {
                 format!("(({e}) + 1).toInt()")
             };
-            format!("{rs}.substring(({b}).toInt(), {end_idx})")
+            // Ruby clamps the end of a range slice to the string's
+            // length (`"abc"[1..10]` is `"bc"`); `substring` throws.
+            format!(
+                "{rs}.let {{ __s -> __s.substring(({b}).toInt(), minOf({end_idx}, __s.length)) }}"
+            )
         }
     }
 }
@@ -1644,11 +1648,13 @@ fn emit_send(
                 return format!("{rs}[{}]", args_s[0]);
             }
             if args.len() == 2 {
-                // Ruby `str[start, len]` → `substring(start, start + len)`.
+                // Ruby `str[start, len]` → `substring(start, start + len)`,
+                // with the end clamped to the length the way Ruby clamps
+                // it (`"abc"[1, 10]` is `"bc"`; `substring` throws).
                 let start = &args_s[0];
                 let len = &args_s[1];
                 return format!(
-                    "{rs}.substring(({start}).toInt(), (({start}) + ({len})).toInt())"
+                    "{rs}.let {{ __s -> __s.substring(minOf(({start}).toInt(), __s.length), minOf((({start}) + ({len})).toInt(), __s.length)) }}"
                 );
             }
         }
