@@ -109,6 +109,7 @@ module ActiveRecord
     def detect: () { (untyped) -> bool } -> untyped
     def sort_by: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
+    def each_with_object: (untyped memo) { (untyped, untyped) -> untyped } -> untyped
     def first: () -> untyped
     def take: () -> untyped
     def first!: () -> untyped

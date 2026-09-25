@@ -36,6 +36,7 @@ pub mod sequel_migration;
 pub mod sequel_model;
 pub mod sorbet_sig;
 pub mod sources;
+pub mod sql_functions;
 pub mod survey;
 pub mod test;
 pub mod util;

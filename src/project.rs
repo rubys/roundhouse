@@ -1819,11 +1819,18 @@ fn ruby_family_runtime_files(
     const TIME_PARSING_REQUIRE: &str = "require_relative \"active_support_time_parsing\"\n";
     match flavor {
         RubyFlavor::CRuby => {
+            let sql_functions = cruby_sql_functions_file(app);
             for (path, content) in files.iter_mut() {
                 if path == "runtime/db_cruby.rb" {
                     *path = "runtime/db.rb".to_string();
                     content.insert_str(0, TIME_PARSING_REQUIRE);
+                    if sql_functions.is_some() {
+                        content.insert_str(0, "require_relative \"sql_functions\"\n");
+                    }
                 }
+            }
+            if let Some(src) = sql_functions {
+                files.push(("runtime/sql_functions.rb".to_string(), src));
             }
         }
         RubyFlavor::JRuby => {
@@ -3866,6 +3873,66 @@ const GEM_REQUIRES: &[&str] = &[
 /// source: JRuby provides Markly through the commonmark-java shim, and
 /// a string surgery that silently missed would put the real gem (which
 /// has no JRuby build) back in the list.
+/// `runtime/sql_functions.rb` for the CRuby tree: the app's SQL
+/// functions (`App::sql_functions`) as `SqlFunctions` class methods,
+/// plus the `install(db)` the gem-backed `Db` calls on every pooled
+/// connection. `None` when the app registers none.
+///
+/// The bodies are the app's, emitted from IR like any other method; the
+/// `install` glue is the sqlite3 gem's registration API, which is why
+/// this file is CRuby's alone. The `fn` each body takes is the gem's
+/// function proxy (`result=`, and `[]`/`[]=` for an aggregate's state),
+/// the object the app's own blocks were handed. JRuby's JDBC driver
+/// and spinel's FFI binding register functions differently and do not
+/// install these yet (docs/pipeline/runtime.md).
+fn cruby_sql_functions_file(app: &App) -> Option<String> {
+    use crate::app::SqlFunctionKind;
+    if app.sql_functions.is_empty() {
+        return None;
+    }
+    let indent = |s: String| {
+        s.lines()
+            .map(|l| if l.is_empty() { String::new() } else { format!("  {l}") })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut out = String::from(
+        "# SQL functions the app's initializers register on every SQLite\n\
+         # connection (generated from App::sql_functions — see\n\
+         # src/ingest/sql_functions.rs). Installed by Db.open_pool.\n\
+         module SqlFunctions\n",
+    );
+    let mut install = String::from("  def self.install(db)\n");
+    for f in &app.sql_functions {
+        let args: Vec<String> = (0..f.arity).map(|i| format!("a{i}")).collect();
+        let bargs = std::iter::once("fn".to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(", ");
+        match &f.kind {
+            SqlFunctionKind::Scalar { method } => {
+                out.push_str(&indent(crate::emit::ruby::emit_method(method)));
+                out.push_str("\n\n");
+                install.push_str(&format!(
+                    "    db.create_function({:?}, {}) {{ |{bargs}| SqlFunctions.{}({bargs}) }}\n",
+                    f.name, f.arity, method.name.as_str()
+                ));
+            }
+            SqlFunctionKind::Aggregate { step, finalize } => {
+                out.push_str(&indent(crate::emit::ruby::emit_method(step)));
+                out.push_str("\n\n");
+                out.push_str(&indent(crate::emit::ruby::emit_method(finalize)));
+                out.push_str("\n\n");
+                install.push_str(&format!(
+                    "    db.create_aggregate({:?}, {}) do\n      step {{ |{bargs}| SqlFunctions.{}({bargs}) }}\n      finalize {{ |fn| SqlFunctions.{}(fn) }}\n    end\n",
+                    f.name, f.arity, step.name.as_str(), finalize.name.as_str()
+                ));
+            }
+        }
+    }
+    install.push_str("  end\n");
+    out.push_str(&install);
+    out.push_str("end\n");
+    Some(out)
+}
+
 fn gem_require_block(exclude: &[&str]) -> String {
     let names: Vec<String> = GEM_REQUIRES
         .iter()

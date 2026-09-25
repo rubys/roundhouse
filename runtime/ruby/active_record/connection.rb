@@ -81,6 +81,13 @@ module ActiveRecord
       execute(sql)
     end
 
+    # `select_all(sql)` — the same rows under the name Rails' query
+    # interface gives them (lobsters' TrafficHelper reads its activity
+    # range this way).
+    def select_all(sql)
+      execute(sql)
+    end
+
     # Rails' `exec_update(sql, name, binds)` / `exec_delete`: DML with
     # positional `?` binds, answering the rows affected. lobsters
     # recomputes a comment's score this way (`UPDATE comments SET …
@@ -96,6 +103,14 @@ module ActiveRecord
     # (`DELETE FROM … where rowid = ?`).
     def exec_delete(sql, name = nil, binds = [])
       exec_update(sql, name, binds)
+    end
+
+    # lobsters' FullTextSearch adds an index row this way (`INSERT INTO …
+    # (rowid, …) values (?, …)`). Rails answers a Result; an INSERT
+    # selects nothing, so it is an empty one.
+    def exec_insert(sql, name = nil, binds = [])
+      exec_update(sql, name, binds)
+      Result.new([])
     end
   end
 

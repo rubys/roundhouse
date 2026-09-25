@@ -26,6 +26,7 @@ module ActiveSupport
   # reason.
   def self.many?: (untyped list) -> bool
   def self.to_sentence: (Array[untyped] list) -> String
+  def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.squish: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver

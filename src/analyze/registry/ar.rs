@@ -8,7 +8,35 @@ use crate::analyze::ClassInfo;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+/// `Model.connection` / `ActiveRecord::Base.connection` — the raw-SQL
+/// connection the runtime implements (`runtime/ruby/active_record/
+/// connection.rb`).
+pub(in crate::analyze) fn connection_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Connection")), args: vec![] }
+}
+
+/// `ActiveRecord::Connection` and `ActiveRecord::Result`, read from the
+/// runtime's own signatures rather than restated here, so the analyzer
+/// knows exactly the surface both lanes implement. `connection` used to
+/// answer `Untyped`, which made every raw-SQL row gradual: lobsters'
+/// `exec_query(sql).first.symbolize_keys!` could not be grounded
+/// because nothing knew the row was a `Hash[String, _]`. A call beyond
+/// the declared surface is now a visible gap instead of a silent one.
+fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
+    const RBS: &str = include_str!("../../../runtime/ruby/active_record/connection.rbs");
+    let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
+    for name in ["ActiveRecord::Connection", "ActiveRecord::Result"] {
+        let id = ClassId(Symbol::from(name));
+        let Some(methods) = parsed.get(&id) else { continue };
+        let cls = classes.entry(id).or_default();
+        for (m, ty) in methods {
+            cls.instance_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+        }
+    }
+}
+
 pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
+    register_connection_surface(classes);
     // `ActiveRecord::Base` itself — the literal base class, called
     // directly as `ActiveRecord::Base.transaction { ... }` and
     // `ActiveRecord::Base.connection.exec_query(...)`. It sits at the
@@ -25,12 +53,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let mut base = ClassInfo::default();
         for m in [
             "transaction",
-            "connection",
             "connection_pool",
             "establish_connection",
         ] {
             base.class_methods.insert(Symbol::from(m), Ty::Untyped);
         }
+        base.class_methods.insert(Symbol::from("connection"), connection_ty());
         classes
             .entry(ClassId(Symbol::from("ActiveRecord::Base")))
             .or_insert(base);

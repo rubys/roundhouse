@@ -182,6 +182,19 @@ module ActiveSupport
     list[0]
   end
 
+  # AS `Hash#symbolize_keys` over a String-keyed hash: a NEW hash, each
+  # key interned. The core_ext reopen (`Hash`) is out of reach for the
+  # same reason as the others here. lobsters reads a raw-SQL row this way
+  # (`exec_query(sql).first.symbolize_keys!` in FlaggedCommenters) —
+  # rows come back keyed by column name. `lower::symbolize_keys` routes
+  # the String-keyed calls here; a Symbol-keyed receiver is the identity
+  # and never arrives.
+  def self.symbolize_keys(hash)
+    out = {}
+    hash.each { |k, v| out[k.to_sym] = v }
+    out
+  end
+
   # AS `Array#to_sentence`, default :en connectors: "", "a", "a and b",
   # "a, b, and c". Another core_ext reopen (`Array`) the transpiled
   # runtimes cannot host — same home and same rule as `index_by`, the

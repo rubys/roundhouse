@@ -247,6 +247,15 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// SQL functions an initializer registers on every SQLite
+    /// connection (`raw_connection.create_function("regexp", 2) do …`,
+    /// `create_aggregate("stddev", 1) do step … finalize … end`).
+    /// Lobsters' raw-SQL flag statistics call `stddev(…)`, so without
+    /// them the query fails with "no such function". Each body is an
+    /// ordinary method; installing them is per-lane runtime glue — see
+    /// [`SqlFunction`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sql_functions: Vec<SqlFunction>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -446,6 +455,32 @@ pub enum TimeFormat {
 /// The receiver is stored as WRITTEN (`Turbo::StreamsChannel`), not
 /// resolved: a mixin onto a constant this tree does not define is a gap
 /// to report, and reporting it needs the app's own spelling.
+/// One SQL function an initializer registers with SQLite.
+///
+/// The block bodies become methods of the `SqlFunctions` module, each
+/// taking the SQLite context as its first parameter under the block's
+/// own name (`fn`), so a body reads exactly as the app wrote it:
+/// `fn.result = …` sets the value, and an aggregate keeps its running
+/// state in `fn[:key]`. A `next` that left the block early is a
+/// `return` in the method. The context object is the lane's: the
+/// sqlite3 gem's function proxy on CRuby.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SqlFunction {
+    /// The SQL-visible name (`"stddev"`).
+    pub name: String,
+    /// Argument count SQLite dispatches on.
+    pub arity: usize,
+    pub kind: SqlFunctionKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SqlFunctionKind {
+    /// `create_function` — one method, called per row.
+    Scalar { method: crate::dialect::MethodDef },
+    /// `create_aggregate` — `step` per row, `finalize` once.
+    Aggregate { step: crate::dialect::MethodDef, finalize: crate::dialect::MethodDef },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMixin {
     /// The constant receiving the module, as the initializer spells it.
@@ -619,6 +654,7 @@ impl App {
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             initializer_filters: Vec::new(),
+            sql_functions: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_spliced_actions: HashMap::new(),

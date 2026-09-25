@@ -230,7 +230,7 @@ impl Analyzer {
             // return whatever the block returned, which we don't
             // statically track — Untyped is the gradual escape.
             cls.class_methods.insert(Symbol::from("transaction"), Ty::Untyped);
-            cls.class_methods.insert(Symbol::from("connection"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("connection"), registry::ar::connection_ty());
             cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);

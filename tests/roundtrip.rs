@@ -126,6 +126,7 @@ fn tiny_blog_round_trips() {
         library_classes: vec![],
         current_attribute_classes: vec![],
         initializer_filters: Vec::new(),
+        sql_functions: Vec::new(),
         rbs_includes: Default::default(),
         controllers: vec![posts_controller],
         routes,

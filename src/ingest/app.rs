@@ -933,6 +933,8 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                app.sql_functions
+                    .extend(super::sql_functions::extract_sql_functions(&bytes, &path_str));
             }
         }
     }

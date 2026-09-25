@@ -3769,3 +3769,39 @@ so the form's spelling is a decision rather than a surprise.
 Found 2026-09-01 by the join-form probe that closed the view-params
 symbol-key defect (the form's `action` was the visible half; the
 enctype was sitting beside it).
+
+### SQL functions an initializer registers are installed on CRuby only
+
+An app that registers SQLite functions in an initializer —
+`raw_connection.create_function("regexp", 2) do |fn, …| … end`,
+`create_aggregate("stddev", 1) do step … finalize … end`, the shape
+lobsters' `config/initializers/sqlite_functions.rb` patches into the
+adapter — has them read at ingest into `App::sql_functions`. Each block
+body is an ordinary `SqlFunctions` class method taking the SQLite
+context as its first parameter under the app's own name for it (`fn`),
+so `fn.result = …` and an aggregate's `fn[:n]` state read as written;
+a `next` that left the block is a `return` in the method.
+
+The CRuby tree installs them: `runtime/sql_functions.rb` is generated
+with an `install(db)` that registers each through the sqlite3 gem, and
+`Db.open_pool` calls it on every pooled connection, as Rails' adapter
+patch does. The context object handed in is the gem's own function
+proxy — the object the app's blocks were written against.
+
+The other lanes do not install them yet, and the raw SQL that calls one
+fails with SQLite's "no such function" there:
+
+- **JRuby** reaches SQLite over JDBC, whose user-function API is
+  `org.sqlite.Function` subclasses — a different registration shape.
+- **Spinel** binds SQLite through FFI. `ffi_callback` can hand a Ruby
+  method to `sqlite3_create_function_v2`, which is the route; it needs
+  per-function trampolines reading `sqlite3_value_*` arguments and a
+  context object with `result=` / `[]` / `[]=` over
+  `sqlite3_aggregate_context`.
+
+Lobsters reaches `stddev` from `FlaggedCommenters`, which renders on any
+page where you view your own threads, profile or inbox (the 2023
+ruby-bench snapshot had that warning switched off for this reason).
+
+Found 2026-09-25 bringing current lobsters' benchmark routes up on the
+ruby lane.

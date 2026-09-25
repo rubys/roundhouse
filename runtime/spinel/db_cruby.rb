@@ -106,6 +106,11 @@ module Db
       # the binary's PRAGMAS — the harness's file database (see
       # test/test_helper.rb) relies on writers waiting.
       db.busy_timeout = 5000
+      # The app's SQL functions (`create_function` / `create_aggregate`
+      # in an initializer), per connection as Rails' adapter registers
+      # them. Defined only when the app has some (runtime/sql_functions.rb
+      # is generated for it).
+      SqlFunctions.install(db) if defined?(SqlFunctions)
       db
     end
   end

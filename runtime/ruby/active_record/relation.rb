@@ -735,6 +735,16 @@ module ActiveRecord
       acc
     end
 
+    # `each_with_object(memo) { |r, memo| … }` — Enumerable's fold that
+    # threads one mutable memo and answers it. lobsters builds its vote
+    # lookup tables this way straight off a query
+    # (`Vote.where(…).select(…).each_with_object({}) { |v, memo| … }`,
+    # on every comment listing).
+    def each_with_object(memo)
+      to_a.each { |x| yield(x, memo) }
+      memo
+    end
+
     def first
       prior = @limit
       @limit = 1

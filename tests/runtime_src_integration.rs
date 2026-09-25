@@ -1401,7 +1401,19 @@ fn every_runtime_method_body_concretely_typed() {
     // same untyped statement tail that method has always taken. What it
     // bought: lobsters' comment score recompute, reached by every
     // comment and vote save (18 more of its model specs pass).
-    const CEILING: usize = 480;
+    //
+    // 480 -> 487: three lobsters raw-SQL/enumerable surfaces, each
+    // untyped for the value's own reason. `Relation#each_with_object`,
+    // FIVE: the memo is whatever the caller seeds, the same shape as
+    // `inject` beside it (8); lobsters' vote lookup tables are built
+    // this way on every comment listing. `ActiveSupport.
+    // symbolize_keys`, ONE: a raw-SQL row's values are heterogeneous by
+    // construction (`Result` rows are `Hash[String, untyped]`), and
+    // FlaggedCommenters reads its aggregate row through it.
+    // `Connection#exec_insert`, ONE: Rails' `name` log label passed on to
+    // `exec_update`, the site that method already carries; lobsters'
+    // FullTextSearch indexes new rows through it.
+    const CEILING: usize = 487;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
