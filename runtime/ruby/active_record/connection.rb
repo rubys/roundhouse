@@ -319,6 +319,14 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
+    # Rails-shape `none` fallback, same story as `where`/`all` above:
+    # an empty Relation off the class. lobsters' `Search` reaches it
+    # through a class-valued method (`searched_model.none`), which no
+    # static lowering can resolve to one model (#132).
+    def self.none
+      ActiveRecord::Relation.new(self).none
+    end
+
     # Rails-shape `first` fallback, same story as `where`/`all` above:
     # spec/dynamic call sites reach the class method directly
     # (`Category.first` in lobsters' specs); lowered call sites don't

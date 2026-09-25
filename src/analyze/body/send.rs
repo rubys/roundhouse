@@ -498,6 +498,16 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
         args: &[crate::expr::Expr],
     ) -> Ty {
+        // `Class[C]` — a method that returns the class object itself
+        // (see `class_object_return_ty`). Dispatch reads it back as
+        // `C`, the flattened type a bare `C` constant already has, so
+        // a call on the returned class resolves exactly as one written
+        // on the constant does.
+        if let Some(Ty::Class { id, args: of }) = recv_ty {
+            if id.0.as_str() == "Class" && of.len() == 1 {
+                return self.dispatch(Some(&of[0]), method, block_ret, args);
+            }
+        }
         // `obj.class` is receiver-aware: our type system flattens the
         // class object and instances onto the same `Ty::Class { id }`,
         // so `instance_of_Base.class` returns `Ty::Class { Base }`

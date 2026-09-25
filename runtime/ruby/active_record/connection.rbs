@@ -36,6 +36,7 @@ module ActiveRecord
     # Ruby-family overrides of base.rb's Array-returning fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.all: () -> Relation
+    def self.none: () -> Relation
     def _note_hydrated: () -> void
     def attribute_previously_was: (String name) -> untyped
     def self.first: () -> untyped

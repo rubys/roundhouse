@@ -3401,7 +3401,83 @@ impl Analyzer {
     /// the call-site fact, the harvest the function's, and a compiled
     /// target (spinel) returns what the function returns.
     fn method_return_ty(&self, _class_id: &ClassId, method: &crate::dialect::MethodDef) -> Option<Ty> {
-        effective_return_ty(&method.body)
+        self.class_object_return_ty(&method.body)
+            .or_else(|| effective_return_ty(&method.body))
+    }
+
+    /// A method whose every return value is a class constant returns
+    /// the CLASS, not an instance of it: lobsters'
+    /// `Search#searched_model` is `what == :stories ? Story : Comment`.
+    /// The body typer gives a class constant the same `Ty::Class { C }`
+    /// an instance has (deliberately, so `Story.where` dispatches), and
+    /// harvesting that as the return declared `-> (Comment | Story)` in
+    /// the emitted RBS — a lie spinel trusted, which hid a
+    /// `searched_model.none` NoMethodError (#132). The boundary is where
+    /// the distinction is recoverable, so it is drawn here, the way
+    /// `Relation` is: `Class[C]`, which RBS spells `singleton(C)` and
+    /// `dispatch` reads back as `C` for callers.
+    ///
+    /// All or nothing: a tail mixing a class with any other value, or a
+    /// `return` off the tail, keeps the ordinary harvest.
+    fn class_object_return_ty(&self, body: &Expr) -> Option<Ty> {
+        fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>, returns: &mut usize) {
+            match &*e.node {
+                ExprNode::If { then_branch, else_branch, .. } => {
+                    tails(then_branch, out, returns);
+                    tails(else_branch, out, returns);
+                }
+                ExprNode::Case { arms, .. } => {
+                    arms.iter().for_each(|a| tails(&a.body, out, returns))
+                }
+                ExprNode::Seq { exprs } if !exprs.is_empty() => {
+                    tails(exprs.last().unwrap(), out, returns)
+                }
+                ExprNode::Return { value } => {
+                    *returns += 1;
+                    tails(value, out, returns);
+                }
+                // A raising arm returns nothing.
+                ExprNode::Raise { .. } => {}
+                _ => out.push(e),
+            }
+        }
+        fn count_returns(e: &Expr) -> usize {
+            let mut n = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
+            e.node.for_each_child(&mut |c| n += count_returns(c));
+            n
+        }
+        let mut out = Vec::new();
+        let mut tail_returns = 0;
+        tails(body, &mut out, &mut tail_returns);
+        // A `return` off the tail is a value this walk did not see.
+        if out.is_empty() || count_returns(body) != tail_returns {
+            return None;
+        }
+        let mut classes: Vec<Ty> = Vec::new();
+        for t in out {
+            let ExprNode::Const { path } = &*t.node else { return None };
+            let Some(Ty::Class { id, args }) = &t.ty else { return None };
+            // The constant must NAME the class it is typed as. A value
+            // constant (`DEFAULT = Foo.new`) is typed by its value,
+            // whose class is not its own name.
+            let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            let named = id.0.as_str() == written
+                || id.0.as_str().ends_with(&format!("::{written}"));
+            if !args.is_empty() || !named || !self.classes.contains_key(id) {
+                return None;
+            }
+            let singleton = Ty::Class {
+                id: ClassId(Symbol::from("Class")),
+                args: vec![Ty::Class { id: id.clone(), args: vec![] }],
+            };
+            if !classes.contains(&singleton) {
+                classes.push(singleton);
+            }
+        }
+        Some(match classes.len() {
+            1 => classes.pop().unwrap(),
+            _ => Ty::Union { variants: classes },
+        })
     }
 
     fn register_method_return(

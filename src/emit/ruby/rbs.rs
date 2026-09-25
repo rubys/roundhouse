@@ -266,6 +266,11 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
             format!("{{ {} }}", inner.join(", "))
         }
         Ty::Union { variants } => render_union(variants, enclosing),
+        // The class object itself (`class_object_return_ty`), which RBS
+        // spells `singleton(C)`; `Class[C]` is not an RBS type.
+        Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => {
+            format!("singleton({})", rbs(&args[0]))
+        }
         Ty::Class { id, args } => {
             let raw = id.0.as_str();
             let first = raw.split("::").next().unwrap_or(raw);
@@ -305,24 +310,27 @@ fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
     }
     // `T | nil` collapses to `T?` (RBS idiomatic optional form).
     let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
-    // Dedup structurally-equal members, preserving first-seen order. A
-    // `case`/branch return like `@id | @title | @body` typed
-    // `Integer | String | String` should render `(Integer | String)`,
-    // not repeat the `String`.
-    let mut non_nil: Vec<&Ty> = Vec::new();
+    // Dedup members, preserving first-seen order. A `case`/branch
+    // return like `@id | @title | @body` typed `Integer | String |
+    // String` should render `(Integer | String)`, not repeat the
+    // `String`. By the RENDERED text, not the `Ty`: members RBS cannot
+    // tell apart print the same (`Relation { Story } | Relation {
+    // Comment }` is `ActiveRecord::Relation` twice — lobsters'
+    // `searched_model.none`, #132).
+    let mut rendered: Vec<String> = Vec::new();
     for v in variants.iter().filter(|v| !matches!(v, Ty::Nil)) {
-        if !non_nil.contains(&v) {
-            non_nil.push(v);
+        let r = ty_to_rbs_in(v, enclosing);
+        if !rendered.contains(&r) {
+            rendered.push(r);
         }
     }
-    if has_nil && non_nil.len() == 1 {
-        return format!("{}?", ty_to_rbs_in(non_nil[0], enclosing));
+    if has_nil && rendered.len() == 1 {
+        return format!("{}?", rendered[0]);
     }
-    if non_nil.is_empty() {
+    if rendered.is_empty() {
         // All-Nil union; degenerate but represent it.
         return "nil".into();
     }
-    let rendered: Vec<String> = non_nil.iter().map(|t| ty_to_rbs_in(t, enclosing)).collect();
     if has_nil {
         format!("({} | nil)", rendered.join(" | "))
     } else if rendered.len() == 1 {
