@@ -42,9 +42,33 @@ module ActiveRecord
       @includes = []
       @records = nil
       @scope_attributes = {}
+      @from = nil
+      @ctes = []
     end
 
     # ---- chain methods (return self) --------------------------------
+
+    # `with_recursive(parents: [base, step])` — a recursive common table
+    # expression, each named part the UNION ALL of its relations (Rails
+    # 7.1). Rendered ahead of the SELECT; `from("parents")` then reads
+    # from it. lobsters walks a comment's ancestors this way on the reply
+    # page (`Comment#parents`).
+    def with_recursive(ctes)
+      @records = nil
+      ctes.each do |name, parts|
+        @ctes << "#{name} AS (#{parts.map { |p| p.to_sql }.join(" UNION ALL ")})"
+      end
+      self
+    end
+
+    # `from("parents")` — the FROM source, in place of this model's own
+    # table. The String form only: Rails also takes a relation (a
+    # subquery) there, which no corpus call writes.
+    def from(source)
+      @records = nil
+      @from = source
+      self
+    end
 
     # `where(hash)` / `where("raw sql")` / `where("a = ? AND b = ?", x, y)`.
     def where(condition = nil, *args)
@@ -340,15 +364,22 @@ module ActiveRecord
     #
     # Found via `Rooms::Direct.all.joins(:users)` — an STI subclass is
     # not in the registry, so nothing could resolve it.
+    # An identical join is added ONCE, as Rails' `joins_values` are
+    # uniq'd: two scopes that each `joins(:story)` — lobsters'
+    # `on_stories_not_authored_by.above_average` — render one INNER JOIN,
+    # where appending both made SQLite reject every column of the joined
+    # table as ambiguous.
     def joins(spec)
       @records = nil
-      @joins << join_fragment(spec)
+      frag = join_fragment(spec)
+      @joins << frag unless @joins.include?(frag)
       self
     end
 
     def left_outer_joins(spec)
       @records = nil
-      @joins << join_fragment(spec)
+      frag = join_fragment(spec)
+      @joins << frag unless @joins.include?(frag)
       self
     end
 
@@ -1222,7 +1253,7 @@ module ActiveRecord
     def select_sql_with(default_cols)
       cols = @select_sql.nil? ? default_cols : @select_sql
       distinct = @distinct ? "DISTINCT " : ""
-      sql = "SELECT #{distinct}#{cols} FROM #{@table}"
+      sql = "#{cte_prefix}SELECT #{distinct}#{cols} FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
@@ -1234,13 +1265,25 @@ module ActiveRecord
     end
 
     def count_sql
-      sql = "SELECT COUNT(*) AS n FROM #{@table}"
+      sql = "#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql
     end
 
     # ---- helpers ----------------------------------------------------
+
+    # `WITH RECURSIVE a AS (…), b AS (…) ` or nothing.
+    def cte_prefix
+      return "" if @ctes.empty?
+      "WITH RECURSIVE #{@ctes.join(", ")} "
+    end
+
+    # The FROM source: `from(...)`'s, else this model's table.
+    def from_source
+      src = @from
+      src.nil? ? @table : src
+    end
 
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->
     # `is_deleted = 0 AND user_id = 3`. Array value -> `IN`, nil ->

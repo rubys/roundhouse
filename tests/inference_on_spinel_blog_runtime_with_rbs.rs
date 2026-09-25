@@ -834,7 +834,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // interpolation, the shape `update_all` beside it already carries.
     // `load_async` (a forward to `load`) adds none. What it buys:
     // lobsters' inbox `after_action :update_read_at`, which now runs.
-    const CEILING: usize = 1001;
+    // 2026-09-25 1001 -> 1021, +20, MEASURED by grouping the dump by
+    // method: `joins` / `left_outer_joins` (+3 each, the `frag` local
+    // read twice now that an identical join is added once, as Rails
+    // uniq's `joins_values`), `with_recursive` (+8, the CTE name/parts
+    // block and each part's `to_sql`), `select_sql_with` / `count_sql`
+    // (+3/+2, the `cte_prefix` / `from_source` interpolations) and
+    // `from` (+2 — its param is typed `String` so the runtime ratchet
+    // stays put, and the bare assignment reads here as a local). What it buys: lobsters' profile page (two scopes each
+    // `joins(:story)`) and its comment reply page (`Comment#parents`, a
+    // recursive CTE read `from("parents")`).
+    const CEILING: usize = 1021;
 
     assert!(
         all_untyped.len() <= CEILING,

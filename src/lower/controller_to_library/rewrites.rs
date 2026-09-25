@@ -233,6 +233,56 @@ pub(super) fn rewrite_render_to_views(
                     return None;
                 }
             }
+            // `render "_commentbox", locals: {…}` — a PARTIAL file named
+            // as a template (lobsters' comment reply page). Rails renders
+            // that file as the page, WITH the layout and with the given
+            // locals; the partial's lowered function already takes
+            // exactly those. So it binds like `render partial:` does,
+            // minus the `layout: false` marker that path plants.
+            if let ExprNode::Lit { value: Literal::Str { value: tname } } = &*args[0].node {
+                let base = tname.rsplit('/').next().unwrap_or(tname);
+                if base.starts_with('_') && !to_string {
+                    let mut locals_entries: Vec<(Symbol, Expr)> = Vec::new();
+                    let mut rest: Vec<(Expr, Expr)> = Vec::new();
+                    for a in &args[1..] {
+                        let ExprNode::Hash { entries, .. } = &*a.node else { return None };
+                        for (k, v) in entries {
+                            let key = match &*k.node {
+                                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                                _ => "",
+                            };
+                            if key == "locals" {
+                                let ExprNode::Hash { entries: le, .. } = &*v.node else {
+                                    return None;
+                                };
+                                for (lk, lv) in le {
+                                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node {
+                                        locals_entries.push((value.clone(), lv.clone()));
+                                    }
+                                }
+                            } else {
+                                rest.push((k.clone(), v.clone()));
+                            }
+                        }
+                    }
+                    let view_call =
+                        partial_view_call(tname, &locals_entries, module_name, partials, e.span)?;
+                    let mut new_args = vec![view_call];
+                    if !rest.is_empty() {
+                        new_args.push(Expr::new(e.span, ExprNode::Hash { entries: rest, kwargs: true }));
+                    }
+                    return Some(Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: None,
+                            method: Symbol::from("render"),
+                            args: new_args,
+                            block: block.clone(),
+                            parenthesized: true,
+                        },
+                    ));
+                }
+            }
             // View name comes from `render :index` (a Symbol first arg),
             // `render "index"` / `render "articles/index"` (a String
             // first arg — slashed form names another view module), or

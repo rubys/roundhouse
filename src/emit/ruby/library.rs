@@ -824,8 +824,19 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         wants_class_root_terminal = wants_class_root_terminal
             || crate::lower::scope_chain::mentions_class_root_terminal(body, &models);
     });
+    // …and an association read continuing into relation surface
+    // (`@user.notifications.offset(n)`) needs the seed whether or not
+    // the app declares a single scope: without this the whole pass was
+    // skipped for a scope-free app, and every such chain stayed on the
+    // has_many reader's Array.
+    let mut wants_assoc_lookup = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        wants_assoc_lookup = wants_assoc_lookup
+            || crate::lower::scope_chain::mentions_assoc_lookup(body, &assocs);
+    });
     if !crate::lower::scope_chain::any_scopes(&scopes)
         && assoc_class_methods.is_empty()
+        && !wants_assoc_lookup
         // An app with no scopes at all can still declare an association
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)

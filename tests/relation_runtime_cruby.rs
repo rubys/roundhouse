@@ -16,7 +16,7 @@ fn tree() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("roundhouse-relation-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, body) in [
-        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n    t.datetime \"read_at\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\nend\n"),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n    t.integer \"parent_id\"\n    t.datetime \"read_at\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/note.rb", "class Note < ApplicationRecord\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
@@ -37,7 +37,7 @@ fn tree() -> PathBuf {
 }
 
 #[test]
-fn load_async_and_touch_all_answer_like_rails() {
+fn relation_surface_answers_like_rails() {
     if !Command::new("ruby").args(["-rsqlite3", "-e", "1"]).status().is_ok_and(|s| s.success()) {
         eprintln!("skipping: ruby with the sqlite3 gem not available");
         return;
@@ -52,6 +52,17 @@ p ActiveRecord::Relation.new(Note).where(body: "a").load_async.length
 p ActiveRecord::Relation.new(Note).where(read_at: nil).where(body: "a").touch_all(:read_at)
 p ActiveRecord::Relation.new(Note).where(read_at: nil).length
 p Note.find(a.id).read_at.nil?
+# with_recursive + from: the ancestors of c (b, then a)
+b.parent_id = a.id; b.save!
+c = Note.new; c.body = "c"; c.parent_id = b.id; c.save!
+ancestors = ActiveRecord::Relation.new(Note).with_recursive(parents: [
+  ActiveRecord::Relation.new(Note).where(id: c.parent_id),
+  ActiveRecord::Relation.new(Note).joins("JOIN parents on notes.id = parents.parent_id")
+]).select("*").from("parents")
+p ancestors.map(&:body).sort
+p ancestors.count
+# an identical join added twice renders once
+p ActiveRecord::Relation.new(Note).joins("JOIN notes p2 ON p2.id = notes.parent_id").joins("JOIN notes p2 ON p2.id = notes.parent_id").count
 "#;
     let result = Command::new("ruby")
         .arg("-e")
@@ -61,5 +72,8 @@ p Note.find(a.id).read_at.nil?
         .output()
         .expect("ruby");
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n1\n1\nfalse\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1\n1\n1\nfalse\n[\"a\", \"b\"]\n2\n2\n"
+    );
 }

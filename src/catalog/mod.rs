@@ -537,6 +537,21 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         // `Model.select(:col)` is a relation builder (column projection).
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
+    // Recursive CTE and FROM source (Rails 7.1) — lobsters' `Comment#parents`.
+    CatalogedMethod {
+        name: "with_recursive",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "from",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
     CatalogedMethod {
         name: "distinct",
         receiver: ReceiverContext::Class,
@@ -1024,6 +1039,20 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "left_outer_joins",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "with_recursive",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "from",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Builder,

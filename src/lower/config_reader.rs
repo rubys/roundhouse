@@ -62,6 +62,7 @@ const CABLE_MOUNT_PATH: &str = "/cable";
 
 pub fn apply_config_reader_lowering(app: &mut App) {
     ground_cable_mount_path(app);
+    ground_credentials_readers(app);
     // Reader name -> the type of the value it answers, from the lifted
     // method's own body. Stamped onto each rewritten read for the same
     // reason the synthesized `application` hop below is stamped: this
@@ -111,6 +112,77 @@ fn body_ty(body: &Expr) -> Option<crate::ty::Ty> {
         _ => body,
     };
     last.ty.clone().filter(|t| !matches!(t, crate::ty::Ty::Var { .. } | crate::ty::Ty::Untyped))
+}
+
+/// `Rails.application.credentials.pushover` → `Rails.application
+/// .credentials[:pushover]`.
+///
+/// Rails' credentials object is an `ActiveSupport::EncryptedConfiguration`
+/// that answers any key as a method — nil when the key is absent — and
+/// apps read it that way (lobsters' `Pushover.enabled?` is
+/// `credentials.pushover&.api_token.present?`, on every settings page).
+/// The runtime's store is a Hash, deliberately EMPTY (the master key is
+/// not in the repo — see `Rails::Application#credentials`), so the
+/// method spelling was a NoMethodError where Rails answers nil. The
+/// index is the same question, asked of the store we have. A `!` key
+/// (`credentials.x!`, "raise when absent") and the Hash's own methods
+/// are left alone.
+fn ground_credentials_readers(app: &mut App) {
+    super::for_each_hook_body(app, &mut rewrite_credentials_read);
+    for view in &mut app.views {
+        rewrite_credentials_read(&mut view.body);
+    }
+}
+
+fn rewrite_credentials_read(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_credentials_read);
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
+        return;
+    };
+    const HASH_METHODS: &[&str] = &[
+        "dig", "fetch", "[]", "key?", "has_key?", "include?", "each", "keys", "values",
+        "to_h", "empty?", "any?", "present?", "blank?", "nil?", "config", "merge",
+    ];
+    let key = method.as_str();
+    if !args.is_empty()
+        || HASH_METHODS.contains(&key)
+        || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || !is_credentials_root(r)
+    {
+        return;
+    }
+    let span = expr.span;
+    let mut index = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(r.clone()),
+            method: crate::ident::Symbol::from("[]"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(key) } },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    index.ty = Some(crate::ty::Ty::Untyped);
+    *expr = index;
+}
+
+/// `Rails.application.credentials`, exactly.
+fn is_credentials_root(e: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else {
+        return false;
+    };
+    if method.as_str() != "credentials" || !args.is_empty() {
+        return false;
+    }
+    let ExprNode::Send { recv: Some(rr), method: m2, args: a2, block: None, .. } = &*r.node else {
+        return false;
+    };
+    m2.as_str() == "application"
+        && a2.is_empty()
+        && matches!(&*rr.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Rails")
 }
 
 fn ground_cable_mount_path(app: &mut App) {

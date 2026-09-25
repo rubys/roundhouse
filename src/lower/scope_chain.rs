@@ -1481,7 +1481,21 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
             // terminal, so it is admitted beside the terminal check
             // instead of through it — with an argument and no block,
             // which is the only spelling that reaches a relation.
-            let is_where = method.as_str() == "where" && !args.is_empty() && block.is_none();
+            // …and every other chain method an Array does not answer.
+            // Current lobsters pages its inbox with
+            // `@user.notifications.offset(n).limit(25).order(…)`; with
+            // only `where` admitted, a chain that STARTS elsewhere was
+            // left on the has_many reader's Array and died on `offset`.
+            // `select` stays out: Array answers it (with a block), so
+            // the site could mean either.
+            let is_where = (method.as_str() == "where" && !args.is_empty() && block.is_none())
+                || (block.is_none()
+                    && matches!(
+                        method.as_str(),
+                        "offset" | "limit" | "order" | "reorder" | "joins" | "left_outer_joins"
+                            | "includes" | "preload" | "eager_load" | "references" | "group"
+                            | "having" | "merge"
+                    ));
             if is_where
                 || is_relation_terminal(method.as_str(), args, block.as_ref())
                     && matches!(
@@ -1704,6 +1718,9 @@ fn is_relation_chain_method(name: &str) -> bool {
             | "references"
             | "merge"
             | "none"
+            // Recursive CTE / FROM source (`Comment#parents`).
+            | "with_recursive"
+            | "from"
             // `excluding` (Rails 7 `where.not(id: …)` in one hop).
             // Listed here so an association read that continues into it
             // is ROOTED as a relation: campfire's
