@@ -51,24 +51,84 @@ fn residue(expr: &Expr, reason: &str) -> Diagnostic {
         expr.span,
         reason,
         format!(
-            "kwargs-form `update` left uninlined ({reason}) — the hash-bag \
-             fallback drops association keys and the bang form has no \
-             runtime target"
+            "column-writing `update`/`touch` left uninlined ({reason}) — the \
+             hash-bag `update` drops association keys, and neither the bang \
+             form nor `touch(:column)` has a runtime target"
         ),
     )
 }
 
-/// The kwargs-form `update`/`update!` send shape this pass inlines.
+/// The kwargs-form `update`/`update!` send shape this pass inlines —
+/// and `touch(:col, …)`, which is the same shape with the values
+/// implied: every named column gets the current time, and the record's
+/// own `touch` then stamps `updated_at` and writes the row. That is the
+/// call-site lowering `Base#touch`'s header asks for (a shared
+/// `touch(name)` would index-write through a variable key, which one
+/// strict emitter cannot compile). lobsters stamps its read markers
+/// this way on /newest and /comments (`@user&.touch(:last_read_newest_
+/// story)`).
 fn recognized_update(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Send { recv: Some(_), method, args, block: None, .. }
-            if matches!(method.as_str(), "update" | "update!")
-                && args.len() == 1
-                && matches!(&*args[0].node, ExprNode::Hash { entries, .. }
-                    if !entries.is_empty() && entries.iter().all(|(k, _)| matches!(
-                        &*k.node, ExprNode::Lit { value: Literal::Sym { .. } })))
-    )
+    inline_parts(e).is_some()
+}
+
+/// `(column writes, finishing call)` for a recognized send: the
+/// kwargs of an `update`, or each `touch` column paired with the
+/// current time.
+fn inline_parts(e: &Expr) -> Option<(Vec<(Symbol, Expr)>, &'static str)> {
+    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    match method.as_str() {
+        "update" | "update!" => {
+            if args.len() != 1 {
+                return None;
+            }
+            let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+            if entries.is_empty() {
+                return None;
+            }
+            let mut out = Vec::new();
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
+                    return None;
+                };
+                out.push((value.clone(), v.clone()));
+            }
+            Some((out, if method.as_str() == "update!" { "save!" } else { "save" }))
+        }
+        // An implicit or `self` receiver in a model body is
+        // `lower::column_ops`' — one owner per call shape.
+        "touch" if !args.is_empty() && !matches!(e.node.as_ref(), ExprNode::Send { recv: Some(r), .. } if matches!(&*r.node, ExprNode::SelfRef)) => {
+            let mut out = Vec::new();
+            for a in args {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else {
+                    return None;
+                };
+                out.push((value.clone(), now(e.span)));
+            }
+            Some((out, "touch"))
+        }
+        _ => None,
+    }
+}
+
+/// `ActiveSupport.db_now` — the instant `Base#touch` stamps
+/// `updated_at` with (`fill_timestamps`) and the runtime's one clock
+/// (`travel_to` moves it). `lower::column_ops` writes the implicit-self
+/// form with it for the same reasons.
+fn now(span: crate::span::Span) -> Expr {
+    let mut now = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from("db_now"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    now.ty = Some(Ty::Str);
+    now
 }
 
 fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnostic>) {
@@ -99,10 +159,8 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
             let span = expr.span;
             let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
             let ExprNode::BoolOp { left, right, .. } = node else { unreachable!() };
-            let ExprNode::Send { recv: Some(r), method, args, .. } = *right.node else {
-                unreachable!()
-            };
-            let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+            let (entries, finish) = inline_parts(&right).expect("recognized above");
+            let ExprNode::Send { recv: Some(r), .. } = *right.node else { unreachable!() };
             let local = Symbol::from("__update_rcv");
             let bind = Expr::new(
                 span,
@@ -112,10 +170,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                 },
             );
             let mut stmts = vec![bind];
-            for (k, v) in entries {
-                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-                    unreachable!()
-                };
+            for (key, v) in entries {
                 stmts.push(Expr::new(
                     span,
                     ExprNode::Assign {
@@ -124,13 +179,12 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                                 span,
                                 ExprNode::Var { id: VarId(0), name: local.clone() },
                             ),
-                            name: key.clone(),
+                            name: key,
                         },
-                        value: v.clone(),
+                        value: v,
                     },
                 ));
             }
-            let save = if method.as_str() == "update!" { "save!" } else { "save" };
             let mut save_call = Expr::new(
                 span,
                 ExprNode::Send {
@@ -138,7 +192,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                         span,
                         ExprNode::Var { id: VarId(0), name: local },
                     )),
-                    method: Symbol::from(save),
+                    method: Symbol::from(finish),
                     args: vec![],
                     block: None,
                     parenthesized: false,
@@ -167,36 +221,43 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
         }
         return;
     }
-    if !pure {
-        // Each assigned key re-evaluates the receiver, so it must be
-        // an effect-free reader chain.
-        diags.push(residue(expr, "receiver is not an effect-free reader"));
-        return;
-    }
-
     let span = expr.span;
+    let (entries, finish) = inline_parts(expr).expect("recognized above");
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-    let ExprNode::Send { recv: Some(r), method, args, .. } = node else { unreachable!() };
-    let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+    let ExprNode::Send { recv: Some(r), .. } = node else { unreachable!() };
     let mut exprs: Vec<Expr> = Vec::new();
-    for (k, v) in entries {
-        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-            unreachable!()
-        };
+    // Each write re-reads the receiver, so one that is not an
+    // effect-free reader (`@comment.story` — an association read that
+    // may query) is bound ONCE first, as the guarded form above does:
+    // writing through two reads would set one instance and save
+    // another.
+    let r = if pure {
+        r
+    } else {
+        let local = Symbol::from("__update_rcv");
+        let ty = r.ty.clone();
+        exprs.push(Expr::new(
+            span,
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: local.clone() }, value: r },
+        ));
+        let mut v = Expr::new(span, ExprNode::Var { id: VarId(0), name: local });
+        v.ty = ty;
+        v
+    };
+    for (key, v) in entries {
         exprs.push(Expr::new(
             span,
             ExprNode::Assign {
-                target: LValue::Attr { recv: r.clone(), name: key.clone() },
-                value: v.clone(),
+                target: LValue::Attr { recv: r.clone(), name: key },
+                value: v,
             },
         ));
     }
-    let save = if method.as_str() == "update!" { "save!" } else { "save" };
     let mut save_call = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(r),
-            method: Symbol::from(save),
+            method: Symbol::from(finish),
             args: vec![],
             block: None,
             parenthesized: false,

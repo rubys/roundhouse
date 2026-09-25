@@ -327,7 +327,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // parameter is a `Hash[Symbol, untyped]` — the one shape
     // `feedback_types_are_performance` says to keep out of a tree that
     // does not need it.
-    if app_splats_into_a_route_helper(app) {
+    if app_splats_into_a_route_helper(app) || app_merges_into_url_options(app) {
         funcs.push(build_query_suffix_helper(&module_path));
     }
     // These bodies carry APP source (a `direct` block's expressions —
@@ -1808,6 +1808,36 @@ fn app_splats_into_a_route_helper(app: &App) -> bool {
     };
     for_each_route_call_site(app, &mut look);
     found
+}
+
+/// A view merging a runtime Hash into a url-options hash
+/// (`{controller:, action:, page:}.merge(extra)`) — the view lowering
+/// renders the merged keys through `query_suffix`.
+fn app_merges_into_url_options(app: &App) -> bool {
+    fn walk(e: &Expr) -> bool {
+        if let ExprNode::Send { recv: Some(base), method, args, .. } = &*e.node {
+            if method.as_str() == "merge" && args.len() == 1 {
+                if let ExprNode::Hash { entries, .. } = &*base.node {
+                    let named = |k: &str| {
+                        entries.iter().any(|(key, _)| {
+                            matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == k)
+                        })
+                    };
+                    if named("controller") && named("action") {
+                        return true;
+                    }
+                }
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found {
+                found = walk(c);
+            }
+        });
+        found
+    }
+    app.views.iter().any(|v| walk(&v.body))
 }
 
 fn expr_splats_into_a_route_helper(

@@ -820,7 +820,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `Base.none`, the body `Relation.new(self).none` — the same chained
     // shape its `where` neighbour already carries. What it buys:
     // lobsters' `searched_model.none` (#132), a NoMethodError before.
-    const CEILING: usize = 979;
+    // 2026-09-25 979 -> 991, +12, MEASURED by grouping the dump by
+    // method: `Relation#each_with_object` (+6, the `to_a.each` / `yield`
+    // shape `inject` beside it carries, and a memo that is whatever the
+    // caller seeds), `Connection#exec_insert` (+4, `exec_update`'s
+    // untyped `name`/`binds` passed on) and `#select_all` (+2, the
+    // `execute(sql)` forward `exec_query` already carries). What it
+    // buys: lobsters' vote lookup tables on every comment listing, its
+    // FullTextSearch index insert and TrafficHelper's activity range.
+    const CEILING: usize = 991;
 
     assert!(
         all_untyped.len() <= CEILING,

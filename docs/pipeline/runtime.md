@@ -3782,7 +3782,7 @@ context as its first parameter under the app's own name for it (`fn`),
 so `fn.result = …` and an aggregate's `fn[:n]` state read as written;
 a `next` that left the block is a `return` in the method.
 
-The CRuby tree installs them: `runtime/sql_functions.rb` is generated
+The CRuby tree installs them: a `sql_functions.rb` beside its `db.rb` is generated
 with an `install(db)` that registers each through the sqlite3 gem, and
 `Db.open_pool` calls it on every pooled connection, as Rails' adapter
 patch does. The context object handed in is the gem's own function

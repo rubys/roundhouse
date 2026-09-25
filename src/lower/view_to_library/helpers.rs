@@ -862,6 +862,27 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
 /// expression. Returns None for any hash that isn't this form, so an
 /// ordinary opts hash in url position still falls through.
 fn emit_url_options_hash(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    // `{controller:, action:, page:}.merge(extra)` — current lobsters
+    // carries its last-read marker across pages this way
+    // (`.merge(@next_page_params || {})`). The literal keys resolve
+    // exactly as below; the merged keys are known only at run time,
+    // and none of them is a segment of any route this shape reaches
+    // (those take `page` alone), so Rails renders them as the query
+    // string — `RouteHelpers.query_suffix`, the same helper a
+    // `**splat` into a route helper goes through.
+    if let ExprNode::Send { recv: Some(base), method, args, block: None, .. } = &*url.node {
+        if method.as_str() == "merge" && args.len() == 1 {
+            let path = emit_url_options_hash(base, ctx)?;
+            let extra = rewrite_helpers_in_expr(&args[0], ctx);
+            return Some(send(
+                Some(path),
+                "+",
+                vec![route_helpers_call("query_suffix", vec![extra])],
+                None,
+                false,
+            ));
+        }
+    }
     let ExprNode::Hash { entries, .. } = &*url.node else {
         return None;
     };

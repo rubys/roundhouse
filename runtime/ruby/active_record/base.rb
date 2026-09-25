@@ -738,9 +738,10 @@ module ActiveRecord
     # literal (`touch :connected_at` → `self.connected_at = …; touch`),
     # which is the same posture `insert_all` and `has_json` landed on:
     # inline what would otherwise need an untyped or dynamic parameter.
-    # Until that lowering lands, `touch(:col)` raises ArgumentError,
-    # which is the honest failure — campfire's `Membership#connected`
-    # is the one corpus site.
+    # That lowering is `lower::column_ops` for an implicit-self call
+    # (campfire's `Membership#connected`) and `lower::update_kwargs` for
+    # an explicit receiver (lobsters' `@user&.touch(:last_read_newest_
+    # story)`); both reach this method with the column already written.
     #
     # `after_touch` FIRES, and that is load-bearing rather than
     # cosmetic: it is the only thing that makes `belongs_to … touch:

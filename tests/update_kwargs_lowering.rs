@@ -154,3 +154,40 @@ end
     );
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+#[test]
+fn touch_with_a_column_stamps_it_then_touches() {
+    // lobsters' read markers: `@user&.touch(:last_read_newest_story)`.
+    // `Base#touch` takes no column (a shared `touch(name)` would
+    // index-write through a variable key), so the column write is
+    // inlined at the call site and the record's own `touch` finishes.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Marker
+  def mark(code)
+    invitation = Invitation.find_by(code: code)
+    invitation&.touch(:code)
+  end
+end
+"#,
+    );
+    assert!(!out.contains("touch(:code)"), "site should be inlined:\n{out}");
+    assert!(out.contains("__update_rcv.code = ActiveSupport.db_now"), "column stamped:\n{out}");
+    assert!(out.contains("__update_rcv.touch"), "then touched:\n{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn bare_touch_is_left_to_the_runtime() {
+    let (out, _) = lower_and_emit(
+        r#"
+class Marker
+  def mark(code)
+    Invitation.find_by(code: code).touch
+  end
+end
+"#,
+    );
+    assert!(out.contains(".touch"), "{out}");
+    assert!(!out.contains("db_now"), "{out}");
+}

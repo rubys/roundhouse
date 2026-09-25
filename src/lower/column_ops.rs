@@ -22,9 +22,10 @@
 //!
 //! Scope: a bare/`self` receiver in a MODEL body (including concerns
 //! and association extensions — `for_each_model_body`). An explicit
-//! receiver (`other.touch(:col)`) is left alone rather than
-//! rewritten: the receiver would be evaluated twice, and nothing in
-//! the corpus writes it.
+//! receiver (`@user&.touch(:last_read_newest_story)`, lobsters' read
+//! markers in its controllers) is `lower::update_kwargs`', which binds
+//! the receiver once and handles the `&.`-guarded form alongside
+//! `update(k: v)`, the same column-write-then-finish shape.
 //!
 //! STATEMENT POSITIONS ONLY. The rewrite produces two statements, and
 //! a `Seq` spliced into an argument position is what took the campfire
