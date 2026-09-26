@@ -73,6 +73,16 @@ module ActiveRecord
       raise NotImplementedError, "id=: subclasses must override"
     end
 
+    # `to_param` — the same contract. The lowerer synthesizes it on
+    # ApplicationRecord (the key as a String, Rails' `id&.to_s`) and a
+    # model may override it (lobsters' Story answers `short_id`).
+    # Declared here so code holding a record only as a `Base` —
+    # `ActiveSupport.to_param(value)` after `is_a?(ActiveRecord::Base)` —
+    # has a typed method to call.
+    def to_param
+      raise NotImplementedError, "to_param: subclasses must override"
+    end
+
     # Error message accumulator populated by the lowerer-emitted
     # `validate` method (one `errors << "..."` per failed rule). Lives
     # on Base directly — Phase 2.5(a) inlined every `validates :x, …`

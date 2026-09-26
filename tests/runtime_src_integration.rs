@@ -1420,7 +1420,18 @@ fn every_runtime_method_body_concretely_typed() {
     // carries (4). What it bought: lobsters' inbox marks itself read
     // (`after_action :update_read_at`), which runs now that after
     // filters reach the dispatcher.
-    const CEILING: usize = 489;
+    //
+    // 489 -> 494: `ActiveSupport.to_param(value)`, FIVE sites, all reads
+    // of its one parameter (active_support_ext.rb 29 -> 34, MEASURED):
+    // the Hash and Array tests and their arms, and the record send. The
+    // parameter is `untyped` because the method's whole job is taking a
+    // receiver inference could not type (`lower::to_param_residue`), the
+    // same trade as `many?` above. What it bought: lobsters' anonymous
+    // story lists, whose cache key interpolates `v.to_param` over
+    // `true`, an Integer and a Hash — every one 500'd on spinel. An
+    // earlier spelling with a branch per scalar kind cost 14; `to_s` is
+    // Rails' answer for all of them, so they share one tail.
+    const CEILING: usize = 494;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

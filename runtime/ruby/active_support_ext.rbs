@@ -2,6 +2,7 @@ module ActiveSupport
   def self.blank?: (untyped value) -> bool
 
   def self.present?: (untyped value) -> bool
+  def self.to_param: (untyped value) -> String
 
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped

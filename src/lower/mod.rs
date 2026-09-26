@@ -127,6 +127,7 @@ pub mod html_safe;
 pub mod rails_cache;
 pub mod session_options;
 pub mod status_literal;
+pub mod to_param_residue;
 pub mod relation_residue;
 pub mod relation_select_block;
 pub mod send_dispatch;
@@ -203,6 +204,7 @@ pub use html_safe::apply_html_safe_lowering;
 pub use rails_cache::apply_rails_cache_lowering;
 pub use session_options::apply_session_options_lowering;
 pub use status_literal::apply_status_literal_lowering;
+pub use to_param_residue::apply_to_param_residue_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
 pub use partial_qualify::apply_partial_qualification;
@@ -380,6 +382,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `status: 400` → `status: :bad_request` in render / redirect_to /
     // head; a literal rewrite no other pass produces or consumes.
     ("status_literal", &[]),
+    // `"#{v.to_param}"` on an untyped receiver → `ActiveSupport.to_param(v)`.
+    ("to_param_residue", &[]),
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
@@ -744,6 +748,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     status_literal::apply_status_literal_lowering(app);
     ran!("status_literal");
+    to_param_residue::apply_to_param_residue_lowering(app);
+    ran!("to_param_residue");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
     in_predicate::apply_in_predicate_lowering(app);

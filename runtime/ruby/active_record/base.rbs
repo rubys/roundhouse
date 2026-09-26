@@ -73,6 +73,7 @@ module ActiveRecord
     # the app's keys and no wider.
     def id: () -> Integer
     def id=: (Integer) -> Integer
+    def to_param: () -> String
 
     # Error message accumulator populated by the lowerer-emitted
     # `validate` body. Phase 2.5(a) inlines every `validates :x, …`

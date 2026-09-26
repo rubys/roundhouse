@@ -46,6 +46,34 @@ module ActiveSupport
     !blank?(value)
   end
 
+  # ActiveSupport's `Object#to_param`, for a receiver inference could not
+  # type — `lower::to_param_residue` routes it here, as `lower::blank`
+  # routes an untyped `blank?`. lobsters' anonymous story-list cache key
+  # is the shape:
+  #
+  #     opts.merge(page: page).sort.map { |k, v| "#{k}=#{v.to_param}" }
+  #
+  # with `true`, an Integer and the `length` Hash as the values. Rails'
+  # answers by kind: `to_s` for true/false/numbers/Symbols, the String
+  # itself, `to_query` for a Hash, the elements' params joined by "/" for
+  # an Array. A record keeps its own `to_param` (Story's is `short_id`),
+  # so that one stays a send and dispatches on the model.
+  #
+  # `nil.to_param` is nil in Rails; the lowering only routes sites whose
+  # result is interpolated, where nil renders "", so "" is what this
+  # answers and the method stays String-typed.
+  #
+  # `to_s` IS Rails' answer for every scalar — nil (""), true/false,
+  # numbers, Symbols, Strings — so only the containers and records
+  # branch. Fewer reads of the untyped parameter is fewer untyped sites
+  # (the runtime's typing ceiling counts each one).
+  def self.to_param(value)
+    return ActionView::ViewHelpers.to_query(value) if value.is_a?(Hash)
+    return value.map { |e| ActiveSupport.to_param(e) }.join("/") if value.is_a?(Array)
+    return value.to_param.to_s if value.is_a?(ActiveRecord::Base)
+    value.to_s
+  end
+
   def self.presence(value)
     blank?(value) ? nil : value
   end
