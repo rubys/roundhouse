@@ -123,6 +123,19 @@ const SHIMS: &[Shim] = &[
         map_entry: true,
         type_before_name: false,
     },
+    // The Studio's in-browser test runner swaps the emitted `src/db`
+    // for an in-memory `Db` over the sqlite-wasm engine. It lives
+    // outside runtime/, so it drifted: the `_opt` seam never reached
+    // it and fixture loading died on `Db.escape_string_opt is not a
+    // function` in the browser.
+    Shim {
+        path: "wasm/lib/test-runtime.mjs",
+        naming: Naming::Snake,
+        step_pred: "is_step",
+        def_forms: &["function "],
+        map_entry: true,
+        type_before_name: false,
+    },
     Shim {
         path: "runtime/crystal/db.cr",
         naming: Naming::Snake,

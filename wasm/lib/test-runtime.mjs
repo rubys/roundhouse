@@ -152,11 +152,39 @@ function escape_int(n) { const p = typeof n === "number" ? n : Number(n); return
 function escape_int_list(ids) { return ids.length === 0 ? "NULL" : ids.map(escape_int).join(", "); }
 function escape_bool(b) { return b ? "1" : "0"; }
 
+// Nullable-column seam (see runtime/typescript/db-worker-proxy.ts): NULL
+// stays null rather than collapsing to ""/0.
+function currentCell(stmtId, i, caller) {
+  const entry = _statements.get(stmtId);
+  if (entry === undefined || entry.cursor < 0 || entry.cursor >= entry.rows.length) throw new Error("Db: " + caller + " with no current row");
+  const v = entry.rows[entry.cursor][i];
+  return v === null || v === undefined ? null : v;
+}
+function column_int_opt(stmtId, i) {
+  const v = currentCell(stmtId, i, "column_int_opt");
+  if (v === null) return null;
+  if (typeof v === "bigint") return Number(v);
+  return typeof v === "number" ? Math.trunc(v) : Number(v) | 0;
+}
+function column_float_opt(stmtId, i) { const v = currentCell(stmtId, i, "column_float_opt"); return v === null ? null : Number(v); }
+function column_text_opt(stmtId, i) { const v = currentCell(stmtId, i, "column_text_opt"); return v === null ? null : String(v); }
+function column_bool_opt(stmtId, i) { const v = column_int_opt(stmtId, i); return v === null ? null : v !== 0; }
+function escape_string_opt(s) { return s == null ? "NULL" : escape_string(s); }
+function escape_int_opt(n) { return n == null ? "NULL" : escape_int(n); }
+function escape_float_opt(f) {
+  if (f == null) return "NULL";
+  const p = typeof f === "number" ? f : Number(f);
+  return Number.isFinite(p) ? String(p) : "0.0";
+}
+function escape_bool_opt(b) { return b == null ? "NULL" : escape_bool(b); }
+
 export const Db = {
   configure, install, close, exec, prepare, is_step,
   column_int, column_text, column_bool, finalize,
+  column_int_opt, column_float_opt, column_text_opt, column_bool_opt,
   last_insert_rowid, changes,
   escape_string, escape_int, escape_int_list, escape_bool,
+  escape_string_opt, escape_int_opt, escape_float_opt, escape_bool_opt,
 };
 `;
 
