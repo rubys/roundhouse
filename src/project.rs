@@ -3553,7 +3553,40 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_makefile_stylesheet_list(&mut files, app);
     apply_test_gem_wiring(&mut files);
     apply_spinel_sql_functions(&mut files, app)?;
+    apply_pagination_demand(&mut files)?;
     Ok(files)
+}
+
+/// geared_pagination's `set_page_and_extract_portion_from` sets `@page` on
+/// the controller (runtime/ruby/action_controller/pagination.rb reopens
+/// `ActionController::Base` to do it). An app that never calls it gets
+/// neither the file nor its require: a controller that uses `@page` for
+/// something else — lobsters' page NUMBER — would otherwise share the
+/// ivar with the base's `Page`, which spinel refuses as a class-layout
+/// conflict (and which a Rails app without the gem never has). campfire,
+/// which paginates through it, keeps both.
+fn apply_pagination_demand(files: &mut Vec<(String, String)>) -> Result<(), String> {
+    let wanted = files.iter().any(|(p, c)| {
+        (p.starts_with("app/") || p.starts_with("test/")) && p.ends_with(".rb") && c.contains("set_page_and_extract_portion_from")
+    });
+    if wanted {
+        return Ok(());
+    }
+    const REQUIRE: &str = "require_relative \"action_controller/pagination\"\n";
+    let ac = files
+        .iter_mut()
+        .find(|(p, _)| p == "runtime/action_controller.rb")
+        .ok_or("spinel tree has no runtime/action_controller.rb")?;
+    if !ac.1.contains(REQUIRE) {
+        return Err("runtime/action_controller.rb: the pagination require moved".into());
+    }
+    ac.1 = ac.1.replacen(REQUIRE, "", 1);
+    files.retain(|(p, _)| {
+        p != "runtime/action_controller/pagination.rb"
+            && p != "runtime/action_controller/pagination.rbs"
+            && p != "sig/runtime/action_controller/pagination.rbs"
+    });
+    Ok(())
 }
 
 /// The app's initializer-registered SQL functions on the spinel tree:
