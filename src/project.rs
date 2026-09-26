@@ -3336,6 +3336,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "gem_facades",
         "bcrypt_facade",
         "rqrcode_facade",
+        // Nokogiri's raising stand-in, its own file for the same swap:
+        // spin_shape replaces it with `require "nokogiri"` (spinel-nokogiri)
+        // when the app names Nokogiri.
+        "nokogiri_facade",
         "inflector",
         "inflector_ext",
         "json_builder",
@@ -5287,6 +5291,65 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/rqrcode_facade.rbs");
     }
 
+    // nokogiri: the same swap, for HTML parsing and DOM surgery (lobsters'
+    // Markdowner post-processing and og: meta reads, campfire's Opengraph
+    // and its turbo-stream test helper). The package is spinel-nokogiri —
+    // libxml2 2.13.9 with Nokogiri's own patches, carried and compiled
+    // with it, so the parse and the serialization are the gem's bytes.
+    // The spinel read-path reopen (nokogiri_spinel.rb) goes with the
+    // façade: it reopens the façade's classes, and the real ones are the
+    // package's. Manifest below, git form (matz/spin-index#10/#11).
+    let needs_nokogiri = files
+        .iter()
+        .any(|(p, c)| {
+            p.starts_with("app/") && p.ends_with(".rb") && (c.contains("Nokogiri::") || c.contains("Nokogiri."))
+        });
+    if needs_nokogiri {
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/nokogiri_facade.rb")
+            .ok_or("spin_shape: app references Nokogiri but runtime/nokogiri_facade.rb \
+                    is not in the spinel file set")?;
+        facade.1 = "# Real nokogiri — the spinel-nokogiri spin package (libxml2 2.13.9\n\
+                    # with Nokogiri's patches, carried; see spin.toml [dependencies]).\n\
+                    # This file is the swap point: the scaffold base ships a raising\n\
+                    # façade here for targets without the package.\n\
+                    require \"nokogiri\"\n"
+            .to_string();
+        if let Some(sidecar) = files.iter_mut().find(|(p, _)| p == "runtime/nokogiri_spinel.rb") {
+            sidecar.1 = "# The read-path reopen of the Nokogiri façade is not loaded here: this\n\
+                         # tree has the real Nokogiri (spinel-nokogiri), and the façade's\n\
+                         # classes it reopened are not in it. Kept so boot.rb's require\n\
+                         # still resolves.\n\
+                         require \"nokogiri\"\n"
+                .to_string();
+        }
+        files.retain(|(p, _)| p != "runtime/nokogiri_facade.rbs" && p != "runtime/nokogiri_spinel.rbs");
+    }
+
+    // commonmarker: no façade to swap (Markdowner's own façade stands aside
+    // when the app's Markdowner names Commonmarker and Nokogiri — see
+    // `Facade::lifted_by_constants`), only the package to declare: the
+    // commonmarker gem's surface over cmark-gfm 0.29.0.gfm.13, carried.
+    let needs_commonmarker = files
+        .iter()
+        .any(|(p, c)| {
+            p.starts_with("app/") && p.ends_with(".rb") && (c.contains("Commonmarker.") || c.contains("Commonmarker::"))
+        });
+    // The app's own `require "commonmarker"` does not survive the emit (a
+    // bare gem require is the ruby family's GEM_REQUIRES job), so the
+    // package needs an anchor the way the swapped façades are one: the
+    // require rides on gem_facades.rb, which the app's models already
+    // require.
+    if needs_commonmarker {
+        let gf = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/gem_facades.rb")
+            .ok_or("spin_shape: app references Commonmarker but runtime/gem_facades.rb \
+                    is not in the spinel file set")?;
+        gf.1.push_str("\n# The commonmarker spin package (spinel-commonmarker) — see spin.toml.\nrequire \"commonmarker\"\n");
+    }
+
     // ruby-vips: the same swap for the image processor, when the app
     // declares variants — see `apply_image_processor_wiring`. The
     // package is the spinel-ruby-vips spin package; the manifest gains
@@ -5367,6 +5430,28 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # package — no system library. Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#8 is the registration.\n\
              rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\", ref = \"main\" }\n",
+        );
+    }
+    if needs_nokogiri {
+        if !manifest.contains("[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# HTML parsing, CSS/XPath and serialization: the nokogiri gem's\n\
+             # surface over libxml2 2.13.9 with Nokogiri's patches, carried in\n\
+             # the package. Git form until matz/spin-index#10/#11 land.\n\
+             nokogiri = { git = \"https://github.com/rubys/spinel-nokogiri\", ref = \"main\" }\n",
+        );
+    }
+    if needs_commonmarker {
+        if !manifest.contains("[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# Markdown: the commonmarker gem's surface over cmark-gfm\n\
+             # 0.29.0.gfm.13, carried in the package. Git form until\n\
+             # matz/spin-index#9 lands.\n\
+             commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\", ref = \"main\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
@@ -5494,7 +5579,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             for (from, to) in dep_patches {
                 makefile.1 = makefile.1.replacen(from, to, 1);
             }
-        } else if needs_bcrypt || needs_vips || needs_rqrcode {
+        } else if needs_bcrypt || needs_vips || needs_rqrcode || needs_nokogiri || needs_commonmarker {
             return Err(
                 "spin_shape: Makefile dep-patch anchors not found (scaffold \
                  Makefile changed?) and this tree carries a package"

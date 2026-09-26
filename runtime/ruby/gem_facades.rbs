@@ -27,37 +27,6 @@ module Markly
   end
 end
 
-module Nokogiri
-  def self.HTML: (String _html) -> Nokogiri::Document
-
-  class Attr
-    def text: () -> String
-    def to_s: () -> String
-  end
-
-  class Element
-    def name=: (String _value) -> String
-    def []: (untyped _key) -> String?
-    def []=: (untyped _key, String _value) -> String
-    def text: () -> String
-    def inner_html: () -> String
-    def attributes: () -> Hash[String, Attr]
-    def content=: (untyped _value) -> untyped
-    def replace: (Element _node) -> void
-  end
-
-  class NodeSet
-    def each: () { (Element) -> void } -> void
-  end
-
-  class Document
-    def css: (String _selector) -> NodeSet
-    def meta_encoding: () -> String?
-    def at_css: (String _selector) -> Element?
-    def create_element: (String _name) -> Element
-  end
-end
-
 module Mail
   def self.read_from_string: (String _text) -> Mail::Message
 

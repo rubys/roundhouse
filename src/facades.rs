@@ -54,17 +54,51 @@ pub struct Facade {
     /// the real body compiles and serves, and the façade stands aside.
     /// Empty for a façade that stands in for something else.
     pub lifted_by_sql_functions: &'static [&'static str],
+    /// Constants whose spin packages stand in for this façade's reason.
+    /// When the app's own class names every one of them, the spinel tree
+    /// carries those packages (project::spin_shape) and the real body
+    /// compiles and serves, so the façade stands aside. Empty for a façade
+    /// that stands in for something else.
+    pub lifted_by_constants: &'static [&'static str],
 }
 
 impl Facade {
     /// Whether this façade replaces the app's class for `app`.
     pub fn applies(&self, app: &crate::App) -> bool {
-        self.lifted_by_sql_functions.is_empty()
-            || !self
+        let lifted_by_sql = !self.lifted_by_sql_functions.is_empty()
+            && self
                 .lifted_by_sql_functions
                 .iter()
-                .all(|name| app.sql_functions.iter().any(|f| f.name == *name))
+                .all(|name| app.sql_functions.iter().any(|f| f.name == *name));
+        let lifted_by_packages = !self.lifted_by_constants.is_empty()
+            && self
+                .lifted_by_constants
+                .iter()
+                .all(|name| class_names_constant(app, self.class_name, name));
+        !lifted_by_sql && !lifted_by_packages
     }
+}
+
+/// Whether the app's class `class_name` reads the top-level constant
+/// `name` anywhere in its methods or constant values.
+fn class_names_constant(app: &crate::App, class_name: &str, name: &str) -> bool {
+    fn walk(e: &crate::expr::Expr, name: &str) -> bool {
+        if let crate::expr::ExprNode::Const { path } = &*e.node {
+            if path.first().is_some_and(|p| p.as_str() == name) {
+                return true;
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found && walk(c, name) {
+                found = true;
+            }
+        });
+        found
+    }
+    app.library_classes.iter().filter(|lc| lc.name.0.as_str() == class_name).any(|lc| {
+        lc.methods.iter().any(|m| walk(&m.body, name)) || lc.constants.iter().any(|(_, v)| walk(v, name))
+    })
 }
 
 pub const EXTRAS_FACADES: &[Facade] = &[
@@ -74,6 +108,7 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/sponge.rb"),
         rbs: include_str!("../runtime/spinel/facades/sponge.rbs"),
         lifted_by_sql_functions: &[],
+        lifted_by_constants: &[],
     },
     Facade {
         stem: "app/models/markdowner",
@@ -81,6 +116,11 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/markdowner.rb"),
         rbs: include_str!("../runtime/spinel/facades/markdowner.rbs"),
         lifted_by_sql_functions: &[],
+        // Current lobsters' Markdowner renders through commonmarker and
+        // post-processes through Nokogiri; with both spin packages the
+        // body compiles as written (the 2023 snapshot's uses Markly, and
+        // keeps the façade).
+        lifted_by_constants: &["Commonmarker", "Nokogiri"],
     },
     Facade {
         stem: "app/models/flagged_commenters",
@@ -88,6 +128,7 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/flagged_commenters.rb"),
         rbs: include_str!("../runtime/spinel/facades/flagged_commenters.rbs"),
         lifted_by_sql_functions: &["stddev", "if"],
+        lifted_by_constants: &[],
     },
     Facade {
         stem: "app/models/cache_page_job",
@@ -95,6 +136,7 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/cache_page_job.rb"),
         rbs: include_str!("../runtime/spinel/facades/cache_page_job.rbs"),
         lifted_by_sql_functions: &[],
+        lifted_by_constants: &[],
     },
     Facade {
         stem: "app/models/story_image",
@@ -102,6 +144,7 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/story_image.rb"),
         rbs: include_str!("../runtime/spinel/facades/story_image.rbs"),
         lifted_by_sql_functions: &[],
+        lifted_by_constants: &[],
     },
     Facade {
         stem: "app/models/html_encoder",
@@ -109,6 +152,7 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         rb: include_str!("../runtime/spinel/facades/html_encoder.rb"),
         rbs: include_str!("../runtime/spinel/facades/html_encoder.rbs"),
         lifted_by_sql_functions: &[],
+        lifted_by_constants: &[],
     },
 ];
 
