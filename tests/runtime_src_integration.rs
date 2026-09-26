@@ -1432,18 +1432,19 @@ fn every_runtime_method_body_concretely_typed() {
     // earlier spelling with a branch per scalar kind cost 14; `to_s` is
     // Rails' answer for all of them, so they share one tail.
     //
-    // 494 -> 505: Relation's set operations, ELEVEN sites net (relation.rb
-    // 219 -> 230, MEASURED). Each operator still reads its untyped
-    // `other` once, as the one-liners it replaces did; what is new is a
-    // record and its `id` read in each of four blocks and `set_operand`'s
-    // Relation test on `other`. A record is `untyped` here because
-    // `to_a` is `Array[untyped]`, the same reason `==` beside them pays
-    // for `mine[i].id`. What it bought: `relation & relation` — lobsters'
-    // `story.tags & filtered_tags` on every story page, which raised
-    // TypeError on spinel — and id membership, without which two sides
-    // that loaded the same rows intersected to nothing. An earlier
-    // spelling with a seen-list per operator cost 20.
-    const CEILING: usize = 505;
+    // 494 -> 501: Relation's set operations, SEVEN sites net (relation.rb
+    // 219 -> 226, MEASURED). Each operator still reads its untyped
+    // `other` once, as the one-liners it replaces did; what is new is
+    // the one `id_filter` block the three share (a record and its `id`),
+    // `ids_of`'s, and `set_operand`'s Relation test on `other`. A record
+    // is `untyped` here because `to_a` is `Array[untyped]`, the same
+    // reason `==` beside them pays for `mine[i].id`. What it bought:
+    // `relation & relation` — lobsters' `story.tags & filtered_tags` on
+    // every story page, which raised TypeError on spinel — and id
+    // membership, without which two sides that loaded the same rows
+    // intersected to nothing. A block per operator cost 11; a seen-list
+    // per operator 20.
+    const CEILING: usize = 501;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -103,6 +103,7 @@ module ActiveRecord
     def set_operand: (untyped other) -> Array[untyped]
     def operand_ids: (untyped other) -> Array[untyped]
     def ids_of: (Array[untyped] records) -> Array[untyped]
+    def id_filter: (Array[untyped] records, Array[untyped] ids, bool keep) -> Array[untyped]
     def include?: (untyped record) -> bool
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]

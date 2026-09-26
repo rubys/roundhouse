@@ -665,18 +665,20 @@ module ActiveRecord
     end
 
     def &(other)
-      ids = operand_ids(other)
-      to_a.select { |r| ids.include?(r.id) }
+      id_filter(to_a, operand_ids(other), true)
     end
 
     def |(other)
-      mine = ids_of(to_a)
-      to_a + set_operand(other).reject { |r| mine.include?(r.id) }
+      to_a + id_filter(set_operand(other), ids_of(to_a), false)
     end
 
     def -(other)
-      ids = operand_ids(other)
-      to_a.reject { |r| ids.include?(r.id) }
+      id_filter(to_a, operand_ids(other), false)
+    end
+
+    # The records whose id is (`keep`) or is not in `ids`.
+    def id_filter(records, ids, keep)
+      records.select { |r| ids.include?(r.id) == keep }
     end
 
     def set_operand(other)

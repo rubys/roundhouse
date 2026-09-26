@@ -853,7 +853,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // columns it left out, as Rails does, so lobsters' Token guard no
     // longer mints a TypeID per `User.select(*attrs)` row (66 -> 2 per
     // benchmark pass, the 2 being records genuinely built new).
-    const CEILING: usize = 1031;
+    // 2026-09-26 1031 -> 1055, +24, MEASURED by grouping the dump by
+    // method: Relation's set operations, `&` / `|` / `-` / `+` (they
+    // were 3 each as one-liners) now load a Relation operand and match
+    // by id through `id_filter`, `ids_of`, `operand_ids` and
+    // `set_operand` — every record read a TyVar, as this probe has no
+    // concrete model. A block per operator cost 35. What it buys:
+    // lobsters' `story.tags & filtered_tags`, which raised TypeError on
+    // every story page, and intersections that no longer come back empty
+    // for two sides that loaded the same rows.
+    const CEILING: usize = 1055;
 
     assert!(
         all_untyped.len() <= CEILING,
