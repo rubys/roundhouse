@@ -3770,7 +3770,7 @@ Found 2026-09-01 by the join-form probe that closed the view-params
 symbol-key defect (the form's `action` was the visible half; the
 enctype was sitting beside it).
 
-### SQL functions an initializer registers are installed on CRuby only
+### SQL functions an initializer registers are installed on CRuby and spinel, not JRuby
 
 An app that registers SQLite functions in an initializer —
 `raw_connection.create_function("regexp", 2) do |fn, …| … end`,
@@ -3782,26 +3782,37 @@ context as its first parameter under the app's own name for it (`fn`),
 so `fn.result = …` and an aggregate's `fn[:n]` state read as written;
 a `next` that left the block is a `return` in the method.
 
-The CRuby tree installs them: a `sql_functions.rb` beside its `db.rb` is generated
-with an `install(db)` that registers each through the sqlite3 gem, and
-`Db.open_pool` calls it on every pooled connection, as Rails' adapter
-patch does. The context object handed in is the gem's own function
-proxy — the object the app's blocks were written against.
+Both lanes that install them generate a `sql_functions.rb` beside
+`db.rb`, and `Db` calls its `install` on every pooled connection, as
+Rails' adapter patch does:
 
-The other lanes do not install them yet, and the raw SQL that calls one
-fails with SQLite's "no such function" there:
+- **CRuby** registers each through the sqlite3 gem; the context object
+  handed in is the gem's own function proxy — the object the app's
+  blocks were written against.
+- **Spinel** binds SQLite through FFI (`project::spinel_sql_functions_file`):
+  one `ffi_callback` trampoline per function reads the `sqlite3_value`
+  arguments into the Ruby values the gem would hand the block, and a
+  small `SqlFnContext` class plays the gem's proxy — `result=`, and
+  `[]` / `[]=` over per-GROUP state keyed by the address
+  `sqlite3_aggregate_context` returns, behind a Mutex because the OS
+  workers share the process. One spinel shape is designed around, not
+  hidden: an `ffi_callback` argument cannot be `nil` and a trampoline is
+  typed over `const void *`, so registration goes through a six-line
+  `ffi_source` adapter. The app's bodies ship as written —
+  `fn[:n] ||= 0` / `fn[:n] += 1` on the context class compile since
+  spinel 606acc03 (matz/spinel#5054, filed from this).
 
-- **JRuby** reaches SQLite over JDBC, whose user-function API is
-  `org.sqlite.Function` subclasses — a different registration shape.
-- **Spinel** binds SQLite through FFI. `ffi_callback` can hand a Ruby
-  method to `sqlite3_create_function_v2`, which is the route; it needs
-  per-function trampolines reading `sqlite3_value_*` arguments and a
-  context object with `result=` / `[]` / `[]=` over
-  `sqlite3_aggregate_context`.
+**JRuby** does not install them yet: it reaches SQLite over JDBC, whose
+user-function API is `org.sqlite.Function` subclasses — a different
+registration shape. Raw SQL that calls one fails with SQLite's "no such
+function" there.
 
 Lobsters reaches `stddev` from `FlaggedCommenters`, which renders on any
 page where you view your own threads, profile or inbox (the 2023
-ruby-bench snapshot had that warning switched off for this reason).
+ruby-bench snapshot had that warning switched off for this reason, and
+registers no functions — so on spinel the snapshot keeps FlaggedCommenters'
+façade, which stands aside only when the app registers both `stddev` and
+`if`: `Facade::lifted_by_sql_functions`).
 
 Found 2026-09-25 bringing current lobsters' benchmark routes up on the
-ruby lane.
+ruby lane; the spinel install landed the same day.

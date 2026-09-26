@@ -36,7 +36,9 @@
 ///   also carry un-modeled calls (`exec_query().first.symbolize_keys!`,
 ///   select-alias readers); the lobsters-bench capture disables the
 ///   feature rather than port that SQL to SQLite. Constructor and
-///   readers stay real; the statistics methods raise.
+///   readers stay real; the statistics methods raise. Current lobsters
+///   registers both functions for SQLite, and then the real class
+///   serves (`lifted_by_sql_functions`).
 pub struct Facade {
     /// Emit path stem, no extension (`app/models/sponge`).
     pub stem: &'static str,
@@ -46,6 +48,23 @@ pub struct Facade {
     pub class_name: &'static str,
     pub rb: &'static str,
     pub rbs: &'static str,
+    /// SQL functions whose absence is the reason for this façade. When
+    /// the app registers every one of them in an initializer (and so the
+    /// spinel tree installs them — `project::spinel_sql_functions_file`),
+    /// the real body compiles and serves, and the façade stands aside.
+    /// Empty for a façade that stands in for something else.
+    pub lifted_by_sql_functions: &'static [&'static str],
+}
+
+impl Facade {
+    /// Whether this façade replaces the app's class for `app`.
+    pub fn applies(&self, app: &crate::App) -> bool {
+        self.lifted_by_sql_functions.is_empty()
+            || !self
+                .lifted_by_sql_functions
+                .iter()
+                .all(|name| app.sql_functions.iter().any(|f| f.name == *name))
+    }
 }
 
 pub const EXTRAS_FACADES: &[Facade] = &[
@@ -54,36 +73,42 @@ pub const EXTRAS_FACADES: &[Facade] = &[
         class_name: "Sponge",
         rb: include_str!("../runtime/spinel/facades/sponge.rb"),
         rbs: include_str!("../runtime/spinel/facades/sponge.rbs"),
+        lifted_by_sql_functions: &[],
     },
     Facade {
         stem: "app/models/markdowner",
         class_name: "Markdowner",
         rb: include_str!("../runtime/spinel/facades/markdowner.rb"),
         rbs: include_str!("../runtime/spinel/facades/markdowner.rbs"),
+        lifted_by_sql_functions: &[],
     },
     Facade {
         stem: "app/models/flagged_commenters",
         class_name: "FlaggedCommenters",
         rb: include_str!("../runtime/spinel/facades/flagged_commenters.rb"),
         rbs: include_str!("../runtime/spinel/facades/flagged_commenters.rbs"),
+        lifted_by_sql_functions: &["stddev", "if"],
     },
     Facade {
         stem: "app/models/cache_page_job",
         class_name: "CachePageJob",
         rb: include_str!("../runtime/spinel/facades/cache_page_job.rb"),
         rbs: include_str!("../runtime/spinel/facades/cache_page_job.rbs"),
+        lifted_by_sql_functions: &[],
     },
     Facade {
         stem: "app/models/story_image",
         class_name: "StoryImage",
         rb: include_str!("../runtime/spinel/facades/story_image.rb"),
         rbs: include_str!("../runtime/spinel/facades/story_image.rbs"),
+        lifted_by_sql_functions: &[],
     },
     Facade {
         stem: "app/models/html_encoder",
         class_name: "HtmlEncoder",
         rb: include_str!("../runtime/spinel/facades/html_encoder.rb"),
         rbs: include_str!("../runtime/spinel/facades/html_encoder.rbs"),
+        lifted_by_sql_functions: &[],
     },
 ];
 
@@ -107,7 +132,7 @@ pub fn signatures_for(
             .library_classes
             .iter()
             .any(|lc| lc.name.0.as_str() == f.class_name);
-        if !defined {
+        if !defined || !f.applies(app) {
             continue;
         }
         // A malformed façade contract is a build-time authoring error in

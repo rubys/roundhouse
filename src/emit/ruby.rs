@@ -105,8 +105,8 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
 
 /// Swap façade-fated extras emits (Sponge) for their raising façades —
 /// scaffold-base step; see `library::EXTRAS_FACADES`.
-pub fn apply_extras_facades(files: &mut [(String, String)]) {
-    library::apply_extras_facades(files)
+pub fn apply_extras_facades(files: &mut [(String, String)], app: &crate::App) {
+    library::apply_extras_facades(files, app)
 }
 
 /// Restore the verbatim source-shape emit over the extras façades

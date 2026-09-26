@@ -93,11 +93,9 @@ use crate::facades::{Facade, EXTRAS_FACADES};
 /// Swap façade-fated extras emits (scaffold base: spinel + the trees
 /// derived from it). No-op when the app doesn't define the class —
 /// the path simply isn't present.
-pub(super) fn apply_extras_facades(files: &mut [(String, String)]) {
-    for Facade {
-        stem, rb, rbs, ..
-    } in EXTRAS_FACADES
-    {
+pub(super) fn apply_extras_facades(files: &mut [(String, String)], app: &App) {
+    for f in EXTRAS_FACADES.iter().filter(|f| f.applies(app)) {
+        let Facade { stem, rb, rbs, .. } = f;
         for (path, content) in files.iter_mut() {
             if path == &format!("{stem}.rb") {
                 *content = (*rb).to_string();

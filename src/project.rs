@@ -1660,6 +1660,9 @@ fn ruby_family_runtime_files(
     let mut files = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
+    // The spinel SQL-functions file is FFI; CRuby writes its own below
+    // (the sqlite3 gem's `create_function`), JRuby has none yet.
+    files.retain(|(p, _)| p != "runtime/sql_functions.rb");
     // `IPAddr`: the CRuby/JRuby trees have Ruby's own. Same shape as
     // the db.rb swap above — one require path, target-appropriate
     // implementation — but written as a small file rather than a
@@ -3460,7 +3463,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // require path — spinel AOT prices every reachable body and the
     // verbatim ones can't compile until the stdlib spin packages land.
     // The CRuby tree restores the verbatim emit (real stdlib there).
-    emit::ruby::apply_extras_facades(&mut files);
+    emit::ruby::apply_extras_facades(&mut files, app);
 
     let js = fixture.join("app/javascript");
     if js.exists() {
@@ -3549,7 +3552,33 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_makefile_asset_list(&mut files, app);
     apply_makefile_stylesheet_list(&mut files, app);
     apply_test_gem_wiring(&mut files);
+    apply_spinel_sql_functions(&mut files, app)?;
     Ok(files)
+}
+
+/// The app's initializer-registered SQL functions on the spinel tree:
+/// `runtime/sql_functions.rb` (see `spinel_sql_functions_file`), required
+/// by `runtime/db.rb` and installed on every connection the pool opens,
+/// right after its pragmas — as Rails' adapter patch installs them on
+/// every connection. The ruby family replaces the file with its own
+/// (`ruby_family_runtime_files`). A no-op when the app registers none,
+/// so the blog's db.rb is untouched.
+fn apply_spinel_sql_functions(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    let Some(src) = spinel_sql_functions_file(app) else { return Ok(()) };
+    const ANCHOR: &str = "      PRAGMAS.each { |p| SQL.sqlite3_exec(dbh, p, nil, nil, nil) }\n";
+    let db = files
+        .iter_mut()
+        .find(|(p, _)| p == "runtime/db.rb")
+        .ok_or("spinel tree has no runtime/db.rb to install SQL functions from")?;
+    if !db.1.contains(ANCHOR) {
+        return Err("runtime/db.rb: the connection-open anchor for SqlFunctions.install moved".into());
+    }
+    db.1 = format!(
+        "require_relative \"sql_functions\"\n{}",
+        db.1.replacen(ANCHOR, &format!("{ANCHOR}      SqlFunctions.install(dbh)\n"), 1)
+    );
+    files.push(("runtime/sql_functions.rb".to_string(), src));
+    Ok(())
 }
 
 /// How a test body asks for a gem: by naming a constant, or by writing
@@ -3946,6 +3975,198 @@ fn cruby_sql_functions_file(app: &App) -> Option<String> {
     install.push_str("  end\n");
     out.push_str(&install);
     out.push_str("end\n");
+    Some(out)
+}
+
+/// The FFI half of `runtime/sql_functions.rb` on the spinel tree, which
+/// has no sqlite3 gem to hand the app's blocks to: registration through
+/// `sqlite3_create_function_v2`, reading the `sqlite3_value` arguments,
+/// and the `fn` context object the app's bodies were written against
+/// (`fn.result = …`, an aggregate's `fn[:n]`).
+///
+/// Two spinel shapes, both measured on 234125c5 / fe8ebb81: an
+/// `ffi_callback` argument cannot be `nil`, and a callback's trampoline
+/// is typed over `const void *`. So registration goes through a small
+/// `ffi_source` adapter that fills the unused slots and casts. An
+/// aggregate's state lives in a Ruby Hash keyed by the address
+/// `sqlite3_aggregate_context` returns — one per GROUP, freed when the
+/// group finalizes — behind a Mutex, because spinel's OS workers share
+/// the process.
+const SPINEL_SQL_FUNCTIONS_FFI: &str = r##"module SqlFunctionsFFI
+  ffi_lib "sqlite3"
+  ffi_callback :rh_sqlfn, [:ptr, :int, :ptr], :void
+  ffi_callback :rh_sqlfin, [:ptr], :void
+  ffi_source <<~C
+    #include <sqlite3.h>
+    #include <stdint.h>
+    int rh_sql_scalar(void *db, const char *n, int a, void (*f)(const void *, int, const void *)) {
+      return sqlite3_create_function_v2((sqlite3 *)db, n, a, SQLITE_UTF8, 0,
+        (void (*)(sqlite3_context *, int, sqlite3_value **))f, 0, 0, 0);
+    }
+    int rh_sql_agg(void *db, const char *n, int a, void (*s)(const void *, int, const void *), void (*fin)(const void *)) {
+      return sqlite3_create_function_v2((sqlite3 *)db, n, a, SQLITE_UTF8, 0, 0,
+        (void (*)(sqlite3_context *, int, sqlite3_value **))s, (void (*)(sqlite3_context *))fin, 0);
+    }
+    intptr_t rh_sql_agg_key(void *ctx) { return (intptr_t)sqlite3_aggregate_context((sqlite3_context *)ctx, 8); }
+    void *rh_sql_argv(void *argv, int i) { return ((sqlite3_value **)argv)[i]; }
+    void rh_sql_result_text(void *ctx, const char *s) { sqlite3_result_text((sqlite3_context *)ctx, s, -1, SQLITE_TRANSIENT); }
+  C
+  ffi_func :rh_sql_scalar, [:ptr, :str, :int, :rh_sqlfn], :int
+  ffi_func :rh_sql_agg, [:ptr, :str, :int, :rh_sqlfn, :rh_sqlfin], :int
+  ffi_func :rh_sql_agg_key, [:ptr], :long
+  ffi_func :rh_sql_argv, [:ptr, :int], :ptr
+  ffi_func :rh_sql_result_text, [:ptr, :str], :void
+  ffi_func :sqlite3_value_type, [:ptr], :int
+  ffi_func :sqlite3_value_int64, [:ptr], :long
+  ffi_func :sqlite3_value_double, [:ptr], :double
+  ffi_func :sqlite3_value_text, [:ptr], :str
+  ffi_func :sqlite3_result_int64, [:ptr, :long], :void
+  ffi_func :sqlite3_result_double, [:ptr, :double], :void
+  ffi_func :sqlite3_result_null, [:ptr], :void
+end
+
+# The context object SQLite hands a function block (the sqlite3 gem's
+# `fn`): `result=` answers the call, `[]` / `[]=` hold an aggregate's
+# per-group state.
+class SqlFnContext
+  STATE = {}
+  LOCK = Mutex.new
+
+  def initialize(ctx, key)
+    @ctx = ctx
+    @key = key
+  end
+
+  def result=(v)
+    if v.nil?
+      SqlFunctionsFFI.sqlite3_result_null(@ctx)
+    elsif v == true
+      SqlFunctionsFFI.sqlite3_result_int64(@ctx, 1)
+    elsif v == false
+      SqlFunctionsFFI.sqlite3_result_int64(@ctx, 0)
+    elsif v.is_a?(Integer)
+      SqlFunctionsFFI.sqlite3_result_int64(@ctx, v)
+    elsif v.is_a?(Float)
+      SqlFunctionsFFI.sqlite3_result_double(@ctx, v)
+    else
+      SqlFunctionsFFI.rh_sql_result_text(@ctx, v.to_s)
+    end
+    v
+  end
+
+  def [](k)
+    v = nil
+    LOCK.synchronize do
+      h = STATE[@key]
+      v = h[k] unless h.nil?
+    end
+    v
+  end
+
+  def []=(k, v)
+    LOCK.synchronize do
+      h = STATE[@key]
+      if h.nil?
+        h = {}
+        STATE[@key] = h
+      end
+      h[k] = v
+    end
+    v
+  end
+
+  # An aggregate group is done: drop its state.
+  def release
+    LOCK.synchronize { STATE.delete(@key) }
+    nil
+  end
+
+  # Argument `i` as the Ruby value the sqlite3 gem would hand the block.
+  def self.arg(argv, i)
+    v = SqlFunctionsFFI.rh_sql_argv(argv, i)
+    t = SqlFunctionsFFI.sqlite3_value_type(v)
+    return SqlFunctionsFFI.sqlite3_value_int64(v) if t == 1
+    return SqlFunctionsFFI.sqlite3_value_double(v) if t == 2
+    return nil if t == 5
+    SqlFunctionsFFI.sqlite3_value_text(v)
+  end
+end
+"##;
+
+/// `runtime/sql_functions.rb` for the spinel tree — the counterpart of
+/// `cruby_sql_functions_file`. The app's function bodies are the same
+/// `SqlFunctions` methods (see src/ingest/sql_functions.rs); what differs
+/// is the install: an `ffi_callback` trampoline per function, each
+/// building the `fn` context and reading the arguments, registered on
+/// every pooled connection by `Db` (the spinel db.rb calls `install`
+/// after its pragmas). `None` when the app registers none.
+fn spinel_sql_functions_file(app: &App) -> Option<String> {
+    use crate::app::SqlFunctionKind;
+    if app.sql_functions.is_empty() {
+        return None;
+    }
+    let indent = |s: String| {
+        s.lines()
+            .map(|l| if l.is_empty() { String::new() } else { format!("  {l}") })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let emit = crate::emit::ruby::emit_method;
+    let mut out = String::from(
+        "# SQL functions the app's initializers register on every SQLite\n\
+         # connection (generated from App::sql_functions — see\n\
+         # src/ingest/sql_functions.rs and project::spinel_sql_functions_file).\n\
+         # Installed by Db on each pooled connection.\n",
+    );
+    out.push_str(SPINEL_SQL_FUNCTIONS_FFI);
+    out.push_str("\nmodule SqlFunctions\n");
+    let mut install = String::from("  def self.install(db)\n");
+    let mut trampolines = String::new();
+    for f in &app.sql_functions {
+        let args = (0..f.arity).map(|i| format!("SqlFnContext.arg(argv, {i})")).collect::<Vec<_>>();
+        let tramp_args = |fn_expr: &str| {
+            std::iter::once(fn_expr.to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(", ")
+        };
+        let stem = f.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+        match &f.kind {
+            SqlFunctionKind::Scalar { method } => {
+                out.push_str(&indent(emit(method)));
+                out.push_str("\n\n");
+                install.push_str(&format!(
+                    "    SqlFunctionsFFI.rh_sql_scalar(db, {:?}, {}, method(:rh_sqlfn_{stem}))\n",
+                    f.name, f.arity
+                ));
+                trampolines.push_str(&format!(
+                    "\ndef rh_sqlfn_{stem}(ctx, argc, argv)\n  SqlFunctions.{}({})\n  nil\nend\n",
+                    method.name.as_str(),
+                    tramp_args("SqlFnContext.new(ctx, 0)")
+                ));
+            }
+            SqlFunctionKind::Aggregate { step, finalize } => {
+                out.push_str(&indent(emit(step)));
+                out.push_str("\n\n");
+                out.push_str(&indent(emit(finalize)));
+                out.push_str("\n\n");
+                install.push_str(&format!(
+                    "    SqlFunctionsFFI.rh_sql_agg(db, {:?}, {}, method(:rh_sqlfn_{stem}_step), method(:rh_sqlfn_{stem}_final))\n",
+                    f.name, f.arity
+                ));
+                trampolines.push_str(&format!(
+                    "\ndef rh_sqlfn_{stem}_step(ctx, argc, argv)\n  SqlFunctions.{}({})\n  nil\nend\n",
+                    step.name.as_str(),
+                    tramp_args("SqlFnContext.new(ctx, SqlFunctionsFFI.rh_sql_agg_key(ctx))")
+                ));
+                trampolines.push_str(&format!(
+                    "\ndef rh_sqlfn_{stem}_final(ctx)\n  fn = SqlFnContext.new(ctx, SqlFunctionsFFI.rh_sql_agg_key(ctx))\n  SqlFunctions.{}(fn)\n  fn.release\n  nil\nend\n",
+                    finalize.name.as_str()
+                ));
+            }
+        }
+    }
+    install.push_str("    nil\n  end\n");
+    out.push_str(&install);
+    out.push_str("end\n");
+    out.push_str(&trampolines);
     Some(out)
 }
 
