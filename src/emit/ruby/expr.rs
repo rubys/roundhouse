@@ -1035,6 +1035,11 @@ fn binop_of(e: &Expr) -> Option<&str> {
             (crate::expr::BoolOpKind::And, crate::expr::BoolOpSurface::Word) => "and",
             (crate::expr::BoolOpKind::Or, crate::expr::BoolOpSurface::Word) => "or",
         }),
+        // An assignment binds looser than every operator a Send spells:
+        // lobsters' layout `(hrc = HatRequest.count) > 0` rendered bare
+        // re-parses as `hrc = (HatRequest.count > 0)`, the local becoming
+        // the comparison.
+        ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. } => Some("="),
         _ => None,
     }
 }
@@ -1056,6 +1061,7 @@ fn binop_prec(op: &str) -> u8 {
         // and the `and`/`or` word forms are the loosest of all.
         "&&" => 26,
         "||" => 25,
+        "=" => 15,
         "and" => 11,
         "or" => 10,
         _ => 20,
@@ -1496,6 +1502,21 @@ mod tests {
         let inner = and_sym(send(None, "a", vec![]), send(None, "b", vec![]));
         let expr = or_sym(inner, send(None, "c", vec![]));
         assert_eq!(emit_expr(&expr), "a && b || c");
+    }
+
+    #[test]
+    fn assignment_operand_of_an_operator_is_parenthesized() {
+        // `(hrc = count) > 0` — bare, Ruby reads `hrc = (count > 0)`.
+        let assign = Expr::new(
+            Span::default(),
+            ExprNode::Assign {
+                target: LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("hrc") },
+                value: send(None, "count", vec![]),
+            },
+        );
+        let zero = Expr::new(Span::default(), ExprNode::Lit { value: Literal::Int { value: 0 } });
+        assert_eq!(emit_expr(&send(Some(assign.clone()), ">", vec![zero.clone()])), "(hrc = count) > 0");
+        assert_eq!(emit_expr(&send(Some(zero), "+", vec![assign])), "0 + (hrc = count)");
     }
 
     #[test]
