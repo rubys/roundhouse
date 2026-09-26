@@ -80,6 +80,12 @@ pub(super) fn unwrap_lambda(e: &Expr) -> &Expr {
 /// to its HTTP numeric code. Covers the codes the scaffold blog
 /// templates use; unknown symbols fall back to 500.
 pub fn status_sym_to_code(sym: &str) -> u16 {
+    // The runtime's full table first: `status_literal` grounds Integer
+    // statuses to ITS symbols (`:forbidden`, `:gone`, …), which the short
+    // list below would have turned into 500.
+    if let Some(code) = crate::lower::status_literal::status_sym_code(sym) {
+        return code;
+    }
     match sym {
         "ok" => 200,
         "created" => 201,

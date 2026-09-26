@@ -126,6 +126,7 @@ pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;
 pub mod session_options;
+pub mod status_literal;
 pub mod relation_residue;
 pub mod relation_select_block;
 pub mod send_dispatch;
@@ -201,6 +202,7 @@ pub use literal_append::apply_literal_append_lowering;
 pub use html_safe::apply_html_safe_lowering;
 pub use rails_cache::apply_rails_cache_lowering;
 pub use session_options::apply_session_options_lowering;
+pub use status_literal::apply_status_literal_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
 pub use partial_qualify::apply_partial_qualification;
@@ -375,6 +377,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `config.session_options[:key]` → `session_cookie_key`; rewrites a
     // receiver chain no other pass produces or consumes.
     ("session_options", &[]),
+    // `status: 400` → `status: :bad_request` in render / redirect_to /
+    // head; a literal rewrite no other pass produces or consumes.
+    ("status_literal", &[]),
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
@@ -737,6 +742,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("request_index");
     session_options::apply_session_options_lowering(app);
     ran!("session_options");
+    status_literal::apply_status_literal_lowering(app);
+    ran!("status_literal");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
     in_predicate::apply_in_predicate_lowering(app);

@@ -228,8 +228,10 @@ module Main
     # CSRF token generation during render) left in the session, and
     # Set-Cookie only on change. An emptied session (reset_session
     # logout with no token re-added) clears the cookie.
+    # `request.session_options[:skip] = true` leaves it alone — see
+    # the spinel main.
     session_out = controller.session.to_cookie
-    if session_out != session_in
+    if session_out != session_in && !controller.request.session_skip?
       out_cookies[session_cookie] = session_out.empty? ? nil : session_out
     end
     is_redirect = controller.status >= 300 && controller.status < 400

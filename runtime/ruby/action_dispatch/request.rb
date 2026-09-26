@@ -157,6 +157,24 @@ module ActionDispatch
       # Declared in the .rbs and previously left unset — the same
       # defect `@params` had, one read away from surfacing.
       @user_agent = +""
+      @session_options = {}
+    end
+
+    # Rack's per-request session options. The one key the corpus writes
+    # is `:skip` — lobsters' `clear_session_cookie` after-action sets it
+    # on an anonymous page whose session holds only defaults, so the
+    # response carries no session cookie. Typed Boolean-valued: the
+    # other keys rack reads (`:expire_after`, `:renew`, …) are consumed
+    # by a cookie-store middleware we don't run, and a write of one
+    # refuses at the type rather than being silently ignored.
+    def session_options
+      @session_options
+    end
+
+    # Whether the dispatcher should leave the session cookie alone this
+    # response (Rails: the session middleware skips its commit).
+    def session_skip?
+      @session_options[:skip] == true
     end
 
     # Rails accepts a symbol (`request.format = :json`); store the

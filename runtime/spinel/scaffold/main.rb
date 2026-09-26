@@ -543,8 +543,11 @@ module Main
     # (reset_session) clears the cookie. Runs after the render so
     # lazily-created tokens are captured, and on redirects too (login
     # sets `session[:u]` then 302s).
+    # `request.session_options[:skip] = true` (lobsters'
+    # `clear_session_cookie`) leaves the cookie alone, as Rails'
+    # session middleware skips its commit.
     session_out = controller.session.to_cookie
-    if session_out != session_in
+    if session_out != session_in && !request_obj.session_skip?
       if session_out == ""
         Main.clear_flash_cookie(res, session_cookie)
       else

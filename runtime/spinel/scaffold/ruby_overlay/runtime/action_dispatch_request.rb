@@ -34,6 +34,16 @@ module ActionDispatch
     def initialize(env, params = {})
       @env = env
       @params = params
+      @session_options = {}
+    end
+
+    # Rack's per-request session options — see the twin in
+    # runtime/ruby/action_dispatch/request.rb. `:skip` is the one key
+    # read: the dispatcher writes no session cookie when it is set.
+    attr_reader :session_options
+
+    def session_skip?
+      @session_options[:skip] == true
     end
 
     def [](key)
