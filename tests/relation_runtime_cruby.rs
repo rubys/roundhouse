@@ -63,6 +63,15 @@ p ancestors.map(&:body).sort
 p ancestors.count
 # an identical join added twice renders once
 p ActiveRecord::Relation.new(Note).joins("JOIN notes p2 ON p2.id = notes.parent_id").joins("JOIN notes p2 ON p2.id = notes.parent_id").count
+# set operations take a Relation operand (lobsters' `story.tags &
+# filtered_tags`) and match records by id, as ActiveRecord's eql? does:
+# each side loads its own objects for the same rows
+all = ActiveRecord::Relation.new(Note).order(:id)
+only_a = ActiveRecord::Relation.new(Note).where(body: "a")
+p (all & only_a).map(&:body)
+p (all - only_a).map(&:body)
+p (only_a | all).map(&:body)
+p (only_a & [Note.find(a.id)]).length
 "#;
     let result = Command::new("ruby")
         .arg("-e")
@@ -74,6 +83,6 @@ p ActiveRecord::Relation.new(Note).joins("JOIN notes p2 ON p2.id = notes.parent_
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "1\n1\n1\nfalse\n[\"a\", \"b\"]\n2\n2\n"
+        "1\n1\n1\nfalse\n[\"a\", \"b\"]\n2\n2\n[\"a\"]\n[\"b\", \"c\"]\n[\"a\", \"b\", \"c\"]\n1\n"
     );
 }

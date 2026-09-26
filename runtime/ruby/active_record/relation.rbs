@@ -100,6 +100,9 @@ module ActiveRecord
     def &: (untyped other) -> Array[untyped]
     def |: (untyped other) -> Array[untyped]
     def -: (untyped other) -> Array[untyped]
+    def set_operand: (untyped other) -> Array[untyped]
+    def operand_ids: (untyped other) -> Array[untyped]
+    def ids_of: (Array[untyped] records) -> Array[untyped]
     def include?: (untyped record) -> bool
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]

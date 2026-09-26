@@ -650,20 +650,45 @@ module ActiveRecord
     # (`&`, `|`, `-`) are delegated to the loaded records the same
     # way (ActiveRecord::Delegation's array-method delegation);
     # lobsters intersects `story.tags & filtered_tags`.
+    #
+    # The other operand may be a Relation too — `filtered_tags` is
+    # one — and Rails' Array operators take it through `to_ary`, so it
+    # is loaded here the way `==` below loads it; handed over as is, a
+    # Relation reached Array#& and raised TypeError. Membership is by
+    # PRIMARY KEY for the reason `==` gives: Rails' `Array#&` asks the
+    # records' `eql?`/`hash`, which ActiveRecord::Core answers by class
+    # and id, and this runtime has no such `Base#==` — a row loaded by
+    # each side is two objects, and identity would intersect them to
+    # nothing. Like Array's, `&` and `|` drop repeats; `-` does not.
     def +(other)
-      to_a + other
+      to_a + set_operand(other)
     end
 
     def &(other)
-      to_a & other
+      ids = operand_ids(other)
+      to_a.select { |r| ids.include?(r.id) }
     end
 
     def |(other)
-      to_a | other
+      mine = ids_of(to_a)
+      to_a + set_operand(other).reject { |r| mine.include?(r.id) }
     end
 
     def -(other)
-      to_a - other
+      ids = operand_ids(other)
+      to_a.reject { |r| ids.include?(r.id) }
+    end
+
+    def set_operand(other)
+      other.is_a?(ActiveRecord::Relation) ? other.to_a : other
+    end
+
+    def operand_ids(other)
+      ids_of(set_operand(other))
+    end
+
+    def ids_of(records)
+      records.map { |r| r.id }
     end
 
     # `include?(record)` — Rails checks membership against the loaded
