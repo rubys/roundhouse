@@ -562,7 +562,7 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Serve wasm/ and verify the /ide/ + /playground/ pages
+      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ pages
         run: |
           set -euo pipefail
           (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
@@ -571,6 +571,10 @@ jobs:
           # Same shared worker/client, exercised through the emit surface incl.
           # the off-thread Mastodon transpile.
           (cd wasm/playground && node verify-playground.mjs)
+          # Studio: runs the emitted blog + its Minitest suite in-browser over
+          # wasm/lib/test-runtime.mjs — the in-memory Db shim that once drifted
+          # off the `_opt` seam unseen because nothing here ran it.
+          (cd wasm/studio && node verify-studio.mjs)
 
   framework-tests-crystal:
     # Per-target framework-test conformance gate for the Crystal

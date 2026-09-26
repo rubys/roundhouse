@@ -15,7 +15,7 @@
 //   node verify-studio.mjs        # (run from wasm/studio/)
 
 import { createRequire } from "node:module";
-const require = createRequire("/Users/rubys/git/roundhouse/tests/browser_smoke/");
+const require = createRequire(new globalThis.URL("../../tests/browser_smoke/", import.meta.url).pathname);
 const { chromium } = require("playwright");
 
 const URL = "http://localhost:8099/studio/index.html";
