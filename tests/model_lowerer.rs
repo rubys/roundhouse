@@ -964,24 +964,33 @@ end
         init_dbg.contains("equal?") && init_dbg.contains("HYDRATE_ATTRS"),
         "initialize's hook tail is skipped for the hydration sentinel: {init_dbg}"
     );
-    for factory in ["from_row", "from_stmt"] {
+    let body_of = |name: &str| {
         let m = lc
             .methods
             .iter()
-            .find(|m| m.name.as_str() == factory)
-            .unwrap_or_else(|| panic!("{factory} synthesized"));
-        let dbg = format!("{:?}", m.body);
+            .find(|m| m.name.as_str() == name)
+            .unwrap_or_else(|| panic!("{name} synthesized"));
+        format!("{:?}", m.body)
+    };
+    // Both constructions use the sentinel.
+    for factory in ["from_row", "from_stmt"] {
+        let dbg = body_of(factory);
         assert!(dbg.contains("HYDRATE_ATTRS"), "{factory} constructs with the sentinel: {dbg}");
-        // A loaded record is persisted BEFORE its hook runs (Rails:
-        // `new_record?` is false inside after_initialize on a find).
-        let persisted = dbg.find("\"mark_persisted!\"").expect("marks persisted");
-        let hook = dbg.find("\"after_initialize\"").expect("fires hook");
-        assert!(persisted < hook, "{factory} marks persisted before the hook: {dbg}");
-        assert_eq!(
-            dbg.matches("\"after_initialize\"").count(),
-            1,
-            "{factory} fires the hook once, itself: {dbg}"
-        );
+    }
+    // The hook fires once per hydration path, on a persisted record:
+    // `from_stmt` (a full-column read) itself, and a row-hydrated record
+    // in `instantiate`, AFTER it notes the row's unselected columns —
+    // Rails answers `has_attribute?` false for those, which is the test
+    // Token's guard makes. `from_row` fires nothing.
+    assert_eq!(body_of("from_row").matches("\"after_initialize\"").count(), 0, "from_row leaves the hook to instantiate");
+    for (factory, before) in [("from_stmt", vec!["\"mark_persisted!\""]), ("instantiate", vec!["\"mark_persisted!\"", "\"_note_unloaded\""])] {
+        let dbg = body_of(factory);
+        assert_eq!(dbg.matches("\"after_initialize\"").count(), 1, "{factory} fires the hook once: {dbg}");
+        let hook = dbg.find("\"after_initialize\"").unwrap();
+        for step in before {
+            let at = dbg.find(step).unwrap_or_else(|| panic!("{factory} does {step}: {dbg}"));
+            assert!(at < hook, "{factory}: {step} before the hook: {dbg}");
+        }
     }
 }
 

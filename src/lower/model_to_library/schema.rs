@@ -250,7 +250,7 @@ pub(super) fn push_schema_methods(
     // narrows it once via `<Model>Row.from_raw(row)` and then constructs
     // the model via `<Model>.from_row(typed_row)`. The Hash-shaped
     // boundary stops at `from_raw`; everything downstream is typed.
-    methods.push(synth_instantiate(owner));
+    methods.push(synth_instantiate(owner, model_declares_after_initialize(model)));
 
     // def self.from_row(row); instance = new; instance.<col> = row.<col>; ...; instance; end
     //
@@ -1022,7 +1022,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     }
 }
 
-fn synth_instantiate(owner: &ClassId) -> MethodDef {
+fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
     let row_class = row_class_id(owner);
@@ -1052,7 +1052,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
         },
     );
 
-    let body = seq(vec![
+    let mut stmts = vec![
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -1070,8 +1070,40 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
                 parenthesized: false,
             },
         ),
-        var_ref(instance),
-    ]);
+    ];
+    // The hook fires HERE for a row-hydrated record, not in `from_row`:
+    // this is the one caller that holds the raw row, so it can first
+    // note the columns the query did not select. Rails answers
+    // `has_attribute?(col)` false for those, and lobsters' Token guard
+    // (`if new_record? || has_attribute?(:token)`) is exactly that test
+    // — a `User.select(*attrs)` that omits `token` must not mint one.
+    // Persisted first, noted second, hook last: the order Rails' hook
+    // observes. Only models with a hook note anything (see
+    // `Base#_note_unloaded`).
+    if fire_after_initialize {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from("_note_unloaded"),
+                args: vec![var_ref(row.clone())],
+                block: None,
+                parenthesized: true,
+            },
+        ));
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from("after_initialize"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+    stmts.push(var_ref(instance));
+    let body = seq(stmts);
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     // Adapter rows are String-keyed across all targets (Crystal/TS can't
@@ -1425,36 +1457,10 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         },
     ));
 
-    // Rails fires after_initialize on find/hydration too; same gate
-    // as the synthesized initialize tail. The record is marked
-    // persisted FIRST, as `from_stmt` does: a hook on a loaded record
-    // sees `new_record?` false in Rails, and lobsters' Token guard
-    // (`if new_record? || has_attribute?(:token)`) reads exactly that.
-    // `instantiate` marks it again after this returns, harmlessly; the
-    // mark is here only for models with a hook, so hook-free models
-    // emit what they did.
-    if fire_after_initialize {
-        stmts.push(Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref(instance.clone())),
-                method: Symbol::from("mark_persisted!"),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        ));
-        stmts.push(Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref(instance.clone())),
-                method: Symbol::from("after_initialize"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        ));
-    }
+    // No hook here: `instantiate`, the one caller, fires it once it has
+    // noted the row's unselected columns (see there). `from_row` still
+    // constructs with the HYDRATE_ATTRS sentinel so `initialize` does
+    // not fire it on the empty shell.
     stmts.push(var_ref(instance));
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };

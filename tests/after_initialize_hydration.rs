@@ -12,7 +12,9 @@
 //!   hook on the empty shell (token blank, so it minted one) before the
 //!   factory set the columns and fired it again;
 //! * inside the hook the record is already persisted (`new_record?`
-//!   false), as Rails has it on a find;
+//!   false), as Rails has it on a find, and a column the query did not
+//!   select answers `has_attribute?` false (`instantiate` notes them
+//!   before it fires the hook);
 //! * `parameterize` inside the block-form hook is grounded to
 //!   `Inflector.parameterize` — the grounding walked `def` methods only,
 //!   and spinel has no String#parameterize to dispatch.
@@ -66,10 +68,22 @@ fn hydration_factories_fire_the_hook_once_on_a_persisted_record() {
             body.contains("Hat.new(ActiveRecord::Base::HYDRATE_ATTRS)"),
             "{factory} constructs with the sentinel:\n{body}"
         );
+    }
+    assert!(
+        !method_body(&src, "def self.from_row(").contains("after_initialize"),
+        "from_row leaves the hook to instantiate"
+    );
+    for (factory, before) in [
+        ("def self.from_stmt(", vec!["mark_persisted!"]),
+        ("def self.instantiate(", vec!["mark_persisted!", "_note_unloaded(row)"]),
+    ] {
+        let body = method_body(&src, factory);
         assert_eq!(body.matches("after_initialize").count(), 1, "{factory} fires once:\n{body}");
-        let persisted = body.find("mark_persisted!").expect("marks persisted");
         let hook = body.find("after_initialize").unwrap();
-        assert!(persisted < hook, "{factory} is persisted before its hook:\n{body}");
+        for step in before {
+            let at = body.find(step).unwrap_or_else(|| panic!("{factory} does {step}:\n{body}"));
+            assert!(at < hook, "{factory}: {step} before the hook:\n{body}");
+        }
     }
     let init = method_body(&src, "def initialize(");
     assert!(

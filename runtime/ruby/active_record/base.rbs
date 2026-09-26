@@ -153,6 +153,7 @@ module ActiveRecord
     def []: (Symbol name) -> untyped
     def []=: (Symbol name, untyped value) -> untyped
     def has_attribute?: (Symbol name) -> bool
+    def _note_unloaded: (Hash[String, untyped] _row) -> void
 
     # Persistence state — backed by `@persisted` / `@destroyed`.
     def persisted?: () -> bool

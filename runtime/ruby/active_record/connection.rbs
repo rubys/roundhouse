@@ -40,6 +40,8 @@ module ActiveRecord
     def self.all: () -> Relation
     def self.none: () -> Relation
     def _note_hydrated: () -> void
+    def _note_unloaded: (Hash[String, untyped] row) -> nil
+    def has_attribute?: (Symbol name) -> bool
     def attribute_previously_was: (String name) -> untyped
     def self.first: () -> untyped
     def self.take: () -> untyped

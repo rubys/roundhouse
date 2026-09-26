@@ -430,6 +430,26 @@ module ActiveRecord
       nil
     end
 
+    # The row's unselected schema columns — see base.rb's empty stub.
+    # Rails answers `has_attribute?(col)` false for a column a partial
+    # `select` left out, and lobsters' Token guard
+    # (`if new_record? || has_attribute?(:token)`) is exactly that test:
+    # a `User.select(*attrs)` without `token` must not mint one. Nothing
+    # is recorded when the row carries every column, so the common path
+    # allocates nothing.
+    def _note_unloaded(row)
+      missing = []
+      self.class.schema_columns.each { |c| missing << c unless row.key?(c.to_s) }
+      @__unloaded_columns = missing unless missing.empty?
+      nil
+    end
+
+    def has_attribute?(name)
+      return false unless self.class.schema_columns.include?(name)
+      unloaded = @__unloaded_columns
+      unloaded.nil? || !unloaded.include?(name)
+    end
+
     # The pending diff: current attributes against the baseline the
     # last save (or hydration) left, in the same `[prev, value]` shape
     # as `saved_changes`. `save` runs validations and before_* hooks

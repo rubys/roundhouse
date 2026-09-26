@@ -353,6 +353,16 @@ module ActiveRecord
     # Monomorphic on Symbol ([[feedback_monomorphize_polymorphic_apis]]).
     # Rails also accepts a String; a String call site should coerce at
     # the lowering rather than widen this signature.
+    # The schema columns a partial `select` left out of this row —
+    # Rails answers `has_attribute?` false for them. `instantiate` calls
+    # this for a model that declares `after_initialize` (lobsters' Token
+    # guard reads it). EMPTY here, as `_note_hydrated` is: the real body
+    # and the `has_attribute?` that honours it are the ruby-family reopen
+    # in connection.rb, and the strict lanes keep the schema-level
+    # answer below.
+    def _note_unloaded(_row)
+    end
+
     def has_attribute?(name)
       # Bound to a local before the `include?`, matching
       # `fill_timestamps` below rather than chaining straight off

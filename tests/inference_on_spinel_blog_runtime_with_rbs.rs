@@ -844,7 +844,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // stays put, and the bare assignment reads here as a local). What it buys: lobsters' profile page (two scopes each
     // `joins(:story)`) and its comment reply page (`Comment#parents`, a
     // recursive CTE read `from("parents")`).
-    const CEILING: usize = 1021;
+    // 2026-09-25 1021 -> 1031, +10, MEASURED from the dump: connection.rb's
+    // ruby-family `Base#_note_unloaded` (+6) and the `has_attribute?` that
+    // honours it (+4) — `self.class.schema_columns`, the row, and each
+    // column read, the shape base.rb's own `has_attribute?` already
+    // carries here (this probe has no concrete model to type them). What
+    // it buys: a partial `select` answers `has_attribute?` false for the
+    // columns it left out, as Rails does, so lobsters' Token guard no
+    // longer mints a TypeID per `User.select(*attrs)` row (66 -> 2 per
+    // benchmark pass, the 2 being records genuinely built new).
+    const CEILING: usize = 1031;
 
     assert!(
         all_untyped.len() <= CEILING,
