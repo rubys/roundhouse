@@ -1305,6 +1305,30 @@ pub(super) fn push_create_from_params_method(
 /// fresh model instance with each column copied through. The model's
 /// `initialize` runs as bare `new` here — field defaults from
 /// `synth_initialize`'s empty-Hash branch (since attrs is `{}`).
+/// `ActiveRecord::Base::HYDRATE_ATTRS` — the attrs a hydration factory
+/// constructs with, so the synthesized `initialize` can tell a record
+/// being loaded from one being built. Rails loads a record without
+/// running `initialize` and fires `after_initialize` once, after the
+/// columns are set; here every factory goes through `new`, so without
+/// the sentinel the hook ran twice per loaded record, the first time on
+/// the empty shell (`new_record?` true, every column blank). lobsters'
+/// Token concern minted a TypeID per row that way, then threw it away.
+fn hydrate_attrs_const() -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Const {
+            path: vec![Symbol::from("ActiveRecord"), Symbol::from("Base"), Symbol::from("HYDRATE_ATTRS")],
+        },
+    )
+}
+
+/// The hydration factories' `new` arguments: the sentinel when the
+/// model has a hook for it to suppress, else none — hook-free models
+/// (the whole blog fixture) keep their bare `new()`.
+fn hydrate_new_args(fire_after_initialize: bool) -> Vec<Expr> {
+    if fire_after_initialize { vec![hydrate_attrs_const()] } else { Vec::new() }
+}
+
 fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
@@ -1315,7 +1339,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         ExprNode::Send {
             recv: Some(class_const(owner)),
             method: Symbol::from("new"),
-            args: Vec::new(),
+            args: hydrate_new_args(fire_after_initialize),
             block: None,
             parenthesized: true,
         },
@@ -1402,8 +1426,24 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
     ));
 
     // Rails fires after_initialize on find/hydration too; same gate
-    // as the synthesized initialize tail.
+    // as the synthesized initialize tail. The record is marked
+    // persisted FIRST, as `from_stmt` does: a hook on a loaded record
+    // sees `new_record?` false in Rails, and lobsters' Token guard
+    // (`if new_record? || has_attribute?(:token)`) reads exactly that.
+    // `instantiate` marks it again after this returns, harmlessly; the
+    // mark is here only for models with a hook, so hook-free models
+    // emit what they did.
     if fire_after_initialize {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from("mark_persisted!"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        ));
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -1453,7 +1493,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
         ExprNode::Send {
             recv: Some(class_const(owner)),
             method: Symbol::from("new"),
-            args: Vec::new(),
+            args: hydrate_new_args(fire_after_initialize),
             block: None,
             parenthesized: true,
         },
@@ -2394,11 +2434,15 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     }
 
     // `after_initialize` tail — Rails fires the hook after construction
-    // (and after find; the hydration factories append their own call).
-    // Runs LAST so the hook observes the assigned attrs (Token's
-    // generator checks `attributes.include?(:token)`).
+    // (and after find; the hydration factories append their own call,
+    // after the columns are set). Runs LAST so the hook observes the
+    // assigned attrs (Token's generator checks
+    // `attributes.include?(:token)`). Skipped when a factory constructs
+    // with `HYDRATE_ATTRS` (see `hydrate_attrs_const`): that record is
+    // an empty shell until its columns land, and the factory fires the
+    // hook itself once they have.
     if model_declares_after_initialize(model) {
-        stmts.push(Expr::new(
+        let hook = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: None,
@@ -2406,6 +2450,15 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 args: vec![],
                 block: None,
                 parenthesized: false,
+            },
+        );
+        let hydrating = bool_send(var_ref(Symbol::from("attrs")), "equal?", hydrate_attrs_const());
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: with_ty(no_arg_send(hydrating, "!"), Ty::Bool),
+                then_branch: hook,
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
             },
         ));
     }

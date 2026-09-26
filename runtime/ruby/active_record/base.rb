@@ -100,6 +100,16 @@ module ActiveRecord
     # a stack value there) and never read this.
     EMPTY_ATTRS = {}.freeze
 
+    # What a hydration factory (`from_row` / `from_stmt`) passes to `new`
+    # when the model declares `after_initialize`: the constructor skips
+    # the hook for it by IDENTITY (`attrs.equal?(HYDRATE_ATTRS)`) and the
+    # factory fires it once the columns are set. Rails loads a record
+    # without running `initialize`, so the hook sees a loaded record
+    # exactly once; before this it also ran on the empty shell, where
+    # `new_record?` is true and every column is blank. A distinct object
+    # from EMPTY_ATTRS, which is also what a bare `Model.new` receives.
+    HYDRATE_ATTRS = {}.freeze
+
     # `attrs = {}` keeps Base's constructor signature compatible
     # with subclasses that take attrs (`def initialize(attrs = {})`).
     # TS-side, this lets `new this(attrs)` in static `create` /

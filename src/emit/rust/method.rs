@@ -25,13 +25,21 @@ fn strip_guarded_writer_routes(body: &crate::expr::Expr) -> crate::expr::Expr {
         // The receiverless `after_initialize` tail is likewise
         // inexpressible pre-`Self` — dropped (honest subset: rust
         // models don't fire construction hooks).
-        if matches!(&*e.node,
-            ExprNode::Send { recv: None, method, args, .. }
-                if method.as_str() == "after_initialize" && args.is_empty())
-        {
+        // It arrives guarded (`after_initialize unless
+        // attrs.equal?(HYDRATE_ATTRS)`), so the If's then-branch is
+        // what names it.
+        let is_hook = |e: &crate::expr::Expr| {
+            matches!(&*e.node,
+                ExprNode::Send { recv: None, method, args, .. }
+                    if method.as_str() == "after_initialize" && args.is_empty())
+        };
+        if is_hook(e) {
             return true;
         }
         let ExprNode::If { then_branch, .. } = &*e.node else { return false };
+        if is_hook(then_branch) {
+            return true;
+        }
         let head = match &*then_branch.node {
             ExprNode::Seq { exprs } => exprs.first(),
             _ => Some(then_branch),

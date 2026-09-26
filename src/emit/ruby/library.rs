@@ -6281,6 +6281,10 @@ fn require_path_for_body_const(
         // `project::BUNDLED`, so nothing writes a bare `require "zlib"`
         // and the constant would resolve to nothing at all.
         "Zlib" => Some("runtime/zlib".to_string()),
+        // `TypeID` — ported into `runtime/ruby/typeid.rb`, swapped for the
+        // gem on the ruby family. Anchored so the model that names it
+        // (lobsters' Token concern, spliced into 18 models) loads it.
+        "TypeID" => Some("runtime/typeid".to_string()),
         // `Concurrent` — concurrent-ruby's pools and barrier, ported into
         // `runtime/spinel/concurrent.rb` over spinel's own threads and
         // swapped for the gem on the ruby family. Anchored for the same

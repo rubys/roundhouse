@@ -59,6 +59,7 @@ module ActiveRecord
   # the shared CRUD + lifecycle protocol.
   class Base
     EMPTY_ATTRS: Hash[Symbol, untyped]
+    HYDRATE_ATTRS: Hash[Symbol, untyped]
 
     # The key's CONTRACT, not its slot: each model declares its own
     # `attr_reader id: Integer` / `String` from its key column and holds

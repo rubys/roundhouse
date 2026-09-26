@@ -1,0 +1,14 @@
+module TypeID
+  MAX_PREFIX_LENGTH: Integer
+
+  class Error < StandardError
+  end
+
+  def self.new: (String prefix) -> String
+  def self.validate_prefix: (String prefix) -> nil
+  def self.timestamp_ms: () -> Integer
+  def self.uuid7_bytes: (Integer timestamp, String random_hex) -> Array[Integer]
+  def self.hex_digit: (String ch) -> Integer
+  def self.alphabet: () -> String
+  def self.encode: (Array[Integer] bytes) -> String
+end

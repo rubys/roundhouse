@@ -222,6 +222,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("browser", Ty::Str), ("version", Ty::Str), ("os", Ty::Str),
         ("match?", Ty::Bool), ("user_agent", user_agent_ty),
     ]);
+    // `typeid`, PORTED into `runtime/ruby/typeid.rb` as a module whose
+    // `new` answers a plain String (the gem's `TypeID < String` is a
+    // builtin subclass the strict targets do not carry). Registered so
+    // lobsters' Token concern — `self.token ||= TypeID.new(prefix)` —
+    // types its token as the String column it is written into.
+    register_stdlib_class(classes, "TypeID", &[("new", Ty::Str)], &[]);
     // `ActionText::ContentHelper.allowed_attributes`, from
     // `runtime/ruby/action_text.rbs` — the one façade reader campfire's
     // `ContentFilters::SanitizeAttributes` needs typed:

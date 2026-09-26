@@ -951,7 +951,38 @@ end
         "||= rewritten blank-aware, and grounded: {hook_dbg}"
     );
     let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
-    assert!(format!("{:?}", init.body).contains("after_initialize"), "hook tail in initialize");
+    let init_dbg = format!("{:?}", init.body);
+    assert!(init_dbg.contains("after_initialize"), "hook tail in initialize");
+
+    // Loaded records fire the hook ONCE, after their columns are set.
+    // The hydration factories construct with the HYDRATE_ATTRS sentinel
+    // and the initialize tail skips the hook for it — without that the
+    // hook also ran on the empty shell (new_record? true, token blank),
+    // which minted a TypeID per loaded lobsters row and raised
+    // NameError on spinel, where TypeID was undefined.
+    assert!(
+        init_dbg.contains("equal?") && init_dbg.contains("HYDRATE_ATTRS"),
+        "initialize's hook tail is skipped for the hydration sentinel: {init_dbg}"
+    );
+    for factory in ["from_row", "from_stmt"] {
+        let m = lc
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == factory)
+            .unwrap_or_else(|| panic!("{factory} synthesized"));
+        let dbg = format!("{:?}", m.body);
+        assert!(dbg.contains("HYDRATE_ATTRS"), "{factory} constructs with the sentinel: {dbg}");
+        // A loaded record is persisted BEFORE its hook runs (Rails:
+        // `new_record?` is false inside after_initialize on a find).
+        let persisted = dbg.find("\"mark_persisted!\"").expect("marks persisted");
+        let hook = dbg.find("\"after_initialize\"").expect("fires hook");
+        assert!(persisted < hook, "{factory} marks persisted before the hook: {dbg}");
+        assert_eq!(
+            dbg.matches("\"after_initialize\"").count(),
+            1,
+            "{factory} fires the hook once, itself: {dbg}"
+        );
+    }
 }
 
 #[test]

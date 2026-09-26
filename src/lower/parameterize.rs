@@ -18,8 +18,16 @@ use crate::ty::Ty;
 pub fn apply_parameterize_grounding(app: &mut App) {
     for model in &mut app.models {
         for item in &mut model.body {
-            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                rewrite(&mut method.body);
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => rewrite(&mut method.body),
+                // A block-form callback spliced from a concern — lobsters'
+                // Token: `after_initialize do self.token ||=
+                // TypeID.new(self.class.to_s.parameterize) … end`. It is
+                // lowered to a hook method later, so it is still this
+                // item kind here, and skipping it left the call
+                // unresolved on spinel.
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => rewrite(expr),
+                _ => {}
             }
         }
     }

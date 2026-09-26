@@ -1683,6 +1683,16 @@ fn ruby_family_runtime_files(
         // at a time; CRuby's is zlib's own C. Both answer the same
         // number by construction (the port IS CRC-32/ISO-HDLC), so the
         // tree that has the real one should use it.
+        // `TypeID`: the gem itself (`project::GEM_REQUIRES` and the
+        // Gemfile carry it), so the file under the port's require path
+        // just loads it.
+        if path == "runtime/typeid.rb" {
+            *content = "# The typeid gem — see `project::ruby_family_runtime_files`.\n\
+                        # The port at runtime/ruby/typeid.rb exists for the targets\n\
+                        # that have no gem to load.\n\
+                        require \"typeid\"\n"
+                .to_string();
+        }
         if path == "runtime/zlib.rb" {
             *content = "# Ruby's own zlib — see `project::ruby_runtime_files`.\n\
                         # The port at runtime/ruby/zlib.rb exists for the targets\n\
@@ -3369,6 +3379,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         // implementation, every target, ours — and the suite beside the
         // port compares it against the real gems.
         "user_agent",
+        // `typeid` 0.2.2, ported for `TypeID.new(prefix)` — lobsters'
+        // Token concern mints every record's token with it. Swapped for
+        // the gem on the CRuby/JRuby trees below: the gem's `TypeID` is
+        // a String subclass the port cannot be, and the tree that has
+        // the gem should run it.
+        "typeid",
         // `Zlib.crc32`, same arrangement as ipaddr: ported for the
         // targets with no zlib to bind to, swapped for Ruby's own on
         // the CRuby/JRuby trees below.
