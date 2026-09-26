@@ -1117,6 +1117,20 @@ pub(crate) fn for_each_hook_body(
                     f(&mut action.body)
                 }
                 crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                // A filter's `if:` / `unless:` lambda body is spliced into
+                // the dispatcher as written (`process_action`), so it is
+                // an app body like the model callbacks' conditions above.
+                // lobsters' `around_action :track_story_reads, if: -> {
+                // @user.present? }` reached spinel un-grounded and every
+                // story page 500'd on `present?`.
+                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                    if let Some(c) = &mut filter.if_cond_expr {
+                        f(c);
+                    }
+                    if let Some(c) = &mut filter.unless_cond_expr {
+                        f(c);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1208,6 +1222,14 @@ pub(crate) fn for_each_hook_body_ref(
                     f(&action.body)
                 }
                 crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                    if let Some(c) = &filter.if_cond_expr {
+                        f(c);
+                    }
+                    if let Some(c) = &filter.unless_cond_expr {
+                        f(c);
+                    }
+                }
                 _ => {}
             }
         }

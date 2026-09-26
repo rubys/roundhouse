@@ -95,7 +95,7 @@ fn emitted() -> (String, String) {
 fn an_around_filter_wraps_the_dispatch_under_its_guards() {
     let (rooms, _) = emitted();
     assert!(
-        rooms.contains("if [:show].include?(action_name) && @user.present?\n      self.track_reads do\n        case action_name"),
+        rooms.contains("if [:show].include?(action_name) && ActiveSupport.present?(@user)\n      self.track_reads do\n        case action_name"),
         "{rooms}"
     );
 }

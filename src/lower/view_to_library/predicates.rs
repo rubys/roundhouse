@@ -181,6 +181,42 @@ pub(super) fn rewrite_predicates(
             block: block.as_ref().map(|b| rewrite_predicates(b, nullable, refs, nilable_reads)),
             parenthesized: *parenthesized,
         },
+        // `list.filter(&:present?)` — ingest expands the symbol-to-proc
+        // to `{ |x| x.present? }`, over elements the view knows nothing
+        // about (lobsters' story classes: `[:story, klass, cond && "upvoted",
+        // …].filter(&:present?)`, Symbols, Strings and `false`). The
+        // `.empty?` rewrite above would be wrong for a Symbol or `false`,
+        // so the predicate is the runtime helper, which answers every kind
+        // as Rails does (runtime/ruby/active_support_ext.rb). Only the
+        // whole-body `param.present?` / `param.blank?` shape; any other
+        // block is left alone.
+        ExprNode::Lambda { params, body, .. }
+            if params.len() == 1
+                && matches!(&*body.node,
+                    ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                        if args.is_empty()
+                            && matches!(method.as_str(), "present?" | "blank?")
+                            && matches!(&*r.node, ExprNode::Var { name, .. } if *name == params[0])) =>
+        {
+            let ExprNode::Send { recv: Some(r), method, .. } = &*body.node else { unreachable!() };
+            let mut node = (*cond.node).clone();
+            if let ExprNode::Lambda { body, .. } = &mut node {
+                *body = Expr::new(
+                    body.span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            body.span,
+                            ExprNode::Const { path: vec![crate::ident::Symbol::from("ActiveSupport")] },
+                        )),
+                        method: method.clone(),
+                        args: vec![r.clone()],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+            }
+            node
+        }
         other => other.clone(),
     };
     Expr::new(cond.span, new_node)
