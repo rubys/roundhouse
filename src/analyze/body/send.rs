@@ -154,15 +154,26 @@ impl<'a> BodyTyper<'a> {
         // |f|`: the builder is parameterized by the record the form is
         // for, so `form.object` (and `form.object.errors`) answer it.
         if matches!(method.as_str(), "form_with" | "form_for" | "simple_form_for") {
-            if let (Some(name), Some(model)) = (params.first(), Self::form_model_ty(method, args)) {
-                new_ctx.local_bindings.insert(
-                    name.clone(),
-                    Ty::Class {
-                        id: ClassId(Symbol::from("ActionView::Helpers::FormBuilder")),
-                        args: vec![model],
-                    },
-                );
-                return new_ctx;
+            // `form_with ..., builder: CustomFormBuilder` yields THAT
+            // builder, not the stock one. An app that adds field helpers
+            // on a FormBuilder subclass (a very common Rails shape)
+            // otherwise has every `f.my_field` go unresolved. The builder
+            // is honoured even when the model's type is unknown — an
+            // untyped `@record` (assigned through a gem roundhouse does
+            // not model) must not cost the app its own builder methods.
+            if let Some(name) = params.first() {
+                let model = Self::form_model_ty(method, args);
+                let builder = Self::form_builder_id(args);
+                if model.is_some() || builder.is_some() {
+                    let id = builder.unwrap_or_else(|| {
+                        ClassId(Symbol::from("ActionView::Helpers::FormBuilder"))
+                    });
+                    new_ctx.local_bindings.insert(
+                        name.clone(),
+                        Ty::Class { id, args: model.into_iter().collect() },
+                    );
+                    return new_ctx;
+                }
             }
         }
         // Untyped receiver: bind every block param to `Untyped` (the
@@ -182,6 +193,30 @@ impl<'a> BodyTyper<'a> {
             new_ctx.local_bindings.insert(name.clone(), ty.clone());
         }
         new_ctx
+    }
+
+    /// The class named by a `builder:` keyword, when the call carries one
+    /// and it is a plain constant. `::Foo` and `Foo` name the same class.
+    fn form_builder_id(args: &[Expr]) -> Option<ClassId> {
+        let expr = args.iter().find_map(|a| {
+            let ExprNode::Hash { entries, .. } = &*a.node else { return None };
+            entries.iter().find_map(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                    if value.as_str() == "builder" =>
+                {
+                    Some(v)
+                }
+                _ => None,
+            })
+        })?;
+        let ExprNode::Const { path } = &*expr.node else { return None };
+        let joined = path
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("::");
+        (!joined.is_empty()).then(|| ClassId(Symbol::from(joined.as_str())))
     }
 
     /// The record a form helper is building for: `form_with`'s `model:`
