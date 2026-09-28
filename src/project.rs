@@ -724,6 +724,22 @@ pub fn target_files(
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     report_unsupported_keys(app, target);
+    // A keyword parameter is carried by the ruby family and by nothing
+    // else yet. No other emitter reads `Param::keyword`, so a `def`
+    // that declares one renders POSITIONALLY while its call site
+    // renders a hash or an object literal — a mismatch that shows up
+    // only when the emitted code runs. Say so instead.
+    //
+    // Not converted to positionals on the way out: that would lose the
+    // two things that make a keyword a keyword, any order and skipping
+    // an optional one, and a target that cannot express the construct
+    // should report it rather than receive a lossy rewrite.
+    if !matches!(
+        target,
+        BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda
+    ) {
+        report_keyword_params(app, target.as_str());
+    }
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
@@ -3164,6 +3180,38 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
 /// `make assets` copies them under `static/assets/`, and the spinel
 /// binary's `Main.dispatch` serves them at `/assets/*`. Binary files
 /// (e.g. `icon.png`) are silently skipped — the archive is text-only.
+/// Ledger every keyword parameter reaching a target that cannot
+/// express one.
+///
+/// The ruby family renders `def f(code:, upcase: false)` verbatim, and
+/// the call site beside it passes them by name, so the two agree.
+/// Everywhere else the def renders positionally while the call renders
+/// a hash, and nothing in the emitted tree says so.
+fn report_keyword_params(app: &App, target: &str) {
+    // Read from the controllers rather than from `library_classes`:
+    // the lowered helper is built inside each target's emit and never
+    // stored on the App, so a walk over the stored classes finds
+    // nothing. `kw_params` is the ingest's own record and is here.
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for (name, _) in &action.kw_params {
+                crate::emit::diagnostics::report_unsupported(
+                    action.name_span,
+                    target,
+                    "keyword parameter",
+                    format!(
+                        "`{}` on `{}#{}` — this target renders parameters positionally, \
+                         and the call site renders the keywords as a hash",
+                        name.as_str(),
+                        controller.name.0.as_str(),
+                        action.name.as_str()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
