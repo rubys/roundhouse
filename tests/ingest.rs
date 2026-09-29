@@ -1364,3 +1364,46 @@ fn defined_extended_targets_ingest_and_round_trip() {
     let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
     assert_eq!(round_tripped, emit_expr(&e), "defined?(super) must round-trip");
 }
+
+#[test]
+fn class_variable_compound_assignment_in_method_body_ingests_and_round_trips() {
+    // `@@x ||= y` / `@@x = y` in a method body (as opposed to the
+    // class-body initializer `library_class.rs` handles separately).
+    // Both mirror the local-variable-write arms: the `@@`-prefixed name
+    // rides straight into `LValue::Var` so the sigil round-trips on
+    // emit without a dedicated class-variable target, matching how a
+    // class-variable READ already ingests (`n.as_class_variable_read_node()`).
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::expr::{ExprNode, LValue, OpAssignOp};
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    let or_write = ingest_first(b"@@count ||= 0");
+    match &*or_write.node {
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, op, .. } => {
+            assert_eq!(name.as_str(), "@@count");
+            assert_eq!(*op, OpAssignOp::OrOr);
+        }
+        other => panic!("expected OpAssign(@@count, OrOr, ...), got {other:?}"),
+    }
+    let emitted = emit_expr(&or_write);
+    assert_eq!(emitted, "@@count ||= 0");
+    assert_eq!(emit_expr(&ingest_first(emitted.as_bytes())), emitted);
+
+    let plain_write = ingest_first(b"@@count = 1");
+    match &*plain_write.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            assert_eq!(name.as_str(), "@@count");
+        }
+        other => panic!("expected Assign(@@count, ...), got {other:?}"),
+    }
+    let emitted = emit_expr(&plain_write);
+    assert_eq!(emitted, "@@count = 1");
+    assert_eq!(emit_expr(&ingest_first(emitted.as_bytes())), emitted);
+}

@@ -939,6 +939,24 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // `@@x = y` in a method body (as opposed to the class-body
+        // initializer `library_class.rs` handles separately). Mirrors
+        // the local-variable-write arm just above rather than the ivar
+        // one: like `n.as_class_variable_read_node()` below, the
+        // `@@`-prefixed name rides straight into `LValue::Var` so the
+        // sigil round-trips on emit (`LValue::Var { name, .. } =>
+        // name.to_string()` in `emit/ruby/expr.rs`) without a dedicated
+        // class-variable target — we don't model class-variable storage
+        // any more richly than that.
+        n if n.as_class_variable_write_node().is_some() => {
+            let w = n.as_class_variable_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                value,
+            }
+        }
         // `FOO = expr` — bare constant write. In a class body this is
         // a class-scoped constant; at top level it's a global constant.
         // Lowerers/emitters resolve the containing scope.
@@ -972,6 +990,20 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // `x ||= y` — local var, short-circuit.
         n if n.as_local_variable_or_write_node().is_some() => {
             let w = n.as_local_variable_or_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        // `@@x ||= y` — class var, short-circuit (the class-level
+        // memoization idiom, same shape as the local-var case above —
+        // see the plain `@@x = y` arm for why `LValue::Var` and not
+        // `LValue::Ivar` carries the `@@` sigil).
+        n if n.as_class_variable_or_write_node().is_some() => {
+            let w = n.as_class_variable_or_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
             let value = ingest_expr(&w.value(), file)?;
             ExprNode::OpAssign {
