@@ -572,6 +572,19 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
                 f(&arm.body); visit_subexprs(&arm.body, f);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            f(scrutinee); visit_subexprs(scrutinee, f);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| { f(e); visit_subexprs(e, f); });
+                if let Some((_, g)) = &arm.guard { f(g); visit_subexprs(g, f); }
+                f(&arm.body); visit_subexprs(&arm.body, f);
+            }
+            if let Some(e) = else_body { f(e); visit_subexprs(e, f); }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            f(value); visit_subexprs(value, f);
+            pattern.for_each_expr(&mut |e| { f(e); visit_subexprs(e, f); });
+        }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             f(value); visit_subexprs(value, f);
         }

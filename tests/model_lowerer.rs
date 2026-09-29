@@ -1135,6 +1135,27 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_untyped_lowered(scrutinee, &format!("{path}/case_match.scrut"), out);
+            for (i, arm) in arms.iter().enumerate() {
+                arm.pattern.for_each_expr(&mut |e| {
+                    collect_untyped_lowered(e, &format!("{path}/case_match.arm[{i}].pattern"), out);
+                });
+                if let Some((_, g)) = &arm.guard {
+                    collect_untyped_lowered(g, &format!("{path}/case_match.arm[{i}].guard"), out);
+                }
+                collect_untyped_lowered(&arm.body, &format!("{path}/case_match.arm[{i}].body"), out);
+            }
+            if let Some(e) = else_body {
+                collect_untyped_lowered(e, &format!("{path}/case_match.else"), out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_untyped_lowered(value, &format!("{path}/match.value"), out);
+            pattern.for_each_expr(&mut |e| {
+                collect_untyped_lowered(e, &format!("{path}/match.pattern"), out);
+            });
+        }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             collect_untyped_lowered(value, &format!("{path}/assign.value"), out)
         }

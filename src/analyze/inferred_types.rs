@@ -95,6 +95,23 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
                 collect_types_expr(&arm.body, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_types_expr(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| collect_types_expr(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    collect_types_expr(g, out);
+                }
+                collect_types_expr(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                collect_types_expr(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_types_expr(value, out);
+            pattern.for_each_expr(&mut |e| collect_types_expr(e, out));
+        }
         ExprNode::Let { value, body, .. } => {
             collect_types_expr(value, out);
             collect_types_expr(body, out);

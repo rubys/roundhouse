@@ -4462,6 +4462,19 @@ impl Analyzer {
                     self.collect_send_sites(&arm.body, self_class, helpers, out);
                 }
             }
+            ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+                self.collect_send_sites(scrutinee, self_class, helpers, out);
+                for arm in arms {
+                    arm.pattern.for_each_expr(&mut |e| self.collect_send_sites(e, self_class, helpers, out));
+                    if let Some((_, g)) = &arm.guard { self.collect_send_sites(g, self_class, helpers, out); }
+                    self.collect_send_sites(&arm.body, self_class, helpers, out);
+                }
+                if let Some(e) = else_body { self.collect_send_sites(e, self_class, helpers, out); }
+            }
+            ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+                self.collect_send_sites(value, self_class, helpers, out);
+                pattern.for_each_expr(&mut |e| self.collect_send_sites(e, self_class, helpers, out));
+            }
             ExprNode::BoolOp { left, right, .. }
             | ExprNode::RescueModifier { expr: left, fallback: right } => {
                 self.collect_send_sites(left, self_class, helpers, out);

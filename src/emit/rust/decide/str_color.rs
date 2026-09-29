@@ -748,6 +748,32 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                 }
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            count += walk(scrutinee, ParentExpect::None, ctx);
+            for arm in arms.iter_mut() {
+                // Pattern-embedded exprs (a `Value`'s test, a
+                // narrowing `constant`) are non-value positions, same
+                // treatment as `case/when`'s arm guard.
+                let mut pattern_count = 0;
+                arm.pattern.for_each_expr_mut(&mut |e| {
+                    pattern_count += walk(e, ParentExpect::None, ctx);
+                });
+                count += pattern_count;
+                count += walk(&mut arm.body, tail_expect, ctx);
+                if let Some((_, g)) = arm.guard.as_mut() {
+                    count += walk(g, ParentExpect::None, ctx);
+                }
+            }
+            if let Some(e) = else_body.as_mut() {
+                count += walk(e, tail_expect, ctx);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            count += walk(value, ParentExpect::None, ctx);
+            pattern.for_each_expr_mut(&mut |e| {
+                count += walk(e, ParentExpect::None, ctx);
+            });
+        }
         ExprNode::While { cond, body, .. } => {
             count += walk(cond, ParentExpect::None, ctx);
             count += walk(body, ParentExpect::None, ctx);

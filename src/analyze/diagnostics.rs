@@ -379,6 +379,23 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 diagnose_expr(&arm.body, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            diagnose_expr(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| diagnose_expr(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    diagnose_expr(g, out);
+                }
+                diagnose_expr(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                diagnose_expr(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            diagnose_expr(value, out);
+            pattern.for_each_expr(&mut |e| diagnose_expr(e, out));
+        }
         ExprNode::Let { value, body, .. } => {
             diagnose_expr(value, out);
             diagnose_expr(body, out);

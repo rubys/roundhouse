@@ -1193,6 +1193,34 @@ fn emit_expr_inner(e: &Expr) -> String {
         // `serde_json::Value::from(...)` so the match unifies on
         // `Value` regardless of which arm fired.
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
+        // Rust's `match` has real destructuring, but wiring
+        // `deconstruct`/`deconstruct_keys` dispatch against roundhouse's
+        // class model is future work — only the `Nil`/`Bind`/literal-
+        // `Value`/`Alt` subset lowers today (see `simplify_case_match`,
+        // which also reuses `emit_case`'s own wildcard-arm handling for
+        // free). A pattern needing real deconstruction degrades to the
+        // unsupported stub rather than a `match` that would silently
+        // test equality instead.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
+            arms,
+            else_body,
+            e.span,
+            "NoMatchingPatternError (roundhouse-lowered case/in)",
+        ) {
+            Some(case_arms) => emit_case(scrutinee, &case_arms),
+            None => crate::emit::diagnostics::report_unsupported(
+                e.span,
+                "rust",
+                "CaseMatch",
+                "pattern needs destructuring or a guard Rust's match can't express here",
+            ),
+        },
+        ExprNode::MatchPredicate { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "rust", "MatchPredicate", "")
+        }
+        ExprNode::MatchRequired { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "rust", "MatchRequired", "")
+        }
         // `Cast { value, target_ty }` — explicit type narrowing the
         // model lowerer emits at adapter-row sites. The lowerer's
         // `synth_from_row` wraps each `row.<col>` accessor with a

@@ -3184,3 +3184,41 @@ fn a_template_only_action_is_fed_by_its_before_action() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// `case/in` structural pattern matching (#f9): taking `CaseMatchNode`
+/// from an ingest error to a typed `CaseMatch` node is a claim the
+/// emitted program actually dispatches through it (invariant 6), not
+/// just that `check` stops reporting `unsupported expression node:
+/// CaseMatchNode`. A PORO under `app/lib` (same placement as the
+/// `Deprecation` overlay above) exercises a `Capture` pattern
+/// (`Integer => n`) and a plain-class `Value` pattern (`String`) — the
+/// two shapes real-blog's own model/controller code never uses, so
+/// this is the only thing that runs them through CRuby at all.
+#[test]
+fn case_in_pattern_matching_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/pattern_matcher.rb",
+            "class PatternMatcher\n  \
+               def self.classify(x)\n    \
+                 case x\n    \
+                 in Integer => n\n      \
+                   n * 2\n    \
+                 in String\n      \
+                   0\n    \
+                 end\n  \
+               end\nend\n",
+        )
+        .write(
+            "test/models/pattern_matcher_test.rb",
+            "require \"test_helper\"\n\n\
+             class PatternMatcherTest < ActiveSupport::TestCase\n  \
+               test \"case/in dispatches by pattern and captures a binding\" do\n    \
+                 assert_equal 10, PatternMatcher.classify(5)\n    \
+                 assert_equal 0, PatternMatcher.classify(\"hi\")\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/pattern_matcher_test.rb")
+        .assert_passes();
+}

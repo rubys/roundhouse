@@ -479,6 +479,30 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
                         || references_var(&a.body, name)
                 })
         }
+        // A pattern's OWN bindings shadow `name` for its guard and
+        // body: `in name` rebinds `name` to the matched value, so a
+        // read of `name` past that point is the new local, not the
+        // outer one this search is for — checking `bound_names` first
+        // is what keeps `CaseMatch` from over-reporting a capture a
+        // real Elixir closure would never need.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            references_var(scrutinee, name)
+                || arms.iter().any(|a| {
+                    let mut pattern_hit = false;
+                    a.pattern.for_each_expr(&mut |e| pattern_hit |= references_var(e, name));
+                    let mut bound = Vec::new();
+                    a.pattern.bound_names(&mut bound);
+                    let shadowed = bound.iter().any(|n| n.as_str() == name);
+                    let guard_hit = a.guard.as_ref().is_some_and(|(_, g)| references_var(g, name));
+                    pattern_hit || (!shadowed && (guard_hit || references_var(&a.body, name)))
+                })
+                || opt(else_body, name)
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            let mut pattern_hit = false;
+            pattern.for_each_expr(&mut |e| pattern_hit |= references_var(e, name));
+            references_var(value, name) || pattern_hit
+        }
         ExprNode::Seq { exprs } => exprs.iter().any(|x| references_var(x, name)),
         ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
             lvalue(target, name) || references_var(value, name)

@@ -1441,6 +1441,23 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_class_refs(&arm.body, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_class_refs(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| collect_class_refs(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    collect_class_refs(g, out);
+                }
+                collect_class_refs(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                collect_class_refs(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_class_refs(value, out);
+            pattern.for_each_expr(&mut |e| collect_class_refs(e, out));
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 collect_class_refs(e, out);
@@ -1693,6 +1710,27 @@ fn rewrite_free(e: &Expr) -> Expr {
                 guard: arm.guard.as_ref().map(rewrite_free),
                 body: rewrite_free(&arm.body),
             }).collect(),
+        },
+        // Pattern cloned rather than deep-rewritten, same shortcut
+        // `Case` above takes for `Pattern` — this pass only injects
+        // self-ref onto bare Sends, which a pattern's embedded exprs
+        // (a `Value` test, a narrowing `constant`) don't need.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => ExprNode::CaseMatch {
+            scrutinee: rewrite_free(scrutinee),
+            arms: arms.iter().map(|arm| crate::expr::MatchArm {
+                pattern: arm.pattern.clone(),
+                guard: arm.guard.as_ref().map(|(k, g)| (*k, rewrite_free(g))),
+                body: rewrite_free(&arm.body),
+            }).collect(),
+            else_body: else_body.as_ref().map(rewrite_free),
+        },
+        ExprNode::MatchPredicate { value, pattern } => ExprNode::MatchPredicate {
+            value: rewrite_free(value),
+            pattern: pattern.clone(),
+        },
+        ExprNode::MatchRequired { value, pattern } => ExprNode::MatchRequired {
+            value: rewrite_free(value),
+            pattern: pattern.clone(),
         },
         ExprNode::Let { id, name, value, body } => ExprNode::Let {
             id: *id,
@@ -1959,6 +1997,29 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
                     body: rewrite(&arm.body, super_method),
                 })
                 .collect(),
+        },
+        // Pattern cloned rather than deep-rewritten — same shortcut as
+        // `Case` above; see the `rewrite_free` twin of this function
+        // for why that's safe here.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => ExprNode::CaseMatch {
+            scrutinee: rewrite(scrutinee, super_method),
+            arms: arms
+                .iter()
+                .map(|arm| crate::expr::MatchArm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(|(k, g)| (*k, rewrite(g, super_method))),
+                    body: rewrite(&arm.body, super_method),
+                })
+                .collect(),
+            else_body: else_body.as_ref().map(|e| rewrite(e, super_method)),
+        },
+        ExprNode::MatchPredicate { value, pattern } => ExprNode::MatchPredicate {
+            value: rewrite(value, super_method),
+            pattern: pattern.clone(),
+        },
+        ExprNode::MatchRequired { value, pattern } => ExprNode::MatchRequired {
+            value: rewrite(value, super_method),
+            pattern: pattern.clone(),
         },
         ExprNode::Let { id, name, value, body } => ExprNode::Let {
             id: *id,

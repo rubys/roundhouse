@@ -426,6 +426,23 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
                 walk(body, defs, diags);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            walk(scrutinee, defs, diags);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| walk(e, defs, diags));
+                if let Some((_, g)) = &mut arm.guard {
+                    walk(g, defs, diags);
+                }
+                walk(&mut arm.body, defs, diags);
+            }
+            if let Some(e) = else_body {
+                walk(e, defs, diags);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            walk(value, defs, diags);
+            pattern.for_each_expr_mut(&mut |e| walk(e, defs, diags));
+        }
         ExprNode::Assign { target, value } => {
             walk_lvalue(target, defs, diags);
             walk(value, defs, diags);

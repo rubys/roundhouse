@@ -3632,6 +3632,23 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
                 rewrite_defined_to_nil_check(&mut arm.body);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            rewrite_defined_to_nil_check(scrutinee);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| rewrite_defined_to_nil_check(e));
+                if let Some((_, g)) = arm.guard.as_mut() {
+                    rewrite_defined_to_nil_check(g);
+                }
+                rewrite_defined_to_nil_check(&mut arm.body);
+            }
+            if let Some(e) = else_body {
+                rewrite_defined_to_nil_check(e);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            rewrite_defined_to_nil_check(value);
+            pattern.for_each_expr_mut(&mut |e| rewrite_defined_to_nil_check(e));
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 rewrite_defined_to_nil_check(e);

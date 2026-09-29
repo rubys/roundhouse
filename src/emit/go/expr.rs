@@ -522,6 +522,32 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
+        // Go has no destructuring pattern-match construct — only the
+        // `Nil`/`Bind`/literal-`Value`/`Alt` subset lowers to its
+        // native `switch` (see `simplify_case_match`, which also
+        // reuses `emit_case`'s own wildcard-arm handling for free); a
+        // pattern needing real deconstruction degrades to the
+        // unsupported stub.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
+            arms,
+            else_body,
+            e.span,
+            "NoMatchingPatternError (roundhouse-lowered case/in)",
+        ) {
+            Some(case_arms) => emit_case(ctx, scrutinee, &case_arms, e.ty.as_ref()),
+            None => crate::emit::diagnostics::report_unsupported(
+                e.span,
+                "go2",
+                "CaseMatch",
+                "pattern needs destructuring or a guard Go's switch can't express",
+            ),
+        },
+        ExprNode::MatchPredicate { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "go2", "MatchPredicate", "")
+        }
+        ExprNode::MatchRequired { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "go2", "MatchRequired", "")
+        }
         // Ruby `next` inside a block → Go `continue`. The `each`/`map`
         // block emit wraps the body in a real `for … range` loop (not a
         // nested IIFE), so a value-less `next` lands directly inside the

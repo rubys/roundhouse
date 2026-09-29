@@ -177,6 +177,23 @@ fn walk_children(e: &mut Expr) {
                 walk(&mut arm.body, false);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            walk(scrutinee, false);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| walk(e, false));
+                if let Some((_, g)) = arm.guard.as_mut() {
+                    walk(g, false);
+                }
+                walk(&mut arm.body, false);
+            }
+            if let Some(e) = else_body.as_mut() {
+                walk(e, false);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            walk(value, false);
+            pattern.for_each_expr_mut(&mut |e| walk(e, false));
+        }
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             walk(body, false);
             for r in rescues {

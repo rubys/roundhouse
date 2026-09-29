@@ -458,6 +458,23 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
                 f(&mut arm.body);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            f(scrutinee);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(f);
+                if let Some((_, g)) = &mut arm.guard {
+                    f(g);
+                }
+                f(&mut arm.body);
+            }
+            if let Some(e) = else_body {
+                f(e);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            f(value);
+            pattern.for_each_expr_mut(f);
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 f(e);

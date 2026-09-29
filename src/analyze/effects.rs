@@ -155,6 +155,20 @@ impl super::Analyzer {
                     self.visit_effects(&mut arm.body, ctx, out);
                 }
             }
+            ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+                self.visit_effects(scrutinee, ctx, out);
+                for arm in arms {
+                    self.visit_match_pattern_effects(&mut arm.pattern, ctx, out);
+                    if let Some((_, g)) = &mut arm.guard { self.visit_effects(g, ctx, out); }
+                    self.visit_effects(&mut arm.body, ctx, out);
+                }
+                if let Some(e) = else_body { self.visit_effects(e, ctx, out); }
+            }
+            ExprNode::MatchPredicate { value, pattern }
+            | ExprNode::MatchRequired { value, pattern } => {
+                self.visit_effects(value, ctx, out);
+                self.visit_match_pattern_effects(pattern, ctx, out);
+            }
             ExprNode::Seq { exprs } => {
                 for e in exprs { self.visit_effects(e, ctx, out); }
             }
@@ -210,6 +224,53 @@ impl super::Analyzer {
         // effects from scratch against the current typed tree.
         out.extend(local.iter().cloned());
         expr.effects = EffectSet { effects: local };
+    }
+
+    /// Visit every `Expr` embedded in a `MatchPattern` — a `Value`'s
+    /// test expression, or an `Array`/`Find`/`Hash` pattern's narrowing
+    /// `constant` — the effects-walk mirror of the body-typer's
+    /// `analyze_match_pattern_constants`. A pattern's own shape (which
+    /// keys/elements it destructures) never contributes an effect
+    /// itself; only the embedded expressions can.
+    fn visit_match_pattern_effects(
+        &self,
+        pattern: &mut crate::expr::MatchPattern,
+        ctx: &Ctx,
+        out: &mut BTreeSet<Effect>,
+    ) {
+        use crate::expr::MatchPattern;
+        match pattern {
+            MatchPattern::Nil | MatchPattern::Bind { .. } => {}
+            MatchPattern::Value { expr } => self.visit_effects(expr, ctx, out),
+            MatchPattern::Capture { pattern, .. } => {
+                self.visit_match_pattern_effects(pattern, ctx, out);
+            }
+            MatchPattern::Alt { alternatives } => {
+                for a in alternatives {
+                    self.visit_match_pattern_effects(a, ctx, out);
+                }
+            }
+            MatchPattern::Array { constant, pre, post, .. } => {
+                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
+                for p in pre.iter_mut().chain(post.iter_mut()) {
+                    self.visit_match_pattern_effects(p, ctx, out);
+                }
+            }
+            MatchPattern::Find { constant, middle, .. } => {
+                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
+                for p in middle {
+                    self.visit_match_pattern_effects(p, ctx, out);
+                }
+            }
+            MatchPattern::Hash { constant, pairs, .. } => {
+                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
+                for (_, p) in pairs {
+                    if let Some(p) = p {
+                        self.visit_match_pattern_effects(p, ctx, out);
+                    }
+                }
+            }
+        }
     }
 
     fn contribute_send_effect(&self, recv_ty: &Ty, method: &Symbol, out: &mut BTreeSet<Effect>) {

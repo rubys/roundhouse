@@ -2660,6 +2660,18 @@ fn collect_ivar_assignments(
                 collect_ivar_assignments(&arm.body, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_ivar_assignments(scrutinee, out);
+            for arm in arms {
+                collect_ivar_assignments(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                collect_ivar_assignments(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, .. } | ExprNode::MatchRequired { value, .. } => {
+            collect_ivar_assignments(value, out);
+        }
         ExprNode::Seq { exprs } => {
             for sub in exprs {
                 collect_ivar_assignments(sub, out);

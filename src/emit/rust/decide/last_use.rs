@@ -146,6 +146,23 @@ fn collect_var_reads(
                 collect_var_reads(&arm.body, seq, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_var_reads(scrutinee, seq, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| collect_var_reads(e, seq, out));
+                if let Some((_, g)) = arm.guard.as_ref() {
+                    collect_var_reads(g, seq, out);
+                }
+                collect_var_reads(&arm.body, seq, out);
+            }
+            if let Some(e) = else_body {
+                collect_var_reads(e, seq, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_var_reads(value, seq, out);
+            pattern.for_each_expr(&mut |e| collect_var_reads(e, seq, out));
+        }
         ExprNode::While { cond, body, .. } => {
             collect_var_reads(cond, seq, out);
             collect_var_reads(body, seq, out);
@@ -343,6 +360,23 @@ fn stamp_var_reads(
                 }
                 stamp_var_reads(&mut arm.body, seq, counts, last_seq);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            stamp_var_reads(scrutinee, seq, counts, last_seq);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| stamp_var_reads(e, seq, counts, last_seq));
+                if let Some((_, g)) = arm.guard.as_mut() {
+                    stamp_var_reads(g, seq, counts, last_seq);
+                }
+                stamp_var_reads(&mut arm.body, seq, counts, last_seq);
+            }
+            if let Some(e) = else_body {
+                stamp_var_reads(e, seq, counts, last_seq);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            stamp_var_reads(value, seq, counts, last_seq);
+            pattern.for_each_expr_mut(&mut |e| stamp_var_reads(e, seq, counts, last_seq));
         }
         ExprNode::While { cond, body, .. } => {
             stamp_var_reads(cond, seq, counts, last_seq);

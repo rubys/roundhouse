@@ -196,6 +196,29 @@ fn emit_node(n: &ExprNode) -> String {
             s.push_str("end");
             s
         }
+        // No explicit `else … raise` needed: CRuby's own `case/in`
+        // already raises `NoMatchingPatternError` on an unmatched
+        // scrutinee when there's no `else` clause, which is exactly
+        // the semantics `else_body: None` means in this IR.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            let mut s = format!("case {}\n", emit_expr(scrutinee));
+            for arm in arms {
+                s.push_str(&emit_match_arm(arm));
+            }
+            if let Some(eb) = else_body {
+                s.push_str("else\n");
+                s.push_str(&indent_lines(&emit_expr(eb), 1));
+                s.push('\n');
+            }
+            s.push_str("end");
+            s
+        }
+        ExprNode::MatchPredicate { value, pattern } => {
+            format!("{} in {}", emit_expr(value), emit_match_pattern(pattern))
+        }
+        ExprNode::MatchRequired { value, pattern } => {
+            format!("{} => {}", emit_expr(value), emit_match_pattern(pattern))
+        }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
             for (i, e) in exprs.iter().enumerate() {
@@ -1469,6 +1492,113 @@ fn emit_pattern(p: &Pattern) -> String {
         // `pattern === scrutinee` and the dispatch handles Proc /
         // Range / Class / etc. natively.
         Pattern::Expr { expr } => emit_expr(expr),
+    }
+}
+
+/// Emit one `CaseMatch` arm as Ruby's `in pattern [if/unless guard]`.
+fn emit_match_arm(arm: &crate::expr::MatchArm) -> String {
+    use crate::expr::MatchGuardKind;
+    let mut s = format!("in {}", emit_match_pattern(&arm.pattern));
+    if let Some((kind, g)) = &arm.guard {
+        let kw = match kind {
+            MatchGuardKind::If => "if",
+            MatchGuardKind::Unless => "unless",
+        };
+        s.push_str(&format!(" {kw} {}", emit_expr(g)));
+    }
+    s.push('\n');
+    s.push_str(&indent_lines(&emit_expr(&arm.body), 1));
+    s.push('\n');
+    s
+}
+
+/// Emit a `MatchPattern` as Ruby `case/in` pattern syntax — the
+/// round-trip-checked inverse of `ingest_pattern`.
+///
+/// `Value`'s pin handling is the one non-obvious case: CRuby's pattern
+/// grammar treats a bare identifier as ALWAYS binding (that's
+/// `MatchPattern::Bind`, handled below), so the only way a `Var`/`Ivar`
+/// read ends up wrapped in `Value` is if the source pinned it (`^name`,
+/// `^@name`) — `ingest_pattern` folds both `PinnedVariableNode` and
+/// `PinnedExpressionNode` into `Value` with no separate "was this
+/// pinned" flag, since the pin sigil is recoverable from the payload
+/// shape alone. Anything else non-literal/non-const/non-range inside a
+/// `Value` (a method call, a boolop, …) is equally pin-only — Ruby's
+/// grammar rejects an unpinned arbitrary expression in pattern
+/// position — so it gets the general `^(expr)` form. This loses exact
+/// byte fidelity for a source that wrote `^(x)` around a bare variable
+/// (re-emitted as `^x`), which is fine: `roundhouse-ast --round-trip`
+/// checks that re-ingesting reaches the same IR, and `^x` and `^(x)`
+/// ingest identically.
+fn emit_match_pattern(p: &crate::expr::MatchPattern) -> String {
+    use crate::expr::{HashRest, MatchPattern};
+    match p {
+        MatchPattern::Nil => "nil".to_string(),
+        MatchPattern::Bind { name } => name.to_string(),
+        MatchPattern::Value { expr } => match &*expr.node {
+            ExprNode::Lit { .. } | ExprNode::Const { .. } | ExprNode::Range { .. } => {
+                emit_expr(expr)
+            }
+            ExprNode::Var { name, .. } => format!("^{name}"),
+            ExprNode::Ivar { name } => format!("^@{name}"),
+            _ => format!("^({})", emit_expr(expr)),
+        },
+        MatchPattern::Capture { pattern, name } => {
+            format!("{} => {name}", emit_match_pattern(pattern))
+        }
+        MatchPattern::Alt { alternatives } => {
+            alternatives.iter().map(emit_match_pattern).collect::<Vec<_>>().join(" | ")
+        }
+        MatchPattern::Array { constant, pre, rest, post } => {
+            let mut parts: Vec<String> = pre.iter().map(emit_match_pattern).collect();
+            if let Some(r) = rest {
+                parts.push(match r {
+                    Some(name) => format!("*{name}"),
+                    None => "*".to_string(),
+                });
+            }
+            parts.extend(post.iter().map(emit_match_pattern));
+            match constant {
+                Some(c) => format!("{}({})", emit_expr(c), parts.join(", ")),
+                None => format!("[{}]", parts.join(", ")),
+            }
+        }
+        MatchPattern::Find { constant, pre_rest, middle, post_rest } => {
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(match pre_rest {
+                Some(name) => format!("*{name}"),
+                None => "*".to_string(),
+            });
+            parts.extend(middle.iter().map(emit_match_pattern));
+            parts.push(match post_rest {
+                Some(name) => format!("*{name}"),
+                None => "*".to_string(),
+            });
+            let inner = format!("[{}]", parts.join(", "));
+            match constant {
+                Some(c) => format!("{}{inner}", emit_expr(c)),
+                None => inner,
+            }
+        }
+        MatchPattern::Hash { constant, pairs, rest } => {
+            let mut parts: Vec<String> = pairs
+                .iter()
+                .map(|(key, sub)| match sub {
+                    Some(p) => format!("{key}: {}", emit_match_pattern(p)),
+                    None => format!("{key}:"),
+                })
+                .collect();
+            if let Some(r) = rest {
+                parts.push(match r {
+                    HashRest::Collect { name } => format!("**{name}"),
+                    HashRest::Nil => "**nil".to_string(),
+                });
+            }
+            match constant {
+                Some(c) => format!("{}({})", emit_expr(c), parts.join(", ")),
+                None => format!("{{ {} }}", parts.join(", ")),
+            }
+        }
     }
 }
 

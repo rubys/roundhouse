@@ -858,6 +858,32 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_if_expr(cond, then_branch, else_branch)
         }
         ExprNode::Case { scrutinee, arms } => emit_case_expr(scrutinee, arms),
+        // C#'s switch expression has real pattern matching, but wiring
+        // it to roundhouse's `deconstruct`/`deconstruct_keys` narrowing
+        // is future work — only the `Nil`/`Bind`/literal-`Value`/`Alt`
+        // subset lowers today (see `simplify_case_match`, reusing
+        // `emit_case_expr`'s own wildcard-arm handling for free); real
+        // deconstruction degrades to the unsupported stub.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
+            arms,
+            else_body,
+            e.span,
+            "NoMatchingPatternError (roundhouse-lowered case/in)",
+        ) {
+            Some(case_arms) => emit_case_expr(scrutinee, &case_arms),
+            None => crate::emit::diagnostics::report_unsupported(
+                e.span,
+                "csharp",
+                "CaseMatch",
+                "pattern needs destructuring or a guard C#'s switch can't express here",
+            ),
+        },
+        ExprNode::MatchPredicate { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "csharp", "MatchPredicate", "")
+        }
+        ExprNode::MatchRequired { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "csharp", "MatchRequired", "")
+        }
         // A Seq in value position: its value is the last element.
         ExprNode::Seq { exprs } => {
             exprs.last().map(emit_expr).unwrap_or_else(|| "null".to_string())

@@ -1318,6 +1318,32 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_if(cond, then_branch, else_branch)
         }
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, false),
+        // Swift's `switch` has real pattern matching but wiring it up
+        // to roundhouse's `deconstruct`/`deconstruct_keys` narrowing is
+        // future work — only the `Nil`/`Bind`/literal-`Value`/`Alt`
+        // subset lowers today (see `simplify_case_match`, reusing
+        // `emit_case`'s own wildcard-arm handling for free); real
+        // deconstruction degrades to the unsupported stub.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
+            arms,
+            else_body,
+            e.span,
+            "NoMatchingPatternError (roundhouse-lowered case/in)",
+        ) {
+            Some(case_arms) => emit_case(scrutinee, &case_arms, false),
+            None => crate::emit::diagnostics::report_unsupported(
+                e.span,
+                "swift",
+                "CaseMatch",
+                "pattern needs destructuring or a guard Swift's switch can't express here",
+            ),
+        },
+        ExprNode::MatchPredicate { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "swift", "MatchPredicate", "")
+        }
+        ExprNode::MatchRequired { .. } => {
+            crate::emit::diagnostics::report_unsupported(e.span, "swift", "MatchRequired", "")
+        }
         ExprNode::Seq { exprs } => emit_stmts(exprs, false),
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
