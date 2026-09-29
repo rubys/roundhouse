@@ -888,6 +888,7 @@ impl<'f> RouteWalker<'f> {
                         if_cond_expr: None,
                         unless_cond_expr: None,
                         block: None,
+                        prepend: false,
                     },
                     leading_comments: Vec::new(),
                     leading_blank_line: false,

@@ -63,33 +63,10 @@ struct Delegation {
 pub fn lower_delegates(app: &mut crate::App) {
     let mut generated: Vec<(usize, Vec<MethodDef>)> = Vec::new();
     for (i, lc) in app.library_classes.iter_mut().enumerate() {
-        let delegates = take_delegate_decls(lc);
-        if delegates.is_empty() {
-            continue;
+        let methods = expand_delegates_in_class(lc);
+        if !methods.is_empty() {
+            generated.push((i, methods));
         }
-        let src = synthesized_source(lc, &delegates);
-        // Isolated in its OWN scope — never the outer one that spans
-        // the whole app's ingest — so a bug in `synthesized_source`
-        // can't render its parse errors against an unrelated real
-        // file (see `ingest::sources`'s module doc for how that
-        // happened before this existed).
-        let (parsed, diags) = crate::ingest::prism::scope(|| {
-            crate::ingest::ingest_library_classes(src.as_bytes(), "<delegate>")
-        });
-        let methods = match parsed {
-            Ok(classes) if diags.is_empty() => {
-                classes.into_iter().flat_map(|c| c.methods).collect()
-            }
-            Ok(_) => {
-                record_synthesis_failure(&delegates, &diags);
-                Vec::new()
-            }
-            Err(err) => {
-                super::survey::record(&err);
-                Vec::new()
-            }
-        };
-        generated.push((i, methods));
     }
     for (i, methods) in generated {
         app.library_classes[i].methods.extend(methods);
@@ -113,6 +90,51 @@ fn record_synthesis_failure(delegates: &[Delegation], diags: &[crate::diagnostic
         .unwrap_or("<delegate>")
         .to_string();
     super::survey::record_synthesis_failure(file, &format!("delegate forwarder for `{names}`"), diags);
+}
+
+/// The per-class body of `lower_delegates`, factored out so a caller
+/// with a single `LibraryClass` in hand — rather than a whole `App` to
+/// loop over — can drive the same expansion. `lower_controller_to_
+/// library_class` is exactly that caller: a controller isn't a
+/// `LibraryClass` at the point `lower_delegates` runs over
+/// `app.library_classes` (ingest time; controllers only become one
+/// per-target at emit time — see `lower::controller_to_library`), so a
+/// `delegate` call in a controller body never reached this file at
+/// all until the controller lowering started collecting it into its
+/// own `unknown_calls` and calling this directly.
+///
+/// Returns the synthesized forwarder methods; does NOT append them to
+/// `lc.methods` itself (`lower_delegates` above batches that across the
+/// whole app; a single-class caller can just extend its own `methods`
+/// with the result).
+pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef> {
+    let delegates = take_delegate_decls(lc);
+    if delegates.is_empty() {
+        return Vec::new();
+    }
+    let src = synthesized_source(lc, &delegates);
+
+    // Isolated in its OWN scope — never the outer one that spans
+    // the whole app's ingest — so a bug in `synthesized_source`
+    // can't render its parse errors against an unrelated real
+    // file (see `ingest::sources`'s module doc for how that
+    // happened before this existed).
+    let (parsed, diags) = crate::ingest::prism::scope(|| {
+        crate::ingest::ingest_library_classes(src.as_bytes(), "<delegate>")
+    });
+    match parsed {
+        Ok(classes) if diags.is_empty() => {
+            classes.into_iter().flat_map(|c| c.methods).collect()
+        }
+        Ok(_) => {
+            record_synthesis_failure(&delegates, &diags);
+            Vec::new()
+        }
+        Err(err) => {
+            super::survey::record(&err);
+            Vec::new()
+        }
+    }
 }
 
 /// Consume the declarations this pass can reproduce EXACTLY, leaving

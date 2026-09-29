@@ -174,6 +174,7 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
             if_cond_expr: None,
             unless_cond_expr: None,
             block: None,
+            prepend: false,
         };
         *item = ControllerBodyItem::Filter {
             filter: f,

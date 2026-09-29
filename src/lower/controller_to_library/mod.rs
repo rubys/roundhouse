@@ -553,7 +553,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 }
             }
         }
-        out.push(LibraryClass {
+        methods.extend(collect_attr_accessor_methods(controller));
+        apply_alias_methods(controller, &mut methods);
+        apply_undef_methods(controller, &mut methods);
+        let mut lc = LibraryClass {
             name: controller.name.clone(),
             is_module: false,
             parent: controller.parent.clone(),
@@ -562,8 +565,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             nullable_columns: Vec::new(),
             origin: None,
             constants: collect_class_constants(controller),
-            unknown_calls: Vec::new(),
-        });
+            unknown_calls: collect_delegate_calls(controller),
+        };
+        let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
+        lc.methods.extend(forwarders);
+        out.push(lc);
     }
     // Type-check synthesized Params class method bodies with a per-class
     // ivar map seeded from the permitted-fields list. Each `attr_reader`
@@ -603,7 +609,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     // rewrite falls back to in-scope ivars (legacy behavior for tests).
     let view_ivars: ViewIvarMap = std::collections::HashMap::new();
     let partials: PartialMap = std::collections::HashMap::new();
-    let methods = build_methods(
+    let mut methods = build_methods(
         controller,
         std::slice::from_ref(controller),
         &specs,
@@ -616,7 +622,10 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &std::collections::HashMap::new(),
         None,
     );
-    LibraryClass {
+    methods.extend(collect_attr_accessor_methods(controller));
+    apply_alias_methods(controller, &mut methods);
+    apply_undef_methods(controller, &mut methods);
+    let mut lc = LibraryClass {
         name: controller.name.clone(),
         is_module: false,
         parent: controller.parent.clone(),
@@ -625,8 +634,11 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         nullable_columns: Vec::new(),
         origin: None,
         constants: collect_class_constants(controller),
-        unknown_calls: Vec::new(),
-    }
+        unknown_calls: collect_delegate_calls(controller),
+    };
+    let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
+    lc.methods.extend(forwarders);
+    lc
 }
 
 /// Collect class-level constant definitions (`NAME = <expr>`) from a
@@ -669,6 +681,161 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
         }
     }
     out
+}
+
+/// `delegate :a, :b, to: :assoc` calls from a controller body, as
+/// `Unknown` items — the raw shape `ingest::delegate::
+/// expand_delegates_in_class` expects (the same shape it reads off a
+/// model or concern's `LibraryClass::unknown_calls`). A controller
+/// isn't a `LibraryClass` until this exact lowering builds one, so
+/// `delegate` in a controller's own body never reached that file at
+/// all before: it round-tripped as `Unknown`, unconsumed, and the
+/// controller emitted without the forwarder Rails' `class_eval`
+/// would have defined — a receiverless call to the delegated name in
+/// any action raised.
+fn collect_delegate_calls(controller: &Controller) -> Vec<Expr> {
+    let mut out = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+        if method.as_str() == "delegate" {
+            out.push(expr.clone());
+        }
+    }
+    out
+}
+
+/// `attr_reader`/`attr_writer`/`attr_accessor` calls from a controller
+/// body → synthesized accessor `MethodDef`s — the exact treatment
+/// `ingest::library_class::walk_decl_body` gives them for models and
+/// concerns (surface form sacrificed for downstream uniformity; see
+/// that module's `LibraryClass::methods` doc). Deferred to lowering
+/// rather than typed at ingest because the output IS a `MethodDef`,
+/// which a `Controller`'s own body has no slot for — only the
+/// `LibraryClass` this lowering produces does.
+fn collect_attr_accessor_methods(controller: &Controller) -> Vec<MethodDef> {
+    use crate::expr::Literal;
+    let mut out = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        let (want_reader, want_writer) = match method.as_str() {
+            "attr_reader" => (true, false),
+            "attr_writer" => (false, true),
+            "attr_accessor" => (true, true),
+            _ => continue,
+        };
+        for arg in args {
+            let ExprNode::Lit { value: Literal::Sym { value: name } } = &*arg.node else {
+                continue;
+            };
+            if want_reader {
+                out.push(crate::ingest::library_class::synth_attr_reader(
+                    &controller.name,
+                    name,
+                    MethodReceiver::Instance,
+                ));
+            }
+            if want_writer {
+                out.push(crate::ingest::library_class::synth_attr_writer(
+                    &controller.name,
+                    name,
+                    MethodReceiver::Instance,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// `alias_method :new_name, :old_name` — a method named `new_name`
+/// with `old_name`'s existing body and signature, resolved against
+/// THIS controller's own already-built `methods` (actions and private
+/// helpers alike; by the time this runs, `methods` is complete).
+///
+/// `old_name` not found here — inherited from a parent, or defined by
+/// a spliced concern under a name this same-class-only scan can't see
+/// — is a real gap, not silently accepted: Ruby resolves the alias at
+/// class-body EXECUTION time, when the parent's methods already
+/// exist, an ordering this pass (which only ever sees one controller's
+/// own `methods`) doesn't have access to. Ledgered rather than
+/// dropped so the survey names exactly which alias didn't resolve.
+fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+    use crate::expr::Literal;
+    let sym = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let aliases: Vec<(Symbol, Symbol)> = controller
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ControllerBodyItem::Unknown { expr, .. } = item else { return None };
+            let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+                return None;
+            };
+            if method.as_str() != "alias_method" {
+                return None;
+            }
+            let new_name = sym(args.first()?)?;
+            let old_name = sym(args.get(1)?)?;
+            Some((new_name, old_name))
+        })
+        .collect();
+    for (new_name, old_name) in aliases {
+        let Some(old) = methods.iter().find(|m| m.name == old_name).cloned() else {
+            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                file: controller.name.0.as_str().to_string(),
+                message: format!(
+                    "alias_method target not found: `:{}` names no method this controller defines itself (inherited or concern-defined; alias not created)",
+                    old_name.as_str()
+                ),
+            });
+            continue;
+        };
+        let mut aliased = old;
+        aliased.name = new_name;
+        aliased.name_span = crate::span::Span::synthetic();
+        methods.push(aliased);
+    }
+}
+
+/// `undef_method :a, :b` — removes methods this controller itself
+/// defines (its own `methods`, built above) from its output. Matches
+/// only a same-class definition: Ruby's `undef_method` also blocks the
+/// name from resolving through ANY ancestor, which this can't express
+/// (there is no "undefined" marker in the IR to carry past this
+/// point), so an inherited method of the same name — undefined in
+/// Ruby, still callable here — is a documented gap, ledgered rather
+/// than silently kept.
+fn apply_undef_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+    use crate::expr::Literal;
+    let mut names: Vec<Symbol> = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "undef_method" {
+            continue;
+        }
+        for arg in args {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
+                names.push(value.clone());
+            }
+        }
+    }
+    for name in names {
+        let before = methods.len();
+        methods.retain(|m| m.name != name);
+        if methods.len() == before {
+            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                file: controller.name.0.as_str().to_string(),
+                message: format!(
+                    "undef_method target not removed: `:{}` names no method this controller defines itself (inherited method stays callable; Ruby's ancestor-wide undef is not modeled)",
+                    name.as_str()
+                ),
+            });
+        }
+    }
 }
 
 /// Does `body` read the receiver's state — an ivar, or an implicit-self
@@ -1444,6 +1611,15 @@ fn build_filter_preamble(
     // `Current.request = request` never ran in any emitted controller.
     let own_priv_targets: std::collections::HashSet<&Symbol> =
         own_privs.iter().map(|a| &a.name).collect();
+    // `prepend_before_action` filters, collected separately and hoisted
+    // to the front of the WHOLE chain at the end — Rails registers each
+    // one at the head, ahead of every inherited filter too, so the
+    // ordinary in-body-order walk below is the wrong place to place
+    // them. Multiple prepends within one walk end up front-to-back in
+    // REVERSE declaration order: each `prepend_before_action` Rails
+    // sees unshifts onto the same head, so the last one declared is the
+    // first one that runs.
+    let mut prepends: Vec<PreambleStmt> = Vec::new();
     let bodies = chain.iter().map(|c| (*c, false)).chain(std::iter::once((controller, true)));
     for (c, is_own) in bodies {
         for item in &c.body {
@@ -1454,7 +1630,7 @@ fn build_filter_preamble(
                     if is_own && own_privs_inlined && own_priv_targets.contains(&filter.target) {
                         continue; // inlined into action bodies upstream
                     }
-                    push_call(filter, &mut preamble);
+                    push_call(filter, if filter.prepend { &mut prepends } else { &mut preamble });
                 }
                 // `around_action` / `after_action` — carried to the
                 // dispatcher, which wraps the case dispatch in the one
@@ -1474,17 +1650,49 @@ fn build_filter_preamble(
                         wraps.after.push(PreambleStmt::Call { filter: f, halt_check: false });
                     }
                 }
+                // A lambda/proc/block-target `before_action` /
+                // `after_action` / `prepend_before_action` — no Symbol
+                // target, so it stayed `Unknown` through ingest (see
+                // `ingest::controller::lambda_filter_target`, which
+                // recognizes both the block-attached and the
+                // argument-lambda surface).
                 ControllerBodyItem::Unknown { expr, .. } => {
-                    if let Some((body, only, except)) = block_form_filter(expr, "before_action") {
-                        let halt_check = can_respond(&body);
-                        preamble.push(PreambleStmt::Block { body, only, except, halt_check });
-                    } else if let Some((body, only, except)) = block_form_filter(expr, "after_action") {
-                        wraps.after.push(PreambleStmt::Block { body, only, except, halt_check: false });
+                    let Some(target) = crate::ingest::controller::lambda_filter_target(expr)
+                    else {
+                        continue;
+                    };
+                    let is_after = target.is_after();
+                    let is_prepend = target.is_prepend();
+                    let halt_check = can_respond(&target.body);
+                    let stmt = PreambleStmt::Block {
+                        body: target.body,
+                        only: target.only,
+                        except: target.except,
+                        if_cond: target.if_cond,
+                        unless_cond: target.unless_cond,
+                        if_cond_expr: target.if_cond_expr,
+                        unless_cond_expr: target.unless_cond_expr,
+                        halt_check,
+                    };
+                    if is_after {
+                        wraps.after.push(stmt);
+                    } else if is_prepend {
+                        prepends.push(stmt);
+                    } else {
+                        preamble.push(stmt);
                     }
                 }
                 _ => {}
             }
         }
+    }
+    // Hoist every `prepend_before_action` to the head of the chain, in
+    // reverse declaration order — see the comment where `prepends` is
+    // declared above.
+    if !prepends.is_empty() {
+        prepends.reverse();
+        prepends.append(&mut preamble);
+        preamble = prepends;
     }
     (preamble, wraps)
 }
@@ -1506,6 +1714,7 @@ fn default_forgery_protection() -> Filter {
         if_cond_expr: None,
         unless_cond_expr: None,
         block: None,
+        prepend: false,
     }
 }
 
@@ -1823,55 +2032,6 @@ fn can_respond_within(
     let mut found = false;
     walk(body, &mut found, resolve, seen);
     found
-}
-
-/// Recognize `before_action { ... }` (optionally with `only:`/`except:`)
-/// in an Unknown body item — the block form has no symbol target, so the
-/// ingester round-trips it verbatim instead of producing a `Filter`.
-/// Returns the block body plus the only/except scoping.
-fn block_form_filter(expr: &Expr, kind: &str) -> Option<(Expr, Vec<Symbol>, Vec<Symbol>)> {
-    let ExprNode::Send { recv: None, method, args, block: Some(b), .. } = &*expr.node else {
-        return None;
-    };
-    if method.as_str() != kind {
-        return None;
-    }
-    let ExprNode::Lambda { body, .. } = &*b.node else {
-        return None;
-    };
-    let mut only: Vec<Symbol> = Vec::new();
-    let mut except: Vec<Symbol> = Vec::new();
-    for a in args {
-        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
-        for (k, v) in entries {
-            let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node
-            else {
-                continue;
-            };
-            match key.as_str() {
-                "only" => only = filter_symbol_list(v),
-                "except" => except = filter_symbol_list(v),
-                _ => {}
-            }
-        }
-    }
-    Some((body.clone(), only, except))
-}
-
-/// `[:a, :b]` / `:a` → the symbol names; anything else → empty.
-fn filter_symbol_list(e: &Expr) -> Vec<Symbol> {
-    use crate::expr::Literal;
-    match &*e.node {
-        ExprNode::Array { elements, .. } => elements
-            .iter()
-            .filter_map(|el| match &*el.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
-                _ => None,
-            })
-            .collect(),
-        ExprNode::Lit { value: Literal::Sym { value } } => vec![value.clone()],
-        _ => Vec::new(),
-    }
 }
 
 /// ApplicationController baseline — methods every action body may

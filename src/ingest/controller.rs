@@ -417,7 +417,7 @@ pub(super) fn parse_filter_call(
         return parse_forgery_macro(&call, macro_name == "protect_from_forgery", file);
     }
     let kind = match macro_name {
-        "before_action" => FilterKind::Before,
+        "before_action" | "prepend_before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
@@ -425,6 +425,12 @@ pub(super) fn parse_filter_call(
         "skip_after_action" => FilterKind::SkipAfter,
         _ => return None,
     };
+    // Rails moves a `prepend_before_action` callback to the head of the
+    // WHOLE chain, ahead of inherited filters too — see `Filter::prepend`.
+    // `prepend_around_action` / `prepend_after_action` are not modeled:
+    // no controller in this codebase's fixtures uses either, so they
+    // stay unrecognized rather than risk a wrong-order claim.
+    let prepend = macro_name == "prepend_before_action";
 
     let args = call.arguments()?;
 
@@ -501,6 +507,7 @@ pub(super) fn parse_filter_call(
                 if_cond_expr: if_cond_expr.clone(),
                 unless_cond_expr: unless_cond_expr.clone(),
                 block: None,
+                prepend,
             })
             .collect(),
     )
@@ -616,6 +623,7 @@ fn parse_forgery_macro(
         if_cond_expr,
         unless_cond_expr,
         block: None,
+        prepend: false,
     }])
 }
 
@@ -636,6 +644,165 @@ fn lambda_body_expr(node: &Node<'_>, file: &str) -> Option<Expr> {
         return None;
     };
     ingest_expr(&body, file).ok()
+}
+
+/// The filter macros whose target may be a lambda/proc/block literal
+/// instead of a Symbol — `before_action -> { ensure_permission(…) },
+/// only: […]` (233 controllers write this for a policy check that
+/// closes over the action's own locals) and its block-attached twin
+/// `before_action { … }`, plus `after_action` and `prepend_before_action`
+/// the same way. `around_action` is deliberately absent: a lambda/block
+/// around-filter has to `yield` to continue the chain, which neither
+/// surface here models, and no controller in this codebase's fixtures
+/// writes one — recognizing the shape without the runtime behind it
+/// would be exactly the invariant-6 mistake (a diagnostic that claims
+/// support the emitted program doesn't have).
+pub(crate) fn is_lambda_filter_macro(method: &str) -> bool {
+    matches!(method, "before_action" | "after_action" | "prepend_before_action")
+}
+
+/// A recognized lambda/proc/block-target filter, already ingested to
+/// IR — the shared shape `report_unrecognized_controller_macros`,
+/// `build_filter_preamble`, and `build_sourced_filter_chain` all read,
+/// so the three agree on what counts as "supported" (the ledger
+/// exclusion, the emitted dispatch, and the ivar-seeding respectively).
+pub(crate) struct LambdaFilterTarget {
+    /// Which macro this was — `"before_action"`, `"after_action"`, or
+    /// `"prepend_before_action"` — so a caller that routes by kind
+    /// (before vs after vs prepend-to-head-of-chain) doesn't have to
+    /// re-match the call itself.
+    pub method: Symbol,
+    /// The lambda/proc/block's body — what runs, in controller-instance
+    /// context (Rails calls it via `instance_exec`), when the filter
+    /// fires.
+    pub body: Expr,
+    pub only: Vec<Symbol>,
+    pub except: Vec<Symbol>,
+    pub if_cond: Option<Symbol>,
+    pub unless_cond: Option<Symbol>,
+    pub if_cond_expr: Option<Expr>,
+    pub unless_cond_expr: Option<Expr>,
+}
+
+impl LambdaFilterTarget {
+    pub fn is_after(&self) -> bool {
+        self.method.as_str() == "after_action"
+    }
+    pub fn is_prepend(&self) -> bool {
+        self.method.as_str() == "prepend_before_action"
+    }
+}
+
+/// Unwrap a lambda/proc literal already ingested to IR — `-> { … }`
+/// (`ExprNode::Lambda` directly) or `lambda { … }` / `proc { … }` (a
+/// receiverless `Send` to that name carrying the block, itself a
+/// `Lambda`). The IR-level twin of `lambda_body_expr` above, one stage
+/// later and returning the body rather than re-ingesting it.
+fn ir_lambda_body(e: &Expr) -> Option<Expr> {
+    match &*e.node {
+        ExprNode::Lambda { body, .. } => Some(body.clone()),
+        ExprNode::Send { recv: None, method, args, block: Some(b), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            match &*b.node {
+                ExprNode::Lambda { body, .. } => Some(body.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn ir_symbol(e: &Expr) -> Option<Symbol> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// `[:a, :b]` / `:a` → the symbol names; anything else → empty.
+fn ir_symbol_list(e: &Expr) -> Vec<Symbol> {
+    match &*e.node {
+        ExprNode::Array { elements, .. } => elements.iter().filter_map(ir_symbol).collect(),
+        _ => ir_symbol(e).into_iter().collect(),
+    }
+}
+
+/// Recognize a `before_action`/`after_action`/`prepend_before_action`
+/// class-body call — already ingested as an `Unknown` body item's
+/// `Expr` (it has no Symbol target, so `parse_filter_call` returned
+/// `None` for it and it round-tripped verbatim) — whose target is a
+/// lambda/proc/block instead. Two surface forms, both recognized:
+///
+///   * block-form:    `before_action(only: […]) { … }` — the lambda is
+///     the call's attached block; every positional arg is options.
+///   * argument-form: `before_action -> { … }, only: […]` — the lambda
+///     is the first positional arg (Rails runs the callback exactly
+///     the same either way; the block form is the one campfire's
+///     `before_action { Current.request = request }` already used,
+///     the argument form is the one Procore controllers write for a
+///     guard that needs `only:`/`except:`/`if:`/`unless:` alongside
+///     it, which the block form's trailing-hash-only argument list
+///     can't carry next to a `do … end`).
+///
+/// A call with BOTH — an attached block and a lambda-literal first
+/// argument — is not a shape Ruby callers write for these macros and
+/// is not recognized (the attached block wins; the "argument" is then
+/// just an options hash to the block-form scan, which finds nothing to
+/// use it for and returns `None` for `only`/`except`/`if`/`unless`
+/// harmlessly).
+pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return None;
+    };
+    if !is_lambda_filter_macro(method.as_str()) {
+        return None;
+    }
+    let method = method.clone();
+    let (body, option_args): (Expr, &[Expr]) = match block {
+        Some(b) => (ir_lambda_body(b)?, args.as_slice()),
+        None => {
+            let first = args.first()?;
+            (ir_lambda_body(first)?, &args[1..])
+        }
+    };
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    let mut if_cond: Option<Symbol> = None;
+    let mut unless_cond: Option<Symbol> = None;
+    let mut if_cond_expr: Option<Expr> = None;
+    let mut unless_cond_expr: Option<Expr> = None;
+    for a in option_args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                continue;
+            };
+            match key.as_str() {
+                "only" => only = ir_symbol_list(v),
+                "except" => except = ir_symbol_list(v),
+                "if" => {
+                    if_cond = ir_symbol(v);
+                    if_cond_expr = ir_lambda_body(v);
+                }
+                "unless" => {
+                    unless_cond = ir_symbol(v);
+                    unless_cond_expr = ir_lambda_body(v);
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(LambdaFilterTarget {
+        method,
+        body,
+        only,
+        except,
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
+    })
 }
 
 /// Resolve the template an action explicitly renders, so the analyzer can

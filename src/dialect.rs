@@ -1100,11 +1100,23 @@ pub struct Filter {
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set
     /// on a body item: block-form filters stay `Unknown` in controller
-    /// bodies (lowered by `block_form_filter`); this rides only on the
-    /// entries `build_sourced_filter_chain` synthesizes from them and on
-    /// the concern-side capture the splice turns back into `Unknown`s.
+    /// bodies (lowered by `ingest::controller::lambda_filter_target`);
+    /// this rides only on the entries `build_sourced_filter_chain`
+    /// synthesizes from them and on the concern-side capture the splice
+    /// turns back into `Unknown`s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<Expr>,
+    /// `prepend_before_action` rather than `before_action` — Rails
+    /// moves the callback to the HEAD of the whole chain, ahead of
+    /// every inherited filter too, not just this controller's own
+    /// (`ActiveSupport::Callbacks::CallbackChain#insert` unshifts a
+    /// `prepend: true` entry). `recent_documents_filters.rb` reaches
+    /// for it for exactly that reason: "so it happens ahead of the
+    /// inherited validation callback." `false` for the ordinary
+    /// `before_action` most filters are; only meaningful on a `Before`
+    /// filter — `build_filter_preamble` is where the hoist happens.
+    #[serde(default)]
+    pub prepend: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

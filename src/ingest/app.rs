@@ -2335,7 +2335,61 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // decision recorded in docs/pipeline/runtime.md ("Conditional GET
     // is ALWAYS FRESH"), so the importmap ETag macro has nothing to do.
     "stale_when_importmap_changes",
+    // `prepend Mod` — read the same way `include Mod` is, by
+    // `controller_includes`/`controller_include_groups` (which now
+    // scan for both). Ruby's MRO puts a prepended module AHEAD of the
+    // class rather than behind it — not modeled, so a prepended
+    // module that redefines a name the controller ALSO defines itself
+    // resolves to the controller's own version rather than the
+    // module's, the opposite of Rails. No controller in this
+    // codebase's fixtures collides that way; a real one would need the
+    // priority modeled, not just the membership.
+    "prepend",
+    // `private_constant :NAME` — restricts constant visibility outside
+    // the class. Roundhouse's targets have no notion of a private
+    // constant (nothing outside the app constant-resolves across a
+    // component boundary the same way), so there's nothing to enforce
+    // and nothing lost by not enforcing it.
+    "private_constant",
+    // `helper SomeHelper` / `helper :all` — registers Ruby view
+    // helpers for ERB. Rails core, same family as `helper_method`
+    // (already recognized): it changes what a VIEW can call, not the
+    // controller's own instance surface, so it has nothing to do here.
+    "helper",
+    // `delegate :a, :b, to: :assoc` — consumed by the controller→
+    // library lowering (`lower::controller_to_library::
+    // collect_delegate_calls` + `ingest::delegate::
+    // expand_delegates_in_class`), the same machinery a model's or
+    // concern's `delegate` already goes through. Left here rather
+    // than typed at ingest because the shape it can and can't expand
+    // (zero-arg forwarders only) is exactly `delegate.rs`'s call, and
+    // duplicating that decision would risk the two disagreeing.
+    "delegate",
+    // `attr_reader`/`attr_writer`/`attr_accessor` — consumed by
+    // `lower::controller_to_library::collect_attr_accessor_methods`,
+    // which synthesizes the same accessor `MethodDef`s
+    // `ingest::library_class` already does for models and concerns.
+    "attr_reader",
+    "attr_writer",
+    "attr_accessor",
+    // `alias_method :new, :old` / `undef_method :a, :b` — consumed by
+    // `lower::controller_to_library::apply_alias_methods` /
+    // `apply_undef_methods`, which resolve against the controller's
+    // own already-built methods. A target that resolves to nothing
+    // (an inherited or concern-defined name this same-class-only scan
+    // can't see) earns its OWN specific ledger line from there, not
+    // this generic one — see those functions' doc comments.
+    "alias_method",
+    "undef_method",
 ];
+
+/// `using SomeRefinement` — Ruby's block-scoped monkey-patch
+/// mechanism. Recognized so it earns its own ledger line rather than
+/// the generic "not recognized" one, but never modeled: refinement
+/// semantics (a method visible only within the `using` scope) have no
+/// analogue in any target here, and pretending the refined methods
+/// exist everywhere would be worse than not modeling them at all.
+const REFINEMENT_MACROS: &[&str] = &["using"];
 
 /// A receiverless, blockless call left in a controller's class body
 /// after every consumer has run is a macro roundhouse does not
@@ -2360,8 +2414,43 @@ fn report_unrecognized_controller_macros(app: &App) {
             if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
                 continue;
             }
+            // `before_action -> { … }, only: […]` (233 controllers) and
+            // its `prepend_before_action`/`after_action` siblings — a
+            // lambda/proc argument target instead of a Symbol, with no
+            // block attached (a block-attached filter already failed
+            // the `block: None` match above and never reaches here).
+            // `super::controller::lambda_filter_target` is the same
+            // recognizer `build_filter_preamble` lowers it with and
+            // `build_sourced_filter_chain` seeds its ivars with, so this
+            // exclusion is exactly as wide as the support actually is.
+            if super::controller::lambda_filter_target(expr).is_some() {
+                continue;
+            }
             let file = super::sources::path_of(expr.span.file)
                 .unwrap_or_else(|| controller.name.0.as_str().to_string());
+            if REFINEMENT_MACROS.contains(&method.as_str()) {
+                // `using SomeRefinement` — name the refinement in the
+                // ledger so the gap is actionable, rather than folding
+                // it into the generic "not recognized" bucket every
+                // other dropped macro shares.
+                let refinement = match &*expr.node {
+                    ExprNode::Send { args, .. } => args.first().and_then(|a| match &*a.node {
+                        ExprNode::Const { path } => {
+                            Some(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"))
+                        }
+                        _ => None,
+                    }),
+                    _ => None,
+                }
+                .unwrap_or_else(|| "?".to_string());
+                survey::record(&IngestError::Unsupported {
+                    file,
+                    message: format!(
+                        "refinement activated: `using {refinement}` (not modeled)"
+                    ),
+                });
+                continue;
+            }
             survey::record(&IngestError::Unsupported {
                 file,
                 message: format!(
@@ -2676,6 +2765,7 @@ fn filter_from_send(
                 if_cond_expr: None,
                 unless_cond_expr: None,
                 block: None,
+                prepend: false,
             })
             .collect(),
     )

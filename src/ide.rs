@@ -1582,12 +1582,24 @@ fn view_ivar_bodies<'a>(app: &'a App, view: &Symbol) -> Vec<&'a Expr> {
                     {
                         continue;
                     }
-                    let block_body = rf.filter.block.as_ref().map(|call| match &*call.node {
-                        ExprNode::Send { block: Some(b), .. } => match &*b.node {
-                            ExprNode::Lambda { body, .. } => body,
-                            _ => b,
-                        },
-                        _ => call,
+                    // The block/lambda's own body, unwrapped from
+                    // whichever surface it arrived on — an attached
+                    // block (`before_action { … }`) or the argument
+                    // form (`before_action -> { … }, only: […]`, no
+                    // attached block at all; see
+                    // `ingest::controller::lambda_filter_target`).
+                    let block_body = rf.filter.block.as_ref().map(|call| {
+                        let ExprNode::Send { args, block, .. } = &*call.node else { return call };
+                        if let Some(b) = block {
+                            return match &*b.node {
+                                ExprNode::Lambda { body, .. } => body,
+                                _ => b,
+                            };
+                        }
+                        match args.first().map(|a| &*a.node) {
+                            Some(ExprNode::Lambda { body, .. }) => body,
+                            _ => call,
+                        }
                     });
                     if let Some(b) = block_body
                         .or_else(|| method_body(app, &rf.defined_in, &rf.filter.target))
@@ -2085,12 +2097,18 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         // construction (the code is right there). Named under its own
         // source text so the panel reads `before_action { Current.request
         // = request }` rather than the chain's sentinel.
-        let block_body: Option<&Expr> = rf.filter.block.as_ref().map(|call| match &*call.node {
-            ExprNode::Send { block: Some(b), .. } => match &*b.node {
-                ExprNode::Lambda { body, .. } => body,
-                _ => b,
-            },
-            _ => call,
+        let block_body: Option<&Expr> = rf.filter.block.as_ref().map(|call| {
+            let ExprNode::Send { args, block, .. } = &*call.node else { return call };
+            if let Some(b) = block {
+                return match &*b.node {
+                    ExprNode::Lambda { body, .. } => body,
+                    _ => b,
+                };
+            }
+            match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lambda { body, .. }) => body,
+                _ => call,
+            }
         });
         let target_body = block_body.or_else(|| {
             method_body(app, &rf.defined_in, &rf.filter.target).or_else(|| {

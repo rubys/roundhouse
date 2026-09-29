@@ -4967,13 +4967,8 @@ fn build_sourced_filter_chain(
                     // module's `included do` filters into this body, each
                     // tagged with `from_concern` for provenance. Splicing
                     // again here would double every concern filter.
-                    "before_action" | "around_action" | "after_action" => {
+                    "around_action" => {
                         let Some(block) = block else { continue };
-                        let kind = match method.as_str() {
-                            "before_action" => FilterKind::Before,
-                            "around_action" => FilterKind::Around,
-                            _ => FilterKind::After,
-                        };
                         // The attached block is a Lambda whose body is
                         // the filter code.
                         let body = match &*block.node {
@@ -4991,7 +4986,7 @@ fn build_sourced_filter_chain(
                         chain.push((
                             Filter {
                                 target_span: crate::span::Span::synthetic(),
-                                kind,
+                                kind: FilterKind::Around,
                                 target: target.clone(),
                                 from_concern,
                                 only,
@@ -5003,6 +4998,55 @@ fn build_sourced_filter_chain(
                                 if_cond_expr: None,
                                 unless_cond_expr: None,
                                 block: Some(expr.clone()),
+                                prepend: false,
+                            },
+                            source,
+                        ));
+                        block_bindings.push((target, ivars));
+                    }
+                    // `before_action`/`after_action`/`prepend_before_action`
+                    // whose target is a lambda/proc/block literal instead
+                    // of a Symbol — the block-attached form handled above
+                    // for `around_action`, or `before_action -> { … },
+                    // only: […]`'s argument form, which has no attached
+                    // block at all (`ingest::controller::
+                    // lambda_filter_target` recognizes both surfaces so
+                    // this arm and `report_unrecognized_controller_macros`
+                    // / `build_filter_preamble` agree on what counts).
+                    "before_action" | "after_action" | "prepend_before_action" => {
+                        let Some(target_info) =
+                            crate::ingest::controller::lambda_filter_target(expr)
+                        else {
+                            continue;
+                        };
+                        let kind = if method.as_str() == "after_action" {
+                            FilterKind::After
+                        } else {
+                            FilterKind::Before
+                        };
+                        let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                        extract_ivar_assignments(&target_info.body, &mut ivars);
+                        let target =
+                            Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
+                        let from_concern =
+                            spliced_origin.and_then(|m| m.get(&target)).cloned();
+                        let source = from_concern.clone().unwrap_or_else(|| own_id.clone());
+                        chain.push((
+                            Filter {
+                                target_span: crate::span::Span::synthetic(),
+                                kind,
+                                target: target.clone(),
+                                from_concern,
+                                only: target_info.only,
+                                except: target_info.except,
+                                only_style: crate::expr::ArrayStyle::default(),
+                                except_style: crate::expr::ArrayStyle::default(),
+                                if_cond: target_info.if_cond,
+                                unless_cond: target_info.unless_cond,
+                                if_cond_expr: target_info.if_cond_expr,
+                                unless_cond_expr: target_info.unless_cond_expr,
+                                block: Some(expr.clone()),
+                                prepend: method.as_str() == "prepend_before_action",
                             },
                             source,
                         ));
@@ -5340,16 +5384,30 @@ pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
     controller_include_groups(controller).into_iter().flatten().collect()
 }
 
-/// The controller's `include` statements, one inner list per statement
-/// in source order, each in the order its arguments were written. The
-/// grouping is what the filter-registration order needs: Ruby processes
-/// one statement's arguments last-first, but statements first-to-last.
+/// The controller's `include` (and `prepend`) statements, one inner
+/// list per statement in source order, each in the order its arguments
+/// were written. The grouping is what the filter-registration order
+/// needs: Ruby processes one statement's arguments last-first, but
+/// statements first-to-last.
+///
+/// `prepend Mod` is folded in here too — same membership (a
+/// prepended module's directly-defined instance methods, and any
+/// concern filters it exports, become reachable exactly like an
+/// included module's), but NOT the same priority: Ruby puts a
+/// prepended module AHEAD of the class in the method-resolution
+/// order, so it should win a name collision with the class's own
+/// method, and this walk doesn't distinguish that — a prepended
+/// module that redefines a name the controller also defines itself
+/// resolves to the controller's own version here, the wrong one. See
+/// `CONSUMED_CONTROLLER_MACROS`'s `"prepend"` entry for why that's an
+/// accepted gap rather than a blocker: no controller in this
+/// codebase's fixtures collides that way.
 pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<ClassId>> {
     let mut out = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "include" {
+        if !matches!(method.as_str(), "include" | "prepend") {
             continue;
         }
         let mut group = Vec::new();
