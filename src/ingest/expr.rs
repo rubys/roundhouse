@@ -681,6 +681,32 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_true_node().is_some() => ExprNode::Lit { value: Literal::Bool { value: true } },
         n if n.as_false_node().is_some() => ExprNode::Lit { value: Literal::Bool { value: false } },
         n if n.as_nil_node().is_some() => ExprNode::Lit { value: Literal::Nil },
+        // `__FILE__` — Ruby's magic constant for the current source
+        // file. Every target needs SOME literal here (Spinel included),
+        // and the path is a static fact the ingest already knows (`file`
+        // is exactly this file's identity), so there's no reason to
+        // treat it as a runtime-only construct. Rendered relative to the
+        // app root rather than verbatim (`file` is often an absolute
+        // filesystem path built from wherever the app was ingested from)
+        // so the literal doesn't bake a local machine's path into the
+        // emitted program. A read of `__FILE__` types as `Str` like any
+        // other string literal, so `File.expand_path('..', __FILE__)`
+        // and friends type-check through it for free.
+        n if n.as_source_file_node().is_some() => {
+            ExprNode::Lit { value: Literal::Str { value: app_relative_path(file) } }
+        }
+        // `__LINE__` — the current line number. Looked up in the
+        // per-thread source registry (`sources::register` already ran
+        // for every real file by the time its body is walked); a
+        // snippet ingested outside that registry (bare `roundhouse-ast
+        // -e` at a stage that skips `ingest_ruby_program`) has no
+        // source to count newlines against, so it falls back to `1`
+        // rather than failing ingest over a magic constant's exact value.
+        n if n.as_source_line_node().is_some() => {
+            let offset = n.location().start_offset();
+            let line = super::sources::line_at(file, offset).unwrap_or(1);
+            ExprNode::Lit { value: Literal::Int { value: line as i64 } }
+        }
         n if n.as_statements_node().is_some() => {
             let stmts = n.as_statements_node().unwrap();
             // The StatementsNode's own location slice is the source for
@@ -1814,6 +1840,27 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
     };
     Ok(Expr::new(span, expr_node))
+}
+
+/// Best-effort app-root-relative rendering of an ingest `file` identity,
+/// for `__FILE__`. `file` is frequently an absolute filesystem path (it
+/// is built from wherever `ingest_app` was pointed), and baking that
+/// into an emitted literal would embed one machine's directory layout
+/// into the output. Rails apps keep every source file under one of a
+/// handful of top-level directories, so trimming everything before the
+/// first one found is a cheap, dependency-free way to recover the
+/// app-relative path without threading the app root through every
+/// `ingest_expr` call. Falls back to `file` unchanged when none match
+/// (already-relative paths, as `parse_one`-style tests use).
+fn app_relative_path(file: &str) -> String {
+    const ROOTS: &[&str] =
+        &["app/", "lib/", "config/", "db/", "spec/", "test/", "bin/", "script/"];
+    for root in ROOTS {
+        if let Some(idx) = file.find(root) {
+            return file[idx..].to_string();
+        }
+    }
+    file.to_string()
 }
 
 /// Map a Prism `binary_operator` symbol (`+`, `-`, `<<`, …) to the IR

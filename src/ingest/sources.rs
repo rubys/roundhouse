@@ -79,6 +79,20 @@ pub fn file_id(path: &str) -> FileId {
     })
 }
 
+/// 1-based line number for a byte offset into `path`'s registered
+/// source — what `__LINE__` needs at ingest time. `None` when `path`
+/// was never registered (a bare `roundhouse-ast -e` snippet that
+/// bypassed `ingest_ruby_program`/`register`), so the caller can fall
+/// back rather than mis-report line 1.
+pub fn line_at(path: &str, offset: usize) -> Option<u32> {
+    SOURCES.with(|s| {
+        let reg = s.borrow();
+        let id = *reg.by_path.get(path)?;
+        let file = reg.files.get((id.0 as usize).checked_sub(1)?)?;
+        Some(file.line_col(offset as u32).0)
+    })
+}
+
 /// The registered path for a `FileId`; `None` for the synthetic
 /// sentinel or an id from another ingest.
 pub fn path_of(id: FileId) -> Option<String> {
@@ -121,6 +135,17 @@ mod tests {
     fn unregistered_path_is_the_synthetic_sentinel() {
         reset();
         assert_eq!(file_id("nope.rb"), FileId(0));
+    }
+
+    #[test]
+    fn line_at_counts_newlines_up_to_the_offset() {
+        reset();
+        register("a.rb", "one\ntwo\nthree\n");
+        assert_eq!(line_at("a.rb", 0), Some(1));
+        assert_eq!(line_at("a.rb", 4), Some(2)); // start of "two"
+        assert_eq!(line_at("a.rb", 8), Some(3)); // start of "three"
+        assert_eq!(line_at("nope.rb", 0), None);
+        drain();
     }
 
     #[test]
