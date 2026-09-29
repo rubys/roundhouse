@@ -712,22 +712,14 @@ fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
             .collect();
     }
     if let Some(hash) = node.as_hash_node() {
-        return hash
-            .elements()
-            .iter()
-            .map(|el| {
-                let assoc = el.as_assoc_node()?;
-                let label = symbol_value(&assoc.key()).or_else(|| string_value(&assoc.key()))?;
-                let value = assoc.value();
-                let lit = if let Some(s) = string_value(&value) {
-                    Literal::Str { value: s }
-                } else {
-                    let raw = value.as_integer_node()?;
-                    Literal::Int { value: super::util::integer_i64(&raw.value())? }
-                };
-                Some((label, lit))
-            })
-            .collect();
+        return enum_label_pairs(hash.elements().iter());
+    }
+    // `enum :status, processing: 'processing', ready: 'ready'` — Rails 7's
+    // dominant spelling. A trailing bare-hash argument (no braces) parses
+    // as a `KeywordHashNode`, not a `HashNode`; its elements are the same
+    // `AssocNode`s either way, so the extraction logic is shared.
+    if let Some(kwhash) = node.as_keyword_hash_node() {
+        return enum_label_pairs(kwhash.elements().iter());
     }
     // `%w[ invisible nothing mentions ].index_by(&:itself)` — the labels
     // ARE the stored strings.
@@ -742,6 +734,29 @@ fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
         .map(|el| {
             let label = symbol_value(&el).or_else(|| string_value(&el))?;
             Some((label.clone(), Literal::Str { value: label }))
+        })
+        .collect()
+}
+
+/// Shared `label => value` extraction for both a braced `HashNode` and a
+/// bare trailing `KeywordHashNode` — same element shape (`AssocNode`s),
+/// different Prism wrapper type depending on whether the source wrote
+/// `{ … }` or left the braces off.
+fn enum_label_pairs<'a>(
+    elements: impl Iterator<Item = Node<'a>>,
+) -> Option<Vec<(String, Literal)>> {
+    elements
+        .map(|el| {
+            let assoc = el.as_assoc_node()?;
+            let label = symbol_value(&assoc.key()).or_else(|| string_value(&assoc.key()))?;
+            let value = assoc.value();
+            let lit = if let Some(s) = string_value(&value) {
+                Literal::Str { value: s }
+            } else {
+                let raw = value.as_integer_node()?;
+                Literal::Int { value: super::util::integer_i64(&raw.value())? }
+            };
+            Some((label, lit))
         })
         .collect()
 }

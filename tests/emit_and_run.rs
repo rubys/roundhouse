@@ -67,3 +67,35 @@ fn a_custom_form_builder_runs() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// The trailing-keyword-hash `enum` mapping (`enum :kind, kind:
+/// 'kind'`) — the dominant Rails 7 spelling, previously ledgered as
+/// "enum :x mapping must be an array or hash literal" because
+/// `enum_label_values` only recognized a braced `HashNode`. Overlays a
+/// single-label string-backed enum onto real-blog's Article, renders
+/// the predicate from the show view (a bare `run_ruby` probe would
+/// never call it, and treeshaking would drop the synthesized method as
+/// dead code — see the emitted tree's own treeshake log), and proves
+/// it evaluates true against a seeded article, not just that `check`
+/// accepts the declaration.
+#[test]
+fn enum_keyword_hash_mapping_predicate_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "t.string \"title\"\n    t.text \"body\"\n    t.datetime \"created_at\", null: false",
+            "t.string \"title\"\n    t.text \"body\"\n    t.string \"kind\", default: \"kind\", null: false\n    t.datetime \"created_at\", null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "has_many :comments, dependent: :destroy\n",
+            "has_many :comments, dependent: :destroy\n\n  enum :kind, kind: 'kind'\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <p id=\"kind-predicate\"><%= @article.kind? %></p>",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
