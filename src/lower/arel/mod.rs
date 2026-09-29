@@ -415,6 +415,11 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             f(body);
         }
         ExprNode::Lambda { body, .. } => f(body),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                f(r);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             f(fun);
             for a in args {

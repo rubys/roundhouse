@@ -1417,6 +1417,11 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
             collect_class_refs(body, out);
         }
         ExprNode::Lambda { body, .. } => collect_class_refs(body, out),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_class_refs(r, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_class_refs(cond, out);
             collect_class_refs(then_branch, out);
@@ -1635,6 +1640,10 @@ fn rewrite_free(e: &Expr) -> Expr {
             block_param: block_param.clone(),
             body: rewrite_free(body),
             block_style: *block_style,
+        },
+        ExprNode::MethodRef { recv, name } => ExprNode::MethodRef {
+            recv: recv.as_ref().map(rewrite_free),
+            name: name.clone(),
         },
         ExprNode::Assign { target, value } => {
             let new_target = rewrite_lvalue_free(target);
@@ -1865,6 +1874,20 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
             block_param: block_param.clone(),
             body: rewrite(body, super_method),
             block_style: *block_style,
+        },
+        // Mirrors the `Send { recv: None, .. }` case above: materialize
+        // the implicit self so a later pass sees an explicit `this.`
+        // receiver rather than having to special-case `None` again.
+        // (TS emit itself does not support `MethodRef` yet — see
+        // `emit/typescript/expr.rs`'s `report_unsupported` fallback —
+        // but this pass runs on the whole tree regardless.)
+        ExprNode::MethodRef { recv: None, name } => ExprNode::MethodRef {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            name: name.clone(),
+        },
+        ExprNode::MethodRef { recv: Some(r), name } => ExprNode::MethodRef {
+            recv: Some(rewrite(r, super_method)),
+            name: name.clone(),
         },
         ExprNode::Apply { fun, args, block } => ExprNode::Apply {
             fun: rewrite(fun, super_method),

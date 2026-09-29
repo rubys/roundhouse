@@ -635,6 +635,17 @@ fn emit_node(n: &ExprNode) -> String {
             n.kind_str(),
             "Crystal has no retry/redo equivalent",
         ),
+        // `&method(:name)` / `&recv.method(:name)` — the callee's
+        // arity is only known via the class registry, not statically
+        // at this call site; Crystal needs a concrete proc/closure
+        // type at the parameter, so degrade rather than guess. See
+        // `ExprNode::MethodRef`'s doc comment for the Ruby/Spinel path.
+        ExprNode::MethodRef { .. } => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "block argument is a bound-method reference (&method(:name))",
+        ),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();

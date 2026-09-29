@@ -841,3 +841,37 @@ fn a_local_holding_a_request_params_value_reads_it() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Gap F15 took `&method(:name)` from an ingest error (block-argument
+/// forms other than `&:symbol`/`&local_var` were unsupported) to
+/// clean, emitting `&method(:name)` verbatim (`ExprNode::MethodRef`).
+/// Invariant 6: prove the emitted PROGRAM runs it, not just that
+/// `check` stays quiet — a PORO under `app/lib` maps an array through
+/// a bound-method reference to its own helper, and a model test reads
+/// the result back.
+#[test]
+fn method_ref_block_arg_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/doubler.rb",
+            "class Doubler\n  \
+               def self.doubled(list)\n    \
+                 list.map(&method(:double))\n  \
+               end\n\n  \
+               def self.double(n)\n    \
+                 n * 2\n  \
+               end\n\
+             end\n",
+        )
+        .write(
+            "test/models/doubler_test.rb",
+            "require \"test_helper\"\n\n\
+             class DoublerTest < ActiveSupport::TestCase\n  \
+               test \"&method(:name) as a block argument runs\" do\n    \
+                 assert_equal [2, 4, 6], Doubler.doubled([1, 2, 3])\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/doubler_test.rb")
+        .assert_passes();
+}

@@ -464,6 +464,7 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
             references_var(value, name) || references_var(body, name)
         }
         ExprNode::Lambda { body, .. } => references_var(body, name),
+        ExprNode::MethodRef { recv, .. } => opt(recv, name),
         ExprNode::If { cond, then_branch, else_branch } => {
             references_var(cond, name)
                 || references_var(then_branch, name)

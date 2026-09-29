@@ -188,6 +188,11 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
             count_gradual_recurse(body, total);
         }
         N::Lambda { body, .. } => count_gradual_recurse(body, total),
+        N::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                count_gradual_recurse(r, total);
+            }
+        }
         N::Apply { fun, args, block } => {
             count_gradual_recurse(fun, total);
             for a in args { count_gradual_recurse(a, total); }
@@ -295,6 +300,11 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         }
         ExprNode::Lambda { body, .. } => {
             collect_untyped(body, &format!("{path}/lambda.body"), out)
+        }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_untyped(r, &format!("{path}/method_ref.recv"), out);
+            }
         }
         ExprNode::Apply { fun, args, block } => {
             collect_untyped(fun, &format!("{path}/apply.fun"), out);

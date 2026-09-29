@@ -544,6 +544,12 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             f(body); visit_subexprs(body, f);
         }
         ExprNode::Lambda { body, .. } => { f(body); visit_subexprs(body, f); }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                f(r);
+                visit_subexprs(r, f);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             f(fun); visit_subexprs(fun, f);
             for a in args { f(a); visit_subexprs(a, f); }

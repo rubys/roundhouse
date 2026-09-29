@@ -90,6 +90,11 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         ExprNode::Lambda { body, .. } => {
             collect_untyped(body, &format!("{path}/lambda.body"), out)
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_untyped(r, &format!("{path}/method_ref.recv"), out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             collect_untyped(fun, &format!("{path}/apply.fun"), out);
             for (i, a) in args.iter().enumerate() {

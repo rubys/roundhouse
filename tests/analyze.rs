@@ -601,6 +601,11 @@ fn action_aggregate_equals_subtree_fold() {
                 fold(body, acc);
             }
             ExprNode::Lambda { body, .. } => fold(body, acc),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    fold(r, acc);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 fold(fun, acc);
                 for a in args {
@@ -951,6 +956,11 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
         ExprNode::Lambda { body, .. } => {
             collect_ivar_reads(body, out);
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_ivar_reads(r, out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             collect_ivar_reads(fun, out);
             for a in args {
@@ -1130,6 +1140,11 @@ fn collect_bare_name_sends(
         }
         ExprNode::Lambda { body, .. } => {
             collect_bare_name_sends(body, out);
+        }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_bare_name_sends(r, out);
+            }
         }
         ExprNode::Apply { fun, args, block } => {
             collect_bare_name_sends(fun, out);
@@ -4504,4 +4519,54 @@ end
     for m in ["cast", "stringify_keys", "deep_symbolize_keys", "symbolize_keys", "upcase", "keys"] {
         assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
     }
+}
+
+// ── Gap F15: `&method(:name)` types via the referenced method's own
+// registered signature, same as ordinary dispatch. ──
+
+#[test]
+fn method_ref_block_arg_types_map_result_by_referenced_method_return_ty() {
+    // `double`'s param type comes from ITS OWN inferred/declared
+    // signature (the same registry lookup ordinary `Send` dispatch
+    // uses) — NOT from the block's yielded element type, since
+    // `&method(:double)` is not a `Send`, so `n` gets no evidence
+    // from `[1, 2, 3].map(...)` directly. `seed_double_arity`'s direct
+    // call is what makes `n`, and so `double`'s return, resolve to
+    // `Int` — the realistic case, since a helper referenced by
+    // `&method(:name)` is usually also called directly somewhere.
+    let files: &[(&str, &str)] = &[(
+        "app/lib/doubler.rb",
+        concat!(
+            "class Doubler\n",
+            "  def double(n)\n",
+            "    n * 2\n",
+            "  end\n",
+            "\n",
+            "  def seed_double_arity\n",
+            "    double(1)\n",
+            "  end\n",
+            "\n",
+            "  def doubled_list\n",
+            "    [1, 2, 3].map(&method(:double))\n",
+            "  end\n",
+            "end\n",
+        ),
+    )];
+    let app = app_from_files(files);
+    let lc = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Doubler")
+        .expect("Doubler ingested as a library class");
+    let doubled_list = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "doubled_list")
+        .expect("doubled_list present");
+    assert_eq!(
+        doubled_list.body.ty,
+        Some(Ty::Array { elem: Box::new(Ty::Int) }),
+        "[1, 2, 3].map(&method(:double)) should type as Array[Integer], got {:?}",
+        doubled_list.body.ty,
+    );
 }

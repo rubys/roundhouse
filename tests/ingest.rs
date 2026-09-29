@@ -1452,3 +1452,114 @@ fn computed_enum_index_by_and_index_with_over_constant_ingest() {
     assert_eq!(widget.enums.get(&roundhouse::Symbol::from("kind")).unwrap(), &expected);
     assert_eq!(widget.enums.get(&roundhouse::Symbol::from("variant")).unwrap(), &expected);
 }
+
+// ── Gap F15: block-argument forms other than `&:symbol`/`&local_var` ──
+
+#[test]
+fn block_arg_method_ref_bare() {
+    fn parse_one(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    let e = parse_one(b"[1, 2].map(&method(:double))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv, name } => {
+            assert!(recv.is_none(), "bare `method(:x)` has no receiver");
+            assert_eq!(name.as_str(), "double");
+        }
+        other => panic!("expected MethodRef, got {other:?}"),
+    }
+}
+
+#[test]
+fn block_arg_method_ref_self_and_recv() {
+    fn parse_one(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    let e = parse_one(b"[1, 2].map(&self.method(:triple))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv: Some(recv), name } => {
+            assert!(matches!(&*recv.node, ExprNode::SelfRef));
+            assert_eq!(name.as_str(), "triple");
+        }
+        other => panic!("expected MethodRef with SelfRef recv, got {other:?}"),
+    }
+
+    let e = parse_one(b"[1, 2].map(&widget.method(:quad))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv: Some(_), name } => {
+            assert_eq!(name.as_str(), "quad");
+        }
+        other => panic!("expected MethodRef with a receiver, got {other:?}"),
+    }
+}
+
+#[test]
+fn block_arg_stabby_lambda_and_proc_desugar_to_lambda() {
+    fn parse_one(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    for src in [
+        &b"[1, 2].each(&->(a) { a + 1 })"[..],
+        &b"[1, 2].each(&proc { |a| a + 1 })"[..],
+        &b"[1, 2].each(&lambda { |a| a + 1 })"[..],
+    ] {
+        let e = parse_one(src);
+        let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+            panic!("expected Send, got {:?}", e.node);
+        };
+        match &*block.node {
+            ExprNode::Lambda { params, .. } => {
+                assert_eq!(params.len(), 1, "source: {}", String::from_utf8_lossy(src));
+                assert_eq!(params[0].as_str(), "a");
+            }
+            other => panic!("expected Lambda, got {other:?} for {}", String::from_utf8_lossy(src)),
+        }
+    }
+}
+
+#[test]
+fn block_arg_ivar_and_call_result_have_specific_ledger_messages() {
+    fn parse_one_err(source: &[u8]) -> String {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        match roundhouse::ingest::ingest_expr(&stmt, "<literal>") {
+            Err(roundhouse::ingest::IngestError::Unsupported { message, .. }) => message,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        parse_one_err(b"[1, 2].each(&@callback)"),
+        "block argument is an instance variable"
+    );
+    assert_eq!(
+        parse_one_err(b"[1, 2].each(&compute(1))"),
+        "block argument is a call result"
+    );
+}

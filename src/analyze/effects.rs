@@ -108,6 +108,16 @@ impl super::Analyzer {
                 // proper treatment requires first-class Fn types. Skip for now.
                 self.visit_effects(body, ctx, out);
             }
+            ExprNode::MethodRef { recv, .. } => {
+                // `method(:name)` / `recv.method(:name)` — binding a
+                // Method object is pure (mirrors Lambda: only invoking
+                // it has effects, and there is no first-class Fn-effect
+                // tracking yet). Evaluating an explicit receiver can
+                // itself be effectful, so recurse into it.
+                if let Some(r) = recv {
+                    self.visit_effects(r, ctx, out);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 self.visit_effects(fun, ctx, out);
                 for a in args { self.visit_effects(a, ctx, out); }

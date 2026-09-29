@@ -4173,6 +4173,11 @@ impl Analyzer {
                 self.collect_send_sites(body, self_class, helpers, out);
             }
             ExprNode::Lambda { body, .. } => self.collect_send_sites(body, self_class, helpers, out),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    self.collect_send_sites(r, self_class, helpers, out);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 self.collect_send_sites(fun, self_class, helpers, out);
                 for a in args { self.collect_send_sites(a, self_class, helpers, out); }

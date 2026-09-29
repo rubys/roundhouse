@@ -156,6 +156,11 @@ fn collect_var_reads(
             }
         }
         ExprNode::Lambda { body, .. } => collect_var_reads(body, seq, out),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_var_reads(r, seq, out);
+            }
+        }
         ExprNode::Return { value } => collect_var_reads(value, seq, out),
         ExprNode::Raise { value } => collect_var_reads(value, seq, out),
         ExprNode::Yield { args } => {
@@ -348,6 +353,11 @@ fn stamp_var_reads(
             }
         }
         ExprNode::Lambda { body, .. } => stamp_var_reads(body, seq, counts, last_seq),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv.as_mut() {
+                stamp_var_reads(r, seq, counts, last_seq);
+            }
+        }
         ExprNode::Return { value } => stamp_var_reads(value, seq, counts, last_seq),
         ExprNode::Raise { value } => stamp_var_reads(value, seq, counts, last_seq),
         ExprNode::Yield { args } => {

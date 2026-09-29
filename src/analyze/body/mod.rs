@@ -806,6 +806,42 @@ impl<'a> BodyTyper<'a> {
                 }
             }
 
+            // `method(:name)` / `recv.method(:name)`. Unlike `&:sym`
+            // (desugared to a real `Lambda` calling through
+            // `block_ctx_for`'s elem-type binding), there is no body
+            // here to give per-block-arg types to — the callee's arity
+            // is a fact about `name`'s *definition*, not this call
+            // site. So type it the same way ordinary dispatch types
+            // any other call: resolve `name` on the receiver (explicit,
+            // or `self` when elided) through the SAME registry lookup
+            // `Send` uses, with no argument evidence (`&[]`) since none
+            // is available yet — the block's yielded values become
+            // ARGUMENTS to `name` at runtime, not evidence about ITS
+            // return type. `block_ret` in the `Send` arm below reads
+            // this node's type as the element type for map/select/etc.
+            //
+            // Known gap: `name`'s OWN param types come from its
+            // inferred/declared signature (call sites elsewhere,
+            // an RBS sig, …) — never from THIS site, since
+            // `collect_send_sites`'s evidence-gathering walk only
+            // reads `Send` nodes, and `&method(:name)` isn't one. A
+            // helper referenced ONLY via `&method(:name)` therefore
+            // types its params `Untyped` rather than the block's
+            // element type — a gradual fallback (not an unresolved
+            // `Var`, so invariant 1's zero-unresolved-type gate still
+            // holds), just a weaker inference than `&:sym` gets. See
+            // `tests/analyze.rs`'s `method_ref_block_arg_types_map_
+            // result_by_referenced_method_return_ty` for the case this
+            // does resolve (the common one — a helper also called
+            // directly somewhere feeds its own param types).
+            ExprNode::MethodRef { recv, name } => {
+                let recv_ty = match recv {
+                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    None => ctx.self_ty.clone(),
+                };
+                self.dispatch(recv_ty.as_ref(), name, None, &[])
+            }
+
             ExprNode::Apply { fun, args, block } => {
                 self.analyze_expr(fun, ctx);
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
@@ -901,14 +937,17 @@ impl<'a> BodyTyper<'a> {
                 }
                 let block_ret = if let Some(b) = block {
                     let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, args, b);
-                    self.analyze_expr(b, &block_ctx);
+                    let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
                     // on the body expr itself. `map`/`collect`/similar
                     // use that to determine the output element type.
-                    if let ExprNode::Lambda { body, .. } = &*b.node {
-                        body.ty.clone()
-                    } else {
-                        None
+                    // `MethodRef` (`&method(:name)`) has no body to
+                    // read from — its own computed type already IS
+                    // the referenced method's return type.
+                    match &*b.node {
+                        ExprNode::Lambda { body, .. } => body.ty.clone(),
+                        ExprNode::MethodRef { .. } => Some(method_ref_ty),
+                        _ => None,
                     }
                 } else {
                     None

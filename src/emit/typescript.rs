@@ -2644,6 +2644,11 @@ fn collect_ivar_assignments(
             collect_ivar_assignments(body, out);
         }
         ExprNode::Lambda { body, .. } => collect_ivar_assignments(body, out),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_ivar_assignments(r, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_ivar_assignments(cond, out);
             collect_ivar_assignments(then_branch, out);

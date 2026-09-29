@@ -781,6 +781,13 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // would need its own lookup. Phase 1 doesn't model it.
             count += walk(body, ParentExpect::None, ctx);
         }
+        ExprNode::MethodRef { recv, .. } => {
+            // No string constraint modeled for a bound-method
+            // reference's receiver, same as `Send`'s recv above.
+            if let Some(r) = recv.as_mut() {
+                count += walk(r, ParentExpect::None, ctx);
+            }
+        }
         ExprNode::RescueModifier { expr, fallback } => {
             // `expr rescue fallback` — both sides are value-position
             // and inherit the surrounding expectation.

@@ -407,6 +407,11 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
             walk(body, defs, diags);
         }
         ExprNode::Lambda { body, .. } => walk(body, defs, diags),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                walk(r, defs, diags);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             walk(cond, defs, diags);
             walk(then_branch, defs, diags);

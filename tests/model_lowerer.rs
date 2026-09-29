@@ -1098,6 +1098,11 @@ fn collect_untyped_lowered(
         ExprNode::Lambda { body, .. } => {
             collect_untyped_lowered(body, &format!("{path}/lambda.body"), out)
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_untyped_lowered(r, &format!("{path}/method_ref.recv"), out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             collect_untyped_lowered(fun, &format!("{path}/apply.fun"), out);
             for (i, a) in args.iter().enumerate() {

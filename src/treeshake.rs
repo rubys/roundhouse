@@ -317,6 +317,20 @@ where
             }
         }
         ExprNode::Lambda { body, .. } => walk_sends(body, visit),
+        // `method(:name)` / `recv.method(:name)` — a bound-method
+        // VALUE, not an invocation, but the referenced method must
+        // stay reachable: nothing else in the tree names it as a
+        // Send, and treeshaking it away would leave the runtime
+        // `Method` object dangling. Same conservative (name-only)
+        // resolution as an unresolved-receiver Send when `recv` is
+        // `None` (implicit self).
+        ExprNode::MethodRef { recv, name } => {
+            let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
+            visit(recv_ty, name);
+            if let Some(r) = recv {
+                walk_sends(r, visit);
+            }
+        }
         ExprNode::Let { value, body, .. } => {
             walk_sends(value, visit);
             walk_sends(body, visit);

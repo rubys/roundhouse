@@ -376,6 +376,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Lambda { body, .. } => {
             diagnose_expr(body, out);
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                diagnose_expr(r, out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             diagnose_expr(fun, out);
             for a in args {

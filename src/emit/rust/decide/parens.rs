@@ -140,6 +140,13 @@ fn walk_children(e: &mut Expr) {
             walk(value, false);
         }
         ExprNode::Lambda { body, .. } => walk(body, false),
+        // `recv.method(:name)` — same primary-demanding receiver
+        // position as `Send`.
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv.as_mut() {
+                walk(r, true);
+            }
+        }
         ExprNode::Return { value } => walk(value, false),
         ExprNode::Raise { value } => walk(value, false),
         ExprNode::Yield { args } => {

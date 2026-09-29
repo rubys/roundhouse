@@ -303,6 +303,23 @@ pub enum ExprNode {
         #[serde(default)]
         block_style: BlockStyle,
     },
+    /// A bound-method value: `method(:name)` (`recv: None`, dispatches
+    /// on `self`), `self.method(:name)` / `recv.method(:name)`
+    /// (`recv: Some(...)`). Surfaces almost exclusively in block-
+    /// argument position (`&method(:name)`) — see `ingest_call_block`
+    /// — but is a general value-producing node, not block-slot-only.
+    ///
+    /// Distinct from `Lambda` because there is no body to desugar to
+    /// at ingest time: the callee's arity is a property of `name`'s
+    /// *definition*, unknown until the class registry resolves it (see
+    /// `BodyTyper`'s `MethodRef` arm, which types this like a Send with
+    /// no args — same registry lookup ordinary dispatch uses). Ruby/
+    /// Spinel emit this verbatim (`&method(:name)`); Spinel supports
+    /// `Method` objects natively (see `~/working/spinel/README.md`
+    /// and `docs/limitations.md`'s extensive `obj.method(:m)`
+    /// coverage). Strict targets emit an `unsupported` stub — see each
+    /// emitter's `MethodRef` arm.
+    MethodRef { recv: Option<Expr>, name: Symbol },
     Apply { fun: Expr, args: Vec<Expr>, block: Option<Expr> },
     Send {
         /// `None` means implicit self (bare method call in current scope).
@@ -460,6 +477,7 @@ impl ExprNode {
             ExprNode::BoolOp { .. } => "BoolOp",
             ExprNode::Let { .. } => "Let",
             ExprNode::Lambda { .. } => "Lambda",
+            ExprNode::MethodRef { .. } => "MethodRef",
             ExprNode::Apply { .. } => "Apply",
             ExprNode::Send { .. } => "Send",
             ExprNode::If { .. } => "If",
@@ -552,6 +570,11 @@ impl ExprNode {
                 f(body);
             }
             ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 f(fun);
                 for a in args {
@@ -733,6 +756,11 @@ impl ExprNode {
                 f(body);
             }
             ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 f(fun);
                 for a in args {

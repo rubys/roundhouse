@@ -102,6 +102,11 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
         ExprNode::Lambda { body, .. } => {
             collect_types_expr(body, out);
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_types_expr(r, out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             collect_types_expr(fun, out);
             for a in args {
