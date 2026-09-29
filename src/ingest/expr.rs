@@ -557,18 +557,21 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // Rails view partials to check whether an optional local was
         // passed: `<% if defined?(show_tree_lines) && show_tree_lines %>`.
         //
-        // Restrict to the bareword shape Prism produces for the
-        // partial-local idiom: either a no-arg CallNode (when the name
-        // isn't lexically bound, which is the partial-local case) or a
-        // LocalVariableReadNode (when it IS bound). Both lift to a
-        // `Var(name)` reference inside a marker Send. Other shapes
-        // (`defined?(@ivar)`, `defined?(Foo)`, `defined?(obj.method)`)
-        // have target-different semantics and surface as Unsupported
-        // for now — lobsters/real-blog don't use them.
-        //
-        // The view-lowerer picks up the inner Var as a partial
-        // parameter (collect_extra_params) then rewrites the marker
-        // Send to `!name.nil?` (rewrite_defined_to_nil_check).
+        // The bareword shape Prism produces for the partial-local idiom
+        // — either a no-arg CallNode (when the name isn't lexically
+        // bound, which is the partial-local case) or a
+        // LocalVariableReadNode (when it IS bound) — lifts to a
+        // `Var(name)` reference inside a marker Send; the view-lowerer
+        // picks up that inner Var as a partial parameter
+        // (collect_extra_params) then rewrites the marker Send to
+        // `!name.nil?` (rewrite_defined_to_nil_check). `defined?(@ivar)`,
+        // `defined?(Const)` / `defined?(A::B)`, `defined?(a.b)`, and
+        // `defined?(super)` extend the same marker-Send shape with their
+        // own operand expression — none of them are partial-local
+        // guards, so the view-lowerer's Var-based rewrite never sees
+        // them, and the analyzer's universal `defined?` typing (`Str?`,
+        // see `analyze/body/send.rs`) covers all of them alike since it
+        // dispatches on the method name, not the operand shape.
         n if n.as_defined_node().is_some() => {
             let d = n.as_defined_node().unwrap();
             let inner = d.value();
@@ -598,42 +601,75 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     },
                 ));
             }
-            let name: Option<String> = if let Some(c) = inner.as_call_node() {
-                let bareword = c.receiver().is_none()
-                    && c.arguments().is_none()
-                    && c.block().is_none();
+            // `defined?(Const)` / `defined?(A::B)` — whether a constant
+            // resolves is, in principle, a fact the class registry could
+            // answer statically. Answering it here would mean
+            // duplicating the registry's own resolution timing inside
+            // ingest, before the registry is even built; leaving it as
+            // a runtime check — same marker-Send shape as every other
+            // `defined?` target — is exactly as correct (Ruby evaluates
+            // it at runtime too) and costs nothing extra.
+            let arg: Option<Expr> = if let Some(cr) = inner.as_constant_read_node() {
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from(constant_id_str(&cr.name()))] },
+                ))
+            } else if let Some(cp) = inner.as_constant_path_node() {
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: constant_path_segments(&cp) },
+                ))
+            } else if inner.as_forwarding_super_node().is_some() {
+                // `defined?(super)` — bare `super`, no parens. Same
+                // `ExprNode::Super` a plain `super` statement ingests
+                // to; `defined?` only asks whether it resolves; it does
+                // not invoke it.
+                Some(Expr::new(Span::synthetic(), ExprNode::Super { args: None }))
+            } else if let Some(c) = inner.as_call_node() {
+                let bareword =
+                    c.receiver().is_none() && c.arguments().is_none() && c.block().is_none();
                 if bareword {
-                    Some(constant_id_str(&c.name()).to_string())
-                } else {
-                    None
-                }
-            } else if let Some(lv) = inner.as_local_variable_read_node() {
-                Some(constant_id_str(&lv.name()).to_string())
-            } else {
-                None
-            };
-            match name {
-                Some(name) => {
-                    let var = Expr::new(
+                    Some(Expr::new(
                         Span::synthetic(),
                         ExprNode::Var {
                             id: crate::ident::VarId(0),
-                            name: Symbol::from(name),
+                            name: Symbol::from(constant_id_str(&c.name())),
                         },
-                    );
-                    ExprNode::Send {
-                        recv: None,
-                        method: Symbol::from("defined?"),
-                        args: vec![var],
-                        block: None,
-                        parenthesized: true,
-                    }
+                    ))
+                } else {
+                    // `defined?(a.b)` — a real receiver/call chain, not
+                    // the partial-local idiom. Ingest it exactly like
+                    // any other expression; `defined?` only asks
+                    // whether it would raise, not what it returns, but
+                    // giving the analyzer the real Send lets it
+                    // type-check the receiver and args the same as
+                    // anywhere else in the body.
+                    Some(ingest_expr(&c.as_node(), file)?)
                 }
+            } else if let Some(lv) = inner.as_local_variable_read_node() {
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: Symbol::from(constant_id_str(&lv.name())),
+                    },
+                ))
+            } else {
+                None
+            };
+            match arg {
+                Some(arg) => ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("defined?"),
+                    args: vec![arg],
+                    block: None,
+                    parenthesized: true,
+                },
                 None => {
                     return Err(IngestError::Unsupported {
                         file: file.into(),
                         message: format!(
-                            "`defined?` only supports bareword targets today: {inner:?}"
+                            "`defined?` does not support this target yet: {inner:?}"
                         ),
                     });
                 }

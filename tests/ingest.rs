@@ -1285,3 +1285,82 @@ fn multi_write_with_attr_targets_ingests_and_round_trips() {
         ref other => panic!("expected a MultiAssign, got {other:?}"),
     }
 }
+
+#[test]
+fn defined_extended_targets_ingest_and_round_trip() {
+    // `defined?` beyond the bareword partial-local idiom: a constant, a
+    // qualified constant path, a real receiver/call chain, and bare
+    // `super`. Each lifts to the same marker-Send shape the bareword
+    // form already used (`Send(None, :defined?, [operand])`), just with
+    // a richer operand — see the `n.as_defined_node()` arm in
+    // `src/ingest/expr.rs`.
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::expr::ExprNode;
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    // `defined?(Const)` — a bare constant operand.
+    let e = ingest_first(b"defined?(Widget)");
+    match &*e.node {
+        ExprNode::Send { recv: None, method, args, .. } => {
+            assert_eq!(method.as_str(), "defined?");
+            assert_eq!(args.len(), 1);
+            match &*args[0].node {
+                ExprNode::Const { path } => {
+                    assert_eq!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["Widget"]);
+                }
+                other => panic!("expected Const, got {other:?}"),
+            }
+        }
+        other => panic!("expected Send(defined?, ...), got {other:?}"),
+    }
+    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
+    assert_eq!(round_tripped, emit_expr(&e), "defined?(Const) must round-trip");
+
+    // `defined?(A::B)` — a qualified constant path.
+    let e = ingest_first(b"defined?(Widget::Kind)");
+    match &*e.node {
+        ExprNode::Send { args, .. } => match &*args[0].node {
+            ExprNode::Const { path } => {
+                assert_eq!(
+                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    vec!["Widget", "Kind"]
+                );
+            }
+            other => panic!("expected Const, got {other:?}"),
+        },
+        other => panic!("expected Send(defined?, ...), got {other:?}"),
+    }
+
+    // `defined?(a.b)` — a real receiver/call chain, not the bareword
+    // partial-local idiom (which has no receiver and no args).
+    let e = ingest_first(b"defined?(widget.kind)");
+    match &*e.node {
+        ExprNode::Send { args, .. } => match &*args[0].node {
+            ExprNode::Send { recv: Some(_), method, .. } => {
+                assert_eq!(method.as_str(), "kind");
+            }
+            other => panic!("expected a receiver Send, got {other:?}"),
+        },
+        other => panic!("expected Send(defined?, ...), got {other:?}"),
+    }
+    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
+    assert_eq!(round_tripped, emit_expr(&e), "defined?(a.b) must round-trip");
+
+    // `defined?(super)` — bare `super`, no parens.
+    let e = ingest_first(b"defined?(super)");
+    match &*e.node {
+        ExprNode::Send { args, .. } => {
+            assert!(matches!(&*args[0].node, ExprNode::Super { args: None }));
+        }
+        other => panic!("expected Send(defined?, ...), got {other:?}"),
+    }
+    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
+    assert_eq!(round_tripped, emit_expr(&e), "defined?(super) must round-trip");
+}
