@@ -1449,3 +1449,45 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
         "unparsed fragment (Prism recovery node)"
     );
 }
+
+#[test]
+fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
+    // `a, *b, c = expr` — a target AFTER the splat. `b` claims
+    // everything between the leading positionals and the trailing
+    // ones; `c` reads from the tail by negative index regardless of
+    // how long `b` ends up being.
+    use roundhouse::emit::ruby::emit_expr;
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    // The desugar expands one source statement into several emitted
+    // lines (a temp bind, then one assignment per target), so
+    // re-ingesting for the round-trip check needs the WHOLE statement
+    // list, not just its first line — mirrors how `ingest_ruby_program`
+    // (and `roundhouse-ast --round-trip`) ingest a full program.
+    fn ingest_program(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        roundhouse::ingest::ingest_expr(&prog.statements().as_node(), "<snippet>").unwrap()
+    }
+
+    let e = ingest_first(b"a, *b, c = [1, 2, 3, 4]");
+    let emitted = emit_expr(&e);
+    assert!(emitted.contains("a = "), "leading target reads positionally:\n{emitted}");
+    assert!(
+        emitted.contains("...-1]") || emitted.contains("... -1]"),
+        "the rest slice stops short of the trailing target(s):\n{emitted}"
+    );
+    assert!(emitted.contains("[-1]"), "the trailing target reads off the tail:\n{emitted}");
+
+    // Re-ingesting the emitted Ruby (now several statements) must reach
+    // the same fixed point.
+    assert_eq!(emit_expr(&ingest_program(emitted.as_bytes())), emitted);
+}

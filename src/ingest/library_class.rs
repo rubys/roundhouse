@@ -1712,37 +1712,48 @@ pub(super) fn ingest_library_method(
         }
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
-                if let Some(loc) = krp.name() {
-                    if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                        // `**options` is OPTIONAL in Ruby — it binds to
-                        // `{}` when the caller passes no keywords — and
-                        // the trailing positional it becomes here has to
-                        // say so, or every bare call is an ArgumentError.
-                        // campfire's `avatar_tag(user, **options)` is
-                        // called with one argument from the message row,
-                        // the user list and the sidebar.
-                        // Not beside a positional `*rest`: there the caller's
-                        // keywords already land in the rest, and the slot is
-                        // dropped on purpose (tests/initializer_defined_constants).
-                        if keeps_keywords && !params.iter().any(|p| p.rest && !p.keyword) {
-                            // The keyword group is kept in this def, so
-                            // `**rest` stays a keyword-rest: flattened to
-                            // `rest = {}` after a `name:` it does not parse
-                            // (`def call(server_context:, arguments = {})`).
-                            let mut p = Param::keyword(Symbol::from(s), None);
-                            p.rest = true;
-                            params.push(p);
-                        } else {
-                            let mut p = Param::with_default(
-                                Symbol::from(s),
-                                Expr::new(
-                                    Span::synthetic(),
-                                    ExprNode::Hash { entries: vec![], kwargs: false },
-                                ),
-                            );
-                            p.from_kwrest = true;
-                            params.push(p);
-                        }
+                // `def f(**); …; end` — anonymous keyword-rest (no name
+                // to forward under, just `**` at the call site). Prism
+                // still reports it as a `KeywordRestParameterNode`, only
+                // `name()` comes back empty; synthesize the same
+                // `__fwd_kwargs` binding name `pr/argument-forwarding`'s
+                // `...` desugar uses, so a bare `**` read at the call
+                // site (`ingest_hash_literal`'s anonymous-splat arm)
+                // resolves to a real parameter either way.
+                let name: Option<String> = match krp.name() {
+                    Some(loc) => std::str::from_utf8(loc.as_slice()).ok().map(str::to_string),
+                    None => Some("__fwd_kwargs".to_string()),
+                };
+                if let Some(name) = name {
+                    let name = name.as_str();
+                    // `**options` is OPTIONAL in Ruby — it binds to
+                    // `{}` when the caller passes no keywords — and
+                    // the trailing positional it becomes here has to
+                    // say so, or every bare call is an ArgumentError.
+                    // campfire's `avatar_tag(user, **options)` is
+                    // called with one argument from the message row,
+                    // the user list and the sidebar.
+                    // Not beside a positional `*rest`: there the caller's
+                    // keywords already land in the rest, and the slot is
+                    // dropped on purpose (tests/initializer_defined_constants).
+                    if keeps_keywords && !params.iter().any(|p| p.rest && !p.keyword) {
+                        // The keyword group is kept in this def, so
+                        // `**rest` stays a keyword-rest: flattened to
+                        // `rest = {}` after a `name:` it does not parse
+                        // (`def call(server_context:, arguments = {})`).
+                        let mut p = Param::keyword(Symbol::from(name), None);
+                        p.rest = true;
+                        params.push(p);
+                    } else {
+                        let mut p = Param::with_default(
+                            Symbol::from(name),
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Hash { entries: vec![], kwargs: false },
+                            ),
+                        );
+                        p.from_kwrest = true;
+                        params.push(p);
                     }
                 }
             }

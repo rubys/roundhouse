@@ -76,14 +76,6 @@ fn ingest_multi_write(
     span: Span,
     file: &str,
 ) -> IngestResult<ExprNode> {
-    // Post-rest targets (`*init, last = c`) need length-relative
-    // indexing off the tail; still out of scope.
-    if mw.rights().iter().next().is_some() {
-        return Err(IngestError::Unsupported {
-            file: file.into(),
-            message: "multi-write with post-rest targets not yet supported".into(),
-        });
-    }
     let mut targets: Vec<crate::expr::LValue> = Vec::new();
     for left in mw.lefts().iter() {
         targets.push(multi_write_target(&left, file)?);
@@ -107,11 +99,30 @@ fn ingest_multi_write(
     let tmp_read = || {
         Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp.clone() })
     };
-    let int_lit = |v: usize| {
-        Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v as i64 } })
+    let int_lit = |v: i64| {
+        Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } })
     };
+    let index_read = |index: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(tmp_read()),
+                method: Symbol::from("[]"),
+                args: vec![index],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    // `a, *b, c = expr` — POST-rest targets after the splat. Prism's
+    // `rights()` holds them (`c` here); reading them off the tail needs
+    // negative indices, and the rest binding (`b`) needs a slice rather
+    // than the plain `drop(n)` the no-rights case uses below — it has to
+    // stop short of the tail, not just skip the head.
+    let rights: Vec<Node<'_>> = mw.rights().iter().collect();
     let n_lefts = targets.len();
-    let mut exprs: Vec<Expr> = Vec::with_capacity(n_lefts + 3);
+    let n_rights = rights.len();
+    let mut exprs: Vec<Expr> = Vec::with_capacity(n_lefts + n_rights + 3);
     exprs.push(Expr::new(
         span,
         ExprNode::Assign {
@@ -120,33 +131,50 @@ fn ingest_multi_write(
         },
     ));
     for (i, target) in targets.into_iter().enumerate() {
-        let read = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(tmp_read()),
-                method: Symbol::from("[]"),
-                args: vec![int_lit(i)],
-                block: None,
-                parenthesized: true,
-            },
-        );
+        let read = index_read(int_lit(i as i64));
         exprs.push(Expr::new(span, ExprNode::Assign { target, value: read }));
     }
-    // Anonymous splat (`a, * = c`) discards the rest — only a named
-    // target gets a binding.
+    // Anonymous splat (`a, * = c` / `a, *, c = x`) discards the rest —
+    // only a named target gets a binding.
     if let Some(rest_node) = rest.as_splat_node().and_then(|s| s.expression()) {
         let rest_target = multi_write_target(&rest_node, file)?;
-        let drop = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(tmp_read()),
-                method: Symbol::from("drop"),
-                args: vec![int_lit(n_lefts)],
-                block: None,
-                parenthesized: true,
-            },
-        );
-        exprs.push(Expr::new(span, ExprNode::Assign { target: rest_target, value: drop }));
+        let rest_value = if n_rights == 0 {
+            // No post-rest targets: the rest is everything after the
+            // leading positionals.
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(tmp_read()),
+                    method: Symbol::from("drop"),
+                    args: vec![int_lit(n_lefts as i64)],
+                    block: None,
+                    parenthesized: true,
+                },
+            )
+        } else {
+            // Post-rest targets claim the tail: the rest is everything
+            // BETWEEN the leading positionals and the trailing ones —
+            // `temp[n_lefts...-n_rights]`, an exclusive range with a
+            // negative end that counts back from the tail regardless of
+            // the RHS's actual length.
+            index_read(Expr::new(
+                span,
+                ExprNode::Range {
+                    begin: Some(int_lit(n_lefts as i64)),
+                    end: Some(int_lit(-(n_rights as i64))),
+                    exclusive: true,
+                },
+            ))
+        };
+        exprs.push(Expr::new(span, ExprNode::Assign { target: rest_target, value: rest_value }));
+    }
+    // Each post-rest target reads from the tail by negative index:
+    // `a, *b, c, d = expr` puts `c` at `temp[-2]` and `d` at `temp[-1]`,
+    // regardless of how long `b` ends up being.
+    for (i, right_node) in rights.iter().enumerate() {
+        let target = multi_write_target(right_node, file)?;
+        let read = index_read(int_lit(-((n_rights - i) as i64)));
+        exprs.push(Expr::new(span, ExprNode::Assign { target, value: read }));
     }
     exprs.push(tmp_read());
     Ok(ExprNode::Seq { exprs })
@@ -2396,16 +2424,19 @@ fn ingest_hash_literal(
             });
         };
         // Anonymous `**` forwarding (`def f(**) ; g(**) ; end`) has no
-        // value to merge, and the declaration side drops the unnamed
-        // parameter — fail loud rather than emit a silently empty hash.
-        let Some(value) = splat.value() else {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "anonymous `**` keyword forwarding not yet supported".into(),
-            });
+        // value node of its own to ingest — `ingest_library_method`'s
+        // `keyword_rest` arm synthesizes a `__fwd_kwargs` parameter for
+        // exactly this case (same name `pr/argument-forwarding`'s `...`
+        // desugar uses), so a bare `**` here reads that binding rather
+        // than failing.
+        let value = match splat.value() {
+            Some(value) => ingest_expr(&value, file)?,
+            None => Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__fwd_kwargs") },
+            ),
         };
         saw_splat = true;
-        let value = ingest_expr(&value, file)?;
         chain = Some(merge_into(chain, std::mem::take(&mut pending), span, value));
     }
 
