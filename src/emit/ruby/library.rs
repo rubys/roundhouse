@@ -74,7 +74,38 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // head is skipped), so running it in both pipelines is safe.
 
     apply_constant_rooting(&mut lcs, app, RootingScope::RuntimeOnly);
+    // A nested class goes in its parent's file, as the source wrote
+    // it. Given its own, each part-file re-opened the outer class and
+    // CLOSED it again, and `TracePoint(:end)` — how a gem implements
+    // "end of class body" — fires on every close. A gem validating
+    // there saw a body missing what the parent's own file sets, and
+    // the tree stopped loading. Naming the same superclass in both
+    // places (see `outer_header`) makes the ORDER irrelevant; it
+    // cannot make the COUNT of body-ends one.
+    // Only into an owner THIS collection emits. A class nested in a
+    // MODEL (`Message::Broadcasts`) has its owner emitted by
+    // `emit_lowered_models`, a different pipeline — filtering it out
+    // here without anyone to splice it into made it vanish from the
+    // tree entirely, which the broadcast tests caught at once. Those
+    // keep their own file and the extra body-end with it; moving them
+    // is a change to the model emit, not to this one.
+    let emitted_here: std::collections::HashSet<&str> =
+        lcs.iter().map(|lc| lc.name.0.as_str()).collect();
+    let owner_in_this_tree = |lc: &LibraryClass| -> Option<String> {
+        let owner = file_owner(lc.name.0.as_str(), app);
+        (owner != lc.name.0.as_str() && emitted_here.contains(owner.as_str())).then_some(owner)
+    };
+
+    let mut children: std::collections::HashMap<String, Vec<&LibraryClass>> =
+        std::collections::HashMap::new();
+    for lc in &lcs {
+        if let Some(owner) = owner_in_this_tree(lc) {
+            children.entry(owner).or_default().push(lc);
+        }
+    }
+
     lcs.iter()
+        .filter(|lc| owner_in_this_tree(lc).is_none())
         .flat_map(|lc| {
             // `underscore`, not `snake_case`: a namespaced reopen
             // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
@@ -83,9 +114,200 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             // Makefile's dependency list.
             let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-            emit_library_class_pair(lc, app, out_path)
+            let mut files = emit_library_class_pair(lc, app, out_path);
+            if let Some(kids) = children.get(lc.name.0.as_str()) {
+                splice_nested(&mut files, lc, kids, app);
+            }
+            files
         })
         .collect()
+}
+
+/// A child's `require_relative` target, expressed from its parent's
+/// file instead of its own.
+///
+/// Both files live under `app/models/`, so the arithmetic is on that
+/// tree: resolve the target against the directory the child's file
+/// WOULD have had, then re-express it against the parent's.
+fn rebase_relative(child_stem: &str, parent_name: &str, target: &str, app: &App) -> String {
+    let _ = app;
+    // Anchored at the TREE root, not at `app/models`: a require can
+    // climb out of the models directory (`../../../runtime/x`), and
+    // arithmetic that starts inside it loses those steps silently —
+    // the `..` pops an empty stack and the path comes out too short.
+    let mut child_dir: Vec<String> =
+        vec!["app".to_string(), "models".to_string()];
+    child_dir.extend(child_stem.split('/').map(str::to_string));
+    child_dir.pop();
+    let parent_stem = crate::naming::underscore(parent_name);
+    let mut parent_dir: Vec<String> =
+        vec!["app".to_string(), "models".to_string()];
+    parent_dir.extend(parent_stem.split('/').map(str::to_string));
+    parent_dir.pop();
+
+    let mut resolved: Vec<String> = child_dir.clone();
+    for seg in target.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                resolved.pop();
+            }
+            other => resolved.push(other.to_string()),
+        }
+    }
+    // Longest common prefix, then `..` for what the parent has left.
+    let common = parent_dir
+        .iter()
+        .zip(resolved.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ups = parent_dir.len() - common;
+    let mut out: Vec<String> = std::iter::repeat_n("..".to_string(), ups).collect();
+    out.extend(resolved[common..].iter().cloned());
+    out.join("/")
+}
+
+/// Put each nested class's block inside its parent's file, before the
+/// parent's own body — the order the source has, and the only one that
+/// works when the parent's class body references them.
+///
+/// The child is rendered by the same function as before and its outer
+/// wrapper removed by COUNT, not by pattern: the parent's name has D
+/// segments, so the child's render opens with exactly D header lines
+/// and closes with exactly D `end`s, and what lies between is already
+/// at the indentation the parent's body wants.
+fn splice_nested(
+    files: &mut [EmittedFile],
+    parent: &LibraryClass,
+    kids: &[&LibraryClass],
+    app: &App,
+) {
+    let depth = parent.name.0.as_str().split("::").count();
+    // Order the children so a superclass precedes its subclass. They
+    // share one file now, so `class Image < Sound::ImageStruct` runs
+    // where the base must already be defined — the requirement the
+    // require between two files used to satisfy. Left to the
+    // collection's own order this works by luck.
+    let kids = {
+        let names: std::collections::HashSet<&str> =
+            kids.iter().map(|k| k.name.0.as_str()).collect();
+        let mut pending: Vec<&LibraryClass> = kids.to_vec();
+        let mut ordered: Vec<&LibraryClass> = Vec::new();
+        let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while !pending.is_empty() {
+            let before = pending.len();
+            pending.retain(|k| {
+                let waits_for = k
+                    .parent
+                    .as_ref()
+                    .map(|p| p.0.as_str())
+                    .filter(|p| names.contains(p) && !placed.contains(*p));
+                if waits_for.is_some() {
+                    return true;
+                }
+                placed.insert(k.name.0.as_str().to_string());
+                ordered.push(k);
+                false
+            });
+            // A cycle cannot be ordered and cannot be Ruby either;
+            // emit the rest as they came rather than loop forever.
+            if pending.len() == before {
+                ordered.extend(pending.drain(..));
+            }
+        }
+        ordered
+    };
+    let kids = &kids[..];
+    let mut blocks: Vec<String> = Vec::new();
+    let mut hoisted: Vec<String> = Vec::new();
+    for kid in kids {
+        let stem = crate::naming::underscore(kid.name.0.as_str());
+        let rendered =
+            emit_library_class_decl(kid, app, PathBuf::from(format!("app/models/{stem}.rb")));
+        let lines: Vec<&str> = rendered.content.lines().collect();
+        // Requires belong at the top of the file that now holds the
+        // class, not buried inside a class body where they would still
+        // execute but read as a mistake — and they have to be REBASED
+        // on the way: the child's were computed relative to the file
+        // it used to have, which sat one directory deeper per level of
+        // nesting. Hoisted verbatim they read `../../x` where the
+        // parent needs `../x`, which is a load error the day someone
+        // reaches that constant.
+        for line in lines.iter().filter(|l| l.starts_with("require_relative ")) {
+            let Some(rest) = line.strip_prefix("require_relative ") else { continue };
+            let target = rest.trim().trim_matches('"');
+            let rebased = rebase_relative(&stem, parent.name.0.as_str(), target, app);
+            // A sibling that is now in THIS file needs no require, and
+            // naming it would name a path that no longer exists: one
+            // child referencing another is the common case in a class
+            // that nests several.
+            let own_dir = format!("{}/", crate::naming::underscore(parent.name.0.as_str()));
+            let own_dir = own_dir.rsplit('/').nth(1).map(|d| format!("{d}/"));
+            if own_dir.is_some_and(|d| rebased.starts_with(&d)) {
+                continue;
+            }
+            hoisted.push(format!("require_relative {rebased:?}"));
+        }
+        // A plain `require "x"` names a library, not a path, and is
+        // carried as written.
+        hoisted.extend(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("require \""))
+                .map(|l| l.to_string()),
+        );
+        let body: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| !l.starts_with("require"))
+            .collect();
+        let first = body.iter().position(|l| !l.trim().is_empty());
+        let Some(first) = first else { continue };
+        let open = first + depth;
+        let close = body
+            .iter()
+            .rposition(|l| l.trim() == "end")
+            .map(|last| last + 1 - depth);
+        let Some(close) = close else { continue };
+        if open >= close {
+            continue;
+        }
+        blocks.push(body[open..close].join("
+"));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+    let Some(rb) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rb")) else {
+        return;
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut inserted = false;
+    let own_header_indent = "  ".repeat(depth - 1);
+    for line in rb.content.lines() {
+        out.push(line.to_string());
+        if !inserted
+            && line.starts_with(&format!("{own_header_indent}class "))
+            && line.trim_start().starts_with("class ")
+        {
+            out.extend(blocks.iter().cloned());
+            inserted = true;
+        }
+    }
+    if !inserted {
+        return;
+    }
+    let mut content = String::new();
+    for r in &hoisted {
+        content.push_str(r);
+        content.push('\n');
+    }
+    if !hoisted.is_empty() {
+        content.push('\n');
+    }
+    content.push_str(&out.join("\n"));
+    content.push('\n');
+    rb.content = content;
 }
 
 use crate::facades::{Facade, EXTRAS_FACADES};
@@ -6123,6 +6345,46 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
 
 /// Is this name one of the app's own CLASSES (not a module)? Namespace
 /// segments that name one must reopen as `class`, not `module`.
+/// The file a class belongs in: the OUTERMOST enclosing app class, or
+/// the class itself when no enclosing segment is one.
+///
+/// A nested class used to get a file of its own, which meant every
+/// part-file re-opened the outer class and CLOSED it again — and
+/// `TracePoint(:end)`, which is how a gem implements "end of class
+/// body", fires on each of those closes. A gem that validates there
+/// saw a body missing what the parent's own file sets. Naming the same
+/// superclass in both places (see `outer_header`) makes the ORDER
+/// irrelevant; it cannot make the COUNT of body-ends one.
+///
+/// Outermost rather than nearest: `A::B::C::D` with both `A::B` and
+/// `A::B::C` classes belongs in `A::B`'s file, because that is the
+/// body whose end must happen once.
+pub(super) fn file_owner(name: &str, app: &App) -> String {
+    let segments: Vec<&str> = name.split("::").collect();
+    for i in 0..segments.len().saturating_sub(1) {
+        let prefix = segments[..=i].join("::");
+        if owns_a_file(&prefix, app) {
+            return prefix;
+        }
+    }
+    name.to_string()
+}
+
+/// A class that can absorb its nested classes: a LIBRARY class, not a
+/// model.
+///
+/// Models are emitted by a different pipeline, so there is nothing for
+/// a nested class to be spliced into and it keeps its own file. The
+/// emit already knew that; the path resolver did not, and answered
+/// "same file, no require needed" for `Account::Joinable` nested in
+/// the MODEL `Account` — whose file then referenced a constant nothing
+/// had loaded. Both sides ask this now.
+fn owns_a_file(name: &str, app: &App) -> bool {
+    app.library_classes
+        .iter()
+        .any(|c| c.name.0.as_str() == name && !c.is_module)
+}
+
 fn is_app_class(name: &str, app: &App) -> bool {
     app.models.iter().any(|m| m.name.0.as_str() == name)
         || app
@@ -6296,7 +6558,14 @@ fn require_path_for_body_const(
         && (app.models.iter().any(|m| m.name.0.as_str() == joined)
             || app.library_classes.iter().any(|lc| lc.name.0.as_str() == joined))
     {
-        return Some(format!("app/models/{}", crate::naming::underscore(&joined)));
+        // The file that DEFINES it, which for a nested class is its
+        // parent's — and when that is the file being emitted, there is
+        // nothing to require: the class is already in it.
+        let owner = file_owner(&joined, app);
+        if owner == self_name {
+            return None;
+        }
+        return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
     // A bare reference inside a namespace resolves LEXICALLY first:
     // campfire's `module ContentFilters` builds
@@ -6312,7 +6581,11 @@ fn require_path_for_body_const(
         && (app.models.iter().any(|m| m.name.0.as_str() == lexical)
             || app.library_classes.iter().any(|lc| lc.name.0.as_str() == lexical))
     {
-        return Some(format!("app/models/{}", crate::naming::underscore(&lexical)));
+        let owner = file_owner(&lexical, app);
+        if owner == self_name {
+            return None;
+        }
+        return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
     if first == self_name {
         return None;

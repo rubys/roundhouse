@@ -54,16 +54,21 @@ fn find<'a>(files: &'a [(String, String)], stem: &str) -> &'a str {
 #[test]
 fn the_superclass_expression_becomes_a_named_class() {
     let files = emitted(SOUND);
-    let image = find(&files, "image.rb");
-    assert!(image.contains("class Image < Sound::ImageStruct"), "{image}");
-    // The base has to be LOADED when the `class X < Y` line runs.
-    assert!(image.contains("require_relative \"image_struct\""), "{image}");
+    // Both live in their parent's file now, so the assertion is on
+    // ORDER rather than on a require between two files: the base has
+    // to be defined when the `class X < Y` line runs, and that is the
+    // requirement either layout has to meet.
+    let sound = find(&files, "sound.rb");
+    assert!(sound.contains("class Image < Sound::ImageStruct"), "{sound}");
+    let base_at = sound.find("class ImageStruct").expect("the base is emitted");
+    let sub_at = sound.find("class Image <").expect("the subclass is emitted");
+    assert!(base_at < sub_at, "the base must come first:\n{sound}");
 }
 
 #[test]
 fn the_named_base_carries_the_positional_constructor_super_calls() {
     let files = emitted(SOUND);
-    let base = find(&files, "image_struct.rb");
+    let base = find(&files, "sound.rb");
     assert!(
         base.contains("def initialize(asset_path = nil, width = nil, height = nil)"),
         "{base}"
@@ -87,7 +92,7 @@ fn the_keyword_init_form_is_not_claimed() {
 end
 "#,
     );
-    let image = find(&files, "image.rb");
+    let image = find(&files, "sound.rb");
     assert!(!image.contains("ImageStruct"), "{image}");
     assert!(files.iter().all(|(p, _)| !p.ends_with("image_struct.rb")), "{files:?}");
 }
