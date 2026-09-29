@@ -1864,6 +1864,51 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_def_node().is_some() => {
             ExprNode::Lit { value: Literal::Nil }
         }
+        // Backticks / `%x{…}` — a shell-out (`Kernel#\``). Not a
+        // construct any target can run, and not worth pretending to
+        // model; ledgered by name so it stops reading as the generic
+        // "unsupported expression node" catch-all.
+        n if n.as_x_string_node().is_some() || n.as_interpolated_x_string_node().is_some() => {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "shell command (backticks) is not modeled".into(),
+            });
+        }
+        // Prism's error-recovery node: the parser hit something it
+        // couldn't make sense of and inserted a placeholder to keep
+        // going. There is no real construct here to ingest — ledgered
+        // by name rather than falling through to the generic message,
+        // which would misleadingly imply a real Ruby node was rejected.
+        n if n.as_missing_node().is_some() => {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "unparsed fragment (Prism recovery node)".into(),
+            });
+        }
+        // `$stdout = …` — a global-variable write. Reads of the same
+        // sigil already ingest (see `n.as_global_variable_read_node()`
+        // above); writing global state isn't modeled, and the specific
+        // message says exactly what's missing instead of the generic one.
+        n if n.as_global_variable_write_node().is_some() => {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "global variable write".into(),
+            });
+        }
+        // `class`/`module` at expression position — e.g. inside a
+        // method or block body (`Class.new { class Foo; end }`,
+        // conditionally-defined classes). Unlike the class-BODY
+        // constructs `ingest::model`/`ingest::library_class` walk, a
+        // class or module built at runtime, mid-method, has no static
+        // home in the IR's class-table model — ledgered specifically
+        // rather than falling through to the generic message.
+        n if n.as_class_node().is_some() || n.as_module_node().is_some() => {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "class/module defined inside a method or block (runtime class definition)"
+                    .into(),
+            });
+        }
         other => {
             return Err(IngestError::Unsupported {
                 file: file.into(),

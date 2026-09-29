@@ -1407,3 +1407,45 @@ fn class_variable_compound_assignment_in_method_body_ingests_and_round_trips() {
     assert_eq!(emitted, "@@count = 1");
     assert_eq!(emit_expr(&ingest_first(emitted.as_bytes())), emitted);
 }
+
+#[test]
+fn specific_ledger_messages_replace_the_generic_catch_all() {
+    // Constructs that cannot round-trip at all (a shell-out, a Prism
+    // recovery node, a global write, a runtime class/module def) should
+    // report BY NAME, not fall through to "unsupported expression node:
+    // <debug dump>" — the generic message that makes every one of these
+    // indistinguishable in the ledger.
+    use roundhouse::ingest::IngestError;
+
+    fn ingest_first_err(source: &[u8]) -> String {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        match roundhouse::ingest::ingest_expr(&stmt, "<snippet>") {
+            Err(IngestError::Unsupported { message, .. }) => message,
+            other => panic!("expected IngestError::Unsupported, got {other:?}"),
+        }
+    }
+
+    assert_eq!(ingest_first_err(b"`ls`"), "shell command (backticks) is not modeled");
+    assert_eq!(
+        ingest_first_err(b"%x{ls}"),
+        "shell command (backticks) is not modeled"
+    );
+    assert_eq!(ingest_first_err(b"$stdout = out"), "global variable write");
+    assert_eq!(
+        ingest_first_err(b"class Foo; end"),
+        "class/module defined inside a method or block (runtime class definition)"
+    );
+    assert_eq!(
+        ingest_first_err(b"module Foo; end"),
+        "class/module defined inside a method or block (runtime class definition)"
+    );
+    // `1 + ` — a dangling binary operator. Prism recovers by inserting a
+    // `MissingNode` in the missing operand's place.
+    assert_eq!(
+        ingest_first_err(b"1 + "),
+        "unparsed fragment (Prism recovery node)"
+    );
+}
