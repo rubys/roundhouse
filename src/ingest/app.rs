@@ -1483,7 +1483,19 @@ end
         }
     }
 
-    app.sources = super::sources::drain();
+    // A SNAPSHOT, not the real `drain`: `keep_initializer_defined` just
+    // below needs to read the app's real source text right now, but
+    // the real files' `FileId`s must stay live (not reset to empty)
+    // through every synthesizing pass below — `current_attributes`,
+    // `delegate`, `channel_callbacks`, `allow_browser`, `rate_limit` —
+    // each of which re-ingests generated Ruby of its own. Draining here
+    // and letting the registry start over at `FileId(1)` mid-pipeline
+    // is exactly how a synthesized parse failure once rendered against
+    // an unrelated real file that happened to share the reused id (see
+    // `ingest::sources`'s module doc). The real `drain` — the one that
+    // actually clears the registry and becomes `app.sources` for
+    // good — runs after all of them, below.
+    app.sources = super::sources::snapshot();
     keep_initializer_defined(&mut app, dir, initializer_defined);
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
@@ -1516,6 +1528,14 @@ end
     // the controller that called it directly.
     super::allow_browser::lower_allow_browser(&mut app);
     super::rate_limit::lower_rate_limit(&mut app);
+    // The real drain, now that every pass re-ingesting synthesized
+    // Ruby has run — see the snapshot comment above. `app.sources`
+    // held the pre-synthesis snapshot until now; this replaces it with
+    // the complete, contiguously-numbered table (each synthesized
+    // pass's own `"<label>"` re-ingest never took a slot in it at all —
+    // `sources::register` refuses a label starting with `<` — so this
+    // is the same real-file list the snapshot already had).
+    app.sources = super::sources::drain();
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.

@@ -41,11 +41,18 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 /// One expanded `delegate` entry: `<name>` forwards to `<target>.<method>`.
+#[derive(Debug)]
 struct Delegation {
     method: Symbol,
     target: Symbol,
     name: String,
     allow_nil: bool,
+    /// The real app file the `delegate` call was declared in, when the
+    /// source registry can still resolve it (it can, at this point in
+    /// the pipeline — see `ingest::sources`'s module doc). Empty when
+    /// it can't; callers fall back to the pass's own `"<delegate>"`
+    /// label for a synthesis-failure report rather than misattribute.
+    file: String,
 }
 
 /// Expand every `delegate … to: …` the app's library classes declare.
@@ -61,8 +68,22 @@ pub fn lower_delegates(app: &mut crate::App) {
             continue;
         }
         let src = synthesized_source(lc, &delegates);
-        let methods = match crate::ingest::ingest_library_classes(src.as_bytes(), "<delegate>") {
-            Ok(classes) => classes.into_iter().flat_map(|c| c.methods).collect(),
+        // Isolated in its OWN scope — never the outer one that spans
+        // the whole app's ingest — so a bug in `synthesized_source`
+        // can't render its parse errors against an unrelated real
+        // file (see `ingest::sources`'s module doc for how that
+        // happened before this existed).
+        let (parsed, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::ingest_library_classes(src.as_bytes(), "<delegate>")
+        });
+        let methods = match parsed {
+            Ok(classes) if diags.is_empty() => {
+                classes.into_iter().flat_map(|c| c.methods).collect()
+            }
+            Ok(_) => {
+                record_synthesis_failure(&delegates, &diags);
+                Vec::new()
+            }
             Err(err) => {
                 super::survey::record(&err);
                 Vec::new()
@@ -73,6 +94,25 @@ pub fn lower_delegates(app: &mut crate::App) {
     for (i, methods) in generated {
         app.library_classes[i].methods.extend(methods);
     }
+}
+
+/// `synthesized_source` produced Ruby Prism couldn't parse cleanly —
+/// roundhouse's gap, not the app's. Record one survey entry naming
+/// every delegated name in this class's declaration, attributed to the
+/// real file when a delegated call's own span still resolves one.
+fn record_synthesis_failure(delegates: &[Delegation], diags: &[crate::diagnostic::Diagnostic]) {
+    let names = delegates
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let file = delegates
+        .iter()
+        .map(|d| d.file.as_str())
+        .find(|f| !f.is_empty())
+        .unwrap_or("<delegate>")
+        .to_string();
+    super::survey::record_synthesis_failure(file, &format!("delegate forwarder for `{names}`"), diags);
 }
 
 /// Consume the declarations this pass can reproduce EXACTLY, leaving
@@ -127,18 +167,32 @@ fn take_delegate_decls(lc: &mut LibraryClass) -> Vec<Delegation> {
         if unknown_option || names.is_empty() {
             return true;
         }
-        // Arguments at a call site mean the forwarder needs to forward
-        // them — see the module header.
-        if names.iter().any(|n| called_with_args.contains(n.as_str())) {
+        // `[]=` takes two arguments (key, value) — the one shape a
+        // trailing `=` does NOT mean "single-value setter" for. Rails
+        // excludes it from the writer-arity rule for the same reason;
+        // this pass has no argument forwarding (see the module
+        // header), so it declines the whole declaration rather than
+        // synthesize a one-arg forwarder for a two-arg method.
+        if names.iter().any(|n| n.as_str() == "[]=") {
             return true;
         }
+        // Arguments at a call site mean the forwarder needs to forward
+        // them — see the module header. A setter is exempt: Ruby's own
+        // assignment syntax fixes its arity at exactly one, so
+        // `self.behavior = v` calling `behavior=` WITH an argument is
+        // not evidence this pass can't cover it — it's what every
+        // setter call looks like, delegated or not.
+        if names.iter().any(|n| !n.as_str().ends_with('=') && called_with_args.contains(n.as_str())) {
+            return true;
+        }
+        let file = super::sources::path_of(call.span.file).unwrap_or_default();
         for m in names {
             let name = if prefix {
                 format!("{}_{}", target.as_str(), m.as_str())
             } else {
                 m.as_str().to_string()
             };
-            out.push(Delegation { method: m, target: target.clone(), name, allow_nil });
+            out.push(Delegation { method: m, target: target.clone(), name, allow_nil, file: file.clone() });
         }
         false
     });
@@ -179,7 +233,25 @@ fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
             continue;
         }
         let (t, m) = (d.target.as_str(), d.method.as_str());
-        if d.allow_nil {
+        if let Some(setter) = m.strip_suffix('=') {
+            // Rails forwards a setter with the one argument its own
+            // `def name=(arg)` shape always takes — `delegate :name=`
+            // (and, with `prefix: true`, `d.name` is already
+            // `<prefix>_name=`) needs no argument forwarding the way a
+            // plain method might: assignment syntax fixes the arity.
+            if d.allow_nil {
+                // Parenthesized so the assignment, not the ternary,
+                // binds first — same "ends in a read" shape the getter
+                // ternary below keeps, since an assignment expression
+                // is itself a read of the value it just stored.
+                body.push_str(&format!(
+                    "  def {}(value)\n    {t}.nil? ? nil : ({t}.{setter} = value)\n  end\n\n",
+                    d.name
+                ));
+            } else {
+                body.push_str(&format!("  def {}(value)\n    {t}.{setter} = value\n  end\n\n", d.name));
+            }
+        } else if d.allow_nil {
             // A ternary, not `return nil if …`: it leaves the method
             // ending in a read, which is what the strict targets want
             // of a non-void body.
@@ -191,4 +263,165 @@ fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
     // The class name is irrelevant — only the METHODS are lifted out of
     // the parse — but a wrapper is needed for the bodies to be methods.
     format!("class {}\n{body}end\n", lc.name.0.as_str().replace("::", "__"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialect::AccessorKind;
+    use crate::effect::EffectSet;
+    use crate::span::Span;
+
+    fn library_class(src: &str) -> LibraryClass {
+        crate::ingest::ingest_library_class(src.as_bytes(), "app/lib/deprecation.rb")
+            .unwrap()
+            .unwrap()
+    }
+
+    /// `synthesized_source`'s output, re-parsed the same way
+    /// `lower_delegates` re-parses it — the same round trip that
+    /// catches Bug A (a setter `def` with no parameter and a bare
+    /// `x.y=` call is two syntax errors, not zero).
+    fn synthesized_methods(lc: &LibraryClass, delegates: &[Delegation]) -> Vec<MethodDef> {
+        let src = synthesized_source(lc, delegates);
+        crate::ingest::ingest_library_classes(src.as_bytes(), "<test>")
+            .unwrap_or_else(|e| panic!("synthesized source failed to parse: {e}\n{src}"))
+            .into_iter()
+            .flat_map(|c| c.methods)
+            .collect()
+    }
+
+    #[test]
+    fn a_delegated_getter_and_setter_pair_both_synthesize() {
+        let mut lc = library_class(
+            "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior, :behavior=, to: :deprecator\nend\n",
+        );
+        let delegates = take_delegate_decls(&mut lc);
+        assert_eq!(delegates.len(), 2);
+        assert!(lc.unknown_calls.is_empty(), "the declaration should be consumed");
+
+        let methods = synthesized_methods(&lc, &delegates);
+        let getter = methods
+            .iter()
+            .find(|m| m.name.as_str() == "behavior")
+            .expect("getter should be synthesized");
+        assert!(getter.params.is_empty(), "a getter forwarder takes no arguments");
+
+        let setter = methods
+            .iter()
+            .find(|m| m.name.as_str() == "behavior=")
+            .expect("setter should be synthesized");
+        assert_eq!(setter.params.len(), 1, "a setter forwarder takes exactly the one argument Ruby's own assignment syntax supplies");
+    }
+
+    #[test]
+    fn prefix_true_composes_with_the_setter_name_too() {
+        let mut lc = library_class(
+            "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior=, to: :deprecator, prefix: true\nend\n",
+        );
+        let delegates = take_delegate_decls(&mut lc);
+        assert_eq!(delegates.len(), 1);
+        assert_eq!(delegates[0].name, "deprecator_behavior=", "prefix composes ahead of the delegated name, trailing `=` intact");
+
+        let methods = synthesized_methods(&lc, &delegates);
+        let setter = methods
+            .iter()
+            .find(|m| m.name.as_str() == "deprecator_behavior=")
+            .expect("prefixed setter should be synthesized under its prefixed name");
+        assert_eq!(setter.params.len(), 1);
+    }
+
+    #[test]
+    fn allow_nil_setter_stays_a_ternary_that_ends_in_a_read() {
+        let mut lc = library_class(
+            "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior=, to: :deprecator, allow_nil: true\nend\n",
+        );
+        let delegates = take_delegate_decls(&mut lc);
+        assert_eq!(delegates.len(), 1);
+        assert!(delegates[0].allow_nil);
+
+        let methods = synthesized_methods(&lc, &delegates);
+        let setter = methods
+            .iter()
+            .find(|m| m.name.as_str() == "behavior=")
+            .expect("allow_nil setter should still be synthesized");
+        assert_eq!(setter.params.len(), 1);
+        // The body is a Ternary (an `If` in this IR's expression form)
+        // rather than a bare Assign — the same "ends in a read" shape
+        // the getter's own allow_nil branch keeps.
+        assert!(
+            matches!(&*setter.body.node, ExprNode::If { .. }),
+            "expected the allow_nil ternary shape, got {:?}",
+            setter.body.node
+        );
+    }
+
+    #[test]
+    fn bracket_assign_is_declined_not_half_synthesized() {
+        // `[]=` takes two arguments (key, value); this pass forwards
+        // none, so a one-arg forwarder for it would be a silent arity
+        // bug standing in for a working delegate — worse than leaving
+        // it undelegated and visible.
+        let mut lc = library_class(
+            "class Store\n  attr_accessor :backing\n\n  delegate :[]=, to: :backing\nend\n",
+        );
+        let delegates = take_delegate_decls(&mut lc);
+        assert!(delegates.is_empty(), "[]= should stay undelegated: {delegates:?}");
+        assert_eq!(lc.unknown_calls.len(), 1, "the declaration stays visible rather than half-expanded");
+    }
+
+    /// Ordinary Ruby can't actually produce a `Send { recv: None,
+    /// method: "behavior=", .. }` node — `self.behavior = v` always
+    /// carries an explicit receiver; a bare `behavior = v` is *always*
+    /// local-variable assignment in Ruby, never a method send,
+    /// delegated or not. So `names_called_with_arguments` (which only
+    /// collects receiverless sends) can never actually hold a
+    /// `"name="` key from real source today, and this guard's setter
+    /// exemption is not reachable through the parser as things stand.
+    /// It is still the right rule to state — the arity a `def name=`
+    /// forwarder needs is fixed by Ruby's own assignment grammar, not
+    /// by anything a call site can be observed doing — and cheap
+    /// insurance against a future IR change (or a metaprogrammed call
+    /// site this ingest doesn't model yet) making such a node
+    /// possible. Pinned directly against hand-built IR since the
+    /// parser has no way to hand us this shape.
+    #[test]
+    fn a_setter_name_is_exempt_from_the_called_with_arguments_guard() {
+        let mut lc = library_class(
+            "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior=, to: :deprecator\nend\n",
+        );
+        lc.methods.push(MethodDef {
+            name: Symbol::from("reset!"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            block_param: None,
+            name_span: Span::synthetic(),
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("behavior="),
+                    args: vec![Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from("warn") } },
+                    )],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        });
+
+        let delegates = take_delegate_decls(&mut lc);
+        assert_eq!(
+            delegates.len(),
+            1,
+            "a setter's fixed arity exempts it from the call-site-arguments heuristic"
+        );
+    }
 }

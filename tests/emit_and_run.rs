@@ -17,6 +17,38 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
+/// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
+/// errors) to working is a claim the emitted program actually runs a
+/// SET through it, not just that `check` stays clean (invariant 6). A
+/// PORO under `app/lib` (the same shape `procore_os/deprecation.rb`
+/// declares: `attr_accessor` on the target, `delegate` for a setter)
+/// forwards to another object — reusing `Article`, since it already
+/// has a `title` column — and a model test sets through the forwarder
+/// and reads the value back off the target.
+#[test]
+fn a_delegated_setter_forwards_through_to_its_target() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/deprecation.rb",
+            "class Deprecation\n  attr_accessor :inner\n\n  delegate :title=, to: :inner\nend\n",
+        )
+        .write(
+            "test/models/deprecation_test.rb",
+            "require \"test_helper\"\n\n\
+             class DeprecationTest < ActiveSupport::TestCase\n  \
+               test \"a delegated setter forwards through to its target\" do\n    \
+                 d = Deprecation.new\n    \
+                 d.inner = Article.new\n    \
+                 d.title = \"Reused\"\n    \
+                 assert_equal \"Reused\", d.inner.title\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/deprecation_test.rb")
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, which took the
 /// call from an error to clean, but no runtime defines it, so every
 /// page rendering the form raises `undefined method

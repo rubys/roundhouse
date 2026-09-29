@@ -83,10 +83,26 @@ pub fn lower_rate_limit(app: &mut crate::App) {
             controller.name.0.as_str(),
             methods
         );
-        let parsed = match super::controller::ingest_controller(src.as_bytes(), "<rate_limit>") {
-            Ok(Some(c)) => c,
-            Ok(None) => continue,
-            Err(err) => {
+        // Isolated in its own `prism::scope` — never the outer one
+        // that spans the whole app's ingest — so a bug in the
+        // generated method source can't render its parse errors
+        // against an unrelated real file (see `ingest::sources`'s
+        // module doc).
+        let (result, diags) = crate::ingest::prism::scope(|| {
+            super::controller::ingest_controller(src.as_bytes(), "<rate_limit>")
+        });
+        let parsed = match (result, diags.is_empty()) {
+            (Ok(Some(c)), true) => c,
+            (Ok(None), true) => continue,
+            (Ok(_), false) => {
+                super::survey::record_synthesis_failure(
+                    "<rate_limit>",
+                    &format!("rate_limit forwarder for `{}`", controller.name.0.as_str()),
+                    &diags,
+                );
+                continue;
+            }
+            (Err(err), _) => {
                 super::survey::record(&err);
                 continue;
             }

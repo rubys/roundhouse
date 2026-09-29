@@ -51,8 +51,25 @@ pub fn lower_current_attributes(app: &mut crate::App) {
         let delegates = take_delegate_decls(lc);
         rewrite_super_writers(lc, &attrs);
         let src = synthesized_source(lc, &attrs, &delegates);
-        let methods = match crate::ingest::ingest_library_classes(src.as_bytes(), "<current>") {
-            Ok(classes) => classes.into_iter().flat_map(|c| c.methods).collect(),
+        // Isolated in its own `prism::scope` — never the outer one
+        // that spans the whole app's ingest — so a bug in
+        // `synthesized_source` can't render its parse errors against
+        // an unrelated real file (see `ingest::sources`'s module doc).
+        let (parsed, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::ingest_library_classes(src.as_bytes(), "<current>")
+        });
+        let methods = match parsed {
+            Ok(classes) if diags.is_empty() => {
+                classes.into_iter().flat_map(|c| c.methods).collect()
+            }
+            Ok(_) => {
+                super::survey::record_synthesis_failure(
+                    "<current>",
+                    &format!("CurrentAttributes forwarder for `{}`", lc.name.0.as_str()),
+                    &diags,
+                );
+                Vec::new()
+            }
             Err(err) => {
                 super::survey::record(&err);
                 Vec::new()

@@ -82,8 +82,25 @@ pub fn lower_allow_browser(app: &mut crate::App) {
         }
         let Some(gate) = take_from_included_block(lc) else { continue };
         let src = format!("module {}\n{}end\n", lc.name.0.as_str(), method_source(&gate));
-        let methods = match crate::ingest::ingest_library_classes(src.as_bytes(), "<allow_browser>") {
-            Ok(classes) => classes.into_iter().flat_map(|c| c.methods).collect(),
+        // Isolated in its own `prism::scope` — never the outer one
+        // that spans the whole app's ingest — so a bug in the gate's
+        // rendered method source can't render its parse errors against
+        // an unrelated real file (see `ingest::sources`'s module doc).
+        let (parsed, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::ingest_library_classes(src.as_bytes(), "<allow_browser>")
+        });
+        let methods = match parsed {
+            Ok(classes) if diags.is_empty() => {
+                classes.into_iter().flat_map(|c| c.methods).collect()
+            }
+            Ok(_) => {
+                super::survey::record_synthesis_failure(
+                    "<allow_browser>",
+                    &format!("allow_browser gate for `{}`", lc.name.0.as_str()),
+                    &diags,
+                );
+                continue;
+            }
             Err(err) => {
                 super::survey::record(&err);
                 continue;
@@ -112,10 +129,23 @@ pub fn lower_allow_browser(app: &mut crate::App) {
             controller.name.0.as_str(),
             method_source(&gate)
         );
-        let parsed = match crate::ingest::controller::ingest_controller(src.as_bytes(), "<allow_browser>") {
-            Ok(Some(c)) => c,
-            Ok(None) => continue,
-            Err(err) => {
+        // Isolated in its own `prism::scope` — see the concern-form
+        // call above for why.
+        let (result, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::controller::ingest_controller(src.as_bytes(), "<allow_browser>")
+        });
+        let parsed = match (result, diags.is_empty()) {
+            (Ok(Some(c)), true) => c,
+            (Ok(None), true) => continue,
+            (Ok(_), false) => {
+                super::survey::record_synthesis_failure(
+                    "<allow_browser>",
+                    &format!("allow_browser gate for `{}`", controller.name.0.as_str()),
+                    &diags,
+                );
+                continue;
+            }
+            (Err(err), _) => {
                 super::survey::record(&err);
                 continue;
             }
