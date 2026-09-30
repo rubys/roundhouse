@@ -706,6 +706,18 @@ pub(super) fn ingest_model_body_item(
         if let Some(callback) = parse_callback(&call, &method) {
             return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments, span });
         }
+        // The same classifier sees model declarations and a concern's
+        // `included do`. Record before the latter drops the Unknown,
+        // and before ingesting a block that may contain further gaps.
+        // Name the DSL shape, not unverified gem ownership.
+        if matches!(method.as_str(), "aasm" | "state_machine")
+            && call.block().and_then(|b| b.as_block_node()).is_some()
+        {
+            super::survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: format!("state-machine DSL block `{method}` is not modeled"),
+            });
+        }
         return Ok(ModelBodyItem::Unknown {
             expr: ingest_expr(stmt, file)?,
             leading_comments,
