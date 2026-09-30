@@ -4199,8 +4199,8 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
 /// it — the same discipline `extract_config_assignments` draws below.
 /// `ActiveSupport::DateFormats` is a SEPARATE registry whose strings
 /// differ for the same names (`:number` is `"%Y%m%d"` there against
-/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in: our
-/// `Ty::Time` covers Date and DateTime too, and sharing one table would
+/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in:
+/// Date's format registry is not modeled, and sharing Time's table would
 /// render a full timestamp where Rails renders eight digits.
 fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
     let result = super::prism::parse(source, file);

@@ -17,6 +17,7 @@ use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
+use crate::ty::Ty;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
@@ -4813,7 +4814,9 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                     if temporal.contains(&m.name)
                         && is_plain_ivar_read(&m.body, &m.name) =>
                 {
-                    m.body = temporal_reader_body(&m.name);
+                    let column = table.columns.iter().find(|c| c.name == m.name).unwrap();
+                    let (_, parser, _) = crate::lower::model_to_library::schema::temporal_seam(column);
+                    m.body = temporal_reader_body(&m.name, parser);
                 }
                 // Hand-written temporal writers only, same reasoning:
                 // synthesized models write storage via `<col>_raw=`
@@ -4825,7 +4828,12 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                     let col = Symbol::from(m.name.as_str().trim_end_matches('='));
                     if temporal.contains(&col) {
                         if let Some(param) = m.params.first() {
-                            m.body = temporal_writer_body(&col, &param.name);
+                            let column = table.columns.iter().find(|c| c.name == col).unwrap();
+                            let (ty, _, formatter) = crate::lower::model_to_library::schema::temporal_seam(column);
+                            // Date uses the shared date-only formatter.
+                            // Keep the pre-existing legacy timestamp
+                            // iso8601 policy, not a Time storage refactor.
+                            m.body = temporal_writer_body(&col, &param.name, (ty == Ty::Date).then_some(formatter));
                         }
                     }
                     // The synthesized `<col>_raw=` writer's own store
@@ -5511,7 +5519,7 @@ fn datetime_var(name: &Symbol) -> Expr {
 }
 
 /// `@col && ActiveSupport.parse_db_time(@col)`.
-fn temporal_reader_body(col: &Symbol) -> Expr {
+fn temporal_reader_body(col: &Symbol, parser: &str) -> Expr {
     // `ActiveSupport.parse_db_time` (not bare `Time.parse`) — a stored
     // column with no zone marker is always implicitly UTC (Rails/sqlite3
     // convention), but `Time.parse` defaults an absent zone to the
@@ -5523,7 +5531,7 @@ fn temporal_reader_body(col: &Symbol) -> Expr {
                 Span::synthetic(),
                 ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
             )),
-            method: Symbol::from("parse_db_time"),
+            method: Symbol::from(parser),
             args: vec![datetime_ivar(col)],
             block: None,
             parenthesized: true,
@@ -5541,7 +5549,24 @@ fn temporal_reader_body(col: &Symbol) -> Expr {
 }
 
 /// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)`.
-fn temporal_writer_body(col: &Symbol, value_param: &Symbol) -> Expr {
+fn temporal_writer_body(col: &Symbol, value_param: &Symbol, date_formatter: Option<&str>) -> Expr {
+    if let Some(formatter) = date_formatter {
+        return Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col.clone() },
+                value: Expr::new(Span::synthetic(), ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const {
+                        path: vec![Symbol::from("ActiveSupport")],
+                    })),
+                    method: Symbol::from(formatter),
+                    args: vec![datetime_var(value_param)],
+                    block: None,
+                    parenthesized: true,
+                }),
+            },
+        );
+    }
     let responds = Expr::new(
         Span::synthetic(),
         ExprNode::Send {

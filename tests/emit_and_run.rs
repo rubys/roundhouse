@@ -66,6 +66,114 @@ puts "PASS portable Alba source-property contract"
         .assert_passes();
 }
 
+#[test]
+fn native_date_column_crud_and_month_shifts() {
+    let output = std::process::Command::new("ruby")
+        .args(["tests/date_columns_runtime.rb", "native"])
+        .output()
+        .expect("native Ruby");
+    assert!(output.status.success(), "{}\n{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Date CRUD and month shifts OK"));
+}
+
+#[test]
+fn date_column_crud_and_month_shifts_run() {
+    date_blog()
+        .run_ruby(include_str!("date_columns_runtime.rb"))
+        .assert_passes();
+}
+
+#[test]
+fn date_storage_and_integer_enum_labels_coexist() {
+    date_blog()
+        .edit("db/schema.rb", "    t.date \"due_on\"", "    t.date \"due_on\"\n    t.integer \"state\"")
+        .edit("app/models/calendar_entry.rb", "class CalendarEntry < ApplicationRecord", "class CalendarEntry < ApplicationRecord\n  enum :state, { draft: 7, published: 42 }")
+        .run_ruby(r#"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), state: :published)
+entry.reload
+raise entry.due_on.inspect unless entry.due_on.class == Date && entry.due_on.iso8601 == "2024-01-31"
+raise entry.shifted(2).inspect unless entry.shifted(2).iso8601 == "2024-03-31"
+raise entry.state.inspect unless entry.state == "published"
+raise entry[:state].inspect unless entry[:state] == "published"
+raise entry.attributes.inspect unless entry.attributes["state"] == "published"
+raise "enum predicates changed" unless entry.published? && !entry.draft?
+stored = CalendarEntry.connection.select_all("SELECT due_on, state FROM calendar_entries WHERE id = #{entry.id}").first
+raise stored.inspect unless stored == {"due_on" => "2024-01-31", "state" => 42}
+actual = ActionController::JsonRender.encode(entry.as_json(only: [:due_on, :state]))
+raise actual.inspect unless actual == '{"due_on":"2024-01-31","state":"published"}'
+entry.update!(due_on: nil, state: nil)
+entry.reload
+raise "nullable readers changed" unless entry.due_on.nil? && entry.state.nil? && entry[:state].nil? && entry.attributes["state"].nil?
+stored = CalendarEntry.connection.select_all("SELECT due_on, state FROM calendar_entries WHERE id = #{entry.id}").first
+raise stored.inspect unless stored == {"due_on" => nil, "state" => nil}
+actual = ActionController::JsonRender.encode(entry.as_json(only: [:due_on, :state]))
+raise actual.inspect unless actual == '{"due_on":null,"state":null}'
+puts "Date storage and nullable sparse integer enum labels coexist"
+"#)
+        .assert_passes();
+}
+
+fn date_blog() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "  create_table \"articles\"", "  create_table \"calendar_entries\" do |t|\n    t.date \"due_on\"\n    t.datetime \"observed_at\"\n    t.time \"opens_at\"\n  end\n\n  create_table \"articles\"")
+        .write("app/models/calendar_entry.rb", include_str!("date_columns_model.rb"))
+}
+
+fn date_json_blog() -> emit_and_run::Overlay {
+    date_blog()
+        .edit("app/models/calendar_entry.rb", "\nend\n", "\n  def as_json(options = {})\n    attrs = [:due_on, :observed_at]\n    json = super(only: attrs)\n    json\n  end\nend\n")
+        .write("app/controllers/calendar_entries_controller.rb", "class CalendarEntriesController < ApplicationController\n  def show\n    entry = CalendarEntry.find(params[:id])\n    render json: entry\n  end\nend\n")
+        .edit("config/routes.rb", "  resources :articles do", "  resources :calendar_entries, only: [:show]\n  resources :articles do")
+}
+
+#[test]
+fn specialized_date_json_preserves_dates_and_zoned_timestamps() {
+    date_json_blog()
+        .run_ruby(r#"
+require_relative "app/controllers/calendar_entries_controller"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), observed_at: Time.utc(2024, 1, 31, 23, 47, 19, 123456))
+raise "specialization was not exercised" unless entry.respond_to?(:as_json_str)
+ActiveSupport.use_zone("Pacific/Auckland") do
+  controller = CalendarEntriesController.new
+  controller.params = {"id" => entry.id.to_s}
+  controller.process_action(:show)
+  expected = '{"due_on":"2024-01-31","observed_at":"2024-02-01T12:47:19.123+13:00"}'
+  raise controller.body.inspect unless controller.body == expected
+  raise controller.content_type.inspect unless controller.content_type == "application/json"
+  actual = ActionController::JsonRender.encode(entry.as_json)
+  raise actual.inspect unless actual == expected
+  entry.update!(due_on: nil)
+  controller = CalendarEntriesController.new
+  controller.params = {"id" => entry.id.to_s}
+  controller.process_action(:show)
+  expected = '{"due_on":null,"observed_at":"2024-02-01T12:47:19.123+13:00"}'
+  raise controller.body.inspect unless controller.body == expected
+  actual = ActionController::JsonRender.encode(entry.as_json)
+  raise actual.inspect unless actual == expected
+end
+puts "Specialized Date JSON and timestamp control OK"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn specialized_date_json_normalizes_unset_nonnullable_storage() {
+    date_json_blog()
+        .edit("db/schema.rb", "t.date \"due_on\"", "t.date \"due_on\", null: false")
+        .run_ruby(r#"
+entry = CalendarEntry.new
+raise entry.due_on_raw.inspect unless entry.due_on_raw == ""
+raise entry.due_on.inspect unless entry.due_on.nil?
+expected = '{"due_on":null,"observed_at":null}'
+raise entry.as_json_str.inspect unless entry.as_json_str == expected
+actual = ActionController::JsonRender.encode(entry.as_json)
+raise actual.inspect unless actual == expected
+puts "Unset nonnullable Date JSON is null in both paths"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a
