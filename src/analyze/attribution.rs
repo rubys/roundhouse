@@ -49,6 +49,7 @@ use crate::span::FileId;
 use crate::ty::Ty;
 
 mod gem_ancestry;
+mod generated_methods;
 use gem_ancestry::{GemAncestry, GemClaim};
 
 /// Downgrade diagnostics attributable to `gaps` (see module docs).
@@ -293,14 +294,20 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         && matches!(d.kind, DiagnosticKind::SendDispatchFailed { .. }))
         .then(|| GemAncestry::new(app));
 
-    // Pass 1: sites on a gem's surface — a dispatch on the gem's
-    // namespace through source-recorded parents/mixins, or a known
-    // DSL/helper name where there is no structural gem evidence.
+    // Pass 1: a declared generated surface is the most specific
+    // evidence, ahead of ancestry and fixed DSL/helper names.
     let gem_for = |d: &Diagnostic| -> Option<(&str, Option<String>)> {
         match &d.kind {
             DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
+                if let Some((dsl, owner)) = ancestry.as_ref()?.generating_dsl(recv_ty, method.as_str(), lock) {
+                    if let Some(gem) = crate::gems::gem_providing_dsl(lock, dsl) {
+                        return Some((gem, Some(format!("matches the declared `{dsl}` surface in {}; runtime method availability is unverified", owner.0))));
+                    }
+                }
                 match ancestry.as_ref()?.receiver_gem(recv_ty, &census) {
-                    GemClaim::Known { gem, constant } => Some((gem, Some(constant))),
+                    GemClaim::Known { gem, constant } => Some((gem, Some(format!(
+                        "receiver ancestry reaches `{constant}`; method ownership is unverified"
+                    )))),
                     GemClaim::Uncertain => None,
                     GemClaim::Absent => crate::gems::gem_claiming_method(lock, method.as_str())
                         .map(|gem| (gem, None)),
@@ -318,13 +325,11 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
-        if let Some((gem, constant)) = gem_for(d) {
+        if let Some((gem, evidence)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
-            if let Some(constant) = constant {
-                d.message.push_str(&format!(
-                    " (receiver ancestry reaches `{constant}`; method ownership is unverified)"
-                ));
+            if let Some(evidence) = evidence {
+                d.message.push_str(&format!(" ({evidence})"));
             }
         }
     }
