@@ -31,6 +31,109 @@ use super::{IngestError, IngestResult};
 /// table is `push_subscriptions`.
 pub type TablePrefixes = std::collections::HashMap<String, String>;
 
+/// Cross-file enum inputs: only direct literal string-array assignments
+/// (optionally frozen). Names include unsupported constants/namespaces so a
+/// nearer name shadows an outer one even when its value cannot be folded.
+#[derive(Default)]
+pub(super) struct EnumConstants {
+    names: std::collections::HashSet<String>,
+    values: std::collections::HashMap<String, Option<Vec<(String, Literal)>>>,
+    nesting: std::collections::HashMap<(String, usize), Vec<String>>,
+}
+
+impl EnumConstants {
+    pub(super) fn record(&mut self, source: &[u8], file: &str) {
+        let result = super::prism::parse(source, file);
+        if result.errors().next().is_none() {
+            self.walk(&result.node(), file, &mut Vec::new());
+        }
+    }
+
+    fn walk(&mut self, node: &Node<'_>, file: &str, nesting: &mut Vec<String>) {
+        let owner = nesting.last().map(String::as_str).unwrap_or("");
+        if let Some(program) = node.as_program_node() {
+            self.walk(&program.statements().as_node(), file, nesting);
+        } else if let Some(stmts) = node.as_statements_node() {
+            for stmt in stmts.body().iter() {
+                self.walk(&stmt, file, nesting);
+            }
+        } else if let Some(class) = node.as_class_node() {
+            if let Some(path) = class_name_path(&class) {
+                let name = Self::qualify(owner, &path.join("::"));
+                self.names.insert(name.clone());
+                self.nesting.insert(
+                    (file.to_string(), class.location().start_offset()),
+                    nesting.iter().rev().cloned().collect(),
+                );
+                if let Some(body) = class.body() {
+                    nesting.push(name);
+                    self.walk(&body, file, nesting);
+                    nesting.pop();
+                }
+            }
+        } else if let Some(module) = node.as_module_node() {
+            if let Some(path) = super::util::module_name_path(&module) {
+                let name = Self::qualify(owner, &path.join("::"));
+                self.names.insert(name.clone());
+                if let Some(body) = module.body() {
+                    nesting.push(name);
+                    self.walk(&body, file, nesting);
+                    nesting.pop();
+                }
+            }
+        } else if let Some(write) = node.as_constant_write_node() {
+            let name = Self::qualify(owner, constant_id_str(&write.name()));
+            self.names.insert(name.clone());
+            let value = write.value();
+            let literal = match value.as_call_node() {
+                Some(call) if constant_id_str(&call.name()) == "freeze"
+                    && call.arguments().is_none() && call.block().is_none() => call.receiver(),
+                _ => Some(value),
+            };
+            let labels = literal.and_then(|node| {
+                node.as_array_node()?.elements().iter().enumerate()
+                    .map(|(i, el)| string_value(&el)
+                        .map(|label| (label, Literal::Int { value: i as i64 })))
+                    .collect()
+            });
+            // Reassignments/reopens have load-order-dependent semantics.
+            // Refuse them rather than choosing whichever file was read last.
+            self.values.entry(name).and_modify(|value| *value = None).or_insert(labels);
+        }
+    }
+
+    fn qualify(owner: &str, name: &str) -> String {
+        if owner.is_empty() { name.to_string() } else { format!("{owner}::{name}") }
+    }
+
+    fn resolve(&self, node: &Node<'_>, owners: &[String]) -> Option<Vec<(String, Literal)>> {
+        // `some_call::VALUES` is a runtime namespace, not a static path.
+        let mut parent = node.as_constant_path_node()?.parent();
+        while let Some(node) = parent {
+            if let Some(path) = node.as_constant_path_node() {
+                parent = path.parent();
+            } else if node.as_constant_read_node().is_some() {
+                break;
+            } else {
+                return None;
+            }
+        }
+        let path = constant_path_of(node)?;
+        let name = path.join("::");
+        if node.location().as_slice().starts_with(b"::") {
+            return self.values.get(&name)?.clone();
+        }
+        // Resolve the FIRST segment lexically, then read the rest strictly
+        // through that owner. Never fall back past a shadowing namespace.
+        for owner in owners.iter().map(String::as_str).chain(std::iter::once("")) {
+            if self.names.contains(&Self::qualify(owner, &path[0])) {
+                return self.values.get(&Self::qualify(owner, &name))?.clone();
+            }
+        }
+        None
+    }
+}
+
 /// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
 /// Deliberately narrow: only a module-level `self.` def whose body is a
 /// single string literal. A computed prefix would have to run to be known,
@@ -75,6 +178,16 @@ pub fn ingest_model(
     schema: &Schema,
     prefixes: &TablePrefixes,
 ) -> IngestResult<Option<Model>> {
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &EnumConstants::default())
+}
+
+pub(super) fn ingest_model_with_enum_constants(
+    source: &[u8],
+    file: &str,
+    schema: &Schema,
+    prefixes: &TablePrefixes,
+    enum_constants: &EnumConstants,
+) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -91,12 +204,18 @@ pub fn ingest_model(
         return Ok(None);
     };
 
+    // Syntactic nesting, not every prefix of the class name: `module
+    // Admin::Nested` does not put `Admin` in Ruby's lexical search path.
+    let mut enum_owners = enum_constants.nesting
+        .get(&(file.to_string(), class.location().start_offset()))
+        .cloned().unwrap_or_default();
     let mut name_path = scope;
     name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "model class name must be a simple constant or path".into(),
     })?);
     let class_name = Symbol::from(name_path.join("::"));
+    enum_owners.insert(0, class_name.as_str().to_string());
     let owner = ClassId(class_name.clone());
     // Rails: `full_table_name_prefix + undecorated_table_name`. The
     // prefix comes from the nearest module parent that declares one,
@@ -139,7 +258,7 @@ pub fn ingest_model(
             std::collections::HashMap::new();
         for stmt in &stmts {
             if let Some(cw) = stmt.as_constant_write_node() {
-                if let Some(labels) = enum_label_values(&cw.value(), &class_consts) {
+                if let Some(labels) = enum_label_values(&cw.value(), &class_consts, enum_constants, &enum_owners) {
                     class_consts.insert(constant_id_str(&cw.name()).to_string(), labels);
                 }
             }
@@ -168,7 +287,7 @@ pub fn ingest_model(
             // scope + predicate + bang writer per label, so it expands
             // in the walk loop for the same reason `class << self` does.
             if let Some(call) = stmt.as_call_node() {
-                match expand_enum_decl(&call, file, &leading, &class_consts) {
+                match expand_enum_decl(&call, file, &leading, &class_consts, enum_constants, &enum_owners) {
                     Ok(Some(expanded)) => {
                         enums.insert(expanded.column, expanded.mapping);
                         let mut blank = leading_blank;
@@ -534,6 +653,8 @@ pub(super) fn expand_enum_decl(
     file: &str,
     leading_comments: &[crate::dialect::Comment],
     class_consts: &std::collections::HashMap<String, Vec<(String, Literal)>>,
+    enum_constants: &EnumConstants,
+    enum_owners: &[String],
 ) -> IngestResult<Option<EnumExpansion>> {
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
@@ -577,7 +698,7 @@ pub(super) fn expand_enum_decl(
     // else `enum_label_values` resolves, now including a computed
     // mapping over that same constant (`enum :x, STATUSES.map { |s|
     // [s, s.to_s] }.to_h`).
-    let labels = enum_label_values(&mapping_node, class_consts).ok_or_else(|| {
+    let labels = enum_label_values(&mapping_node, class_consts, enum_constants, enum_owners).ok_or_else(|| {
         IngestError::Unsupported {
             file: file.into(),
             message: format!(
@@ -725,7 +846,8 @@ pub(super) fn expand_enum_decl(
 /// literal carries its own values; `%w[…].index_by(&:itself)` — the
 /// idiom for a string-backed column — maps each label to itself; a bare
 /// `CONST` resolves through `class_consts` (the class body's own
-/// `CONST = %i[…]` assignments, collected before this ever runs); and
+/// `CONST = %i[…]` assignments, collected before this ever runs); a
+/// qualified constant resolves only a cross-file literal string array; and
 /// `<array-expr>.map { |v| [v, v.to_s] }.to_h` / `.index_by(&:to_s)` /
 /// `.index_with(&:to_s)` recurse into whichever of the above
 /// `<array-expr>` already is — Procore's `bid_package.rb` and
@@ -738,6 +860,8 @@ pub(super) fn expand_enum_decl(
 fn enum_label_values(
     node: &Node<'_>,
     class_consts: &std::collections::HashMap<String, Vec<(String, Literal)>>,
+    enum_constants: &EnumConstants,
+    enum_owners: &[String],
 ) -> Option<Vec<(String, Literal)>> {
     // `CONST` — folded in here (rather than only at the `enum_label_values`
     // call sites) so a computed mapping's `<array-expr>` can ALSO be a
@@ -745,11 +869,14 @@ fn enum_label_values(
     if let Some(cr) = node.as_constant_read_node() {
         return class_consts.get(constant_id_str(&cr.name())).cloned();
     }
+    if node.as_constant_path_node().is_some() {
+        return enum_constants.resolve(node, enum_owners);
+    }
     // `%i[…].freeze` / `{ … }.freeze` — the literal is the receiver.
     if let Some(call) = node.as_call_node() {
         if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
             if let Some(recv) = call.receiver() {
-                return enum_label_values(&recv, class_consts);
+                return enum_label_values(&recv, class_consts, enum_constants, enum_owners);
             }
         }
     }
@@ -787,15 +914,18 @@ fn enum_label_values(
     let call_name = constant_id_str(&call.name());
 
     // `<array-expr>.index_by(&:itself)` / `.index_by(&:to_s)` /
-    // `.index_with(&:to_s)` — the labels ARE the stored strings. The
-    // block's exact proc isn't checked: `&:itself` and `&:to_s` agree
-    // on the string labels every `<array-expr>` case above already
-    // produces, so there is nothing to distinguish. `<array-expr>` is
-    // whatever the recursive call resolves — a literal array, `%w[…]`,
-    // or (new) a `CONST`.
+    // `.index_with(&:itself)` / `.index_with(&:to_s)` — identity string
+    // mappings over the literal/constant input resolved recursively.
     if call_name == "index_by" || call_name == "index_with" {
+        // These are identity mappings only for the two explicit symbol
+        // procs. Arbitrary blocks (e.g. &:length) must stay ledgered.
+        let block = call.block()?.as_block_argument_node()?;
+        let proc = symbol_value(&block.expression()?)?;
+        if call.arguments().is_some() || !matches!(proc.as_str(), "itself" | "to_s") {
+            return None;
+        }
         let recv = call.receiver()?;
-        let labels = enum_label_values(&recv, class_consts)?;
+        let labels = enum_label_values(&recv, class_consts, enum_constants, enum_owners)?;
         return Some(
             labels
                 .into_iter()
@@ -819,7 +949,7 @@ fn enum_label_values(
             return None;
         }
         let recv = map_call.receiver()?;
-        let labels = enum_label_values(&recv, class_consts)?;
+        let labels = enum_label_values(&recv, class_consts, enum_constants, enum_owners)?;
 
         let block = map_call.block()?.as_block_node()?;
         let block_params = block.parameters()?.as_block_parameters_node()?.parameters()?;

@@ -107,6 +107,53 @@ fn computed_enum_map_to_h_runs() {
         .assert_passes();
 }
 
+/// A module constant in another file is the same string-backed enum
+/// input as an inline array. Exercise the mapping AND generated methods,
+/// including a scope that must exclude the record after a persisted write.
+#[test]
+fn cross_file_literal_enum_mapping_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/article_states.rb",
+            "module ArticleStates\n  VALUES = %w[draft active archived].freeze\nend\n",
+        )
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"state\", default: \"draft\", null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, ArticleStates::VALUES.index_with(&:itself)",
+        )
+        .write(
+            "test/models/article_cross_file_enum_test.rb",
+            r#"require "test_helper"
+
+class ArticleCrossFileEnumTest < ActiveSupport::TestCase
+  test "a cross-file literal constant expands to a working string enum" do
+    assert_equal({"draft" => "draft", "active" => "active", "archived" => "archived"}, Article.states)
+    assert_equal "active", Article.states[:active]
+    article = articles(:one)
+    other = articles(:two)
+    assert article.draft?
+    assert_not article.active?
+    article.active!
+    assert_equal "active", article.reload.state
+    assert article.active?
+    assert_not article.draft?
+    assert_equal article.id, Article.active.first.id
+    assert_equal other.id, Article.draft.first.id
+    assert_nil Article.archived.first
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_cross_file_enum_test.rb")
+        .assert_passes();
+}
+
 /// `def self.included(klass); class << klass; … end; end` — Procore's
 /// shared search concerns (`app/concerns/search_engine/indexed.rb` and
 /// more) skip `ActiveSupport::Concern` and open the includer's

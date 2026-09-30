@@ -27,7 +27,7 @@ use super::library_class::{
     ingest_concern_filters, ingest_concern_model_items, ingest_helper_method_names,
     ingest_library_classes, ingest_rails_application_singleton_methods,
 };
-use super::model::ingest_model;
+use super::model::ingest_model_with_enum_constants;
 use super::routes::ingest_routes_with_draws;
 use super::schema::{ingest_migration, ingest_schema};
 use super::structure_sql::ingest_structure_sql;
@@ -352,6 +352,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         .collect();
 
     let mut table_prefixes = super::model::TablePrefixes::new();
+    // Qualified enum arrays can live in a later file (e.g. a service
+    // module). Collect literal inputs before expanding any model DSL.
+    let mut enum_constants = super::model::EnumConstants::default();
     // The same pre-pass answers a second question: which classes are
     // ActiveRecord bases. A model descending through the app's own
     // abstract base was classified a library class and lost its DSL,
@@ -369,6 +372,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             table_prefixes
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
+            enum_constants.record(&source, &entry.display().to_string());
         }
     }
     // An abstract base can live outside `app/models` too — in a
@@ -388,6 +392,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 &entry.display().to_string(),
             ));
             model_bases.record(&source, &mut base_pairs);
+            let ignored = sub == "lib"
+                && entry.strip_prefix(&support_dir).is_ok_and(|rel| {
+                    rel.components().next().is_some_and(|c| {
+                        lib_ignores.iter().any(|ig| c.as_os_str() == ig.as_str())
+                    })
+                });
+            if !ignored {
+                enum_constants.record(&source, &entry.display().to_string());
+            }
         }
     }
     model_bases.close_over(&base_pairs);
@@ -402,7 +415,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             match classify_class_file(&source, &model_bases) {
                 Some(ClassKind::Model) | None => {
                     if let Some(maybe_model) =
-                        unwrap_or_record(ingest_model(&source, &path_str, &app.schema, &table_prefixes))?
+                        unwrap_or_record(ingest_model_with_enum_constants(
+                            &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                        ))?
                     {
                         if let Some(model) = maybe_model {
                             // Classes nested in the model's body are
@@ -525,7 +540,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             // library class here, unlike under `app/models` where the
             // directory itself is the app saying what the file is.
             if super::library_class::has_active_record_base(&source, &model_bases) {
-                match ingest_model(&source, &path_str, &app.schema, &table_prefixes) {
+                match ingest_model_with_enum_constants(
+                    &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                ) {
                     Ok(Some(model)) => {
                         let outer = model.name.clone();
                         app.models.push(model);
