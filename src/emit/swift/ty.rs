@@ -26,6 +26,7 @@ pub fn swift_ty(t: &Ty) -> String {
         // backing — see the temporal branch in swift/library.rs and
         // `Roundhouse.RhDateTime.parse`.
         Ty::Time => "Date".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("swift"),
         // No symbol type in Swift — route symbols to string keys, as the
         // TS/Crystal/Kotlin renderers do.
         Ty::Sym => "String".to_string(),

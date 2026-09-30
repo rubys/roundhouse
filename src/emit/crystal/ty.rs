@@ -23,6 +23,7 @@ pub fn crystal_ty(t: &Ty) -> String {
         // explicit parsing getter — see the temporal branch in
         // crystal/library.rs and `Roundhouse::DateTime.parse`.
         Ty::Time => "Time".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("crystal"),
         Ty::Nil => "Nil".to_string(),
         Ty::Bottom => "NoReturn".to_string(),
         // A self type the analyzer should have substituted with

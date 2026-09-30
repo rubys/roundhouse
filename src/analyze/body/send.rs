@@ -838,6 +838,11 @@ impl<'a> BodyTyper<'a> {
             // of Ruby's own guarantees about the answer.
             Some(Ty::Untyped) => conversion_fallback(method).unwrap_or(Ty::Untyped),
             Some(Ty::Class { id, args }) => {
+                if id.0.as_str() == "Date" {
+                    if let Some(ty) = date_constructor(method, call_args) {
+                        return ty;
+                    }
+                }
                 // `Range` is modeled as `Ty::Class { id: "Range", args:
                 // [elem] }` (see the body-typer's `ExprNode::Range` arm),
                 // not a dedicated `Ty` variant, so its methods live in a
@@ -861,6 +866,16 @@ impl<'a> BodyTyper<'a> {
                 // registry, which would leave it an unresolved `Ty::Var`.
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_time" {
                     return Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+                }
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
+                    return Ty::Union { variants: vec![Ty::Date, Ty::Nil] };
+                }
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_date" {
+                    return if matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Date)) {
+                        Ty::Str
+                    } else {
+                        Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                    };
                 }
                 // `ActiveSupport.db_now` — the write-side sibling:
                 // current UTC time in Rails' exact storage form
@@ -1424,6 +1439,7 @@ impl<'a> BodyTyper<'a> {
             // inference gap) rather than the parent-chain walk — `Time`
             // has no user-defined ancestors in this corpus.
             Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
+            Some(Ty::Date) => date_method(method, args).unwrap_or_else(unknown),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Float) => float_method(method),
             Some(Ty::Bool) => bool_method(method),
@@ -1646,10 +1662,8 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
 /// like `story.created_at.strftime(...)` dispatches against. The `Time`
 /// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
 /// flattens onto the same table, so the class-side constructors live
-/// here too. Date / DateTime columns also fold into `Ty::Time` (its
-/// method surface is a superset for everything the corpus calls); a
-/// dedicated `date_method` can split them out if a Date-only method ever
-/// surfaces. Returns `None` for unmodeled methods so dispatch falls
+/// here too. DateTime/time-of-day columns also use `Ty::Time`;
+/// date-only columns have their own table. Returns `None` for unmodeled methods so dispatch falls
 /// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
     let time = || Ty::Time;
@@ -1670,7 +1684,8 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         | "prev_month" | "next_month" | "last_month" | "months_ago" | "months_since"
         | "prev_year" | "next_year" | "last_year" | "years_ago" | "years_since"
         | "change" | "advance" | "ago" | "since" | "from_now"
-        | "round" | "floor" | "ceil" | "to_date" | "to_datetime" => time(),
+        | "round" | "floor" | "ceil" | "to_datetime" => time(),
+        "to_date" => Ty::Date,
         // `Time - x` is `Time` for a Duration arg but a Float for a
         // Time arg — the receiver-only dispatch can't disambiguate, so
         // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
@@ -1700,6 +1715,46 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         _ => return None,
     };
     Some(ty)
+}
+
+/// Ruby's native date-only surface. Do not inherit the Time table:
+/// Date has neither epoch seconds nor a zone, and only Date supports >>.
+fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    // Every core Date argument is optional. Reject known wrong types
+    // and excess arguments rather than declaring a crashing call clean.
+    let numeric = Ty::Union { variants: vec![Ty::Int, Ty::Float] };
+    let expected: Vec<Ty> = match method.as_str() {
+        "new" | "civil" => vec![numeric.clone(), numeric.clone(), numeric.clone(), numeric],
+        "parse" => vec![Ty::Str, Ty::Bool, numeric],
+        "strptime" => vec![Ty::Str, Ty::Str, numeric],
+        "iso8601" => vec![Ty::Str, numeric],
+        "today" => vec![numeric],
+        _ => return None,
+    };
+    let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
+        None | Some(Ty::Var { .. } | Ty::Untyped) => true,
+        Some(actual) => actual == expected || matches!(expected, Ty::Union { variants } if variants.contains(actual)),
+    };
+    Some(if args.len() <= expected.len()
+        && args.iter().zip(&expected).all(|(a, t)| accepts(a.ty.as_ref(), t)) {
+        Ty::Date
+    } else {
+        unknown()
+    })
+}
+
+fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    Some(match method.as_str() {
+        ">>" | "<<" if args.len() == 1
+            && args[0].ty.as_ref().is_none_or(|t| matches!(t, Ty::Int | Ty::Var { .. })) => Ty::Date,
+        "to_date" => Ty::Date,
+        "to_time" => Ty::Time,
+        "year" | "month" | "mon" | "day" | "mday" | "wday" | "yday" => Ty::Int,
+        "iso8601" | "xmlschema" | "to_s" | "strftime" | "inspect" => Ty::Str,
+        "<" | ">" | "<=" | ">=" | "leap?" | "monday?" | "tuesday?" | "wednesday?"
+        | "thursday?" | "friday?" | "saturday?" | "sunday?" => Ty::Bool,
+        _ => return None,
+    })
 }
 
 /// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,

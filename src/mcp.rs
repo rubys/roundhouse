@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn wont_lower_lowers_datetime_cleanly_and_bad_target_is_an_error() {
-        // real-blog has Date/DateTime columns, which type as the first-
+        // real-blog has DateTime columns, which type as the first-
         // class `Ty::Time`. The shared Stage-2 datetime foundation stores
         // temporal columns as ISO-8601 TEXT and exposes them through a
         // synthesized reader that parses to a native datetime — so `Ty::Time`
