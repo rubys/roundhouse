@@ -519,22 +519,29 @@ fn camelize(gem: &str) -> String {
         .collect()
 }
 
-/// The unknown gem (in `lock`) whose namespace `constant_path` sits
-/// under, if any: `Redcarpet::Markdown` → `redcarpet`.
+/// The unique resolved unknown gem whose namespace `constant_path`
+/// sits under, if any. Ambiguous prefixes must not pick lockfile order.
 pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
+    let owners = gems_owning_constant(census, constant_path);
+    (owners.len() == 1).then(|| owners[0])
+}
+
+/// All candidates in the best namespace-matching tier. Full/irregular
+/// names beat dashed-prefix guesses (`Alba`: alba, not alba-inertia).
+pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
     let head = constant_path.split("::").next().unwrap_or(constant_path);
-    // Two passes, so a full-name match always beats a first-segment
-    // one: two house gems under the same prefix both answer to `Acme`,
-    // and the one that spells the whole constant is the better claim.
-    census
+    let exact: Vec<_> = census
         .unknown()
-        .find(|g| namespace_of(&g.name) == head)
-        .or_else(|| {
-            census
-                .unknown()
-                .find(|g| namespace_candidates(&g.name).iter().any(|c| c == head))
-        })
+        .filter(|g| g.version.is_some() && namespace_of(&g.name) == head)
         .map(|g| g.name.as_str())
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    census.unknown()
+        .filter(|g| g.version.is_some() && namespace_candidates(&g.name).iter().any(|c| c == head))
+        .map(|g| g.name.as_str())
+        .collect()
 }
 
 #[cfg(test)]
@@ -629,7 +636,8 @@ BUNDLED WITH
         );
         // A dashed gem answers to its first segment as well as to its
         // whole name, which is what `aws-sdk-s3 → Aws` says by hand.
-        assert_eq!(gem_owning_constant(&census, "Acme::Client"), Some("acme-core"));
+        assert_eq!(gem_owning_constant(&census, "Acme::Client"), None, "two prefix candidates are ambiguous");
+        assert_eq!(gems_owning_constant(&census, "Acme::Client"), vec!["acme-core", "acme-telemetry"]);
         assert_eq!(
             gem_owning_constant(&census, "AcmeTelemetry::Span"),
             Some("acme-telemetry"),

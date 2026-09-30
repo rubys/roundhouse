@@ -48,6 +48,9 @@ use crate::ingest::{survey, IngestError};
 use crate::span::FileId;
 use crate::ty::Ty;
 
+mod gem_ancestry;
+use gem_ancestry::{GemAncestry, GemClaim};
+
 /// Downgrade diagnostics attributable to `gaps` (see module docs).
 /// No-op when `gaps` is empty — strict-mode callers can pass through
 /// unconditionally.
@@ -276,28 +279,35 @@ impl<'a> AttributionCtx<'a> {
 /// Downgrade diagnostics attributable to an unknown gem in the app's
 /// `Gemfile.lock` (see the section comment). No-op when the app carries
 /// no lockfile or the census has no unknown gem.
+///
+/// Recorded ancestry is evidence of missing coverage, NOT method ownership:
+/// even a typo on a gem-dependent receiver can be a note. Types and emitted
+/// methods remain unchanged; ambiguous ancestry does not claim a diagnostic.
 pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
     let Some(lock) = &app.gem_lock else { return };
     let census = crate::gems::GemCensus::of(lock);
     if census.unknown().next().is_none() || diags.is_empty() {
         return;
     }
+    let ancestry = diags.iter().any(|d| d.severity != Severity::Info
+        && matches!(d.kind, DiagnosticKind::SendDispatchFailed { .. }))
+        .then(|| GemAncestry::new(app));
 
     // Pass 1: sites on a gem's surface — a dispatch on the gem's
-    // constant namespace (`Redcarpet::Markdown#render`) or on a DSL /
-    // helper name the gem is known to add (`policy_scope`).
-    let gem_for = |d: &Diagnostic| -> Option<&str> {
+    // namespace through source-recorded parents/mixins, or a known
+    // DSL/helper name where there is no structural gem evidence.
+    let gem_for = |d: &Diagnostic| -> Option<(&str, Option<String>)> {
         match &d.kind {
             DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
-                if let Some(path) = recv_root_path(recv_ty) {
-                    if let Some(g) = crate::gems::gem_owning_constant(&census, &path) {
-                        return Some(g);
-                    }
+                match ancestry.as_ref()?.receiver_gem(recv_ty, &census) {
+                    GemClaim::Known { gem, constant } => Some((gem, Some(constant))),
+                    GemClaim::Uncertain => None,
+                    GemClaim::Absent => crate::gems::gem_claiming_method(lock, method.as_str())
+                        .map(|gem| (gem, None)),
                 }
-                crate::gems::gem_claiming_method(lock, method.as_str())
             }
             DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
-                crate::gems::gem_claiming_method(lock, n.as_str())
+                crate::gems::gem_claiming_method(lock, n.as_str()).map(|gem| (gem, None))
             }
             _ => None,
         }
@@ -308,9 +318,14 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
-        if let Some(gem) = gem_for(d) {
+        if let Some((gem, constant)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
+            if let Some(constant) = constant {
+                d.message.push_str(&format!(
+                    " (receiver ancestry reaches `{constant}`; method ownership is unverified)"
+                ));
+            }
         }
     }
     if sites.is_empty() {
@@ -369,16 +384,6 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
         None => d.message.push_str(&format!(
             " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
         )),
-    }
-}
-
-/// The constant path of a dispatch receiver's class, unions by first
-/// class arm.
-fn recv_root_path(ty: &Ty) -> Option<String> {
-    match ty {
-        Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
-        Ty::Union { variants } => variants.iter().find_map(recv_root_path),
-        _ => None,
     }
 }
 
