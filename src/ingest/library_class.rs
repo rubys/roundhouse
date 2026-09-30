@@ -251,11 +251,6 @@ pub(super) fn library_class_and_struct_base(
         // The body walk already read the members out of `enums do` as
         // constants of this class, receiver spelled out, so they are
         // read from there rather than from the block a second time.
-        let members: Vec<SorbetEnumMember> = constants
-            .iter()
-            .filter(|(_, value)| is_enum_member(&owner, value))
-            .map(|(name, _)| SorbetEnumMember { name: name.clone() })
-            .collect();
         // Each member is told the constant it is bound to. sorbet reads
         // that off the constant table when the `enums` block finishes;
         // here it is known at ingest, and `inspect` needs it.
@@ -280,6 +275,7 @@ pub(super) fn library_class_and_struct_base(
                 args.push(str_lit(name.as_str()));
             }
         }
+        let members = sorbet_enum_members(&owner, &constants);
         unknown_calls.retain(|call| !is_enums_declaration(call));
         let mut synthesized = synth_sorbet_enum_methods(&owner, &members);
         synthesized.append(&mut methods);
@@ -353,10 +349,85 @@ fn is_enums_declaration(call: &Expr) -> bool {
     )
 }
 
-/// One member of a lowered enum: the constant it is bound to, which is
-/// also the name `inspect` prints.
-struct SorbetEnumMember {
-    name: Symbol,
+/// One normalized member, shared by Sorbet's synthesized surface and
+/// consumers such as Rails enum mapping ingestion. Constructor layout stays
+/// here; consumers read the serialized expression, not positional arguments.
+pub(super) struct SorbetEnumMember {
+    pub(super) name: Symbol,
+    pub(super) serialized: Expr,
+}
+
+pub(super) fn sorbet_enum_members(owner: &ClassId, constants: &[(Symbol, Expr)]) -> Vec<SorbetEnumMember> {
+    constants.iter().filter(|(_, value)| is_enum_member(owner, value))
+        .map(|(name, value)| {
+            let ExprNode::Send { args, .. } = &*value.node else { unreachable!() };
+            SorbetEnumMember {
+                name: name.clone(),
+                serialized: args.first().expect("enum constructors are normalized before projection").clone(),
+            }
+        }).collect()
+}
+
+/// The literal-only subset safe for Rails mapping expansion. Guard the
+/// original source BEFORE annotation erasure, then read the same normalized
+/// member projection that supplies Sorbet's emitted `values`/`serialize`.
+pub(super) fn literal_sorbet_members(
+    class: &ruby_prism::ClassNode<'_>,
+    scope: &[String],
+    file: &str,
+) -> Option<Vec<(Symbol, Literal)>> {
+    let base = class.superclass()?.as_constant_path_node()?;
+    let namespace = base.parent()?;
+    if constant_path_of(&base.as_node())?.join("::") != "T::Enum"
+        || !(namespace.as_constant_read_node().is_some()
+            || namespace.as_constant_path_node().is_some_and(|path| path.parent().is_none()))
+    {
+        return None;
+    }
+    let statements = flatten_statements(class.body()?);
+    let [declaration] = statements.as_slice() else { return None };
+    let call = declaration.as_call_node()?;
+    if constant_id_str(&call.name()) != "enums"
+        || call.receiver().is_some()
+        || call.arguments().is_some()
+    {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    if block.parameters().is_some() {
+        return None;
+    }
+    let statements = flatten_statements(block.body()?);
+    if statements.is_empty() || statements.iter().any(|statement| {
+        let Some(write) = statement.as_constant_write_node() else { return true };
+        let Some(call) = write.value().as_call_node() else { return true };
+        call.receiver().is_some() || call.block().is_some()
+            || call.arguments().is_none_or(|args| {
+                let arguments: Vec<_> = args.arguments().iter().collect();
+                !matches!(arguments.as_slice(), [argument] if argument.as_string_node().is_some())
+            })
+    }) {
+        return None;
+    }
+    let library = library_class_from_node_with_scope(class, scope, file).ok()?;
+    let members = sorbet_enum_members(&library.name, &library.constants);
+    if members.len() != statements.len() {
+        return None;
+    }
+    let mut names = HashSet::new();
+    let mut serialized = HashSet::new();
+    members.into_iter().map(|member| {
+        if !names.insert(member.name.clone()) {
+            return None;
+        }
+        let ExprNode::Lit { value: Literal::Str { value } } = &*member.serialized.node else {
+            return None;
+        };
+        if !serialized.insert(value.clone()) {
+            return None;
+        }
+        Some((member.name, Literal::Str { value: value.clone() }))
+    }).collect()
 }
 
 /// A class-body constant initialized by this class's own `new` — which

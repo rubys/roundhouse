@@ -32,191 +32,8 @@ use super::{IngestError, IngestResult};
 /// table is `push_subscriptions`.
 pub type TablePrefixes = std::collections::HashMap<String, String>;
 
-/// One entry per declared name, so unsupported values still shadow outer
-/// namespaces. Only unique direct string-array assignments can be folded.
-enum EnumConstant {
-    Namespace,
-    Mapping(Vec<(String, Literal)>),
-    Unsupported,
-}
-
-#[derive(Default)]
-pub(super) struct EnumConstants {
-    values: std::collections::HashMap<String, EnumConstant>,
-    nesting: std::collections::HashMap<(String, usize), Vec<String>>,
-    writes: Vec<(String, Vec<String>)>,
-}
-
-impl EnumConstants {
-    pub(super) fn record(&mut self, source: &[u8], file: &str) {
-        // Prism walks every write (including RHSs and multi-write targets).
-        // Track syntactic parents to fold only direct namespace declarations,
-        // while still invalidating writes beneath conditionals or blocks.
-        struct Collector<'a, 'pr> {
-            constants: &'a mut EnumConstants,
-            file: &'a str,
-            nesting: Vec<String>,
-            parents: Vec<Node<'pr>>,
-        }
-        impl<'pr> ruby_prism::Visit<'pr> for Collector<'_, 'pr> {
-            fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
-                let direct = self.parents.iter().all(|parent| matches!(parent,
-                    Node::ProgramNode { .. } | Node::StatementsNode { .. }
-                    | Node::ClassNode { .. } | Node::ModuleNode { .. }
-                ));
-                self.constants.record_write(&node, &self.nesting, direct);
-                let path = node.as_class_node().map(|c| c.constant_path())
-                    .or_else(|| node.as_module_node().map(|m| m.constant_path()));
-                if let Some(path) = path.and_then(|p| EnumConstants::path(&p)) {
-                    let owner = self.nesting.last().map(String::as_str).unwrap_or("");
-                    let name = EnumConstants::qualify(owner, &path);
-                    self.constants.values.entry(name.clone()).or_insert(EnumConstant::Namespace);
-                    if node.as_class_node().is_some() {
-                        self.constants.nesting.insert(
-                            (self.file.to_string(), node.location().start_offset()),
-                            std::iter::once(name.clone()).chain(self.nesting.iter().rev().cloned()).collect(),
-                        );
-                    }
-                    self.nesting.push(name);
-                }
-                self.parents.push(node);
-            }
-
-            fn visit_branch_node_leave(&mut self) {
-                let node = self.parents.pop().unwrap();
-                let path = node.as_class_node().map(|c| c.constant_path())
-                    .or_else(|| node.as_module_node().map(|m| m.constant_path()));
-                if path.and_then(|p| EnumConstants::path(&p)).is_some() {
-                    self.nesting.pop();
-                }
-            }
-
-            fn visit_leaf_node_enter(&mut self, node: Node<'pr>) {
-                self.constants.record_write(&node, &self.nesting, false);
-            }
-        }
-        let result = super::prism::parse(source, file);
-        if result.errors().next().is_none() {
-            ruby_prism::Visit::visit(&mut Collector {
-                constants: self, file, nesting: Vec::new(), parents: Vec::new(),
-            }, &result.node());
-        }
-    }
-
-    fn record_write(&mut self, node: &Node<'_>, nesting: &[String], direct: bool) {
-        let owner = nesting.last().map(String::as_str).unwrap_or("");
-        if let Some(write) = node.as_constant_write_node() {
-            let name = Self::qualify(owner, constant_id_str(&write.name()));
-            let value = write.value();
-            let literal = match value.as_call_node() {
-                Some(call) if constant_id_str(&call.name()) == "freeze"
-                    && call.arguments().is_none() && call.block().is_none() => call.receiver(),
-                _ => Some(value),
-            };
-            let labels = literal.filter(|_| direct).and_then(|node| {
-                node.as_array_node()?.elements().iter().enumerate()
-                    .map(|(i, el)| string_value(&el)
-                        .map(|label| (label, Literal::Int { value: i as i64 })))
-                    .collect()
-            });
-            // Reassignments/reopens have load-order-dependent semantics.
-            // Refuse them rather than choosing whichever file was read last.
-            self.values.entry(name)
-                .and_modify(|value| *value = EnumConstant::Unsupported)
-                .or_insert(labels.map_or(EnumConstant::Unsupported, EnumConstant::Mapping));
-        } else {
-            // Prism uses distinct nodes for qualified, compound and multi-
-            // writes. None is a direct literal declaration. Resolve qualified
-            // destinations only after every namespace has been collected.
-            let bare = node.as_constant_and_write_node().map(|w| w.name())
-                .or_else(|| node.as_constant_or_write_node().map(|w| w.name()))
-                .or_else(|| node.as_constant_operator_write_node().map(|w| w.name()))
-                .or_else(|| node.as_constant_target_node().map(|w| w.name()));
-            if let Some(name) = bare {
-                self.values.insert(Self::qualify(owner, constant_id_str(&name)), EnumConstant::Unsupported);
-            }
-            let target = node.as_constant_path_write_node().map(|w| w.target().as_node())
-                .or_else(|| node.as_constant_path_and_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_or_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_operator_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_target_node().map(|w| w.as_node()));
-            if let Some(target) = target {
-                if let Some(path) = Self::path(&target) {
-                    self.writes.push((path, nesting.iter().rev().cloned().collect()));
-                }
-            }
-        }
-    }
-
-    pub(super) fn finish(&mut self) {
-        for (path, owners) in std::mem::take(&mut self.writes) {
-            if let Some(name) = self.resolve_name(&path, &owners) {
-                self.values.insert(name, EnumConstant::Unsupported);
-            }
-        }
-    }
-
-    fn qualify(owner: &str, name: &str) -> String {
-        if let Some(rooted) = name.strip_prefix("::") {
-            rooted.to_string()
-        } else if owner.is_empty() {
-            name.to_string()
-        } else {
-            format!("{owner}::{name}")
-        }
-    }
-
-    /// A static path, preserving root qualification and rejecting runtime
-    /// receivers such as `some_call::VALUES`. Also handles multi-write targets.
-    fn path(node: &Node<'_>) -> Option<String> {
-        if let Some(read) = node.as_constant_read_node() {
-            return Some(constant_id_str(&read.name()).to_string());
-        }
-        let (parent, name) = if let Some(path) = node.as_constant_path_node() {
-            (path.parent(), path.name()?)
-        } else {
-            let target = node.as_constant_path_target_node()?;
-            (target.parent(), target.name()?)
-        };
-        let mut path = match parent {
-            Some(parent) => format!("{}::", Self::path(&parent)?),
-            None if node.location().as_slice().starts_with(b"::") => "::".to_string(),
-            None => String::new(),
-        };
-        path.push_str(constant_id_str(&name));
-        Some(path)
-    }
-
-    fn resolve_name(&self, path: &str, owners: &[String]) -> Option<String> {
-        if let Some(rooted) = path.strip_prefix("::") {
-            return Some(rooted.to_string());
-        }
-        let first = path.split("::").next()?;
-        for owner in owners.iter().map(String::as_str).chain(std::iter::once("")) {
-            if self.values.contains_key(&Self::qualify(owner, first)) {
-                return Some(Self::qualify(owner, path));
-            }
-        }
-        None
-    }
-
-    fn resolve(&self, node: &Node<'_>, owners: &[String]) -> Option<Vec<(String, Literal)>> {
-        // Resolve the FIRST segment lexically, then read the rest strictly
-        // through that owner. Never fall back past a shadowing namespace.
-        let name = self.resolve_name(&Self::path(node)?, owners)?;
-        let mut namespace = name.as_str();
-        while let Some((parent, _)) = namespace.rsplit_once("::") {
-            if !matches!(self.values.get(parent), Some(EnumConstant::Namespace)) {
-                return None;
-            }
-            namespace = parent;
-        }
-        match self.values.get(&name)? {
-            EnumConstant::Mapping(mapping) => Some(mapping.clone()),
-            _ => None,
-        }
-    }
-}
+mod enum_constants;
+pub(super) use enum_constants::EnumConstants;
 
 /// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
 /// Deliberately narrow: only a module-level `self.` def whose body is a
@@ -262,7 +79,10 @@ pub fn ingest_model(
     schema: &Schema,
     prefixes: &TablePrefixes,
 ) -> IngestResult<Option<Model>> {
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &EnumConstants::default())
+    let mut constants = EnumConstants::default();
+    constants.record(source, file);
+    constants.finish();
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants)
 }
 
 pub(super) fn ingest_model_with_enum_constants(
@@ -752,22 +572,23 @@ pub(super) struct EnumExpansion {
     pub items: Vec<ModelBodyItem>,
 }
 
-pub(super) fn expand_enum_decl(
-    call: &ruby_prism::CallNode<'_>,
-    file: &str,
-    leading_comments: &[crate::dialect::Comment],
-    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
-) -> IngestResult<Option<EnumExpansion>> {
-    use crate::dialect::{MethodDef, MethodReceiver, Scope};
-    use crate::effect::EffectSet;
+/// The same syntax contract serves expansion and post-ingest validation.
+/// Validation reads declarations only, never reconstructs model IR.
+struct EnumDeclaration<'pr> {
+    column: String,
+    mapping: Node<'pr>,
+    prefix: String,
+    suffix: String,
+}
 
+fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclaration<'pr>> {
     if call.receiver().is_some() || constant_id_str(&call.name()) != "enum" {
-        return Ok(None);
+        return None;
     }
-    let Some(args) = call.arguments() else { return Ok(None) };
+    let args = call.arguments()?;
     let all_args = args.arguments();
     let mut iter = all_args.iter();
-    let Some(first) = iter.next() else { return Ok(None) };
+    let first = iter.next()?;
 
     // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
     // older `enum status: <mapping>, **opts`, where the column and its
@@ -784,31 +605,78 @@ pub(super) fn expand_enum_decl(
             (column, mapping, prefix, suffix)
         }
         None => {
-            let Some(kh) = first.as_keyword_hash_node() else { return Ok(None) };
+            let kh = first.as_keyword_hash_node()?;
             let elements = kh.elements();
-            let Some(pair) = elements.iter().next().and_then(|e| e.as_assoc_node()) else {
-                return Ok(None);
-            };
-            let Some(column) = symbol_value(&pair.key()) else { return Ok(None) };
+            let pair = elements.iter().next()?.as_assoc_node()?;
+            let column = symbol_value(&pair.key())?;
             let (prefix, suffix) = enum_affixes(&elements, &column);
             (column, Some(pair.value()), prefix, suffix)
         }
     };
-    let Some(mapping_node) = mapping_node else { return Ok(None) };
+    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix })
+}
+
+fn enum_mapping_error(file: &str, column: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
+            column
+        ),
+    }
+}
+
+fn validate_sorbet_enum_mappings(
+    model: &Model,
+    source: &crate::span::SourceFile,
+    constants: &EnumConstants,
+) -> IngestResult<()> {
+    // This source was already parsed by ingest. Do not duplicate parse or
+    // unrelated model diagnostics, or rebuild the model to check one mapping.
+    let result = ruby_prism::parse(source.text.as_bytes());
+    let root = result.node();
+    let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
+        .find(|(_, class)| class.location().start_offset() == model.span.start as usize)
+        else { return Ok(()) };
+    let Some(body) = class.body() else { return Ok(()) };
+    let owners = constants.nesting.get(&(source.path.clone(), model.span.start as usize))
+        .cloned().unwrap_or_default();
+    for statement in flatten_statements(body) {
+        let Some(declaration) = statement.as_call_node().and_then(|call| enum_declaration(&call))
+            else { continue };
+        if let Some(receiver) = serialized_enum_receiver(&declaration.mapping) {
+            if constants.resolve(&receiver, &owners).is_none() {
+                super::survey::unwrap_or_record::<()>(Err(enum_mapping_error(
+                    &source.path, &declaration.column,
+                )))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn expand_enum_decl(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    leading_comments: &[crate::dialect::Comment],
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
+) -> IngestResult<Option<EnumExpansion>> {
+    use crate::dialect::{MethodDef, MethodReceiver, Scope};
+    use crate::effect::EffectSet;
+
+    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix }) = enum_declaration(call)
+        else { return Ok(None) };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`) — and everything
     // else `enum_label_values` resolves, now including a computed
     // mapping over that same constant (`enum :x, STATUSES.map { |s|
     // [s, s.to_s] }.to_h`).
-    let labels = enum_label_values(&mapping_node, resolve_constant).ok_or_else(|| {
-        IngestError::Unsupported {
-            file: file.into(),
-            message: format!(
-                "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
-                column
-            ),
-        }
-    })?;
+    // A Sorbet serialize-pair returns a HASH, not an array operand for the
+    // legacy recursive transformations. Admit it only as a complete mapping.
+    let labels = serialized_enum_receiver(&mapping_node)
+        .and_then(|receiver| resolve_constant(&receiver))
+        .or_else(|| enum_label_values(&mapping_node, resolve_constant))
+        .ok_or_else(|| enum_mapping_error(file, &column))?;
     let all_labels = labels.clone();
     // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
     // predicate, scope or bang writer Ruby could name: Rails reaches them
@@ -971,7 +839,7 @@ fn enum_label_values(
     }
     // `%i[…].freeze` / `{ … }.freeze` — the literal is the receiver.
     if let Some(call) = node.as_call_node() {
-        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
             if let Some(recv) = call.receiver() {
                 return enum_label_values(&recv, resolve_constant);
             }
@@ -1085,6 +953,46 @@ fn enum_label_values(
     }
 
     None
+}
+
+/// The one admitted consumer of enum-valued reads. Shared with the source
+/// guard so a mutating block cannot hide behind a method name like `to_h`.
+fn serialized_enum_receiver<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let call = node.as_call_node()?;
+    if constant_id_str(&call.name()) == "freeze"
+        && call.arguments().is_none() && call.block().is_none() {
+        return serialized_enum_receiver(&call.receiver()?);
+    }
+    if constant_id_str(&call.name()) != "to_h" || call.arguments().is_some() {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    let parameters = block.parameters()?.as_block_parameters_node()?;
+    let params = parameters.parameters()?;
+    if parameters.locals().iter().next().is_some() || params.optionals().iter().next().is_some()
+        || params.rest().is_some() || params.posts().iter().next().is_some()
+        || params.keywords().iter().next().is_some() || params.keyword_rest().is_some()
+        || params.block().is_some() {
+        return None;
+    }
+    let requireds: Vec<_> = params.requireds().iter().collect();
+    let [parameter] = requireds.as_slice() else { return None };
+    let name = parameter.as_required_parameter_node()?.name();
+    let statements = flatten_statements(block.body()?);
+    let [statement] = statements.as_slice() else { return None };
+    let pair = statement.as_array_node()?;
+    if pair.elements().iter().count() != 2 || pair.elements().iter().any(|element| {
+        let Some(call) = element.as_call_node() else { return true };
+        constant_id_str(&call.name()) != "serialize" || call.arguments().is_some()
+            || call.block().is_some() || !call.receiver().and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|read| constant_id_str(&read.name()) == constant_id_str(&name))
+    }) {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let values = receiver.as_call_node()?;
+    (constant_id_str(&values.name()) == "values"
+        && values.arguments().is_none() && values.block().is_none()).then_some(receiver)
 }
 
 /// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
