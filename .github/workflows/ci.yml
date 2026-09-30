@@ -366,6 +366,10 @@ jobs:
           ruby-version: '3.4'
       - name: Install the gem the overlay escape surface uses
         run: gem install rails-html-sanitizer --no-document
+      # The native Date reference uses ActiveRecord against in-memory
+      # SQLite. Fixture generation ships source, not its installed gems.
+      - name: Install ActiveRecord for the native Date reference
+        run: gem install activerecord -v '~> 8.1.0' --no-document
       # `tests/emit_and_run.rs` and `tests/relation_runtime_cruby.rs`
       # run the emitted Ruby tree, whose database layer is the sqlite3
       # gem. The second skipped without it and passed: before this step
