@@ -190,10 +190,16 @@ end
         VENDOR_DIRECT,
         "observation.rb",
     );
-    // The reader the macro stands for, and the keyword constructor.
+    // The readers the macro stands for — but NOT a constructor. A
+    // `T::Struct` base is lowered away, so the class would have none
+    // and one has to be synthesized. A gem base is still there at
+    // runtime, and `T::Props::Constructor` builds one from the same
+    // declarations; synthesizing ours on top overrides it, and a gem
+    // that checks its subclasses' signatures then rejects the class
+    // for introducing required keywords its base does not declare.
     assert!(emitted.contains("def amount"), "got:\n{emitted}");
     assert!(emitted.contains("def label"), "got:\n{emitted}");
-    assert!(emitted.contains("def initialize("), "got:\n{emitted}");
+    assert!(!emitted.contains("def initialize("), "got:\n{emitted}");
     // And the declaration itself is gone — expanded, not replayed.
     assert!(!emitted.contains("const :amount"), "got:\n{emitted}");
 }

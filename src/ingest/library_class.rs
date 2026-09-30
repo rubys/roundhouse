@@ -243,7 +243,7 @@ pub(super) fn library_class_and_struct_base(
         // provide.
         unknown_calls.retain(|call| !is_struct_declaration(call));
         includes.retain(|i| !i.0.as_str().starts_with("T::"));
-        let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable);
+        let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable, true);
         synthesized.append(&mut methods);
         methods = synthesized;
         None
@@ -704,6 +704,7 @@ fn synth_sorbet_struct_methods(
     owner: &ClassId,
     members: &[SorbetStructMember],
     comparable: bool,
+    with_constructor: bool,
 ) -> Vec<MethodDef> {
     let mut methods = Vec::new();
     for member in members {
@@ -731,6 +732,16 @@ fn synth_sorbet_struct_methods(
             )
         })
         .collect();
+    // A base that STAYS brings its own constructor. `T::Struct` is
+    // lowered away, so the class would have none — but a gem base
+    // whose ancestry reaches `T::Props` is still there at runtime and
+    // `T::Props::Constructor` generates one from the same
+    // declarations. Synthesizing ours on top overrides it, and a gem
+    // that checks its subclasses' signatures rejects the class for
+    // introducing required keywords its base does not declare.
+    if !with_constructor {
+        return methods;
+    }
     methods.push(MethodDef {
         name_span: Span::synthetic(),
         name: Symbol::from("initialize"),
@@ -2603,7 +2614,7 @@ pub(super) fn expand_props_bases(app: &mut crate::App) {
             .iter()
             .any(|i| i.0.as_str() == "T::Struct::ActsAsComparable");
         lc.unknown_calls.retain(|call| !is_struct_declaration(call));
-        let mut synthesized = synth_sorbet_struct_methods(&lc.name, &members, comparable);
+        let mut synthesized = synth_sorbet_struct_methods(&lc.name, &members, comparable, false);
         synthesized.append(&mut lc.methods);
         lc.methods = synthesized;
     }
