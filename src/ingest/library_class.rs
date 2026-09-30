@@ -2423,8 +2423,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // model walk expands it: one statement, many items.
                 if let Some(call) = inner.as_call_node() {
                     match super::model::expand_enum_decl(
-                        &call, file, &[], &std::collections::HashMap::new(),
-                        &super::model::EnumConstants::default(), &[],
+                        &call, file, &[], &|_| None,
                     ) {
                         Ok(Some(expanded)) => {
                             enums.push((expanded.column, expanded.mapping));

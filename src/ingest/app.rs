@@ -350,6 +350,13 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         .into_iter()
         .filter(|ignored| !lib_dir_is_explicitly_required(vfs, dir, ignored))
         .collect();
+    let ignored_lib_file = |entry: &Path| {
+        entry.strip_prefix(dir.join("lib")).is_ok_and(|rel| {
+            rel.components().next().is_some_and(|c| {
+                lib_ignores.iter().any(|ig| c.as_os_str() == ig.as_str())
+            })
+        })
+    };
 
     let mut table_prefixes = super::model::TablePrefixes::new();
     // Qualified enum arrays can live in a later file (e.g. a service
@@ -392,17 +399,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 &entry.display().to_string(),
             ));
             model_bases.record(&source, &mut base_pairs);
-            let ignored = sub == "lib"
-                && entry.strip_prefix(&support_dir).is_ok_and(|rel| {
-                    rel.components().next().is_some_and(|c| {
-                        lib_ignores.iter().any(|ig| c.as_os_str() == ig.as_str())
-                    })
-                });
-            if !ignored {
+            if sub != "lib" || !ignored_lib_file(&entry) {
                 enum_constants.record(&source, &entry.display().to_string());
             }
         }
     }
+    enum_constants.finish();
     model_bases.close_over(&base_pairs);
     for root in &roots {
         let models_dir = dir.join(root).join("models");
@@ -517,13 +519,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
         for entry in entries {
-            if sub == "lib"
-                && entry.strip_prefix(&support_dir).is_ok_and(|rel| {
-                    rel.components().next().is_some_and(|c| {
-                        lib_ignores.iter().any(|ig| c.as_os_str() == ig.as_str())
-                    })
-                })
-            {
+            if sub == "lib" && ignored_lib_file(&entry) {
                 continue;
             }
             let Ok(source) = vfs.read(&entry) else { continue };

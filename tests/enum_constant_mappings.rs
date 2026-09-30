@@ -105,7 +105,8 @@ fn ingest_enum(model: &str, constants: &[(&str, &str)]) -> Result<roundhouse::Ap
 }
 
 fn assert_enum_gap(model: &str, constants: &[(&str, &str)]) {
-    let error = ingest_enum(model, constants).expect_err("mapping must remain unsupported");
+    let error = ingest_enum(model, constants).err()
+        .unwrap_or_else(|| panic!("mapping must remain unsupported: {constants:?}\n{model}"));
     assert!(error.to_string().contains("enum :state mapping"), "unexpected failure: {error}");
 }
 
@@ -188,6 +189,58 @@ fn nonliteral_or_reassigned_cross_file_inputs_stay_unsupported() {
     }
     let dynamic_owner = "class Ticket < ApplicationRecord\n  enum :state, choose_namespace::VALUES.index_with(&:itself)\nend\n";
     assert_enum_gap(dynamic_owner, &[("app/services/values.rb", "VALUES = %w[wrong].freeze\n")]);
+}
+
+#[test]
+fn every_constant_reassignment_form_stays_unsupported() {
+    let model = "class Ticket < ApplicationRecord\n  enum :state, TicketStates::VALUES.index_with(&:itself)\nend\n";
+    for assignment in [
+        "TicketStates::VALUES = %w[closed]",
+        "::TicketStates::VALUES = %w[closed]",
+        "TicketStates:: VALUES = %w[closed]",
+        "TicketStates::VALUES ||= %w[closed]",
+        "TicketStates::VALUES &&= %w[closed]",
+        "TicketStates::VALUES += %w[closed]",
+        "module TicketStates; VALUES ||= %w[closed]; end",
+        "module TicketStates; VALUES &&= %w[closed]; end",
+        "module TicketStates; VALUES += %w[closed]; end",
+        "TicketStates::VALUES, OTHER = [%w[closed], nil]",
+        "module TicketStates; VALUES, OTHER = [%w[closed], nil]; end",
+        "OTHER = (TicketStates::VALUES = %w[closed])",
+        "OTHER ||= (TicketStates::VALUES = %w[closed])",
+        "OTHER, ANOTHER = [(TicketStates::VALUES = %w[closed]), nil]",
+        "TicketStates = Module.new",
+        "if ENV['REDEFINE']; TicketStates::VALUES = %w[closed]; end",
+        "module TicketStates; VALUES = %w[closed] if ENV['REDEFINE']; end",
+    ] {
+        assert_enum_gap(model, &[
+            ("app/services/ticket_states.rb", TICKET_STATES),
+            ("app/services/reopen.rb", assignment),
+        ]);
+    }
+}
+
+#[test]
+fn qualified_reassignments_respect_lexical_shadowing_and_file_order() {
+    let constants = [
+        ("app/services/ticket_states.rb", TICKET_STATES),
+        ("app/services/admin.rb", "module Admin\n  module TicketStates\n    VALUES = %w[review closed].freeze\n  end\nend\n"),
+        // This file sorts before the declarations. It changes only Admin's
+        // constant; the root mapping must not be rejected or overwritten.
+        ("app/services/aaa_reopen.rb", "module Admin; TicketStates::VALUES = %w[other]; end"),
+    ];
+    let rooted = "class Ticket < ApplicationRecord\n  enum :state, ::TicketStates::VALUES.index_with(&:itself)\nend\n";
+    let app = ingest_enum(rooted, &constants).expect("unrelated namespace assignment");
+    let mapping = &app.models[0].enums[&roundhouse::Symbol::from("state")];
+    assert_eq!(mapping.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(), vec!["draft", "active", "archived"]);
+    let lexical = "module Admin\n  class Ticket < ApplicationRecord\n    enum :state, TicketStates::VALUES.index_with(&:itself)\n  end\nend\n";
+    assert_enum_gap(lexical, &constants);
+}
+
+#[test]
+fn class_local_aliases_do_not_expand_cross_file_support() {
+    let model = "class Ticket < ApplicationRecord\n  LOCAL = TicketStates::VALUES\n  enum :state, LOCAL.index_with(&:itself)\nend\n";
+    assert_enum_gap(model, &[("app/services/ticket_states.rb", TICKET_STATES)]);
 }
 
 #[test]
