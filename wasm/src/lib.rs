@@ -118,6 +118,11 @@ fn transpile_inner(json_in: &str) -> String {
         Ok(app) => app,
         Err(e) => return error_json(&format!("ingest: {e}")),
     };
+    // Direct WASM emission is not the validated native generated-project
+    // Ruby path, even when language="ruby". Never emit an approximation.
+    if let Err(error) = roundhouse::lower::current_set::guard_output(&app, "wasm") {
+        return error_json(&error);
+    }
 
     // The Roda conversion target is source-to-source from the
     // INGEST-shape IR — same contract as the CLI (bin/roundhouse):
@@ -141,6 +146,9 @@ fn transpile_inner(json_in: &str) -> String {
         // out in the existing filter.
         roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry())
     };
+    if let Err(error) = roundhouse::lower::current_set::guard_output(&app, "wasm") {
+        return error_json(&error);
+    }
 
     // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
     // resolved to source positions. Synthetic spans (no source site) are
@@ -809,4 +817,29 @@ pub unsafe extern "C" fn transpile(input_ptr: *const u8, input_len: u32) -> u64 
     std::mem::forget(boxed);
 
     (ptr & 0xFFFF_FFFF) | (len << 32)
+}
+
+#[cfg(test)]
+mod current_set_tests {
+    #[test]
+    fn direct_wasm_outputs_refuse_literal_scopes_before_emission() {
+        for language in ["ruby", "typescript", "roda"] {
+            for (current, probe) in [
+                ("class Current < ActiveSupport::CurrentAttributes\n attribute :user\nend\n", "class Probe\n def self.run\n Current.set(user: 83) { 31 }\n end\nend\n"),
+                ("module ScopeContext\n class Current < ActiveSupport::CurrentAttributes\n attribute :user\n end\nend\n", "module ScopeContext\n class Probe\n def self.run\n Current.set(user: 83) { 31 }\n end\n end\nend\n"),
+            ] {
+                let input = serde_json::json!({
+                    "language": language,
+                    "src": {
+                        "app/models/current.rb": current,
+                        "app/lib/probe.rb": probe
+                    }
+                });
+                let output: serde_json::Value = serde_json::from_str(&super::transpile_inner(&input.to_string())).unwrap();
+                assert!(output.get("files").is_none(), "{language}: {output}");
+                let error = output["error"].as_str().expect("fail before emission");
+                assert!(error.contains("app/lib/probe.rb") && error.contains("CurrentAttributes#set") && error.contains("--allow-unsupported"), "{error}");
+            }
+        }
+    }
 }

@@ -8,6 +8,9 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
+#[path = "emit_and_run/current_set.rs"]
+mod current_set;
+
 /// The harness itself: the unedited blog emits and its controller
 /// suite, which renders every page, passes.
 #[test]

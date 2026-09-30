@@ -64,6 +64,53 @@ marked in the output, and the punch list is the inventory. What they
 produce is a survey, not a deployable; a stubbed action renders
 nothing useful.
 
+Literal `CurrentAttributes#set` scopes are an explicit exception to
+`--allow-unsupported`: recognized affected calls refuse unsupported
+targets or block shapes **before writing output**, even with that flag.
+Only native generated-project `--target ruby` is validated. JRuby,
+Spinel, Roda, WASM (including its Ruby output) and other targets remain
+unverified for this construct and refuse it; this is a coverage limit,
+not a claim about those languages' capabilities. The verbatim Blog
+export is exempt.
+
+The supported form is `Current.set(user: value) { |context| ... }` on
+an ingested CurrentAttributes class without a source `set` override:
+nonempty literal unique keys with represented instance readers and writers,
+an attached literal block, and ordinary required block parameters.
+It executes the block, returns its value,
+yields the current instance (extra required parameters receive nil),
+and preserves lexical captures, `next`, `break`, method `return`, and
+exception restoration. Values evaluate once in source order before
+instance capture; save/write and restoration follow Rails' per-key
+insertion order, including partial setup failures. Nested supported
+`Current.set` scopes work. Loops, other nested block calls/closures,
+converted/forwarded blocks, rest parameters and bindings the IR cannot
+preserve (including block-local, optional, destructured and keyword
+parameters) are explicitly refused anywhere in a supported body.
+Dynamic hashes, no-block forms and other receivers retain their
+existing support/diagnostics. When source classes share a relative path
+(a bare name or a suffix such as `Tenant::Current`), literal `set`
+receivers using that ambiguous path are conservatively refused: use an
+absolute identity such as
+`::Tenant::Current.set(...)` or `::Current.set(...)`. This avoids an
+existing analyzer ambiguity without inventing lexical dispatch.
+The same qualification is required for namespaced bare candidates in
+bodies the analyzer does not type, such as association extensions,
+and for relative qualified candidates whose resolved class identity
+is not represented (for example `Tenant::Current` inside `Outer`).
+Scopes in CurrentAttributes class-body initializers, direct route
+helpers, association defaults/scopes, and test constants/inner classes
+or helper defaults are also refused in this initial execution slice,
+as are controller keyword defaults, represented strict-local defaults
+and fixture ERB. Existing strict-local header ingestion accepts literal
+defaults only; richer header expressions are not represented call sites
+and are not validated or repaired by this change.
+External eager constant initializers remain supported; Current's own
+bootstrap ordering is not changed.
+Source refusals stop shared lowering before lossy rewrites, retaining
+the affected source and useful diagnostics; they never emit a partial
+project. Merely declaring CurrentAttributes does not trigger refusal.
+
 Before either flag, the `wont_lower` question is worth asking: which
 constructs in this app have no lowering for this target at all. The
 MCP server's [`wont_lower` tool](mcp.md) answers it per target without

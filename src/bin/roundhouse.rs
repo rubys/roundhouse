@@ -294,6 +294,9 @@ fn run_transpile(
             return Err(format!("ingest {}: {e}", input.display()));
         }
     };
+    // Roda bypasses shared lowering; use the same raw/generated-site
+    // boundary before any output, independently of allow_unsupported.
+    roundhouse::lower::current_set::guard_output(&app, target.as_str())?;
     // Analyze + the post-analyze shared lowerings — type-directed IR
     // rewrites every target consumes (blank-predicate grounding,
     // `Time.current`). The returned residue diagnostics (sites a pass

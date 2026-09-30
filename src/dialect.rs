@@ -813,6 +813,13 @@ pub enum LibraryClassOrigin {
         owner: Symbol,
         members: Vec<Symbol>,
     },
+    /// A monomorphic synchronous CurrentAttributes scope caller. The
+    /// original attached block stays at its call site, so break/return
+    /// retain their Ruby owners. Output gates retain the source site
+    /// after the framework call has been lowered away.
+    CurrentSet {
+        site: crate::span::Span,
+    },
 }
 
 fn is_false(b: &bool) -> bool {

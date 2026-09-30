@@ -1,199 +1,241 @@
-//! `Current.set(request: r) { … }` → save, assign, run, restore.
+//! Native Ruby execution and output boundary for literal Current.set.
 //!
-//! `ActiveSupport::CurrentAttributes.set` is a scoped write: it assigns
-//! the named attributes, yields, and puts the previous values back —
-//! including when the block raises, which is what keeps one request's
-//! `Current.user` out of the next. Rails implements it by walking the
-//! attribute names at run time; there is no list to walk here, because
-//! `ingest::current_attributes` flattens a `Current` into ordinary
-//! per-attribute accessors on a thread-local instance.
-//!
-//! The call site names the attributes, so the triple is spelled out at
-//! lower time:
-//!
-//! ```ruby
-//! Current.set(request: r) { body }
-//! # →
-//! __current_set_request = Current.request
-//! Current.request = r
-//! begin
-//!   body
-//! ensure
-//!   Current.request = __current_set_request
-//! end
-//! ```
-//!
-//! ENSURE, NOT A TRAILING ASSIGNMENT, and it is the half that matters:
-//! `Current.set` exists to be exception-safe. campfire's
-//! `actiontext_opengraph_embeds_test` asserts inside the block, so the
-//! first failing assertion would otherwise leave `Current.request`
-//! pointing at a test host for every test after it — a leak that shows
-//! up as an unrelated file failing, which is the worst kind.
-//!
-//! NO RUNTIME METHOD, deliberately. A generated `Current.set` would
-//! need one signature covering every subset of attributes a caller
-//! might name, and optional keywords are their own hazard on the strict
-//! targets (docs/pipeline/runtime.md). The shape above uses only the
-//! accessors the flattening already emits, so it compiles wherever they
-//! do.
-//!
-//! WHAT IT DECLINES: a `set` whose argument is not a literal keyword
-//! hash, or whose receiver is not one of the app's own
-//! `CurrentAttributes` classes. Both are reported and left as written —
-//! the tree has no `set` to call, so the site fails loudly with the
-//! reason rather than running the block with the wrong scope.
+//! Source admission is shared with inference in `crate::current_set`.
+//! A generated class method receives RHS arguments before capturing the
+//! current instance, protects sequential save/write, yields to the ORIGINAL
+//! attached block, and restores saved keys in one insertion-order ensure.
+//! Ruby owns next, break, captures and enclosing-method return; no Proc,
+//! IIFE or overridable application primitive substitutes for that block.
 
 use crate::app::App;
+use crate::current_set::{
+    classify_site, for_each_body, keyword_pairs, scoped_classes, set_receiver_class,
+    site_diagnostics, target_refusal, LiteralSite, ScopedClasses,
+};
+pub use crate::current_set::source_refusals;
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::dialect::{AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, Param};
+use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
-use std::collections::BTreeSet;
+use crate::ty::{ParamKind, Ty};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Hard fail before output, deliberately independent of allow-unsupported.
+/// Blog exports verbatim; native generated Ruby is the only validated path.
+pub fn guard_output(app: &App, target: &str) -> Result<(), String> {
+    if target == "blog" { return Ok(()); }
+    // Reuse the analyzer's resolution on an isolated clone only when raw
+    // bare candidates need it. Preserve ingest-shaped input for Roda.
+    fn unresolved_site(expr: &Expr) -> bool {
+        if let ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. } = &*expr.node {
+            if method.as_str() == "set"
+                && matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1)
+                && matches!(&*block.node, ExprNode::Lambda { .. })
+                && keyword_pairs(args).is_some()
+                && recv.ty.is_none()
+            {
+                return true;
+            }
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| found |= unresolved_site(child));
+        found
+    }
+    let classes = scoped_classes(app);
+    let mut needs_resolution = false;
+    if !classes.supported.is_empty() {
+        for_each_body(app, &mut |body, _| needs_resolution |= unresolved_site(body));
+    }
+    let mut resolved = needs_resolution.then(|| app.clone());
+    if let Some(resolved) = &mut resolved {
+        crate::analyze::Analyzer::new(resolved).analyze(resolved);
+    }
+    let app = resolved.as_ref().unwrap_or(app);
+    let mut diags = site_diagnostics(app, Some(target));
+    if target != "ruby" {
+        for class in &app.library_classes {
+            if let Some(LibraryClassOrigin::CurrentSet { site }) = class.origin {
+                diags.push(target_refusal(site, target));
+            }
+        }
+    }
+    if diags.is_empty() { return Ok(()); }
+    Err(format!("{}\nCurrent.set output refusal cannot be bypassed with --allow-unsupported.",
+        diags.iter().map(|d| d.render(&app.sources)).collect::<Vec<_>>().join("\n")))
+}
 
 pub fn apply_current_set_lowering(app: &mut App) -> Vec<Diagnostic> {
-    let classes: BTreeSet<String> = app
-        .current_attribute_classes
-        .iter()
-        .map(|c| c.0.as_str().to_string())
-        .collect();
-    if classes.is_empty() {
-        return Vec::new();
+    let refusals = source_refusals(app);
+    if !refusals.is_empty() { return refusals; }
+    let classes = scoped_classes(app);
+    if classes.supported.is_empty() { return Vec::new(); }
+    let mut reserved = BTreeSet::new();
+    for name in app.models.iter().map(|m| &m.name)
+        .chain(app.controllers.iter().map(|c| &c.name))
+        .chain(app.test_modules.iter().map(|tm| &tm.name)) {
+        reserved.extend(name.0.as_str().split("::").map(str::to_string));
     }
+    for class in app.library_classes.iter().chain(app.rails_application.iter())
+        .chain(app.test_modules.iter().flat_map(|tm| &tm.inner_classes)) {
+        reserved.extend(class.name.0.as_str().split("::").map(str::to_string));
+        reserved.extend(class.constants.iter().map(|(name, _)| name.to_string()));
+    }
+    for tm in &app.test_modules {
+        reserved.extend(tm.constants.iter().map(|(name, _)| name.to_string()));
+    }
+    fn reserve(expr: &Expr, names: &mut BTreeSet<String>) {
+        match &*expr.node {
+            ExprNode::Const { path }
+            | ExprNode::Assign { target: LValue::Const { path }, .. }
+            | ExprNode::OpAssign { target: LValue::Const { path }, .. } => {
+                names.extend(path.iter().map(ToString::to_string));
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| reserve(child, names));
+    }
+    for_each_body(app, &mut |expr, _| reserve(expr, &mut reserved));
+    let reader_types = app.library_classes.iter().flat_map(|class| {
+        class.methods.iter().filter_map(|method| {
+            if method.receiver != MethodReceiver::Instance { return None; }
+            let Ty::Fn { ret, .. } = method.signature.as_ref()? else { return None };
+            Some(((class.name.clone(), method.name.to_string()), (**ret).clone()))
+        })
+    }).collect();
+    let mut pass = ScopeLowering { classes, reserved, reader_types, generated: Vec::new() };
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &classes, &mut diags));
-    for view in &mut app.views {
-        rewrite(&mut view.body, &classes, &mut diags);
-    }
+    super::for_each_hook_body(app, &mut |e| pass.rewrite(e, &mut diags));
+    for view in &mut app.views { pass.rewrite(&mut view.body, &mut diags); }
     for tm in &mut app.test_modules {
-        if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &classes, &mut diags);
-        }
-        for t in &mut tm.tests {
-            rewrite(&mut t.body, &classes, &mut diags);
-        }
-        for m in &mut tm.helpers {
-            rewrite(&mut m.body, &classes, &mut diags);
-        }
+        if let Some(setup) = &mut tm.setup { pass.rewrite(setup, &mut diags); }
+        for t in &mut tm.tests { pass.rewrite(&mut t.body, &mut diags); }
+        for m in &mut tm.helpers { pass.rewrite(&mut m.body, &mut diags); }
     }
+    app.library_classes.extend(pass.generated);
     diags
 }
 
-fn rewrite(e: &mut Expr, classes: &BTreeSet<String>, diags: &mut Vec<Diagnostic>) {
-    e.node.for_each_child_mut(&mut |c| rewrite(c, classes, diags));
-    let span = e.span;
-    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { return };
-    if method.as_str() != "set" {
-        return;
-    }
-    let ExprNode::Const { path } = &*recv.node else { return };
-    let class = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
-    if !classes.contains(&class) {
-        return;
-    }
-    let Some(body) = block else {
-        report(span, &class, "it takes no block, so there is no scope to restore after", diags);
-        return;
-    };
-    let Some(pairs) = keyword_pairs(args) else {
-        report(span, &class, "its argument is not a literal keyword hash", diags);
-        return;
-    };
-    *e = expand(span, &class, &pairs, body);
+struct ScopeLowering {
+    classes: ScopedClasses,
+    reserved: BTreeSet<String>,
+    reader_types: BTreeMap<(ClassId, String), Ty>,
+    generated: Vec<LibraryClass>,
 }
 
-/// `[(attribute, value)]` from the single trailing keyword hash.
-fn keyword_pairs(args: &[Expr]) -> Option<Vec<(String, Expr)>> {
-    let [opts] = args else { return None };
-    let ExprNode::Hash { entries, .. } = &*opts.node else { return None };
-    if entries.is_empty() {
-        return None;
-    }
-    let mut out = Vec::new();
-    for (k, v) in entries {
-        let name = match &*k.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-            _ => return None,
+impl ScopeLowering {
+    fn rewrite(&mut self, e: &mut Expr, diags: &mut Vec<Diagnostic>) {
+        // Classify before replacing inner sites with generated callers.
+        let site = match &*e.node {
+            ExprNode::Send { recv, method, args, block, .. } => {
+                let site = classify_site(recv.as_ref(), method, args, block.as_ref(), &self.classes);
+                if site.is_none() {
+                    if let Some(class) = set_receiver_class(recv.as_ref(), method, &self.classes) {
+                        report(e.span, class.0.as_str(), "its arguments and block are not both literal", diags);
+                    }
+                }
+                site
+            }
+            _ => None,
         };
-        out.push((name, v.clone()));
+        if let Some(LiteralSite { refusal: Some((span, why)), .. }) = &site {
+            diags.push(Diagnostic::unsupported(*span, None, "CurrentAttributes#set", *why));
+            return;
+        }
+        e.node.for_each_child_mut(&mut |child| self.rewrite(child, diags));
+        let Some(site) = site else { return };
+        let ExprNode::Send { args, block: Some(block), .. } = &*e.node else { unreachable!("classified literal send") };
+        let pairs = keyword_pairs(args).expect("classified literal hash");
+        let mut n = self.generated.len() + 1;
+        let name = loop {
+            let candidate = format!("RoundhouseCurrentSetScope{n}");
+            if self.reserved.insert(candidate.clone()) { break candidate; }
+            n += 1;
+        };
+        let generated = self.scope_class(e.span, &name, &site.class.expect("admitted scope identity"), &pairs, e.ty.clone());
+        *e.node = ExprNode::Send {
+            recv: Some(const_path(e.span, &name)), method: Symbol::from("run"),
+            args: pairs.into_iter().map(|(_, value)| value).collect(),
+            block: Some(block.clone()), parenthesized: true,
+        };
+        self.generated.push(generated);
     }
-    Some(out)
+
+    fn scope_class(&self, span: Span, name: &str, current: &ClassId, pairs: &[(String, Expr)], result: Option<Ty>) -> LibraryClass {
+        let context_ty = Ty::Class { id: current.clone(), args: Vec::new() };
+        let context = || typed(local_read(span, Symbol::from("__context")), Some(context_ty.clone()));
+        // Arguments evaluate once, before entry and instance capture.
+        let mut stmts = vec![assign_local(span, Symbol::from("__context"), typed(
+            send(span, const_path(span, current.0.as_str()), "instance", Vec::new()), Some(context_ty.clone()),
+        ))];
+        let mut protected = Vec::new();
+        let mut restore = Vec::new();
+        let mut params = Vec::new();
+        let mut typed_params = Vec::new();
+        for (i, (attribute, value)) in pairs.iter().enumerate() {
+            let argument = Symbol::from(format!("__value{i}"));
+            let previous = Symbol::from(format!("__previous{i}"));
+            let saved = Symbol::from(format!("__saved{i}"));
+            params.push(Param::positional(argument.clone()));
+            typed_params.push(value.ty.clone().map(|ty| crate::ty::Param { name: argument.clone(), ty, kind: ParamKind::Required }));
+            stmts.push(assign_local(span, saved.clone(), typed(Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: false } }), Some(Ty::Bool))));
+            let read_ty = self.reader_types.get(&(current.clone(), attribute.clone())).cloned();
+            // Object#with saves/writes per key inside the protected region.
+            // A raising writer was saved; a raising reader was not.
+            protected.push(assign_local(span, previous.clone(), typed(send(span, context(), attribute, Vec::new()), read_ty.clone())));
+            protected.push(assign_local(span, saved.clone(), typed(Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }), Some(Ty::Bool))));
+            protected.push(typed(send(span, context(), &format!("{attribute}="), vec![typed(local_read(span, argument), value.ty.clone())]), value.ty.clone()));
+            restore.push(typed(Expr::new(span, ExprNode::If {
+                cond: typed(local_read(span, saved), Some(Ty::Bool)),
+                then_branch: typed(send(span, context(), &format!("{attribute}="), vec![typed(local_read(span, previous), read_ty.clone())]), read_ty.clone()),
+                else_branch: typed(Expr::new(span, ExprNode::Lit { value: Literal::Nil }), Some(Ty::Nil)),
+            }), read_ty.map(|ty| crate::analyze::union_of(ty, Ty::Nil))));
+        }
+        protected.push(typed(Expr::new(span, ExprNode::Yield { args: vec![context()] }), result.clone()));
+        stmts.push(typed(Expr::new(span, ExprNode::BeginRescue {
+            body: typed(seq(span, protected), result.clone()), rescues: Vec::new(), else_branch: None,
+            // One insertion-order ensure: a restoring raise stops later keys.
+            ensure: Some(seq(span, restore)), implicit: false,
+        }), result.clone()));
+        let signature = result.clone().zip(typed_params.into_iter().collect::<Option<Vec<_>>>()).map(|(ret, params)| Ty::Fn {
+            params,
+            block: Some(Box::new(Ty::Fn {
+                params: vec![crate::ty::Param { name: Symbol::from("context"), ty: context_ty, kind: ParamKind::Required }],
+                block: None, ret: Box::new(ret.clone()), effects: EffectSet::pure(),
+            })),
+            ret: Box::new(ret), effects: EffectSet::pure(),
+        });
+        LibraryClass {
+            name: ClassId(Symbol::from(name)), is_module: false, parent: None, includes: Vec::new(),
+            methods: vec![MethodDef {
+                name: Symbol::from("run"), receiver: MethodReceiver::Class, params, block_param: None,
+                name_span: span, body: typed(seq(span, stmts), result), signature,
+                effects: EffectSet::pure(), enclosing_class: Some(Symbol::from(name)), kind: AccessorKind::Method,
+                is_async: false, mutates_self: false,
+            }],
+            nullable_columns: Vec::new(), origin: Some(LibraryClassOrigin::CurrentSet { site: span }),
+            constants: Vec::new(), unknown_calls: Vec::new(),
+        }
+    }
 }
 
-fn expand(span: Span, class: &str, pairs: &[(String, Expr)], body: &Expr) -> Expr {
-    let mut stmts: Vec<Expr> = Vec::new();
-    // Saves FIRST, all of them, then the assignments — the order Rails'
-    // own `set` uses. A save that read an attribute another pair had
-    // already overwritten would restore the wrong value on a call that
-    // names two.
-    let saved: Vec<(String, Symbol)> = pairs
-        .iter()
-        .map(|(name, _)| (name.clone(), Symbol::from(format!("__current_set_{name}"))))
-        .collect();
-    for ((name, _), (_, local)) in pairs.iter().zip(saved.iter()) {
-        stmts.push(assign_local(span, local.clone(), class_read(span, class, name)));
-    }
-    for (name, value) in pairs {
-        stmts.push(class_write(span, class, name, value.clone()));
-    }
-    let mut restore: Vec<Expr> = Vec::new();
-    for (name, local) in &saved {
-        restore.push(class_write(span, class, name, local_read(span, local.clone())));
-    }
-    stmts.push(Expr::new(
-        span,
-        ExprNode::BeginRescue {
-            body: body.clone(),
-            rescues: Vec::new(),
-            else_branch: None,
-            ensure: Some(seq(span, restore)),
-            implicit: false,
-        },
-    ));
-    seq(span, stmts)
-}
+fn typed(mut expr: Expr, ty: Option<Ty>) -> Expr { expr.ty = ty; expr }
 
 fn seq(span: Span, exprs: Vec<Expr>) -> Expr {
-    if exprs.len() == 1 {
-        return exprs.into_iter().next().expect("checked");
-    }
+    if exprs.len() == 1 { return exprs.into_iter().next().expect("checked"); }
     Expr::new(span, ExprNode::Seq { exprs })
 }
 
-fn class_read(span: Span, class: &str, name: &str) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(const_path(span, class)),
-            method: Symbol::from(name),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
-fn class_write(span: Span, class: &str, name: &str, value: Expr) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(const_path(span, class)),
-            method: Symbol::from(format!("{name}=")),
-            args: vec![value],
-            block: None,
-            parenthesized: false,
-        },
-    )
+fn send(span: Span, recv: Expr, name: &str, args: Vec<Expr>) -> Expr {
+    Expr::new(span, ExprNode::Send {
+        recv: Some(recv), method: Symbol::from(name), args, block: None, parenthesized: true,
+    })
 }
 
 fn assign_local(span: Span, name: Symbol, value: Expr) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name },
-            value,
-        },
-    )
+    let ty = value.ty.clone();
+    typed(Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value }), ty)
 }
 
 fn local_read(span: Span, name: Symbol) -> Expr {
@@ -205,14 +247,9 @@ fn const_path(span: Span, class: &str) -> Expr {
 }
 
 fn report(span: Span, class: &str, why: &str, diags: &mut Vec<Diagnostic>) {
-    let mut d = Diagnostic::unsupported(
-        span,
-        None,
-        "CurrentAttributes#set",
-        format!(
-            "`{class}.set` is served only as a block form over a literal keyword hash, which is what lets the save/restore be spelled at compile time: {why}"
-        ),
-    );
+    let mut d = Diagnostic::unsupported(span, None, "CurrentAttributes#set", format!(
+        "`{class}.set` is served only as a block form over a literal keyword hash, which is what lets the save/restore be spelled at compile time: {why}"
+    ));
     d.severity = Severity::Warning;
     diags.push(d);
 }
@@ -226,13 +263,20 @@ mod tests {
         let src = format!("class T < ActiveSupport::TestCase\n  test \"t\" do\n    {body}\n  end\nend\n");
         let mut app = App::new();
         app.current_attribute_classes.push(ClassId(Symbol::from("Current")));
-        app.test_modules
-            .extend(crate::ingest::test::ingest_test_files(src.as_bytes(), "t.rb").expect("ingest"));
+        app.library_classes.extend(
+            crate::ingest::ingest_library_classes(b"class Current\n def request; @request; end\n def request=(value); @request = value; end\n def user; @user; end\n def user=(value); @user = value; end\n def account; @account; end\n def account=(value); @account = value; end\nend\n", "current.rb").expect("Current class"),
+        );
+        app.test_modules.extend(crate::ingest::test::ingest_test_files(src.as_bytes(), "t.rb").expect("ingest"));
         app
     }
 
-    fn lowered(app: &App) -> String {
-        crate::emit::ruby::emit_expr(&app.test_modules[0].tests[0].body)
+    fn lowered(app: &App) -> String { crate::emit::ruby::emit_expr(&app.test_modules[0].tests[0].body) }
+
+    fn scope_body(app: &App) -> String {
+        let class = app.library_classes.iter().find(|class|
+            matches!(class.origin, Some(LibraryClassOrigin::CurrentSet { .. }))
+        ).expect("generated scope");
+        crate::emit::ruby::emit_expr(&class.methods[0].body)
     }
 
     #[test]
@@ -240,24 +284,24 @@ mod tests {
         let mut app = app_with("Current.set(request: r) do\n      work\n    end");
         let diags = apply_current_set_lowering(&mut app);
         assert!(diags.is_empty(), "{diags:?}");
-        let out = lowered(&app);
-        assert!(out.contains("__current_set_request = Current.request"), "{out}");
-        assert!(out.contains("Current.request = r"), "{out}");
+        assert!(lowered(&app).contains("RoundhouseCurrentSetScope1.run(r) do"));
+        let out = scope_body(&app);
+        assert!(out.contains("__previous0 = __context.request"), "{out}");
+        assert!(out.contains("__context.request = __value0"), "{out}");
+        assert!(out.contains("yield(__context)") || out.contains("yield __context"), "{out}");
         assert!(out.contains("ensure"), "{out}");
-        assert!(out.contains("Current.request = __current_set_request"), "{out}");
+        assert!(out.contains("__context.request = __previous0 if __saved0"), "{out}");
     }
 
-    /// Every save runs before any assignment: with two attributes, a
-    /// save that read after a write would restore the new value.
     #[test]
-    fn two_attributes_save_before_either_is_written() {
+    fn two_attributes_are_saved_and_written_sequentially() {
         let mut app = app_with("Current.set(request: r, user: u) do\n      work\n    end");
         let diags = apply_current_set_lowering(&mut app);
         assert!(diags.is_empty(), "{diags:?}");
-        let out = lowered(&app);
-        let save_user = out.find("__current_set_user = Current.user").expect(&out);
-        let write_request = out.find("Current.request = r").expect(&out);
-        assert!(save_user < write_request, "a save ran after a write:\n{out}");
+        let out = scope_body(&app);
+        let save_user = out.find("__previous1 = __context.user").expect(&out);
+        let write_request = out.find("__context.request = __value0").expect(&out);
+        assert!(write_request < save_user, "expected per-key sequential save/write:\n{out}");
     }
 
     #[test]
@@ -268,8 +312,6 @@ mod tests {
         assert!(lowered(&app).contains("Current.set(attrs)"), "{}", lowered(&app));
     }
 
-    /// `set` on anything that is not one of the app's own
-    /// CurrentAttributes classes is somebody else's method.
     #[test]
     fn another_receivers_set_is_untouched() {
         let mut app = app_with("Cache.set(key: k) do\n      work\n    end");

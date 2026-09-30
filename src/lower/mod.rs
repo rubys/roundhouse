@@ -685,6 +685,14 @@ pub fn apply_post_analyze_lowerings(
     // leave here: the type checker and the IDE have seen them; no
     // lowering or emitter should.
     app.views.retain(|v| !v.analysis_only);
+    // Current scopes' source binding/control-owner refusals must survive
+    // earlier rewrites (for example create_block inlining). Preserve the
+    // source IR on refusal so every output API still hard-fails, even
+    // when the caller permits ordinary unsupported diagnostics.
+    let refusals = current_set::source_refusals(app);
+    if !refusals.is_empty() {
+        return refusals;
+    }
     debug_assert!(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
@@ -1225,6 +1233,15 @@ pub(crate) fn for_each_hook_body_ref(
                     }
                 }
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for method in extension {
+                        visit_param_defaults(&method.params, f);
+                        f(&method.body);
+                    }
+                }
                 _ => {}
             }
         }

@@ -65,6 +65,9 @@ use crate::ty::{Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    /// Source provenance for literal scoped writes; the body typer must
+    /// not infer framework block semantics for an unrelated `set` method.
+    current_attribute_classes: crate::current_set::ScopedClasses,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
     /// during the fixpoint loop in `analyze`. Consulted when seeding
@@ -760,6 +763,7 @@ impl Analyzer {
 
         Self {
             classes,
+            current_attribute_classes: crate::current_set::scoped_classes(app),
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
@@ -774,6 +778,7 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
+            .with_current_attributes(&self.current_attribute_classes)
             .with_const_index(self.const_index())
     }
 
@@ -2636,7 +2641,7 @@ impl Analyzer {
             let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
             if !targets.is_empty() {
                 let mut collect = |body: &crate::expr::Expr| {
-                    collect_const_attr_writes(body, &targets, &mut out);
+                    collect_const_attr_writes(body, &targets, &self.current_attribute_classes, &mut out);
                 };
                 crate::lower::for_each_hook_body_ref(app, &mut collect);
                 for view in &app.views {
@@ -5611,8 +5616,20 @@ fn bind_framework_assigned_ivars(body: &Expr, ivars: &mut HashMap<Symbol, Ty>) {
 fn collect_const_attr_writes(
     expr: &crate::expr::Expr,
     targets: &std::collections::HashSet<&ClassId>,
+    scoped_classes: &crate::current_set::ScopedClasses,
     out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
 ) {
+    let mut record = |id: &ClassId, name: Symbol, value: &Expr| {
+        if let Some(ty) = value.ty.as_ref().filter(|t| !t.is_open()) {
+            let entry = out.entry(id.clone()).or_default();
+            let merged = match entry.remove(&name) {
+                Some(prev) if prev == *ty => prev,
+                Some(prev) => crate::analyze::body::union_of(prev, ty.clone()),
+                None => ty.clone(),
+            };
+            entry.insert(name, merged);
+        }
+    };
     // `Current.user = bot` arrives as a SEND of `user=`, not as an
     // `Assign` — prism spells a receiver-ful attribute write as a call,
     // and only the compound forms (`||=`) become `LValue::Attr`.
@@ -5624,20 +5641,23 @@ fn collect_const_attr_writes(
                 path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str(),
             ));
             if let Some(target) = targets.get(&id) {
-                if let Some(ty) = args[0].ty.as_ref().filter(|t| !t.is_open()) {
-                    let entry = out.entry((*target).clone()).or_default();
-                    let name = Symbol::from(attr);
-                    let merged = match entry.remove(&name) {
-                        Some(prev) if prev == *ty => prev,
-                        Some(prev) => crate::analyze::body::union_of(prev, ty.clone()),
-                        None => ty.clone(),
-                    };
-                    entry.insert(name, merged);
-                }
+                record(target, Symbol::from(attr), &args[0]);
             }
         }
     }
-    expr.node.for_each_child(&mut |c| collect_const_attr_writes(c, targets, out));
+    // The literal scope's values really are writer arguments; omitting
+    // these sites leaves a set-only attribute's reader shapeless even
+    // inside the block that just assigned it.
+    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+        if let Some((id, pairs)) = crate::current_set::literal_set_site(
+            recv.as_ref(), method, args, block.as_ref(), scoped_classes,
+        ) {
+            for (name, value) in pairs {
+                record(&id, Symbol::from(name), &value);
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_const_attr_writes(c, targets, scoped_classes, out));
 }
 
 /// A binding worth carrying to a SUBCLASS: one that is an answer.

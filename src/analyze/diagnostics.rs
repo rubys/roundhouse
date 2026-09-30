@@ -38,7 +38,7 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 /// skins that state the denominator (#64: "0 findings" must be
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
-    let mut out = Vec::new();
+    let mut out = crate::current_set::source_refusals(app);
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual

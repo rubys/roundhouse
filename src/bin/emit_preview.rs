@@ -31,6 +31,7 @@ fn emit() {
 
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
+    roundhouse::lower::current_set::guard_output(&app, &target).expect("Current.set output refusal");
 
     let (files, default_out_dir) = match target.as_str() {
         "typescript" | "ts" => {
