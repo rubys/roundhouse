@@ -2254,8 +2254,8 @@ jobs:
           node-version: '20'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
-          cd e2e
-          npm install --no-audit --no-fund
+          cd e2e/campfire
+          npm ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
         run: scripts/smoke --tgz campfire/spinel.tgz campfire
