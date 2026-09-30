@@ -1527,6 +1527,9 @@ end
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
+    // Alba declarations become ordinary property-reading methods before
+    // inference; validate complete original resource bodies, not just IR.
+    super::alba::lower_alba_resources(&mut app)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.

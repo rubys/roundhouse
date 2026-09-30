@@ -17,6 +17,31 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// Alba's inherited declarations are executable property reads, not just a
+/// return-type assertion. Boot loads the generated classes without Alba.
+#[test]
+fn alba_inherited_attributes_and_one_nested_resource_run() {
+    emit_and_run::real_blog()
+        .write("app/lib/alba_resources.rb", include_str!("support/alba.rb"))
+        .write("app/controllers/alba_probes_controller.rb", r#"
+class AlbaProbesController < ApplicationController
+  def index
+    author = AlbaAuthor.new(9, "Ada")
+    article = AlbaArticle.new(7, "Syn", author)
+    render json: ArticleResource.new(article).to_h
+  end
+end
+"#)
+        .run_ruby(r#"
+expected = {"id" => 7, "title" => "Synthetic", "author" => {"id" => 9, "name" => "Ada"}}
+actual = SurveyProbe.call
+raise actual.inspect unless actual == expected
+raise "external Alba loaded" if defined?(Alba::Resource)
+puts "PASS portable Alba source-property contract"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a

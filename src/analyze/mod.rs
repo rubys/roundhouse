@@ -23,6 +23,7 @@
 //!
 //! Each of those comes when a fixture forces it.
 
+mod alba;
 mod body;
 pub(crate) use body::string_answers;
 pub mod async_color;
