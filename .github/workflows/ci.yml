@@ -326,6 +326,8 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Refresh apt index
+        run: sudo apt-get update -qq
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
         with:
@@ -600,6 +602,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Refresh apt index
+        run: sudo apt-get update -qq
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
         with:
@@ -1668,6 +1672,9 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Refresh apt index
+        if: matrix.target == 'crystal'
+        run: sudo apt-get update -qq
       - name: Install Crystal
         if: matrix.target == 'crystal'
         uses: crystal-lang/install-crystal@v1
@@ -1915,6 +1922,9 @@ jobs:
       - name: Install Rust
         if: matrix.target == 'rust'
         uses: dtolnay/rust-toolchain@stable
+      - name: Refresh apt index
+        if: matrix.target == 'crystal'
+        run: sudo apt-get update -qq
       - name: Install Crystal
         if: matrix.target == 'crystal'
         uses: crystal-lang/install-crystal@v1
