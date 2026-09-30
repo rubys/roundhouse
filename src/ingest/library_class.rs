@@ -1085,7 +1085,7 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 /// `def self.included(klass); class << klass; def foo; …; end; end; end`
 /// — the vanilla-Ruby spelling of ActiveSupport::Concern's `class_methods
 /// do … end` / `module ClassMethods` sugar (handled below in
-/// [`walk_decl_body`] and mirrored in [`ingest_concern_class_method_names`]).
+/// [`walk_decl_body`] and mirrored in [`ingest_concern_class_method_spans`]).
 /// Procore's shared search concerns (`app/concerns/search_engine/
 /// {indexed,procore_search,tool_search,incrementally_backfillable}.rb`
 /// and more) skip `ActiveSupport::Concern` entirely and open the
@@ -1108,6 +1108,18 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 fn included_hook_class_methods_body<'pr>(
     def: &ruby_prism::DefNode<'pr>,
 ) -> Option<ruby_prism::Node<'pr>> {
+    let param_name = included_hook_parameter(def)?;
+    let stmts = flatten_statements(def.body()?);
+    let [stmt] = &stmts[..] else { return None };
+    let sc = stmt.as_singleton_class_node()?;
+    let lv = sc.expression().as_local_variable_read_node()?;
+    if constant_id_str(&lv.name()) != param_name {
+        return None;
+    }
+    sc.body()
+}
+
+fn included_hook_parameter(def: &ruby_prism::DefNode<'_>) -> Option<String> {
     let receiver = def.receiver()?;
     receiver.as_self_node()?;
     if constant_id_str(&def.name()) != "included" {
@@ -1117,6 +1129,7 @@ fn included_hook_class_methods_body<'pr>(
     if params.optionals().iter().next().is_some()
         || params.keywords().iter().next().is_some()
         || params.rest().is_some()
+        || params.keyword_rest().is_some()
         || params.posts().iter().next().is_some()
         || params.block().is_some()
     {
@@ -1127,16 +1140,30 @@ fn included_hook_class_methods_body<'pr>(
     if requireds.next().is_some() {
         return None;
     }
-    let param_name = constant_id_str(&only_param.name());
+    Some(constant_id_str(&only_param.name()).to_string())
+}
 
-    let stmts = flatten_statements(def.body()?);
-    let [stmt] = &stmts[..] else { return None };
-    let sc = stmt.as_singleton_class_node()?;
-    let lv = sc.expression().as_local_variable_read_node()?;
-    if constant_id_str(&lv.name()) != param_name {
-        return None;
+/// The complete vanilla-Ruby ClassMethods bridge. The carrier splice
+/// replaces its only effect; retaining it would reference the nested
+/// module that ingestion flattened away. Extra statements are NOT safe
+/// to consume, nor is an extend of any other constant or receiver.
+fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
+    let Some(param_name) = included_hook_parameter(def) else { return false };
+    let Some(body) = def.body() else { return false };
+    let stmts = flatten_statements(body);
+    let [stmt] = &stmts[..] else { return false };
+    let Some(call) = stmt.as_call_node() else { return false };
+    if constant_id_str(&call.name()) != "extend" || call.block().is_some() {
+        return false;
     }
-    sc.body()
+    let Some(recv) = call.receiver().and_then(|r| r.as_local_variable_read_node()) else { return false };
+    if constant_id_str(&recv.name()) != param_name {
+        return false;
+    }
+    let Some(args) = call.arguments() else { return false };
+    let args: Vec<_> = args.arguments().iter().collect();
+    matches!(args.as_slice(), [arg] if arg.as_constant_read_node()
+        .is_some_and(|c| constant_id_str(&c.name()) == "ClassMethods"))
 }
 
 fn walk_decl_body<'pr>(
@@ -1168,7 +1195,10 @@ fn walk_decl_body<'pr>(
         return Ok((includes, methods, constants, unknown_calls));
     };
 
-    for stmt in flatten_statements(b) {
+    let statements = flatten_statements(b);
+    let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
+        .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
+    for stmt in statements {
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
         // declares its members inside a block, so the constants are one
         // level deeper than every other class-body constant. They are
@@ -1257,6 +1287,9 @@ fn walk_decl_body<'pr>(
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
                 unknown_calls.extend(inner_unknown);
+                continue;
+            }
+            if has_class_methods && is_class_methods_bridge(&def) {
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
@@ -2214,12 +2247,24 @@ pub fn ingest_helper_method_names(source: &[u8]) -> Vec<Symbol> {
     visitor.names
 }
 
-pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Symbol>)> {
-    fn defs_in(body: Option<ruby_prism::Node<'_>>, out: &mut Vec<Symbol>) {
+/// Definition identities, not just names: a module singleton with the
+/// same name as a carrier method is a separate, non-inherited method.
+/// Keep bridge identities and actual nested-carrier declarations too,
+/// so a bridge can be consumed across reopenings without treating an
+/// arbitrary class-side block as proof that `ClassMethods` exists.
+pub struct ConcernClassMethodSpans {
+    pub owner: ClassId,
+    pub methods: Vec<Span>,
+    pub bridges: Vec<Span>,
+    pub has_nested_carrier: bool,
+}
+
+pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
+    fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
             if let Some(def) = stmt.as_def_node() {
-                out.push(Symbol::from(constant_id_str(&def.name())));
+                out.push(super::util::def_name_span(&def, file));
             }
         }
     }
@@ -2239,11 +2284,14 @@ pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Sym
         let id = ClassId(Symbol::from(full_path.join("::")));
 
         let Some(body) = module.body() else { continue };
-        let mut names: Vec<Symbol> = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
+        let mut bridges: Vec<Span> = Vec::new();
+        let mut has_nested_carrier = false;
         for stmt in flatten_statements(body) {
             if let Some(m) = stmt.as_module_node() {
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
-                    defs_in(m.body(), &mut names);
+                    has_nested_carrier = true;
+                    defs_in(m.body(), file, &mut spans);
                 }
                 continue;
             }
@@ -2252,7 +2300,7 @@ pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Sym
                     && constant_id_str(&call.name()) == "class_methods"
                 {
                     if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
-                        defs_in(block.body(), &mut names);
+                        defs_in(block.body(), file, &mut spans);
                     }
                 }
             }
@@ -2266,12 +2314,20 @@ pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Sym
             // do` / `module ClassMethods`.
             if let Some(def) = stmt.as_def_node() {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
-                    defs_in(Some(singleton_body), &mut names);
+                    defs_in(Some(singleton_body), file, &mut spans);
+                }
+                if is_class_methods_bridge(&def) {
+                    bridges.push(super::util::def_name_span(&def, file));
                 }
             }
         }
-        if !names.is_empty() {
-            out.push((id, names));
+        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier {
+            out.push(ConcernClassMethodSpans {
+                owner: id,
+                methods: spans,
+                bridges,
+                has_nested_carrier,
+            });
         }
     }
     out

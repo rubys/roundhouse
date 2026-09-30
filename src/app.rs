@@ -307,9 +307,9 @@ pub struct App {
     /// every construction site including a dozen in tests.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_actions: HashMap<ClassId, HashMap<Symbol, ClassId>>,
-    /// The MODEL twin of `concern_spliced_actions`: class-side concern
-    /// methods `splice_concern_class_methods_into_models` copied onto a
-    /// model, keyed model → method → the module the `def` came from.
+    /// The class-side twin of `concern_spliced_actions`: concern methods
+    /// `splice_concern_class_methods_into_includers` copied onto a model
+    /// or library class, keyed includer → method → the source module.
     ///
     /// The module keeps its own copy of that `def` (dead there, since
     /// `include` never carries a singleton method), so ONE method now

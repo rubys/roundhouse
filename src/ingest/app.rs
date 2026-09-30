@@ -23,7 +23,7 @@ use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
-    ClassKind, classify_class_file, ingest_concern_class_method_names,
+    ClassKind, ConcernClassMethodSpans, classify_class_file, ingest_concern_class_method_spans,
     ingest_concern_filters, ingest_concern_model_items, ingest_helper_method_names,
     ingest_library_classes, ingest_rails_application_singleton_methods,
 };
@@ -230,14 +230,6 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut concern_enums: Vec<(
         crate::ident::ClassId,
         Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
-    )> = Vec::new();
-    // Which of a concern's class-side methods came from its
-    // `ClassMethods` carrier — the only ones an includer inherits. Local
-    // for the same reason as `concern_enums`: read once, by the splice
-    // that copies them onto each including model.
-    let mut concern_class_method_names: Vec<(
-        crate::ident::ClassId,
-        Vec<crate::ident::Symbol>,
     )> = Vec::new();
 
     // The app's inflections come first: everything after this that
@@ -458,8 +450,6 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items(&source, &path_str);
                         app.concern_model_items.extend(concern_items);
-                        concern_class_method_names
-                            .extend(ingest_concern_class_method_names(&source));
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -1098,8 +1088,6 @@ end
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items(&source, &path_str);
                         app.concern_model_items.extend(concern_items);
-                        concern_class_method_names
-                            .extend(ingest_concern_class_method_names(&source));
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -1515,6 +1503,12 @@ end
     // good — runs after all of them, below.
     app.sources = super::sources::snapshot();
     keep_initializer_defined(&mut app, dir, initializer_defined);
+    // Carrier provenance must not depend on where a module lives:
+    // models, services, helpers and lib all use the same splice.
+    let concern_class_method_spans: Vec<_> = app.sources.iter()
+        .filter(|source| source.path.ends_with(".rb"))
+        .flat_map(|source| ingest_concern_class_method_spans(source.text.as_bytes(), &source.path))
+        .collect();
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
@@ -1538,7 +1532,7 @@ end
     super::channel_callbacks::lower_channel_callbacks(&mut app);
     super::channel_callbacks::lower_channel_names(&mut app);
     splice_concerns_into_models(&mut app);
-    splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
+    splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
@@ -1756,8 +1750,9 @@ fn rehome_default_fk(
     out
 }
 
-/// Copy a model concern's CLASS-side methods onto every model that
-/// includes it.
+/// Copy a concern's CLASS-side methods onto every model or library class
+/// that includes it, before analysis so receiver-relative bodies are
+/// typed against each concrete includer.
 ///
 /// `include` never carries them. A concern writes its class side as
 /// `class_methods do` / `module ClassMethods`, both of which
@@ -1788,9 +1783,9 @@ fn rehome_default_fk(
 /// copy is unreachable there rather than wrong (nothing calls
 /// `Message::Attachment.create_with_attachment!`). Removing it would
 /// mean rewriting library-class emit for no behavioural gain.
-fn splice_concern_class_methods_into_models(
+fn splice_concern_class_methods_into_includers(
     app: &mut App,
-    carriers: &[(crate::ident::ClassId, Vec<crate::ident::Symbol>)],
+    carriers: &[ConcernClassMethodSpans],
 ) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::ident::{ClassId, Symbol};
@@ -1801,10 +1796,16 @@ fn splice_concern_class_methods_into_models(
     // against the module it was written in and would resolve against the
     // MODEL once moved — the same lexical trap the controller splice
     // hit with lobsters' `TIME_INTERVALS`.
-    let carried: HashMap<&ClassId, HashSet<&Symbol>> = carriers
-        .iter()
-        .map(|(id, names)| (id, names.iter().collect()))
-        .collect();
+    let mut carried: HashMap<&ClassId, HashSet<&crate::span::Span>> = HashMap::new();
+    let nested_carriers: HashSet<&ClassId> = carriers.iter()
+        .filter(|c| c.has_nested_carrier).map(|c| &c.owner).collect();
+    let mut bridges: HashMap<&ClassId, HashSet<&crate::span::Span>> = HashMap::new();
+    for carrier in carriers {
+        carried.entry(&carrier.owner).or_default().extend(&carrier.methods);
+        if nested_carriers.contains(&carrier.owner) {
+            bridges.entry(&carrier.owner).or_default().extend(&carrier.bridges);
+        }
+    }
     if carried.is_empty() {
         return;
     }
@@ -1812,30 +1813,41 @@ fn splice_concern_class_methods_into_models(
         HashMap::new();
     let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
     for lc in &app.library_classes {
-        module_includes.insert(lc.name.clone(), lc.includes.clone());
-        let Some(names) = carried.get(&lc.name) else { continue };
-        let methods: Vec<crate::dialect::MethodDef> = lc
-            .methods
-            .iter()
-            .filter(|m| m.receiver == MethodReceiver::Class && names.contains(&m.name))
-            .cloned()
-            .collect();
-        if methods.is_empty() {
-            continue;
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.clone());
+        let Some(spans) = carried.get(&lc.name) else { continue };
+        // Reopened modules contribute to one carrier. Later definitions
+        // replace the same method, but cannot erase unrelated earlier defs.
+        let (methods, consts) = class_side.entry(lc.name.clone()).or_default();
+        consts.extend(lc.constants.iter().map(|(n, _)| n.clone()));
+        for method in lc.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && spans.contains(&m.name_span))
+        {
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method.clone();
+            } else {
+                methods.push(method.clone());
+            }
         }
-        let consts: HashSet<Symbol> = lc.constants.iter().map(|(n, _)| n.clone()).collect();
-        class_side.insert(lc.name.clone(), (methods, consts));
     }
     if class_side.is_empty() {
         return;
     }
 
-    let mut spliced: HashMap<ClassId, HashMap<Symbol, ClassId>> = HashMap::new();
-    for model in &mut app.models {
-        // Transitive closure of the model's includes, in ancestor order.
+    // A complete bridge may precede or follow the actual carrier in a
+    // different reopening. Remove only those exact defs, and only after
+    // finding registered carrier methods that this splice will copy.
+    for lc in &mut app.library_classes {
+        if class_side.get(&lc.name).is_some_and(|(methods, _)| !methods.is_empty()) {
+            if let Some(spans) = bridges.get(&lc.name) {
+                lc.methods.retain(|m| !spans.contains(&m.name_span));
+            }
+        }
+    }
+
+    let copies = |mut queue: Vec<ClassId>, mut taken: HashSet<Symbol>| {
+        // Transitive closure of the includer's includes, in ancestor order.
         let mut order: Vec<ClassId> = Vec::new();
         let mut seen: HashSet<ClassId> = HashSet::new();
-        let mut queue: Vec<ClassId> = crate::analyze::model_includes(model);
         while !queue.is_empty() {
             let id = queue.remove(0);
             if !seen.insert(id.clone()) {
@@ -1846,24 +1858,7 @@ fn splice_concern_class_methods_into_models(
                 queue.extend(nested.iter().cloned());
             }
         }
-        if order.is_empty() {
-            continue;
-        }
-
-        let mut taken: HashSet<Symbol> = model
-            .body
-            .iter()
-            .filter_map(|i| match i {
-                ModelBodyItem::Method { method, .. }
-                    if method.receiver == MethodReceiver::Class =>
-                {
-                    Some(method.name.clone())
-                }
-                _ => None,
-            })
-            .collect();
-
-        let mut added: Vec<ModelBodyItem> = Vec::new();
+        let mut added = Vec::new();
         let mut provenance: HashMap<Symbol, ClassId> = HashMap::new();
         for concern in &order {
             let Some((methods, consts)) = class_side.get(concern) else { continue };
@@ -1875,17 +1870,46 @@ fn splice_concern_class_methods_into_models(
                 let mut m = m.clone();
                 if !consts.is_empty() {
                     qualify_lexical_consts(&mut m.body, concern, consts);
+                    for param in &mut m.params {
+                        if let Some(default) = &mut param.default {
+                            qualify_lexical_consts(default, concern, consts);
+                        }
+                    }
                 }
-                added.push(ModelBodyItem::Method {
-                    method: m,
-                    leading_comments: Vec::new(),
-                    leading_blank_line: true,
-                });
+                added.push(m);
             }
         }
-        model.body.extend(added);
+        (added, provenance)
+    };
+
+    let mut spliced: HashMap<ClassId, HashMap<Symbol, ClassId>> = HashMap::new();
+    for model in &mut app.models {
+        let taken = model.methods()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.clone())
+            .collect();
+        let (added, provenance) = copies(crate::analyze::model_includes(model), taken);
+        model.body.extend(added.into_iter().map(|method| ModelBodyItem::Method {
+            method,
+            leading_comments: Vec::new(),
+            leading_blank_line: true,
+        }));
         if !provenance.is_empty() {
             spliced.insert(model.name.clone(), provenance);
+        }
+    }
+    for lc in &mut app.library_classes {
+        if lc.is_module {
+            continue;
+        }
+        let taken = lc.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.clone())
+            .collect();
+        let (added, provenance) = copies(lc.includes.clone(), taken);
+        lc.methods.extend(added);
+        if !provenance.is_empty() {
+            spliced.insert(lc.name.clone(), provenance);
         }
     }
     app.concern_spliced_class_methods = spliced;

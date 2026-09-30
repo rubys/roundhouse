@@ -876,6 +876,89 @@ fn method_ref_block_arg_runs() {
         .assert_passes();
 }
 
+/// A clean factory call must construct the receiving T::Struct, not
+/// the concern or whichever includer was seen first. Exercise native
+/// emitted consumers as well as the objects, independently of the
+/// analyzer's inferred return types (invariant 6).
+#[test]
+fn a_shared_struct_factory_runs_for_both_includers_in_both_orders() {
+    let reading = "class Reading < T::Struct\n  include Factory\n  PREFIX = \"local:\"\n  const :label, String\nend\n";
+    let packet = "class Packet < T::Struct\n  include Factory\n  const :size, Integer\nend\n";
+    for declarations in [format!("{reading}{packet}"), format!("{packet}{reading}")] {
+        emit_and_run::real_blog()
+            .write("app/services/factory.rb", r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+    def prefix
+      "old:"
+    end
+  end
+  def self.prefix
+    "initial module:"
+  end
+end
+"#)
+            // Reopening a carrier must retain build and take the newer
+            // prefix, whose default still belongs to Factory's scope.
+            .write("app/services/factory_extension.rb", r#"module Factory
+  PREFIX = "reading:"
+  module ClassMethods
+    def fixed
+      Reading.new(label: "fixed").freeze
+    end
+    def prefix(value = PREFIX)
+      value
+    end
+  end
+  def self.prefix
+    "module:"
+  end
+end
+"#)
+            .write("app/services/values.rb", &declarations)
+            .write("app/services/factory_consumer.rb", r#"class FactoryConsumer
+  def self.label
+    Reading.prefix + Reading.build(label: "sensor").label.upcase
+  end
+  def self.size
+    Packet.build(size: 7).size * 3
+  end
+end
+"#)
+            .write("app/controllers/factory_probes_controller.rb", r#"class FactoryProbesController < ApplicationController
+  def index
+    @label = Reading.build(label: "probe").label
+    @size = Packet.build(size: 7).size
+    render plain: FactoryConsumer.label
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "probe")
+packet = Packet.build(size: 7)
+raise "reading identity" unless reading.class == Reading
+raise "reading field" unless reading.label == "probe"
+raise "reading freeze" unless reading.frozen?
+raise "packet identity" unless packet.class == Packet
+raise "packet field" unless packet.size == 7
+raise "packet freeze" unless packet.frozen?
+raise "label consumer" unless FactoryConsumer.label == "reading:SENSOR"
+raise "size consumer" unless FactoryConsumer.size == 21
+raise "module singleton" unless Factory.prefix == "module:"
+fixed = Packet.fixed
+raise "fixed-other identity" unless fixed.class == Reading
+raise "fixed-other field" unless fixed.label == "fixed"
+raise "fixed-other freeze" unless fixed.frozen?
+"#)
+            .assert_passes();
+    }
+}
+
 /// A literal table override must reach the emitted row readers and SQL,
 /// not merely quiet the analyzer. Two differently named models share the
 /// real articles table via string/symbol declarations; writes through either
@@ -1089,4 +1172,62 @@ end
         )
         .run_test("test/models/article_inflections_test.rb")
         .assert_passes();
+}
+
+/// The exact inclusion bridge and its carrier can be in different
+/// reopenings. Consuming the bridge must follow the carrier's identity,
+/// not whether both declarations happened to share a source file.
+#[test]
+fn a_reopened_factory_carrier_runs_with_its_bridge_in_either_file_order() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+  end
+end
+"#)
+            .write("app/services/values.rb", r#"class Reading < T::Struct
+  include Factory
+  const :label, String
+end
+class Packet < T::Struct
+  include Factory
+  const :size, Integer
+end
+"#)
+            .write("app/services/split_factory_consumer.rb", r#"class SplitFactoryConsumer
+  def self.label
+    Reading.build(label: "split").label.upcase
+  end
+  def self.size
+    Packet.build(size: 11).size * 3
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "split")
+packet = Packet.build(size: 11)
+raise "split reading identity" unless reading.class == Reading
+raise "split reading field" unless reading.label == "split"
+raise "split reading freeze" unless reading.frozen?
+raise "split packet identity" unless packet.class == Packet
+raise "split packet field" unless packet.size == 11
+raise "split packet freeze" unless packet.frozen?
+raise "split label consumer" unless SplitFactoryConsumer.label == "SPLIT"
+raise "split size consumer" unless SplitFactoryConsumer.size == 33
+"#)
+            .assert_passes();
+    }
 }
