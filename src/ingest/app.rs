@@ -433,8 +433,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             if let Some(classes) =
                                 unwrap_or_record(ingest_library_classes(&source, &path_str))?
                             {
-                                app.library_classes
-                                    .extend(nested_under(&outer, classes));
+                                let nested = nested_under(&outer, classes);
+                                let (concern_items, concern_enum_decls) =
+                                    ingest_concern_model_items(&source, &path_str);
+                                app.concern_model_items.extend(concern_items.into_iter().filter(
+                                    |(id, _)| nested.iter().any(|class| class.name == *id),
+                                ));
+                                concern_enums.extend(concern_enum_decls.into_iter().filter(
+                                    |(id, _)| nested.iter().any(|class| class.name == *id),
+                                ));
+                                app.library_classes.extend(nested);
                             }
                         }
                     }
@@ -545,7 +553,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // Classes nested in the model's body are classes
                         // of their own, exactly as under `app/models`.
                         if let Ok(classes) = ingest_library_classes(&source, &path_str) {
-                            app.library_classes.extend(nested_under(&outer, classes));
+                            let nested = nested_under(&outer, classes);
+                            let (concern_items, concern_enum_decls) =
+                                ingest_concern_model_items(&source, &path_str);
+                            app.concern_model_items.extend(concern_items.into_iter().filter(
+                                |(id, _)| nested.iter().any(|class| class.name == *id),
+                            ));
+                            concern_enums.extend(concern_enum_decls.into_iter().filter(
+                                |(id, _)| nested.iter().any(|class| class.name == *id),
+                            ));
+                            app.library_classes.extend(nested);
                         }
                         super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
                         continue;
