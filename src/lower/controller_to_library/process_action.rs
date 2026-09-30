@@ -149,6 +149,8 @@ pub(super) fn synthesize_process_action(
                     params: vec![],
                     rest_param: None,
                     block_param: None,
+                    has_unrepresented_bindings: false,
+                    from_block_pass: false,
                     body: dispatch.clone(),
                     block_style: crate::expr::BlockStyle::Do,
                 })),

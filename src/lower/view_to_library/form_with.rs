@@ -1271,9 +1271,11 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, params, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
+            has_unrepresented_bindings: *has_unrepresented_bindings,
+            from_block_pass: *from_block_pass,
             body: rewrite_errors_each_body(body, var_name),
             block_style: *block_style,
         },

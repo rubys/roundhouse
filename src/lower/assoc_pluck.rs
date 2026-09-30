@@ -243,6 +243,8 @@ fn rewrite(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
             params: vec![var],
             rest_param: None,
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body,
             block_style: BlockStyle::Brace,
         },

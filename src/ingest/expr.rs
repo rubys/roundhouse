@@ -14,6 +14,21 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+thread_local! {
+    // The seed-style guard rewrite discards a method exit. A block's
+    // return can belong to its enclosing method, even in nested bodies.
+    static IN_BLOCK_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn ingest_block_body(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) { IN_BLOCK_BODY.set(self.0); }
+    }
+    let _restore = Restore(IN_BLOCK_BODY.replace(true));
+    ingest_expr(node, file)
+}
+
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
     // substitute a `Literal::Nil` placeholder so the surrounding
@@ -693,7 +708,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // Triggered by the `return if Article.count > 0`
             // idiom in `db/seeds.rb` (Rails convention for
             // idempotent seed scripts).
-            if body_nodes.len() >= 2 {
+            if body_nodes.len() >= 2 && !IN_BLOCK_BODY.get() {
                 if let Some(guard_cond_node) = detect_leading_guard(&body_nodes[0]) {
                     let cond = ingest_expr(&guard_cond_node, file)?;
                     let rest_nodes = &body_nodes[1..];
@@ -819,14 +834,17 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 })
                 .unwrap_or_default();
             let body = match l.body() {
-                Some(b) => ingest_expr(&b, file)?,
+                Some(b) => ingest_block_body(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
             let block_style = block_style_from_opening(l.opening_loc().as_slice());
-            ExprNode::Lambda { rest_param: None, params, block_param: None, body, block_style }
+            let has_unrepresented_bindings = block_has_unrepresented_bindings(l.parameters())
+                || block_rest_param(l.parameters()).is_some();
+            ExprNode::Lambda { rest_param: None, params, block_param: None,
+                has_unrepresented_bindings, from_block_pass: false, body, block_style }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();
@@ -2024,6 +2042,8 @@ fn ingest_call_block(
                     ExprNode::Lambda { rest_param: None,
                         params,
                         block_param: None,
+                        has_unrepresented_bindings: false,
+                        from_block_pass: true,
                         body,
                         block_style: crate::expr::BlockStyle::Brace,
                     },
@@ -2072,7 +2092,7 @@ fn ingest_call_block(
                 {
                     if let Some(blk) = call.block() {
                         if let Some(b) = blk.as_block_node() {
-                            return Ok(Some(ingest_block_node_as_lambda(&b, file)?));
+                            return Ok(Some(ingest_block_node_as_lambda(&b, file, true)?));
                         }
                     }
                 }
@@ -2085,14 +2105,16 @@ fn ingest_call_block(
             if let Some(lam) = expr.as_lambda_node() {
                 let params = block_param_names(lam.parameters());
                 let rest_param = block_rest_param(lam.parameters());
+                let has_unrepresented_bindings = block_has_unrepresented_bindings(lam.parameters());
                 let body = match lam.body() {
-                    Some(body) => ingest_expr(&body, file)?,
+                    Some(body) => ingest_block_body(&body, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+                    Span { file: super::sources::file_id(file), start: lam.location().start_offset() as u32, end: lam.location().end_offset() as u32 },
+                    ExprNode::Lambda { rest_param, params, block_param: None,
+                        has_unrepresented_bindings, from_block_pass: true, body, block_style },
                 )));
             }
             // `&@ivar` — an instance variable holding a Proc. Its own
@@ -2138,7 +2160,7 @@ fn ingest_call_block(
             message: format!("unexpected block-position node: {node:?}"),
         });
     };
-    Ok(Some(ingest_block_node_as_lambda(&b, file)?))
+    Ok(Some(ingest_block_node_as_lambda(&b, file, false)?))
 }
 
 /// Ingest a literal block's params/body into a `Lambda` `Expr`. Shared
@@ -2146,17 +2168,19 @@ fn ingest_call_block(
 /// `&proc { ... }`/`&lambda { ... }` block-argument desugar, which
 /// hands this the same `BlockNode` shape one level deeper (inside the
 /// `proc`/`lambda` call's own block).
-fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
+fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, from_block_pass: bool) -> IngestResult<Expr> {
     let params = block_param_names(b.parameters());
     let rest_param = block_rest_param(b.parameters());
+    let has_unrepresented_bindings = block_has_unrepresented_bindings(b.parameters());
     let body = match b.body() {
-        Some(body) => ingest_expr(&body, file)?,
+        Some(body) => ingest_block_body(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
-        Span::synthetic(),
-        ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+        Span { file: super::sources::file_id(file), start: b.location().start_offset() as u32, end: b.location().end_offset() as u32 },
+        ExprNode::Lambda { rest_param, params, block_param: None,
+            has_unrepresented_bindings, from_block_pass, body, block_style },
     ))
 }
 
@@ -2211,6 +2235,28 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
         .filter_map(|req| req.as_required_parameter_node())
         .map(|rp| Symbol::from(constant_id_str(&rp.name())))
         .collect()
+}
+
+/// Reject-only source fact: these bindings have no faithful slot in
+/// the current block representation. Named rest is already represented;
+/// contextual consumers decide independently whether to admit it.
+fn block_has_unrepresented_bindings(params_node: Option<Node<'_>>) -> bool {
+    let Some(params_node) = params_node else { return false };
+    if params_node.as_it_parameters_node().is_some() {
+        return false;
+    }
+    let Some(bpn) = params_node.as_block_parameters_node() else { return true };
+    if bpn.locals().iter().next().is_some() {
+        return true;
+    }
+    let Some(pn) = bpn.parameters() else { return false };
+    pn.requireds().iter().any(|p| p.as_required_parameter_node().is_none())
+        || pn.optionals().iter().next().is_some()
+        || pn.rest().is_some_and(|rest| rest.as_rest_parameter_node().is_none_or(|rest| rest.name().is_none()))
+        || pn.posts().iter().next().is_some()
+        || pn.keywords().iter().next().is_some()
+        || pn.keyword_rest().is_some()
+        || pn.block().is_some()
 }
 
 /// The block's REST parameter (`|*args|`), without its sigil.

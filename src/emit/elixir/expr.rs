@@ -2156,6 +2156,8 @@ mod tests {
         let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda { rest_param: None,
             params: params.iter().map(|p| Symbol::from(*p)).collect(),
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body,
             block_style: Default::default(),
         });

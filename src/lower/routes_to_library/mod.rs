@@ -1603,6 +1603,8 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                         ExprNode::Lambda { rest_param: None,
                             params: vec![elem],
                             block_param: None,
+                            has_unrepresented_bindings: false,
+                            from_block_pass: false,
                             body,
                             block_style: crate::expr::BlockStyle::Brace,
                         },

@@ -81,7 +81,7 @@ fn map_to_each(value: &Expr) -> Option<Expr> {
     if method.as_str() != "map" || !args.is_empty() {
         return None;
     }
-    let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node
+    let ExprNode::Lambda { rest_param, params, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } = &*block.node
     else {
         return None;
     };
@@ -114,6 +114,8 @@ fn map_to_each(value: &Expr) -> Option<Expr> {
             rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
+            has_unrepresented_bindings: *has_unrepresented_bindings,
+            from_block_pass: *from_block_pass,
             body: enqueue,
             block_style: *block_style,
         },

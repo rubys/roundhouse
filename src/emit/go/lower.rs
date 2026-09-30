@@ -135,11 +135,13 @@ pub mod nil_check_to_comma_ok {
                 });
                 new_e
             }
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => {
+            ExprNode::Lambda { rest_param, params, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } => {
                 let mut new_e = e.clone();
                 new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(),
                     params: params.clone(),
                     block_param: block_param.clone(),
+                    has_unrepresented_bindings: *has_unrepresented_bindings,
+                    from_block_pass: *from_block_pass,
                     body: transform(body),
                     block_style: *block_style,
                 });
@@ -240,6 +242,8 @@ pub mod nil_check_to_comma_ok {
             ExprNode::Lambda { rest_param: None,
                 params: vec![var_name.clone()],
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body: then_branch,
                 block_style: Default::default(),
             },
@@ -426,11 +430,13 @@ pub mod nil_to_zero_for_string_fields {
                 });
                 new_e
             }
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => {
+            ExprNode::Lambda { rest_param, params, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } => {
                 let mut new_e = e.clone();
                 new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(),
                     params: params.clone(),
                     block_param: block_param.clone(),
+                    has_unrepresented_bindings: *has_unrepresented_bindings,
+                    from_block_pass: *from_block_pass,
                     body: transform(body, fields),
                     block_style: *block_style,
                 });

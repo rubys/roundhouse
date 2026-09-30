@@ -1079,6 +1079,8 @@ fn each_array_block_shape() {
         ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: Expr::new(
                 Span::synthetic(),
                 ExprNode::Var { id: VarId(0), name: Symbol::from("x") },
@@ -1161,6 +1163,8 @@ fn each_hash_block_shape() {
         ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("k"), Symbol::from("v")],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: Expr::new(
                 Span::synthetic(),
                 ExprNode::Var { id: VarId(0), name: Symbol::from("v") },
@@ -1240,6 +1244,8 @@ fn map_array_block_shape() {
         ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: Expr::new(
                 Span::synthetic(),
                 ExprNode::Var { id: VarId(0), name: Symbol::from("x") },

@@ -1522,6 +1522,8 @@ mod tests {
             ExprNode::Lambda { rest_param: None,
                 params: vec![],
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body: lit_sym("body"),
                 block_style: Default::default(),
             },

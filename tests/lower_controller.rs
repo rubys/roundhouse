@@ -101,6 +101,8 @@ fn has_toplevel_terminal_recognizes_respond_to_block() {
     let empty_block = Expr::new(
         Span::synthetic(),
         ExprNode::Lambda { rest_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             params: vec![],
             block_param: None,
             body: seq(vec![]),
@@ -159,6 +161,8 @@ fn lambda(body: Expr) -> Expr {
     Expr::new(
         Span::synthetic(),
         ExprNode::Lambda { rest_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             params: vec![],
             block_param: None,
             body,

@@ -3302,6 +3302,8 @@ mod async_hof_tests {
             ExprNode::Lambda { rest_param: None,
                 params: params.into_iter().map(Symbol::from).collect(),
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body,
                 block_style: BlockStyle::Brace,
             },

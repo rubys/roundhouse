@@ -793,6 +793,8 @@ fn each_loop_with_body(
         ExprNode::Lambda { rest_param: None,
             params: vec![el],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: loop_body,
             block_style: crate::expr::BlockStyle::Do,
         },

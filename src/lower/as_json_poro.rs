@@ -308,6 +308,8 @@ fn collection_text(value: &Expr, id: &ClassId) -> Expr {
             rest_param: None,
             params: vec![item],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: writer_call(item_ref),
             block_style: crate::expr::BlockStyle::Brace,
         },

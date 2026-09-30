@@ -1415,13 +1415,13 @@ fn exception_class_name(arg: &Expr) -> Option<String> {
 /// arity matches; a block naming its own parameters is left as it is
 /// (mocha would hand it every argument, and this slot has one).
 fn predicate_lambda(block: Expr) -> Option<Expr> {
-    let ExprNode::Lambda { params, rest_param, block_param, body, block_style } = *block.node else {
+    let ExprNode::Lambda { params, rest_param, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } = *block.node else {
         return None;
     };
     let params = if params.is_empty() && rest_param.is_none() { vec![Symbol::from("_host")] } else { params };
     Some(Expr::new(
         block.span,
-        ExprNode::Lambda { params, rest_param, block_param, body, block_style },
+        ExprNode::Lambda { params, rest_param, block_param, has_unrepresented_bindings, from_block_pass, body, block_style },
     ))
 }
 
@@ -1533,6 +1533,8 @@ mod tests {
                 rest_param: None,
                 params: vec![],
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body: Expr::new(sp(), ExprNode::Lit { value: Literal::Bool { value: true } }),
                 block_style: crate::expr::BlockStyle::Brace,
             },
@@ -1660,6 +1662,8 @@ mod tests {
                 rest_param: None,
                 params: vec![Symbol::from("m")],
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body: inner,
                 block_style: crate::expr::BlockStyle::Brace,
             },
