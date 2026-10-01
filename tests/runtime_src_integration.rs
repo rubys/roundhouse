@@ -1479,7 +1479,14 @@ fn every_runtime_method_body_concretely_typed() {
     // error messages once @table holds the SQL spelling. These are
     // three additional gradual sites through the existing untyped
     // model contract, not new untyped signatures or relaxed Bar A.
-    const CEILING: usize = 510;
+    //
+    // 510 -> 519: Relation's array finder, NINE sites net (relation.rb
+    // 229 -> 238; original baseline 226 -> 235, MEASURED).
+    // Inputs are concrete Integer/String scalars
+    // or arrays, NOT untyped. The residual is the model-dependent keys
+    // and hydrated records read from the existing dynamic model seam,
+    // as in the set operators above. No parameter contract was erased.
+    const CEILING: usize = 519;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

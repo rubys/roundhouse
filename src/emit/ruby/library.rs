@@ -3402,6 +3402,13 @@ fn rewrite_helper_calls(
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
         let ExprNode::Send { method, mut args, block, .. } = node else { unreachable!() };
+        if path.len() == 1 && path[0].as_str() == "Inflector"
+            && method.as_str() == "pluralize" && args.len() == 2 && !index.contains_key(&method)
+        {
+            let word = args.pop().unwrap();
+            *expr = crate::lower::view::pluralize_helper_call(args.pop().unwrap(), word);
+            return;
+        }
         // `link_to(37, url)` — Rails stringifies the text arg; the runtime
         // link_to is deliberately monomorphic (String text), so coercion
         // belongs here at the call boundary. Literal strings stay bare.

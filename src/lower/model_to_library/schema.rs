@@ -188,6 +188,28 @@ pub(super) fn push_schema_methods(
         });
     }
 
+    // String/UUID keys must not use Base's Integer finder cast. Derive
+    // this from the key column, not an example value or the caller's ID.
+    let key_name = model.primary_key.as_ref().map_or("id", |k| k.as_str());
+    if table.columns.iter().any(|c| c.name.as_str() == key_name && ty_of_column(&c.col_type) == Ty::Str) {
+        methods.push(MethodDef {
+            name_span: Span::synthetic(),
+            name: Symbol::from("_string_primary_key"),
+            receiver: MethodReceiver::Class,
+            params: vec![],
+            body: with_ty(Expr::new(Span::synthetic(), ExprNode::Lit {
+                value: Literal::Bool { value: true },
+            }), Ty::Bool),
+            signature: Some(fn_sig(vec![], Ty::Bool)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // def self.schema_columns
     let column_array = with_ty(
         Expr::new(

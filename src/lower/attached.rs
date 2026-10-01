@@ -74,10 +74,12 @@ fn attached_class() -> ClassId {
 /// tripped the ceiling gate. Reading the bytes here keeps every
 /// parameter a String.
 ///
-/// Keyword-form only, which is the only form Rails documents for the
-/// `io:` variant (`attach(io:, filename:, content_type:)`). The
-/// single-argument `attach(uploaded_file)` shape is a DIFFERENT
-/// attachable and is left alone rather than guessed at.
+/// This lowerer supports only a literal keyword hash with all three
+/// fields. Rails also accepts a forwarded `{ io:, filename: }` Hash;
+/// that contract remains unsupported here. It needs a typed IO/attachable
+/// seam and Rails' byte-based MIME identification when content_type is
+/// absent, not a permissive RBS parameter or a filename-only guess.
+/// Other single-argument attachables are also left alone.
 pub fn apply_attach_lowering(app: &mut crate::app::App) {
     super::for_each_hook_body(app, &mut rewrite_attach);
     // Test bodies too: every `attach` in the corpus today is written by

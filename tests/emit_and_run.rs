@@ -122,6 +122,188 @@ fn a_lambda_target_before_action_gates_the_action_it_guards() {
         .assert_passes();
 }
 
+/// Array `find` is not a scalar lookup or a permissive `where(id: ids)`:
+/// it raises on a missing scoped row, and preserves requested order unless
+/// the relation carries an explicit order. The terminal cannot poison its
+/// receiver's WHERE, limit/offset, or loaded-record cache.
+#[test]
+fn relation_find_with_array_ids_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.find_titles(ids)
+    where("title != 'outside'").find(Array(ids)).map(&:title).join("|")
+  end"#,
+        )
+        .run_ruby(
+            r##"a = Article.create!(title: "zebra", body: "long enough body")
+b = Article.create!(title: "apple", body: "long enough body")
+c = Article.create!(title: "outside", body: "long enough body")
+raise "requested order" unless Article.find_titles([b.id.to_s, a.id.to_s, b.id.to_s]) == "apple|zebra"
+raise "integer ids" unless Article.find_titles([a.id, b.id]) == "zebra|apple"
+raise "mixed ids" unless Article.find_titles([b.id.to_s, a.id]) == "apple|zebra"
+raise "singleton array" unless Article.find_titles([b.id.to_s]) == "apple"
+raise "empty array" unless Article.find_titles([]) == ""
+raise "integer casting" unless Article.find_titles(["#{b.id}-slug", a.id.to_s]) == "apple|zebra"
+rel = ActiveRecord::Relation.new(Article).where("title != 'outside'")
+rel.to_a
+raise "loaded scalar" unless rel.find(b.id.to_s).title == "apple"
+raise "loaded array" unless rel.find([b.id, a.id]).map(&:title) == ["apple", "zebra"]
+begin
+  rel.find([a.id, c.id])
+  raise "a scoped-out id was accepted"
+rescue ActiveRecord::RecordNotFound
+end
+begin
+  rel.find([a.id, 987654321])
+  raise "a missing id was accepted"
+rescue ActiveRecord::RecordNotFound
+end
+begin
+  rel.find([b.id.to_s, "0#{b.id}"])
+  raise "ids were deduplicated after casting"
+rescue ActiveRecord::RecordNotFound
+end
+raise "scope/cache poisoned" unless rel.to_a.map(&:title) == ["zebra", "apple"]
+ordered = ActiveRecord::Relation.new(Article).where("title != 'outside'").order(:title)
+raise "relation order" unless ordered.find([a.id, b.id]).map(&:title) == ["apple", "zebra"]
+offset_only = ActiveRecord::Relation.new(Article).where("title != 'outside'").order(:title).offset(1)
+prior_sql = offset_only.to_sql
+raise "ordered offset only" unless offset_only.find([a.id, b.id]).map(&:title) == ["zebra"]
+raise "offset poisoned" unless offset_only.to_sql == prior_sql
+boundary = ActiveRecord::Relation.new(Article).order(:title).offset(2)
+raise "offset at size" unless boundary.find([a.id, b.id]) == []
+# Writebook's pinned Rails finder raises beyond size (negative expected
+# cardinality); newer Rails returns [] here instead.
+beyond = ActiveRecord::Relation.new(Article).order(:title).offset(3)
+prior_sql = beyond.to_sql
+begin
+  beyond.find([a.id, b.id])
+  raise "pinned Rails beyond-offset behavior changed"
+rescue ActiveRecord::RecordNotFound
+end
+raise "beyond-offset poisoned" unless beyond.to_sql == prior_sql
+paged = ActiveRecord::Relation.new(Article).where("title != 'outside'").limit(1).offset(1)
+raise "input slicing" unless paged.find([b.id, a.id]).map(&:title) == ["zebra"]
+raise "pagination poisoned" unless paged.to_a.map(&:title) == ["apple"]
+ordered.limit(1).offset(1)
+raise "ordered pagination" unless ordered.find([b.id, a.id]).map(&:title) == ["zebra"]
+selected = ActiveRecord::Relation.new(Article).select(:title)
+prior_sql = selected.to_sql
+raise "projected key" unless selected.find([b.id, a.id]).map(&:id) == [b.id, a.id]
+raise "projection poisoned" unless selected.to_sql == prior_sql
+puts "ok"
+"##,
+        )
+        .assert_passes();
+}
+
+/// A custom String primary key must not take the default Integer cast.
+#[test]
+fn relation_find_with_string_keys_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"bookmarks\", id: :string, primary_key: \"code\", force: :cascade do |t|\n    t.string \"title\"\n  end\n\n  create_table \"articles\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/bookmark.rb",
+            r#"class Bookmark < ApplicationRecord
+  self.primary_key = "code"
+
+  def self.find_titles
+    where("title != 'outside'").find(["2-apples", "z-9"]).map(&:title).join("|")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"Bookmark.create!(code: "z-9", title: "zebra")
+Bookmark.create!(code: "2-apples", title: "apple")
+raise "string array cast/order" unless Bookmark.find_titles == "apple|zebra"
+rel = ActiveRecord::Relation.new(Bookmark)
+raise "string scalar cast" unless rel.find("2-apples").title == "apple"
+raise "custom key" unless rel.find(["z-9"]).map(&:id) == ["z-9"]
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Writebook's `pluralize number_with_delimiter(content.split.size), "word"`:
+/// keep the formatted label, and recognize a textual one as singular.
+#[test]
+fn a_formatted_word_count_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/word_counts_helper.rb",
+            r#"module WordCountsHelper
+  def word_count(content)
+    pluralize number_with_delimiter(content.split.size), "word"
+  end
+
+  def label(count)
+    pluralize count, "word"
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_word_count.html.erb",
+            "<%= pluralize number_with_delimiter(1001), \"word\" %>",
+        )
+        .run_ruby(
+            r#"raise "singular" unless WordCountsHelper.word_count("only") == "1 word"
+raise "plural" unless WordCountsHelper.word_count("two words") == "2 words"
+raise "delimiter lost" unless WordCountsHelper.word_count((["w"] * 1001).join(" ")) == "1,001 words"
+raise "zero" unless WordCountsHelper.word_count("") == "0 words"
+raise "text one" unless WordCountsHelper.label("1") == "1 word"
+raise "decimal one" unless WordCountsHelper.label("1.00") == "1.00 word"
+raise "leading zero" unless WordCountsHelper.label("01") == "01 words"
+raise "fraction" unless WordCountsHelper.label("1.01") == "1.01 words"
+raise "empty string" unless WordCountsHelper.label("") == " words"
+raise "float one" unless WordCountsHelper.label(1.0) == "1.0 word"
+raise "view" unless Views::Articles.word_count(nil) == "1,001 words"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn an_app_pluralize_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  def pluralize(count, word)
+    "custom #{count}:#{word}"
+  end
+
+  def heading
+    pluralize(1, "person")
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_count.html.erb",
+            "<%= pluralize(1, \"person\") %>|<%= \"nested #{pluralize(2, 'person')}\" %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.heading == "custom 1:person"
+raise "view override lost" unless Views::Articles.custom_count(nil) == "custom 1:person|nested custom 2:person"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, which took the
 /// call from an error to clean, but no runtime defines it, so every
 /// page rendering the form raises `undefined method

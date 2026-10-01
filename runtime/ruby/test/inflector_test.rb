@@ -24,4 +24,14 @@ class InflectorTest < Minitest::Test
     # style messages where the diff is plural.
     assert_equal "-1 comments", Inflector.pluralize(-1, "comment")
   end
+
+  def test_pluralize_formatted_count_preserves_rails_singular_boundaries
+    assert_equal "1 word", Inflector.pluralize_formatted("1", "word")
+    assert_equal "1.00 word", Inflector.pluralize_formatted("1.00", "word")
+    assert_equal "01 words", Inflector.pluralize_formatted("01", "word")
+    assert_equal "1.01 words", Inflector.pluralize_formatted("1.01", "word")
+    assert_equal "1,001 words", Inflector.pluralize_formatted("1,001", "word")
+    assert_equal " words", Inflector.pluralize_formatted("", "word")
+    assert_equal "2\n1.0\n word", Inflector.pluralize_formatted("2\n1.0\n", "word")
+  end
 end

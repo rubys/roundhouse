@@ -1134,6 +1134,9 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Array { elem }) => {
                 let elem: &Ty = elem;
+                if is_model_relation_elem(elem) && array_find(method, args, block_ret) {
+                    return Ty::Array { elem: Box::new(elem.clone()) };
+                }
                 // A relation delegates scope/builder calls to its element
                 // model, so `user.comments.active` and `Story.where(..).hottest`
                 // chain: any class method that returns a relation
@@ -1272,7 +1275,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
                 }
-                if counted_first_last(method, args) {
+                if counted_first_last(method, args) || array_find(method, args, block_ret) {
                     return Ty::Array {
                         elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
                     };
@@ -1714,6 +1717,11 @@ fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
             args[0].ty.as_ref(),
             None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
         )
+}
+
+fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
+    method.as_str() == "find" && block_ret.is_none() && args.len() == 1
+        && matches!(args[0].ty, Some(Ty::Array { .. }))
 }
 
 /// Is this array element type a model relation's element — a single

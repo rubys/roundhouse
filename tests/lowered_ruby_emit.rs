@@ -1481,10 +1481,9 @@ fn lowered_article_partial_pluralize_uses_inflector() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
     // `<%= pluralize(article.comments.size, "comment") %>` →
-    // Inflector.pluralize (separate from ActiveSupport's string
-    // pluralization helpers; spinel-blog convention).
+    // Inflector's String label entry point, shared with app helpers.
     assert!(
-        src.contains("Inflector.pluralize(article.comments.size, \"comment\")"),
+        src.contains("Inflector.pluralize_formatted(article.comments.size.to_s, \"comment\")"),
         "expected Inflector.pluralize; got:\n{src}",
     );
 }
@@ -1797,11 +1796,11 @@ fn lowered_form_partial_pluralize_count_uses_inflector() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
     // `<%= pluralize(article.errors.count, "error") %>` →
-    // `Inflector.pluralize(article.errors.count, "error")`. (spinel-
+    // `Inflector.pluralize_formatted(article.errors.count.to_s, "error")`. (spinel-
     // blog uses `.length` instead of `.count` — both work in Ruby;
     // size/length/count normalization is a future slice.)
     assert!(
-        src.contains("Inflector.pluralize(article.errors.count, \"error\")"),
+        src.contains("Inflector.pluralize_formatted(article.errors.count.to_s, \"error\")"),
         "expected Inflector.pluralize on errors.count; got:\n{src}",
     );
 }

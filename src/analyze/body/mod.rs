@@ -1075,7 +1075,16 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
-                self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
+                let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
+                // Kernel.Array is a container even for scalar params.
+                // App methods (including inherited/included overrides)
+                // have already dispatched above and must win.
+                if recv.is_none() && method.as_str() == "Array" && args.len() == 1
+                    && block.is_none() && matches!(dispatched, Ty::Var { .. })
+                {
+                    return Ty::Array { elem: Box::new(unknown()) };
+                }
+                dispatched
             }
 
             ExprNode::If { cond, then_branch, else_branch } => {
@@ -2108,6 +2117,29 @@ mod tests {
     fn optional_str() -> Ty {
         Ty::Union {
             variants: vec![Ty::Str, Ty::Nil],
+        }
+    }
+
+    #[test]
+    fn kernel_array_does_not_capture_inherited_or_included_app_methods() {
+        let owner = ClassId(Symbol::from("Owner"));
+        let child = ClassId(Symbol::from("Child"));
+        for included in [false, true] {
+            let mut classes = empty_classes();
+            let mut info = ClassInfo::default();
+            info.instance_methods.insert(Symbol::from("Array"), Ty::Str);
+            classes.insert(owner.clone(), info);
+            let mut info = ClassInfo::default();
+            if included {
+                info.includes.push(owner.clone());
+            } else {
+                info.parent = Some(owner.clone());
+            }
+            classes.insert(child.clone(), info);
+            let mut ctx = Ctx::default();
+            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
+            let mut expr = send(None, "Array", vec![nil_lit()]);
+            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Str);
         }
     }
 
