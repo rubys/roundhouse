@@ -1158,6 +1158,11 @@
     "test/fixtures/active_storage/blobs.yml|not a fixture set: `handbook_reading_image_blob` is a scalar, where Rails expects label → fields": 1
   },
   "lowering": {
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Access] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Book] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 7,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Edit] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[User] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Access] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Book] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 7,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Edit] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
