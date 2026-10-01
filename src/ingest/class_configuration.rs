@@ -26,7 +26,11 @@ struct Configuration {
     reader: MethodDef,
 }
 
-pub(super) fn expand(app: &mut App, carriers: &[ConcernClassMethodSpans]) -> IngestResult<()> {
+pub(super) fn expand(
+    app: &mut App,
+    carriers: &[ConcernClassMethodSpans],
+    framework_shadows: &HashSet<ClassId>,
+) -> IngestResult<()> {
     let catalog = concern_class_method_catalog(&app.library_classes, carriers);
     let mut configurations: Vec<_> = catalog
         .iter()
@@ -51,7 +55,7 @@ pub(super) fn expand(app: &mut App, carriers: &[ConcernClassMethodSpans]) -> Ing
     }
 
     let surfaces = controller_concern_surfaces(app);
-    let verified = verified_concerns(app, carriers, &surfaces.module_includes);
+    let verified = verified_concerns(app, carriers, &surfaces.module_includes, framework_shadows);
     for controller in &mut app.controllers {
         let surface = &surfaces.controllers[&controller.name];
         let candidates: Vec<_> = configurations
@@ -83,6 +87,7 @@ fn verified_concerns(
     app: &App,
     carriers: &[ConcernClassMethodSpans],
     module_includes: &HashMap<ClassId, Vec<ClassId>>,
+    framework_shadows: &HashSet<ClassId>,
 ) -> HashSet<ClassId> {
     let mut extensions: HashMap<ClassId, Vec<crate::span::Span>> = HashMap::new();
     for carrier in carriers {
@@ -113,9 +118,9 @@ fn verified_concerns(
                     || lexical_scope(scope)
                     || included.iter().any(|id| id.0.as_str() == scope)
             };
-            let shadows_framework = carriers.iter().any(|carrier| {
-                carrier.shadows_framework && identity_scope(carrier.owner.0.as_str())
-            });
+            let shadows_framework = framework_shadows
+                .iter()
+                .any(|scope| identity_scope(scope.0.as_str()));
             let source_is_verified = !shadows_framework
                 && !spans.is_empty()
                 && carriers.iter().filter(|c| &c.owner == owner).all(|c| {

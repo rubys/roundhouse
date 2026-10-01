@@ -2336,12 +2336,12 @@ pub struct ConcernClassMethodSpans {
     pub concern_extensions: Vec<Span>,
     pub concern_calls: Vec<Span>,
     pub has_other_extensions: bool,
-    /// Direct source binding barriers, including declarations that the
-    /// library IR omits (empty namespaces, model/controller constants).
-    pub shadows_framework: bool,
 }
 
-pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
+pub fn ingest_concern_class_method_spans(
+    source: &[u8],
+    file: &str,
+) -> (Vec<ConcernClassMethodSpans>, HashSet<ClassId>) {
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
@@ -2442,7 +2442,6 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 concern_extensions,
                 concern_calls,
                 has_other_extensions,
-                shadows_framework: false,
             });
         }
     }
@@ -2451,19 +2450,7 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
     // it neither evaluates constants nor executes class bodies.
     let mut shadows = HashSet::new();
     framework_shadow_scopes(&root, &[], &mut shadows);
-    for scope in shadows {
-        out.push(ConcernClassMethodSpans {
-            owner: ClassId(Symbol::from(scope.join("::"))),
-            methods: Vec::new(),
-            bridges: Vec::new(),
-            has_nested_carrier: false,
-            concern_extensions: Vec::new(),
-            concern_calls: Vec::new(),
-            has_other_extensions: false,
-            shadows_framework: true,
-        });
-    }
-    out
+    (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
 }
 
 fn framework_shadow_scopes(

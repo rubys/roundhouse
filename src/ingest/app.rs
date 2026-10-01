@@ -1527,10 +1527,13 @@ end
     keep_initializer_defined(&mut app, dir, initializer_defined);
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
-    let concern_class_method_spans: Vec<_> = app.sources.iter()
-        .filter(|source| source.path.ends_with(".rb"))
-        .flat_map(|source| ingest_concern_class_method_spans(source.text.as_bytes(), &source.path))
-        .collect();
+    let mut concern_class_method_spans = Vec::new();
+    let mut framework_shadow_scopes = std::collections::HashSet::new();
+    for source in app.sources.iter().filter(|source| source.path.ends_with(".rb")) {
+        let (carriers, shadows) = ingest_concern_class_method_spans(source.text.as_bytes(), &source.path);
+        concern_class_method_spans.extend(carriers);
+        framework_shadow_scopes.extend(shadows);
+    }
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
@@ -1577,7 +1580,7 @@ end
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
-    super::class_configuration::expand(&mut app, &concern_class_method_spans)?;
+    super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     expand_class_body_macros(&mut app)?;
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
