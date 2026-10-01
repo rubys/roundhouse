@@ -191,7 +191,8 @@ jobs:
     env:
       SCCACHE_DIR: ${{ github.workspace }}/.spinel-sccache
       SCCACHE_CACHE_SIZE: "256M"
-      SCCACHE_STARTUP_TIMEOUT: "30"
+      # Preprocess each time: Spinel uses conditional __has_include headers.
+      SCCACHE_DIRECT: "false"
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v5
