@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::emit::ruby;
+use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_app_from_tree;
 
 #[path = "support/emit_and_run.rs"]
@@ -19,7 +20,7 @@ fn emitted(files: &[roundhouse::emit::EmittedFile], suffix: &str) -> String {
         .clone()
 }
 
-fn output() -> Vec<roundhouse::emit::EmittedFile> {
+fn app() -> roundhouse::App {
     let sources = [
         (
             "db/schema.rb",
@@ -32,13 +33,17 @@ fn output() -> Vec<roundhouse::emit::EmittedFile> {
   create_table "protected_posts" do |t|; t.string "title"; end
   create_table "included_posts" do |t|; t.string "title"; end
   create_table "inherited_posts" do |t|; t.string "title"; end
+  create_table "reopened_posts" do |t|; t.string "title"; end
+  create_table "library_patch_posts" do |t|; t.string "title"; end
 end
 "#,
         ),
         (
             "app/models/comment.rb",
             r#"class Comment < ApplicationRecord
+  belongs_to :article
   scope :recent, -> { order(:id) }
+  def dispatch_probe; self.public_send(:article); end
 end
 "#,
         ),
@@ -124,6 +129,45 @@ end
 end
 "#,
         ),
+        (
+            "app/lib/reopened_dispatch.rb",
+            r#"module ReopenedDispatch
+  def marker; :first; end
+end
+module ReopenedDispatch
+  def public_send(name); :dispatch_kept; end
+end
+"#,
+        ),
+        (
+            "app/models/reopened_post.rb",
+            r#"class ReopenedPost < ApplicationRecord
+  include ReopenedDispatch
+  has_many :comments, foreign_key: :article_id
+  def probe; self.public_send(:comments); end
+end
+"#,
+        ),
+        (
+            "app/models/library_patch_post.rb",
+            r#"class LibraryPatchPost < ApplicationRecord
+  has_many :comments, foreign_key: :article_id
+  def probe; self.public_send(:comments); end
+end
+"#,
+        ),
+        (
+            "app/lib/library_patch_post.rb",
+            "class LibraryPatchPost\n  def public_send(name); :patch_kept; end\nend\n",
+        ),
+        (
+            "app/lib/dispatch_guard.rb",
+            "module DispatchGuard\n  def public_send(name); :initializer_kept; end\nend\n",
+        ),
+        (
+            "config/initializers/dispatch_guard.rb",
+            "Comment.prepend DispatchGuard\n",
+        ),
     ];
     let tree: HashMap<PathBuf, Vec<u8>> = sources
         .into_iter()
@@ -139,6 +183,11 @@ end
         .parent = Some(roundhouse::ident::ClassId(roundhouse::ident::Symbol::from(
         "DispatcherPost",
     )));
+    app
+}
+
+fn output() -> Vec<roundhouse::emit::EmittedFile> {
+    let app = app();
     let mut out = ruby::emit_lowered_models(&app);
     out.extend(ruby::emit_lowered_controllers(&app));
     out
@@ -193,6 +242,86 @@ fn private_included_and_inherited_targets_preserve_reflection() {
             "override in {path} was bypassed:\n{src}"
         );
     }
+}
+
+#[test]
+fn reopened_and_initializer_dispatchers_preserve_reflection() {
+    let app = app();
+    let assocs = roundhouse::lower::scope_chain::build_assoc_registry(&app.models);
+    // Exercise the proof with known receiver types too: inference may keep
+    // an overridden dispatch opaque before the grounding pass is reached.
+    for (owner, target) in [
+        ("Article", "comments"),
+        ("ReopenedPost", "comments"),
+        ("LibraryPatchPost", "comments"),
+        ("Comment", "article"),
+    ] {
+        let source = format!("self.public_send(:{target})");
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let statement = parsed
+            .node()
+            .as_program_node()
+            .unwrap()
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .unwrap();
+        let mut body = roundhouse::ingest::ingest_expr(&statement, "probe.rb").unwrap();
+        let ExprNode::Send {
+            recv: Some(recv), ..
+        } = &mut *body.node
+        else {
+            panic!("expected dispatch call")
+        };
+        recv.ty = Some(roundhouse::ty::Ty::Class {
+            id: roundhouse::ident::ClassId(roundhouse::Symbol::from(owner)),
+            args: vec![],
+        });
+        roundhouse::lower::scope_chain::ground_literal_model_dispatch(&mut body, &app, &assocs);
+        let source = ruby::emit_expr(&body);
+        let expected = if owner == "Article" {
+            format!("self.{target}")
+        } else {
+            format!("public_send(:{target})")
+        };
+        assert_eq!(source, expected, "{owner}");
+    }
+    let files = output();
+    for (path, call) in [
+        ("reopened_post.rb", "public_send(:comments)"),
+        ("library_patch_post.rb", "public_send(:comments)"),
+        ("comment.rb", "public_send(:article)"),
+    ] {
+        let src = emitted(&files, path);
+        assert!(
+            src.contains(call),
+            "dispatcher in {path} was bypassed:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn initializer_installed_dispatch_runs_in_the_emitted_app() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/lib/dispatch_guard.rb",
+            "module DispatchGuard\n  def public_send(name); :initializer_kept; end\nend\n",
+        )
+        .write(
+            "config/initializers/dispatch_guard.rb",
+            "Comment.prepend DispatchGuard\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article",
+            "  belongs_to :article\n  def dispatch_probe; self.public_send(:article); end",
+        )
+        .run_ruby(
+            "raise 'initializer dispatcher bypassed' unless Comment.new.dispatch_probe == :initializer_kept\nputs 'initializer dispatch preserved'",
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("initializer dispatch preserved"));
 }
 
 #[test]

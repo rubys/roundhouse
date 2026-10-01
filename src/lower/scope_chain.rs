@@ -1437,8 +1437,8 @@ pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: 
 
 /// Whether app metadata proves that `id`'s lookup chain contains a
 /// user-defined method. This deliberately walks models, library classes,
-/// includes, and parents. Unknown framework roots terminate the walk;
-/// app-owned links are represented by one of these two class shapes.
+/// all reopenings, includes, parents and initializer-installed mixins.
+/// Unknown framework roots terminate the walk.
 pub(crate) fn app_method(
     app: &crate::App,
     id: &ClassId,
@@ -1455,7 +1455,7 @@ pub(crate) fn app_method(
         if !seen.insert(id.clone()) {
             return false;
         }
-        if let Some(model) = app.models.iter().find(|m| &m.name == id) {
+        for model in app.models.iter().filter(|m| &m.name == id) {
             if model
                 .methods()
                 .any(|m| m.name == *name && m.receiver == side)
@@ -1468,12 +1468,15 @@ pub(crate) fn app_method(
             {
                 return true;
             }
-            return model
+            if model
                 .parent
                 .as_ref()
-                .is_some_and(|p| visit(app, p, name, side, seen));
+                .is_some_and(|p| visit(app, p, name, side, seen))
+            {
+                return true;
+            }
         }
-        if let Some(class) = app.library_classes.iter().find(|c| &c.name == id) {
+        for class in app.library_classes.iter().filter(|c| &c.name == id) {
             if class
                 .methods
                 .iter()
@@ -1488,12 +1491,21 @@ pub(crate) fn app_method(
             {
                 return true;
             }
-            return class
+            if class
                 .parent
                 .as_ref()
-                .is_some_and(|p| visit(app, p, name, side, seen));
+                .is_some_and(|p| visit(app, p, name, side, seen))
+            {
+                return true;
+            }
         }
-        false
+        // Both retained `include` and `prepend` change instance lookup,
+        // not the singleton side. Their order cannot make the proof safer:
+        // the optimization needs every represented override to be absent.
+        side == crate::dialect::MethodReceiver::Instance
+            && app.module_mixins.iter()
+                .filter(|m| m.target == id.0)
+                .any(|m| visit(app, &ClassId(m.module.clone()), name, side, seen))
     }
     visit(app, id, name, side, &mut HashSet::new())
 }
