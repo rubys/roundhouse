@@ -953,12 +953,6 @@ jobs:
             -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
           make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
           tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
-      - uses: actions/upload-artifact@v7
-        with:
-          name: campfire-compare-spinel
-          path: campfire-compare-spinel.tar.gz
-          compression-level: 0
-          retention-days: 1
       # Keep the C from the failed invocation, not a second compiler run.
       # Logs and inputs are still useful if emission failed before any C existed.
       - name: Capture Campfire compiler failure
@@ -995,6 +989,12 @@ jobs:
           name: campfire-compiler-repro
           path: ci-campfire-repro
           retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campfire-compare-spinel
+          path: campfire-compare-spinel.tar.gz
+          compression-level: 0
+          retention-days: 1
 
   # campfire-compare-spinel: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
