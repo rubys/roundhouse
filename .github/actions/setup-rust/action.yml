@@ -1,0 +1,20 @@
+name: Set up pinned Rust
+description: Install rust-toolchain.toml and retain its toolchain outside the checkout
+inputs:
+  targets:
+    description: Additional space-separated Rust targets to install
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Install repository toolchain
+      shell: bash
+      run: |
+        rustup show
+        echo "RUSTUP_TOOLCHAIN=$(rustup show active-toolchain | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+    - name: Install additional targets
+      if: inputs.targets != ''
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: rustup target add $TARGETS

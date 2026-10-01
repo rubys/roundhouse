@@ -16,6 +16,98 @@
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+        let steps = job["steps"].as_sequence().unwrap();
+        let setup = steps
+            .iter()
+            .position(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"));
+        for (i, step) in steps.iter().enumerate() {
+            let uses = step["uses"].as_str().unwrap_or("");
+            assert!(
+                !uses.starts_with("dtolnay/rust-toolchain@"),
+                "{name:?}: Rust must come from the repository pin"
+            );
+            if uses.starts_with("Swatinem/rust-cache@") {
+                assert!(
+                    setup.is_some_and(|setup| setup < i),
+                    "{name:?}: select pinned Rust before caching"
+                );
+            }
+        }
+    }
+    let wasm_setup = workflow["jobs"]["build-wasm"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"))
+        .unwrap();
+    assert_eq!(
+        wasm_setup["with"]["targets"].as_str(),
+        Some("wasm32-wasip1")
+    );
+    let smoke_setup = workflow["jobs"]["smoke"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"))
+        .unwrap();
+    assert_eq!(smoke_setup["if"].as_str(), Some("matrix.target == 'rust'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_setup_exports_the_selected_toolchain_for_generated_projects() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let action: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/actions/setup-rust/action.yml").unwrap(),
+    )
+    .unwrap();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("rust-setup-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let rustup = root.join("rustup");
+    // A different version catches hard-coded exports, and the trailing
+    // explanation catches exporting the whole active-toolchain output.
+    fs::write(
+        &rustup,
+        "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then\n  echo '1.97.3-x86_64-unknown-linux-gnu (overridden by rust-toolchain.toml)'\nelif [ \"$*\" != show ]; then\n  exit 99\nfi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+    let env_file = root.join("github-env");
+    let output = Command::new("bash")
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            action["runs"]["steps"][0]["run"].as_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("GITHUB_ENV", &env_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(env_file).unwrap(),
+        "RUSTUP_TOOLCHAIN=1.97.3-x86_64-unknown-linux-gnu\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
