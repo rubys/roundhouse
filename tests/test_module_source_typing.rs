@@ -525,3 +525,60 @@ end
         }
     }
 }
+
+#[test]
+fn inherited_real_helper_shadows_a_fixture_accessor() {
+    let mut app = ingest_app_from_tree(
+        [
+            (
+                "app/models/article.rb",
+                "class Article < ApplicationRecord; end",
+            ),
+            ("test/fixtures/articles.yml", "one:\n  id: 3\n"),
+            (
+                "test/models/source_probe_test.rb",
+                r#"
+class BaseProbeTest < ActiveSupport::TestCase
+  def articles(label)
+    [label.to_s.upcase]
+  end
+end
+class SourceProbeTest < BaseProbeTest
+  test "real inherited helper wins" do
+    articles(:one).each { |value| assert_equal "ONE", value }
+  end
+end
+"#,
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect(),
+    )
+    .unwrap();
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let base = app
+        .test_modules
+        .iter()
+        .find(|module| module.name.0.as_str() == "BaseProbeTest")
+        .unwrap();
+    assert_eq!(
+        app.inferred_method_params
+            .get(&(base.name.clone(), "articles".into())),
+        Some(&vec![Ty::Sym])
+    );
+    let child = app
+        .test_modules
+        .iter()
+        .find(|module| module.name.0.as_str() == "SourceProbeTest")
+        .unwrap();
+    let mut receivers = Vec::new();
+    each_receivers(&child.tests[0].body, &mut receivers);
+    assert_eq!(
+        receivers,
+        vec![Some(Ty::Array {
+            elem: Box::new(Ty::Str)
+        })],
+        "fixture must not hide a real inherited source method"
+    );
+}

@@ -26,8 +26,16 @@ pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
             }
             .insert(method.name.clone(), method.kind);
         }
-        // An application helper shadows a fixture accessor, exactly as in
-        // the existing test-class builder. Do not invent a model for it.
+        // Register fixture accessors only on source test roots. Children
+        // inherit that surface; a synthetic child entry would shadow a
+        // real helper defined on an ancestor test class.
+        if module.parent.as_ref().is_some_and(|parent| {
+            app.test_modules
+                .iter()
+                .any(|ancestor| ancestor.name == *parent)
+        }) {
+            continue;
+        }
         for fixture in &app.fixtures {
             cls.instance_methods
                 .entry(fixture.name.clone())
