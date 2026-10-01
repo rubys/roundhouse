@@ -1535,7 +1535,6 @@ end
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     resolve_polymorphic_targets(&mut app);
-    inherit_enums(&mut app.models);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
@@ -1595,6 +1594,9 @@ end
     // are resolved to their literal here.
     app.content_helper_allowed_attributes = content_helper_attribute_additions(vfs, dir, &app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
+    // Include each base's Concern maps, and retain a child's own maps
+    // (direct or Concern-declared) before filling inherited columns.
+    inherit_enums(&mut app.models);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
