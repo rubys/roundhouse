@@ -807,6 +807,12 @@ pub struct LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Validated Alba source declarations expanded to ordinary methods before
+    /// inference. Analysis checks each constructor site, not a joined type
+    /// alone. This remains a source library class, not a model/params sibling.
+    AlbaResource {
+        declaration_span: Span,
+    },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
     /// model name (e.g. `:article`); `fields` is the permitted column

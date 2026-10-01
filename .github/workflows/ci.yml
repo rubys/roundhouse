@@ -29,8 +29,55 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: 90b330024dec3e757c79b6a7e6568f93da8e3148
+  WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
 
 jobs:
+  writebook-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch pinned Writebook source
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
+          mkdir /tmp/writebook
+          tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      - name: Build Roundhouse and run inventory
+        env:
+          WRITEBOOK_ROOT: /tmp/writebook
+          WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
+        run: |
+          cargo build --release --bin roundhouse
+          cargo test --test writebook --release -- --ignored --nocapture
+      - name: Save complete check report
+        if: always()
+        env:
+          WRITEBOOK_ROOT: /tmp/writebook
+        run: |
+          set +e
+          target/release/roundhouse check --continue "$WRITEBOOK_ROOT" > writebook-check.txt 2>&1
+          status=$?
+          set -e
+          cat writebook-check.txt
+          test "$(grep -c '^roundhouse-check: .* — ' writebook-check.txt)" -eq 1
+          summary=$(grep '^roundhouse-check: .* — ' writebook-check.txt)
+          pattern='^roundhouse-check: .* — ([0-9]+) parse error\(s\), ([0-9]+) error\(s\), [0-9]+ warning\(s\), [0-9]+ gap-attributed note\(s\), [0-9]+ survey gap\(s\)$'
+          [[ "$summary" =~ $pattern ]]
+          expected=0
+          if (( BASH_REMATCH[1] + BASH_REMATCH[2] > 0 )); then expected=1; fi
+          test "$status" -eq "$expected"
+      - name: Upload Writebook reports and baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writebook-inventory
+          path: |
+            writebook-check.txt
+            writebook-inventory-current.json
+            tests/fixtures/writebook-inventory.json
+
   # -------------------------------------------------------------------
   # Generate the real-blog fixture once, upload as artifact. Every
   # downstream test job downloads + extracts it — pay the Ruby/Rails

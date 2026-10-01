@@ -23,6 +23,7 @@
 //!
 //! Each of those comes when a fixture forces it.
 
+mod alba;
 mod body;
 pub(crate) use body::string_answers;
 pub mod async_color;
@@ -3919,7 +3920,7 @@ impl Analyzer {
                 for name in names {
                     // The includer's OWN def wins — unless it is this
                     // module's def, spliced in verbatim
-                    // (`splice_concern_class_methods_into_models`).
+                    // (`splice_concern_class_methods_into_includers`).
                     // Then it is one method with two `MethodDef`s and
                     // the observations belong to both.
                     let spliced_from_here = app
