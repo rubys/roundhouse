@@ -91,6 +91,22 @@ end"#;
 }
 
 #[test]
+fn repeated_private_hooks_keep_duplicate_evidence_but_named_changes_still_error() {
+    for name in ["initialize", "initialize_copy", "initialize_dup", "initialize_clone"] {
+        let source = format!("class Thing\n  def {name}; 11; end\n  def {name}; 29; end\nend");
+        let definitions = methods(&source, false);
+        assert_eq!(definitions.len(), 2, "duplicate evidence lost: {name}");
+        assert!(definitions.iter().all(|m| m.visibility == MethodVisibility::Private));
+
+        let changed = source.replace(
+            &format!("  def {name}; 29; end"),
+            &format!("  public :{name}\n  def {name}; 29; end"),
+        );
+        assert!(ingest_library_class(changed.as_bytes(), "thing.rb").is_err(), "{changed}");
+    }
+}
+
+#[test]
 fn named_and_inline_changes_do_not_change_the_next_definition() {
     use MethodReceiver::{Class, Instance};
     use MethodVisibility::{Private, Protected, Public};

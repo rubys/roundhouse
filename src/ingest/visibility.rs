@@ -10,6 +10,10 @@ use crate::dialect::{MethodDef, MethodVisibility};
 use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_or_string_value};
 use super::{IngestError, IngestResult};
 
+const PRIVATE_HOOKS: &[&str] = &[
+    "initialize", "initialize_copy", "initialize_dup", "initialize_clone",
+];
+
 #[derive(Default)]
 pub(super) struct Visibility {
     // Source statement + method name also identifies synthesized attr/alias
@@ -96,11 +100,20 @@ impl Visibility {
     ) -> IngestResult<()> {
         let key = (class_side, name.clone());
         if let Some(previous) = self.known.get(&key) {
+            // A repeated ordinary constructor has the same implicit
+            // visibility on every definition. Keep the pre-existing duplicate
+            // bodies so semantic consumers (e.g. Alba's evidence gate) can
+            // reject them; a visibility marker still makes them ambiguous.
+            let implicit = if !class_side && PRIVATE_HOOKS.contains(&name.as_str()) {
+                MethodVisibility::Private
+            } else {
+                MethodVisibility::Public
+            };
             if self.changed.contains(&key)
-                || visibility != MethodVisibility::Public
+                || visibility != implicit
                 || previous
                     .iter()
-                    .any(|p| self.values[&(*p, name.clone())] != MethodVisibility::Public)
+                    .any(|p| self.values[&(*p, name.clone())] != implicit)
             {
                 return Err(Self::unsupported(
                     file,
@@ -272,15 +285,7 @@ impl Visibility {
                     self.known.remove(&key);
                 }
                 let visibility = inline.unwrap_or_else(|| {
-                    if !side
-                        && matches!(
-                            name.as_str(),
-                            "initialize"
-                                | "initialize_copy"
-                                | "initialize_dup"
-                                | "initialize_clone"
-                        )
-                    {
+                    if !side && PRIVATE_HOOKS.contains(&name.as_str()) {
                         MethodVisibility::Private
                     } else if def.receiver().is_some() {
                         MethodVisibility::Public
