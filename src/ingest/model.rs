@@ -598,6 +598,9 @@ struct EnumDeclaration<'pr> {
     mapping: Node<'pr>,
     prefix: String,
     suffix: String,
+    /// The label `default:` names, which seeds a new record over the
+    /// column default. Computed here because only this parse sees the
+    /// options hash.
     default_label: Option<String>,
 }
 
@@ -688,7 +691,8 @@ pub(super) fn expand_enum_decl(
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
-    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label }) = enum_declaration(call)
+    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label }) =
+        enum_declaration(call)
         else { return Ok(None) };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`) — and everything
