@@ -26,6 +26,7 @@
 mod predicates;
 mod extra_params;
 mod walker;
+pub(crate) mod form_wrapper;
 pub(crate) mod helpers;
 mod partial;
 mod form_with;
@@ -43,6 +44,7 @@ use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
 use self::extra_params::collect_extra_params;
+use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
 /// Bulk entry: lower every view, then type their bodies against a
@@ -2950,103 +2952,6 @@ pub(crate) fn dynamic_partial_pools(
             )
         })
         .collect()
-}
-
-/// A helper method that is nothing but a wrapper around a form helper
-/// which YIELDS A BUILDER, with the caller's block forwarded through —
-/// campfire's `def composer_form_tag(room, &) = form_with(model: …, url:
-/// …, &)`.
-pub(super) struct FormWrapperHelper {
-    /// The wrapper's own parameters, in declaration order, each with
-    /// its DEFAULT when it has one. `**options` ingests as a trailing
-    /// positional defaulting to `{}` (see the keyword_rest arm in
-    /// `ingest::library_class`), so a call that passes no options is
-    /// short by one argument and has to bind the default rather than
-    /// decline — campfire calls `profile_form_with @user` twice and
-    /// `profile_form_with @user, class: "…"` once, in the same
-    /// template.
-    pub(super) params: Vec<(Symbol, Option<Expr>)>,
-    /// The `form_with(…)` call its body is, block stripped.
-    pub(super) call: Expr,
-}
-
-/// Which helper methods those are.
-///
-/// The BUILDER-YIELDING part is the whole gate, and it is why these
-/// cannot be handled the way the other block-forwarding wrappers are.
-/// `messages_tag(room, &) = tag.div(…, &)` expands IN PLACE inside the
-/// helper module, calling the forwarded block through `capture(&__blk)`
-/// — that works because the block carries no binding across the call: it
-/// is opaque markup either way.
-///
-/// `form_with` yields a FORM BUILDER, and the block body's `form
-/// .rich_text_area :body` calls are macro-inlined at lower time against
-/// that binding (the runtime FormBuilder is retired by design). Leave
-/// the two halves apart and the view's block has an unbound `form` while
-/// the helper has a `form_with` nothing defines — which is exactly the
-/// NoMethodError campfire's room page died on. Bringing the call to the
-/// block is the only shape where both halves are visible at once.
-///
-/// Deliberately narrow, two ways. The body must be that ONE call and
-/// nothing else, so splicing it is a substitution rather than an
-/// inlining — campfire's `auto_submit_form_with` computes a `data` hash
-/// first and is left alone (its one call site passes no block, so it
-/// needs nothing). And a wrapper taking `*args` / `**params` is
-/// declined: campfire's `profile_form_with(model, **params, &)` splats
-/// the caller's options INTO the `form_with` kwargs, and merging a
-/// splat through the substitution is its own job with its own test.
-/// Those three `users/profiles` sites keep the shape they have today.
-fn form_wrapper_helpers(app: &App) -> std::collections::HashMap<String, FormWrapperHelper> {
-    /// Form helpers whose block takes a builder the body then calls.
-    const BUILDER_YIELDING: &[&str] = &["form_with", "form_for", "fields_for"];
-    let mut out = std::collections::HashMap::new();
-    for lc in &app.library_classes {
-        for m in &lc.methods {
-            let Some(blk) = m.block_param.as_ref() else { continue };
-            // A one-statement def body arrives as a single-element Seq.
-            let body = match &*m.body.node {
-                ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
-                _ => &m.body,
-            };
-            let ExprNode::Send { recv: None, method, args, block: Some(b), .. } = &*body.node
-            else {
-                continue;
-            };
-            if !BUILDER_YIELDING.contains(&method.as_str()) {
-                continue;
-            }
-            // The body's block must BE the forwarded parameter — a
-            // literal block would already be expandable in place.
-            if !matches!(&*b.node, ExprNode::Var { name, .. } if *name == blk.name) {
-                continue;
-            }
-            // A splat parameter has no positional slot to substitute.
-            if m.params.iter().any(|p| p.rest) {
-                continue;
-            }
-            out.insert(
-                m.name.as_str().to_string(),
-                FormWrapperHelper {
-                    params: m
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), p.default.clone()))
-                        .collect(),
-                    call: Expr::new(
-                        body.span,
-                        ExprNode::Send {
-                            recv: None,
-                            method: method.clone(),
-                            args: args.clone(),
-                            block: None,
-                            parenthesized: true,
-                        },
-                    ),
-                },
-            );
-        }
-    }
-    out
 }
 
 /// Map each strict-locals partial to its FULL declared locals (record

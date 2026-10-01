@@ -17,6 +17,73 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A builder wrapper's private argument computation belongs to its helper,
+/// not to the view into which the form and builder body are spliced.
+#[test]
+fn a_form_wrapper_keeps_its_private_argument_computation_in_its_owner() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/articles_helper.rb",
+            r#"module ArticlesHelper
+  def article_form_with!(article, suffix = "!", &)
+    form_with model: article, class: "contents", data: private_options(article, suffix), &
+  end
+  def __rh_form_article_form_with_0; 91; end
+  def article_public_form_with(model, &)
+    form_with model: model, data: { controller: public_label, label: @article.title }, &
+  end
+  def public_label; "public-owner"; end
+  private
+  def private_options(article, suffix)
+    article.title = article.title + suffix
+    { controller: private_controller, label: article.title }
+  end
+  def private_controller; "owner-composer"; end
+end
+"#,
+        )
+        .write(
+            "app/helpers/zzz_helper.rb",
+            r#"module ZzzHelper
+  def private_options(article, suffix); { controller: "wrong-owner" }; end
+  def private_controller; "wrong-controller"; end
+end
+"#,
+        )
+        .edit(
+            "app/views/articles/_form.html.erb",
+            "form_with(model: article, class: \"contents\")",
+            "article_form_with!(article)",
+        )
+        .write(
+            "app/views/articles/_public_owner_form.html.erb",
+            "<%= article_public_form_with(article) do |form| %><%= form.text_field :title %><% end %>",
+        )
+        .run_ruby(r#"
+article = Article.new(title: "seed", body: "body")
+raise "unexpected controller context" unless ActionController::Current.controller.nil?
+public_html = Views::Articles.public_owner_form(article)
+raise "direct helper ivar lost view binding" unless public_html.include?('data-label="seed"')
+raise "public helper lost owner" unless public_html.include?('data-controller="public-owner"')
+html = Views::Articles.form(article)
+raise "missing form" unless html.include?("<form") && html.include?("</form>")
+raise "wrong helper owner" unless html.include?('data-controller="owner-composer"')
+raise "argument evaluated incorrectly" unless html.include?('data-label="seed!"') && article.title == "seed!"
+raise "builder lost record" unless html.include?('name="article[title]"') && html.include?('value="seed!"')
+raise "generated name collision" unless ArticlesHelper.__rh_form_article_form_with_0 == 91
+[:private_options, :private_controller].each do |name|
+  raise "private helper made public" if ArticlesHelper.respond_to?(name)
+  begin
+    name == :private_options ? ArticlesHelper.public_send(name, article, "?") : ArticlesHelper.public_send(name)
+    raise "public_send exposed private helper"
+  rescue NoMethodError
+  end
+end
+puts "form wrapper owner checks passed"
+"#)
+        .assert_passes();
+}
+
 /// Visibility is observable runtime behavior, not just an IR annotation.
 /// Cover models, POROs, and a concern's instance and copied class sides.
 #[test]
