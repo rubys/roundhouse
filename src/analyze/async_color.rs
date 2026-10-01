@@ -695,6 +695,7 @@ mod tests {
 
     fn synth_method(name: &str) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Instance,

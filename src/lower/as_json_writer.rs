@@ -81,6 +81,7 @@ pub fn writer_method(
 ) -> Result<MethodDef, ShapeError> {
     let stmts = writer_body(pairs, table, assoc_names)?;
     Ok(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,
@@ -152,6 +153,7 @@ pub fn typed_writer_method(
         Ok(typed_value(pair, &encodings[i]))
     })?;
     Ok(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,

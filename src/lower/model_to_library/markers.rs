@@ -100,6 +100,7 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
         )
     };
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("dom_prefix"),
         receiver: MethodReceiver::Instance,
@@ -141,6 +142,7 @@ pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) 
         return;
     }
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("to_param"),
         receiver: MethodReceiver::Instance,
@@ -230,6 +232,7 @@ pub(super) fn push_dom_record_key_method(methods: &mut Vec<MethodDef>, model: &M
         }
     };
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("dom_record_key"),
         receiver: MethodReceiver::Instance,
@@ -400,6 +403,7 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
             };
             if want_reader && !defines(name) && !methods.iter().any(|m| m.name == *name) {
                 methods.push(MethodDef {
+                    visibility: crate::dialect::MethodVisibility::Public,
                     name_span: crate::span::Span::synthetic(),
                     name: name.clone(),
                     receiver: MethodReceiver::Instance,
@@ -417,6 +421,7 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
             if want_writer && !defines(&setter) && !methods.iter().any(|m| m.name == setter) {
                 let value = Symbol::from("value");
                 methods.push(MethodDef {
+                    visibility: crate::dialect::MethodVisibility::Public,
                     name_span: crate::span::Span::synthetic(),
                     name: setter,
                     receiver: MethodReceiver::Instance,
@@ -489,6 +494,7 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
         let setter = Symbol::from(format!("{}=", name.as_str()));
         if !methods.iter().any(|m| m.name == name) {
             methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
                 name_span: crate::span::Span::synthetic(),
                 name: name.clone(),
                 receiver: MethodReceiver::Instance,
@@ -612,6 +618,7 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                 )
             };
             methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
                 name_span: crate::span::Span::synthetic(),
                 name: setter,
                 receiver: MethodReceiver::Instance,
@@ -638,6 +645,7 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
             if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
                 if args.is_empty() && method.as_str() == "primary_abstract_class" {
                     methods.push(MethodDef {
+                        visibility: crate::dialect::MethodVisibility::Public,
                         name_span: crate::span::Span::synthetic(),
                         name: Symbol::from("abstract?"),
                         receiver: MethodReceiver::Class,
@@ -736,6 +744,7 @@ pub(crate) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
         existing.body = seq(stmts);
     } else {
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: hook,
             receiver: MethodReceiver::Instance,
@@ -998,6 +1007,7 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
 /// methods share.
 fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(name),
         receiver: MethodReceiver::Instance,
@@ -1455,6 +1465,7 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             existing.body = seq(stmts);
         } else {
             methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
                 name_span: crate::span::Span::synthetic(),
                 name: hook_sym,
                 receiver: MethodReceiver::Instance,

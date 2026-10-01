@@ -761,6 +761,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // View methods render HTML — they're functions in the spinel
     // sense (return String), so Method is the right kind.
     let mut method = MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Class,

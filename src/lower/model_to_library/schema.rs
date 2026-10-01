@@ -153,6 +153,7 @@ pub(super) fn push_schema_methods(
         ("_table_sql", crate::naming::sql_ident(model.table.0.as_str())),
     ] {
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Class,
@@ -173,6 +174,7 @@ pub(super) fn push_schema_methods(
     // else and no target pays a per-model method for the common case.
     if let Some(pk) = &model.primary_key {
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("primary_key"),
             receiver: MethodReceiver::Class,
@@ -204,6 +206,7 @@ pub(super) fn push_schema_methods(
         Ty::Array { elem: Box::new(Ty::Sym) },
     );
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("schema_columns"),
         receiver: MethodReceiver::Class,
@@ -240,6 +243,7 @@ pub(super) fn push_schema_methods(
         Ty::Array { elem: Box::new(Ty::Sym) },
     );
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("schema_time_columns"),
         receiver: MethodReceiver::Class,
@@ -531,6 +535,7 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
     }
 
     Some(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("fill_timestamps"),
         receiver: MethodReceiver::Instance,
@@ -611,6 +616,7 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
         _ => not_nil(col, &slot_ty),
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}?", col.name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -774,6 +780,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         )
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: col.name.clone(),
         receiver: MethodReceiver::Instance,
@@ -793,6 +800,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
 fn synth_before_type_cast(owner: &ClassId, col: &Column) -> MethodDef {
     let slot = super::ty_of_column_slot(col);
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}_before_type_cast", col.name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -863,6 +871,7 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
         Ty::Str,
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -952,6 +961,7 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
         text_ty,
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", col.name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -975,6 +985,7 @@ fn synth_key_alias_reader(owner: &ClassId, key: &Column) -> MethodDef {
         key_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("id"),
         receiver: MethodReceiver::Instance,
@@ -1003,6 +1014,7 @@ fn synth_key_alias_writer(owner: &ClassId, key: &Column) -> MethodDef {
         key_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("id="),
         receiver: MethodReceiver::Instance,
@@ -1039,6 +1051,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         col_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: col_storage_setter(col),
         receiver: MethodReceiver::Instance,
@@ -1144,6 +1157,7 @@ fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef 
     // narrowing happens in the body.
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
@@ -1248,6 +1262,7 @@ pub(super) fn push_from_params_method(
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Class,
@@ -1347,6 +1362,7 @@ pub(super) fn push_create_from_params_method(
 
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Class,
@@ -1498,6 +1514,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let row_ty = Ty::Class { id: row_class, args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_row"),
         receiver: MethodReceiver::Class,
@@ -1620,6 +1637,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_stmt"),
         receiver: MethodReceiver::Class,
@@ -1724,6 +1742,7 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: prev_was_name(col),
         receiver: MethodReceiver::Instance,
@@ -1818,6 +1837,7 @@ fn synth_column_delegate(
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -1893,6 +1913,7 @@ fn synth_column_dirty_pred(owner: &ClassId, col: &Column, name: Symbol) -> Metho
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -2528,6 +2549,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         effects: EffectSet::default(),
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Private,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
@@ -2583,6 +2605,7 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("attributes"),
         receiver: MethodReceiver::Instance,
@@ -2648,6 +2671,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
@@ -2910,6 +2934,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
     };
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]="),
         receiver: MethodReceiver::Instance,
@@ -3205,6 +3230,7 @@ fn synth_update_typed(
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -3506,6 +3532,7 @@ fn synth_update_hash(
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(if bang { "update!" } else { "update" }),
         receiver: MethodReceiver::Instance,

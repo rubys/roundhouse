@@ -1174,6 +1174,7 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -1211,6 +1212,7 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver: MethodReceiver::Instance,
@@ -1250,6 +1252,11 @@ fn method_def_from(
     };
 
     Ok(MethodDef {
+        visibility: if receiver == MethodReceiver::Instance && matches!(name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone") {
+            crate::dialect::MethodVisibility::Private
+        } else {
+            crate::dialect::MethodVisibility::Public
+        },
         name_span: crate::span::Span::synthetic(),
         name,
         receiver,

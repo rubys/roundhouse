@@ -17,6 +17,116 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// Visibility is observable runtime behavior, not just an IR annotation.
+/// Cover models, POROs, and a concern's instance and copied class sides.
+#[test]
+fn local_method_visibility_survives_emission_and_reflective_dispatch() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            r#"class Article < ApplicationRecord
+  include VisibilityHelpers
+  def visibility_wrapper; visibility_helper; end
+  def visibility_helper; 41; end
+  private :visibility_helper
+  def visibility_later; 42; end
+  private
+  def self.visibility_public_class; 43; end
+  public
+  class << self
+    def visibility_class_wrapper; visibility_class_helper; end
+    private
+    def visibility_class_helper; 44; end
+  end
+  def self.visibility_class_later; 45; end
+"#,
+        )
+        .write(
+            "app/lib/visibility_probe.rb",
+            r#"class VisibilityProbe
+  def initialize; @value = 51; end
+  def visibility_wrapper; visibility_helper; end
+  private def visibility_helper; @value; end
+  def visibility_later; 52; end
+  protected def guarded; 53; end
+  class << self
+    protected
+    def guarded; 54; end
+  end
+end
+class PublicInitializeProbe
+  def initialize; @value = 71; end
+  public :initialize
+  def self.initialize; 72; end
+end
+"#,
+        )
+        .write(
+            "app/models/concerns/visibility_helpers.rb",
+            r#"module VisibilityHelpers
+  extend ActiveSupport::Concern
+  def concern_wrapper; concern_helper; end
+  private
+  def concern_helper; 61; end
+  class_methods do
+    def concern_class_wrapper; concern_class_helper; end
+    def concern_class_helper; 62; end
+    private :concern_class_helper
+    def concern_class_later; 63; end
+  end
+end
+"#,
+        )
+        .run_ruby(r#"
+def assert_equal(expected, actual)
+  raise "expected #{expected.inspect}, got #{actual.inspect}" unless expected == actual
+end
+def rejects_public_send(receiver, name)
+  begin
+    receiver.public_send(name)
+  rescue NoMethodError
+    return
+  end
+  raise "public_send reached #{name}"
+end
+article = Article.new
+probe = VisibilityProbe.new
+[
+  [article, :visibility_wrapper, :visibility_helper, 41],
+  [probe, :visibility_wrapper, :visibility_helper, 51],
+  [article, :concern_wrapper, :concern_helper, 61],
+  [Article, :visibility_class_wrapper, :visibility_class_helper, 44],
+  [Article, :concern_class_wrapper, :concern_class_helper, 62]
+].each do |receiver, wrapper, helper, expected|
+  assert_equal expected, receiver.public_send(wrapper)
+  assert_equal expected, receiver.send(helper)
+  rejects_public_send receiver, helper
+  assert_equal false, receiver.respond_to?(helper)
+  assert_equal false, receiver.respond_to?(helper, false)
+  assert_equal true, receiver.respond_to?(helper, true)
+end
+assert_equal 42, article.public_send(:visibility_later)
+assert_equal 52, probe.public_send(:visibility_later)
+assert_equal 43, Article.public_send(:visibility_public_class)
+assert_equal 45, Article.public_send(:visibility_class_later)
+assert_equal 63, Article.public_send(:concern_class_later)
+assert_equal false, article.respond_to?(:initialize)
+assert_equal true, article.respond_to?(:initialize, true)
+assert_equal false, probe.respond_to?(:initialize)
+rejects_public_send probe, :initialize
+assert_equal true, PublicInitializeProbe.new.respond_to?(:initialize)
+assert_equal 71, PublicInitializeProbe.new.public_send(:initialize)
+assert_equal 72, PublicInitializeProbe.public_send(:initialize)
+assert_equal true, VisibilityProbe.protected_instance_methods(false).include?(:guarded)
+assert_equal true, VisibilityProbe.singleton_class.protected_instance_methods(false).include?(:guarded)
+rejects_public_send probe, :guarded
+rejects_public_send VisibilityProbe, :guarded
+puts "visibility dispatch checks passed"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a

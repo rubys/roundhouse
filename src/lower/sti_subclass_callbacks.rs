@@ -194,6 +194,7 @@ fn stamp_inheritance_column(lc: &mut crate::dialect::LibraryClass) {
     lc.methods.insert(
         0,
         crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Private,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("initialize"),
             receiver: crate::dialect::MethodReceiver::Instance,
@@ -245,6 +246,7 @@ fn fold(lc: &mut crate::dialect::LibraryClass, hook: &str, target: &Symbol) {
         return;
     }
     lc.methods.push(crate::dialect::MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: hook,
         receiver: crate::dialect::MethodReceiver::Instance,

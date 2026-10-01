@@ -303,7 +303,7 @@ fn body_has_included_block(body: Option<Node<'_>>) -> bool {
 fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
     let Some(body) = body else { return false };
     for stmt in flatten_statements(body) {
-        if stmt.as_def_node().is_some() {
+        if super::visibility::definition(&stmt).is_some() {
             return true;
         }
         if let Some(call) = stmt.as_call_node() {

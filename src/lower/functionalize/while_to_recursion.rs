@@ -239,6 +239,7 @@ fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
     }
 
     let helper = MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: helper_name,
         // Same receiver as the entry: an instance-method loop's helper is
@@ -756,6 +757,7 @@ mod tests {
     }
     fn method(name: &str, receiver: MethodReceiver, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver,

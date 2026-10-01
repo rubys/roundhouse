@@ -1378,6 +1378,7 @@ pub fn module_funcs_to_library_class(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,

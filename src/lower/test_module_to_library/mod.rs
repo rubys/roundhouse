@@ -732,6 +732,7 @@ fn test_to_method_def(
         route_id_segments,
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Instance,

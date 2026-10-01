@@ -139,6 +139,7 @@ fn method(
     };
     next_to_return(&mut body);
     Some(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(name),
         receiver: MethodReceiver::Class,

@@ -197,6 +197,7 @@ mod tests {
         // Method `each` with the typed block sig — mirrors Session#each.
         let block_sig = typed_callee_block_sig();
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("each"),
             receiver: MethodReceiver::Instance,
@@ -238,6 +239,7 @@ mod tests {
             },
         );
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("forwarder"),
             receiver: MethodReceiver::Instance,

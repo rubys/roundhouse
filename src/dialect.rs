@@ -604,10 +604,24 @@ impl std::fmt::Display for Param {
     }
 }
 
+/// Statically resolved Ruby visibility. Strict targets do not yet enforce
+/// Ruby's reflective dispatch contract (`send`, `public_send`, `respond_to?`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MethodVisibility {
+    #[default]
+    Public,
+    Protected,
+    Private,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MethodDef {
     pub name: Symbol,
     pub receiver: MethodReceiver,
+    /// Defaults to public when reading older serialized IR. Source ingest
+    /// resolves lexical markers before model/concern bodies are flattened.
+    #[serde(default)]
+    pub visibility: MethodVisibility,
     pub params: Vec<Param>,
     /// Block parameter declared at the `def` site (`def foo(x, &block)`).
     /// Distinct from `params` because it occupies the call-site `block:`

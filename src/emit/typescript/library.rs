@@ -195,6 +195,7 @@ fn synthesize_module_lc(
     let methods: Vec<crate::dialect::MethodDef> = funcs
         .iter()
         .map(|f| crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,
@@ -497,6 +498,7 @@ fn collect_imports_for_function(
         includes: Vec::new(),
         nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: func.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,

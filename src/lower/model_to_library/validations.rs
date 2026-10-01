@@ -93,6 +93,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     }
 
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("validate"),
         receiver: MethodReceiver::Instance,
@@ -265,6 +266,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
         ]);
         let body = seq(body_stmts);
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("valid?"),
             receiver: MethodReceiver::Instance,
@@ -281,6 +283,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
     }
     if !defines("errors") {
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("errors"),
             receiver: MethodReceiver::Instance,

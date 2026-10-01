@@ -36,6 +36,27 @@ along with Campfire's own test suite and its cable broadcasts. What
 Campfire uses beyond the blog is supported on those two lanes, and
 reaches the others as their emitters and runtimes catch up.
 
+## Local method visibility
+
+Model and library/concern ingest preserve statically known `public`,
+`protected`, and `private` on local definitions, including singleton
+blocks and inline `private def` forms. Named changes must follow an
+unambiguous local definition; forward references, inherited-only names,
+dynamic names/conditional declarations, and visibility-sensitive
+redefinitions remain unsupported. Concern class-method carriers have
+their own lexical scope, distinct from the concern's own singletons.
+
+The common Ruby/Spinel emitter writes named visibility immediately after
+each definition, not sticky sections. A plain `private` does not affect
+`def self.x`; constructors remain implicitly private unless explicitly
+made public. CRuby emit-and-run tests prove wrapper calls, `send`,
+`public_send`, and `respond_to?(name, include_private)` for model, library,
+and concern methods. This is not a strict-target visibility/reflective
+dispatch compatibility claim, nor a Spinel runtime verification.
+Nonpublic model accessor macros that have not become local `MethodDef`s
+are still diagnosed rather than silently emitted as public. Existing
+model lowering's synthesized-name precedence is unchanged.
+
 ## Active Record
 
 | | Blog tier (all targets) | Campfire tier (ruby, spinel) |

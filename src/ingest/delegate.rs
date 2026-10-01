@@ -452,6 +452,7 @@ mod tests {
             "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior=, to: :deprecator\nend\n",
         );
         lc.methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name: Symbol::from("reset!"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),

@@ -259,6 +259,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -308,6 +309,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -360,6 +362,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("article"),
             receiver: MethodReceiver::Class,
@@ -409,6 +412,7 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -462,6 +466,7 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
@@ -507,6 +512,7 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,

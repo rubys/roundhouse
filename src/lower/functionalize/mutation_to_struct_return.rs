@@ -1254,6 +1254,7 @@ mod tests {
     }
     fn instance_method(name: &str, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver: MethodReceiver::Instance,
@@ -1481,6 +1482,7 @@ mod tests {
             ],
         });
         let init = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: sym("initialize"),
             receiver: MethodReceiver::Instance,

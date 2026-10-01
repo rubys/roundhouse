@@ -1454,6 +1454,7 @@ fn a_models_own_to_param_wins_over_the_synthesized_one() {
         .expect("Article not in real-blog")
         .clone();
     let own = roundhouse::dialect::MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_param"),
         receiver: MethodReceiver::Instance,
@@ -1516,6 +1517,7 @@ fn a_models_own_to_key_feeds_dom_record_key() {
         .expect("Article not in real-blog")
         .clone();
     let own = roundhouse::dialect::MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_key"),
         receiver: MethodReceiver::Instance,

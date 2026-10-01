@@ -234,6 +234,7 @@ pub(super) fn synthesize_process_action(
 
     let action_name_param = Symbol::from("action_name");
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,

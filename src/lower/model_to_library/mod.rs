@@ -69,6 +69,7 @@ pub(crate) fn push_synth_instance_method(
         return;
     }
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -1055,6 +1056,7 @@ pub(crate) fn push_scope_methods(
         );
 
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: scope.name.clone(),
             receiver: MethodReceiver::Class,
@@ -1193,6 +1195,7 @@ pub(crate) fn push_scope_variants(
                     });
                 }
                 methods.push(MethodDef {
+                    visibility: crate::dialect::MethodVisibility::Public,
                     name_span: crate::span::Span::synthetic(),
                     name: vname,
                     receiver: MethodReceiver::Class,

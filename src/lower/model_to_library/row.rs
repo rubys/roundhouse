@@ -132,6 +132,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         col_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: col.name.clone(),
         receiver: MethodReceiver::Instance,
@@ -162,6 +163,7 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         col_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", col.name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -213,6 +215,7 @@ fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         ));
     }
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Private,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
@@ -348,6 +351,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_raw"),
         receiver: MethodReceiver::Class,

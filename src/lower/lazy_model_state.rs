@@ -96,6 +96,7 @@ fn getter(ivar: &Symbol, name: &Symbol) -> MethodDef {
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: getter_name(name),
         receiver: MethodReceiver::Instance,

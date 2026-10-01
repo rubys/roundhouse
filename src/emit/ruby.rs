@@ -1710,6 +1710,7 @@ mod method_sig_tests {
     #[test]
     fn emit_method_renders_optional_default_and_block_param() {
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("get_from_cache"),
             receiver: MethodReceiver::Instance,

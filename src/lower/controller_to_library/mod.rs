@@ -977,6 +977,7 @@ fn subclass_template_hooks(
                 rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
             };
             methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
                 name_span: crate::span::Span::synthetic(),
                 name: hook.clone(),
                 receiver: MethodReceiver::Instance,
@@ -2483,6 +2484,7 @@ fn action_to_method(
     // imperative and computed. AttributeReader is reserved for
     // pure ivar-backed reads that can lower to a TS field.
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
