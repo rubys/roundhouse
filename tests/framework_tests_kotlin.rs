@@ -108,13 +108,17 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // Honors `KOTLIN_JAVA_HOME` then `JAVA_HOME` for the JDK (matches
     // `kotlin_toolchain.rs`). Default `GRADLE_USER_HOME` so CI's
     // `setup-gradle` dependency cache applies.
+    // Reuse the Gradle JVM across the five serialized, independent projects
+    // rather than starting a single-use daemon for each. CI uses disposable
+    // hosted runners; setup-gradle also stops daemons before saving a writable
+    // cache. Locally, `gradle --stop` releases the retained JVM when desired.
     let java_home = std::env::var("KOTLIN_JAVA_HOME")
         .or_else(|_| std::env::var("JAVA_HOME"))
         .ok();
     let mut cmd = Command::new("gradle");
     cmd.arg("test")
         .arg("--console=plain")
-        .arg("--no-daemon")
+        .arg("--daemon")
         .current_dir(&scratch);
     if let Some(jh) = java_home {
         cmd.env("JAVA_HOME", jh);

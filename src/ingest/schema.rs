@@ -255,11 +255,11 @@ fn apply_migration_verb(
             }
         }
         "change_column_default" => {
-            // Positional literal or `from:`/`to:` kwargs; only string
-            // literals are retained (parity with the schema.rb parser).
+            // Positional literal or `from:`/`to:` kwargs; only literals
+            // are retained (parity with the schema.rb parser).
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
-                let positional = args.get(2).and_then(string_value);
-                let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| string_value(&v));
+                let positional = args.get(2).and_then(default_value);
+                let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| default_value(&v));
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
@@ -788,6 +788,17 @@ struct ColumnOpts {
     limit: Option<u32>,
 }
 
+// Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
+fn default_value(node: &Node<'_>) -> Option<String> {
+    if let Some(n) = integer_value(node) {
+        return Some(n.to_string());
+    }
+    if let Some(f) = node.as_float_node() {
+        return Some(f.value().to_string());
+    }
+    bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
+}
+
 fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> ColumnOpts {
     let mut opts = ColumnOpts::default();
     for node in nodes {
@@ -798,7 +809,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
             let value = &assoc.value();
             match key.as_str() {
                 "null" => opts.nullable = bool_value(value),
-                "default" => opts.default = string_value(value),
+                "default" => opts.default = default_value(value),
                 "limit" => {
                     if let Some(n) = integer_value(value) {
                         if n >= 0 {

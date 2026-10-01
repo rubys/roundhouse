@@ -25,6 +25,7 @@ pub enum FrameworkError {
     NotImplemented,
     RecordNotFound,
     RecordInvalid,
+    Argument,
 }
 
 #[allow(non_upper_case_globals)]
@@ -33,6 +34,8 @@ pub const NotImplementedError: FrameworkError = FrameworkError::NotImplemented;
 pub const RecordNotFound: FrameworkError = FrameworkError::RecordNotFound;
 #[allow(non_upper_case_globals)]
 pub const RecordInvalid: FrameworkError = FrameworkError::RecordInvalid;
+#[allow(non_upper_case_globals)]
+pub const ArgumentError: FrameworkError = FrameworkError::Argument;
 
 /// Ruby-shape `raise Klass, payload`. Panics with the framework
 /// error kind; payload is accepted but discarded.

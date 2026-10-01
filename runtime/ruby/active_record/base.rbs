@@ -51,7 +51,12 @@ module ActiveRecord
 
   # Enum column assigned by LABEL — see `base.rb`. `labels`/`values`
   # are the declaration's parallel arrays.
-  def self.enum_int: (String text, Array[String] labels, Array[Integer] values) -> Integer
+  def self.enum_int: (String text, Array[String] labels, Array[Integer] values, Array[String] texts, String attr) -> Integer
+  def self.enum_int_or_nil: (String text, Array[String] labels, Array[Integer] values, Array[String] texts, String attr) -> Integer?
+  def self.enum_str: (String text, Array[String] labels, Array[String] values, String attr) -> String
+  def self.enum_str_or_nil: (String text, Array[String] labels, Array[String] values, String attr) -> String?
+  def self.enum_label_str: (String value, Array[String] labels, Array[String] values) -> String?
+  def self.enum_label: (Integer value, Array[String] labels, Array[Integer] values) -> String?
 
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
