@@ -239,6 +239,7 @@ jobs:
           cp -R spinel-src/lib                  spinel-dist/lib
           cp -R spinel-src/packages             spinel-dist/packages
           cp -R spinel-src/builtins             spinel-dist/builtins
+          git -C spinel-src rev-parse HEAD > spinel-dist/revision.txt
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
@@ -945,10 +946,12 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
+        id: build
         run: |
+          set -o pipefail
           cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
-            -o build/campfire-compare-spinel --allow-unsupported
-          make -C build/campfire-compare-spinel build
+            -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
+          make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
           tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
       - uses: actions/upload-artifact@v7
         with:
@@ -956,6 +959,42 @@ jobs:
           path: campfire-compare-spinel.tar.gz
           compression-level: 0
           retention-days: 1
+      # Keep the C from the failed invocation, not a second compiler run.
+      # Logs and inputs are still useful if emission failed before any C existed.
+      - name: Capture Campfire compiler failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          set +e
+          mkdir -p ci-campfire-repro/sources
+          {
+            printf 'Roundhouse: %s\nCampfire: %s\n' "$GITHUB_SHA" "$CAMPFIRE_SHA"
+            printf 'Spinel revision: '; cat spinel-dist/revision.txt
+            spinel-dist/spinel --version
+            cc --version
+            uname -a
+          } > ci-campfire-repro/versions.txt 2>&1
+          for log in campfire-emit.log campfire-build.log; do
+            [ ! -f "$log" ] || cp "$log" ci-campfire-repro/
+          done
+          for entry in main.rb boot.rb spin.toml Makefile bin app config lib runtime sig; do
+            source="build/campfire-compare-spinel/$entry"
+            [ ! -e "$source" ] || cp -R "$source" ci-campfire-repro/sources/
+          done
+          # Spinel retains failed C and names it in its diagnostic. Do not
+          # pick an unrelated file left in /tmp by an earlier compiler call.
+          generated=$(sed -n 's/^spinel: the generated C is kept at //p' campfire-build.log 2>/dev/null | tail -1)
+          if [ -n "$generated" ] && [ -f "$generated" ]; then
+            cp "$generated" ci-campfire-repro/generated.c
+          else
+            echo 'No retained C was reported; see the emission/build logs.' > ci-campfire-repro/capture.txt
+          fi
+      - name: Upload Campfire compiler failure
+        if: failure() && steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: campfire-compiler-repro
+          path: ci-campfire-repro
+          retention-days: 7
 
   # campfire-compare-spinel: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
