@@ -37,6 +37,11 @@ date_value("2024-01-31", entry.due_on)
 equal("2024-01-31", stored_date(entry.id))
 entry = CalendarEntry.find(entry.id)
 date_value("2024-01-31", entry.due_on)
+date_value("2024-01-31", entry[:due_on])
+date_value("2024-01-31", entry.shifted_attribute(0))
+date_value("2024-02-29", entry.shifted_index(1))
+date_value("2024-02-29", entry.shifted_attribute(1))
+date_value("2024-01-31", entry[:due_on]) # index shifts must not mutate storage
 date_value("2024-02-29", entry.shifted(1))
 date_value("2024-03-31", entry.shifted(2)) # one-shot, not repeated February clamping
 date_value("2024-01-31", entry.shifted(0))
@@ -55,6 +60,10 @@ if ARGV.first == "native"
     equal("2024-01-31", entry.as_json["due_on"])
   end
 else
+  equal("2024-01-31", entry.due_on_raw)
+  equal("2024-01-31", entry.attributes["due_on"]) # attributes remains stored text
+  equal(String, entry[:observed_at].class) # timestamp index behavior is unchanged
+  equal(String, entry[:opens_at].class)
   ActiveSupport.use_zone("Pacific/Auckland") do
     date_value("2024-01-31", entry.due_on)
     equal("2024-01-31", entry.as_json["due_on"])
@@ -94,6 +103,8 @@ other = CalendarEntry.find(entry.id)
 other.update!(due_on: Date.new(2024, 2, 29))
 entry.reload # reloading an already-read instance must not keep a stale date
 date_value("2024-02-29", entry.due_on)
+date_value("2024-02-29", entry[:due_on])
+date_value("2024-03-29", entry.shifted_attribute(1))
 date_value("2025-02-28", entry.shifted(12))
 entry.due_on = Date.new(2024, 3, 31)
 entry.save!
@@ -102,6 +113,9 @@ date_value("2024-02-29", entry.shifted(-1))
 entry.update!(due_on: nil)
 equal(nil, entry.due_on)
 equal(nil, stored_date(entry.id))
+equal(nil, entry[:due_on])
+equal(nil, entry.shifted_index(1))
+equal(nil, entry.shifted_attribute(1))
 equal({"due_on" => nil}, entry.as_json(only: [:due_on]))
 equal('{"due_on":null}', ActionController::JsonRender.encode(entry.as_json(only: [:due_on]))) unless ARGV.first == "native"
 equal(nil, entry.shifted(240))

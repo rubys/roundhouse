@@ -2745,8 +2745,10 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     let name = Symbol::from("name");
 
     // Patterns match the PUBLIC column symbol; bodies read the storage
-    // ivar (`@col_raw` for temporal) — `record[:created_at]` yields the
-    // stored text, same as `attributes`. JSON columns are the exception: a
+    // ivar (`@col_raw` for timestamps). Date instead uses its native
+    // reader, matching literal-key analysis and Rails' []/read_attribute.
+    // `attributes` and the raw Date reader still expose stored text.
+    // JSON columns are another exception: a
     // `has_json` declaration builds its typed Hash from the flat readers; a
     // schema-less column decodes through `JsonColumn.load`.
     let arms: Vec<crate::expr::Arm> = table
@@ -2766,6 +2768,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // `&self`.
             body: crate::lower::has_json::column_hash_read(model, &c.name)
                 .or_else(|| enum_label_read(model, c))
+                .or_else(|| (c.col_type == crate::schema::ColumnType::Date).then(|| temporal_reader_body(c)))
                 .or_else(|| is_generic_json_col(c, model).then(|| json_reader_body(c)))
                 .unwrap_or_else(|| {
                 let read = Expr::new(

@@ -165,6 +165,8 @@ fn specialized_date_json_normalizes_unset_nonnullable_storage() {
 entry = CalendarEntry.new
 raise entry.due_on_raw.inspect unless entry.due_on_raw == ""
 raise entry.due_on.inspect unless entry.due_on.nil?
+raise entry[:due_on].inspect unless entry[:due_on].nil?
+raise "unset Date alias changed" unless entry.shifted_attribute(1).nil?
 expected = '{"due_on":null,"observed_at":null}'
 raise entry.as_json_str.inspect unless entry.as_json_str == expected
 actual = ActionController::JsonRender.encode(entry.as_json)
