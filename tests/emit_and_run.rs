@@ -127,6 +127,71 @@ puts "visibility dispatch checks passed"
         .assert_passes();
 }
 
+/// Module-function promotion retains a public singleton copy; extend self
+/// instead retains the original visibility, even across bare markers.
+#[test]
+fn module_function_and_extend_self_have_distinct_runtime_visibility() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/module_visibility.rb",
+            r#"module NamedVisibility
+  private
+  def helper; 81; end
+  module_function :helper
+end
+module BareVisibility
+  private
+  module_function
+  def helper; 82; end
+  private :helper
+  private def inline_helper; 83; end
+  def later_copy; 84; end
+  public
+  def instance_later; 85; end
+end
+module ExtendedVisibility
+  extend self
+  private
+  def helper; 91; end
+  protected
+  def guarded; 92; end
+  public
+  def later; 93; end
+end
+"#,
+        )
+        .run_ruby(r#"
+def assert_equal(expected, actual)
+  raise "expected #{expected.inspect}, got #{actual.inspect}" unless expected == actual
+end
+[
+  [NamedVisibility, :helper, 81],
+  [BareVisibility, :helper, 82],
+  [BareVisibility, :inline_helper, 83],
+  [BareVisibility, :later_copy, 84],
+  [ExtendedVisibility, :later, 93]
+].each do |receiver, name, expected|
+  assert_equal expected, receiver.public_send(name)
+  assert_equal true, receiver.respond_to?(name)
+end
+assert_equal false, BareVisibility.respond_to?(:instance_later, true)
+assert_equal true, BareVisibility.public_instance_methods(false).include?(:instance_later)
+[[ExtendedVisibility, :helper, 91], [ExtendedVisibility, :guarded, 92]].each do |receiver, name, expected|
+  assert_equal expected, receiver.send(name)
+  assert_equal false, receiver.respond_to?(name)
+  assert_equal true, receiver.respond_to?(name, true)
+  begin
+    receiver.public_send(name)
+  rescue NoMethodError
+    next
+  end
+  raise "public_send reached #{name}"
+end
+puts "module visibility checks passed"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a

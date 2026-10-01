@@ -45,6 +45,19 @@ unambiguous local definition; forward references, inherited-only names,
 dynamic names/conditional declarations, and visibility-sensitive
 redefinitions remain unsupported. Concern class-method carriers have
 their own lexical scope, distinct from the concern's own singletons.
+`private_class_method`/`public_class_method` inside singleton blocks or
+concern class-method carriers address a further singleton level and
+remain unsupported, rather than changing the flattened methods.
+
+The retained singleton form of `module_function` is public even when
+the source instance method is private; `extend self` instead retains
+the source visibility. Bare instance-visibility markers end the
+`module_function` mode but not `extend self`. This does not add the
+separate private instance copy or copy/redefinition semantics to the
+existing one-method-per-name lowering.
+`module_function` inside singleton blocks or concern class-method
+carriers remains unsupported: its public copy belongs to the carrier,
+not the includer, so it must not make the includer's method public.
 
 The common Ruby/Spinel emitter writes named visibility immediately after
 each definition, not sticky sections. A plain `private` does not affect

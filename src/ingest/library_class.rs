@@ -1167,6 +1167,9 @@ fn walk_decl_body_with_visibility<'pr>(
     // receiver to Class. Doesn't affect nested `class`/`module` bodies
     // — they get their own walk_decl_body recursion.
     let mut module_function_active = false;
+    // `extend self` exposes methods with their instance visibility; unlike
+    // module_function, it neither makes a public copy nor ends at `private`.
+    let mut extend_self_active = false;
     // Names from the `module_function :a, :b` form, plus the positions
     // of the direct `def`s in this body they may promote. Tracking
     // positions (rather than searching `methods` by name at the end)
@@ -1183,6 +1186,14 @@ fn walk_decl_body_with_visibility<'pr>(
         let definition = visibility::definition(&statement).map(|d| d.as_node());
         let stmt = definition.as_ref().unwrap_or(&statement);
         if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
+            // Only bare instance-visibility markers end Ruby's module_function
+            // mode. Named and inline forms don't change that lexical mode.
+            let call = statement.as_call_node().unwrap();
+            if call.arguments().is_none()
+                && matches!(constant_id_str(&call.name()), "public" | "protected" | "private")
+            {
+                module_function_active = false;
+            }
             continue;
         }
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
@@ -1276,10 +1287,16 @@ fn walk_decl_body_with_visibility<'pr>(
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
-            if force_class_receiver || module_function_active {
+            visibility.apply(&statement, &mut m);
+            if module_function_active && m.receiver == MethodReceiver::Instance {
+                // The retained singleton copy is public even if the original
+                // instance definition is private/protected. extend self shares
+                // the original method instead and must retain its visibility.
+                m.visibility = crate::dialect::MethodVisibility::Public;
+            }
+            if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
-            visibility.apply(&statement, &mut m);
             direct_def_positions.push(methods.len());
             methods.push(m);
             continue;
@@ -1429,8 +1446,7 @@ fn walk_decl_body_with_visibility<'pr>(
                         visibility.apply(&statement, &mut copy);
                         methods.push(copy);
                     }
-                    // `extend self` — the OTHER spelling of the same
-                    // idea, and the one campfire's
+                    // `extend self` — the spelling campfire's
                     // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
                     // makes every instance method a singleton method
                     // too, so `PrivateNetworkGuard.resolve(host)` reaches
@@ -1440,9 +1456,8 @@ fn walk_decl_body_with_visibility<'pr>(
                     // left `Opengraph::Metadata.from_url` fetching
                     // nothing at all.
                     //
-                    // Same treatment as bare `module_function`: our
-                    // targets call these as `Mod.x(...)`, so only the
-                    // class-method form is needed.
+                    // Our targets retain only the class-method form, but
+                    // unlike module_function, it keeps instance visibility.
                     "extend"
                         if call
                             .arguments()
@@ -1452,7 +1467,7 @@ fn walk_decl_body_with_visibility<'pr>(
                             })
                             .unwrap_or(false) =>
                     {
-                        module_function_active = true;
+                        extend_self_active = true;
                     }
                     "module_function" => {
                         // Bare `module_function` (no args) — flip the
@@ -1549,6 +1564,7 @@ fn walk_decl_body_with_visibility<'pr>(
                 .any(|n| n == methods[*pos].name.as_str())
             {
                 methods[*pos].receiver = MethodReceiver::Class;
+                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
                 promoted.push(methods[*pos].name.clone());
             }
         }

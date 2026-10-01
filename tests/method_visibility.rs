@@ -196,6 +196,39 @@ fn a_concern_carrier_is_not_the_modules_own_singleton_scope() {
 }
 
 #[test]
+fn second_singleton_level_inside_carriers_remains_unsupported() {
+    for carrier in [
+        "class << self",
+        "class_methods do",
+        "module ClassMethods",
+        "def self.included(base); class << base",
+    ] {
+        let end = if carrier.starts_with("def") { "end; end" } else { "end" };
+        for declaration in [
+            "def helper; 1; end; private_class_method :helper",
+            "private_class_method def helper; 1; end",
+            "def helper; 1; end; public_class_method :helper",
+            "public_class_method def helper; 1; end",
+            "private; module_function; def helper; 1; end",
+            "private; def helper; 1; end; module_function :helper",
+        ] {
+            let source = format!(
+                "class Thing < ApplicationRecord\n{carrier}\n{declaration}\n{end}\nend"
+            );
+            let error = ingest_library_class(source.as_bytes(), "thing.rb").unwrap_err();
+            assert!(error.to_string().contains("nested singleton"), "{source}: {error}");
+            let error = ingest_model(
+                source.as_bytes(),
+                "thing.rb",
+                &Schema::default(),
+                &Default::default(),
+            ).unwrap_err();
+            assert!(error.to_string().contains("nested singleton"), "{source}: {error}");
+        }
+    }
+}
+
+#[test]
 fn nested_classes_and_modules_have_independent_defaults_and_names() {
     let source = r#"class Thing < ApplicationRecord
   private

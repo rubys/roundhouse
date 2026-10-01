@@ -205,6 +205,14 @@ impl Visibility {
                     _ => MethodVisibility::Private,
                 };
                 let named_class = kw.ends_with("_class_method");
+                if class_side && named_class {
+                    // These address the singleton of the current carrier,
+                    // not the methods flattened from its instance side.
+                    return Err(Self::unsupported(
+                        file,
+                        "class-method visibility on a nested singleton level is not modeled",
+                    ));
+                }
                 if let Some(def) = &def {
                     let side = class_side || def.receiver().is_some();
                     if side != (class_side || named_class) {
@@ -312,6 +320,14 @@ impl Visibility {
             }
             let name = call.name();
             let name = constant_id_str(&name);
+            if class_side && name == "module_function" {
+                // Its public copy belongs to the carrier itself, not to the
+                // includer whose methods we retain after flattening.
+                return Err(Self::unsupported(
+                    file,
+                    "module_function on a nested singleton level or class-method carrier is not modeled",
+                ));
+            }
             if name == "class_methods" {
                 if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
                     self.walk_carrier(block.body(), file)?;

@@ -1,4 +1,5 @@
-//! `extend self` — the other spelling of `module_function`.
+//! `extend self` exposes instance methods on the module, retaining visibility.
+//! Unlike `module_function`, it does not make an independent public copy.
 //!
 //! Ruby makes every instance method of the module a singleton method
 //! too, so `PrivateNetworkGuard.resolve(host)` reaches the `def resolve`
@@ -62,6 +63,26 @@ end
     );
     assert!(src.contains("def self.resolve(host)"), "{src}");
     assert!(src.contains("def self.private?(ip)"), "{src}");
+}
+
+#[test]
+fn extend_self_retains_private_visibility_and_survives_a_public_marker() {
+    let src = emitted(
+        r#"module Guard
+  extend self
+  private
+  def helper; 31; end
+  protected
+  def guarded; 32; end
+  public
+  def later; 33; end
+end
+"#,
+    );
+    assert!(src.contains("private_class_method :helper"), "{src}");
+    assert!(src.contains("protected :guarded"), "{src}");
+    assert!(src.contains("def self.later"), "{src}");
+    assert!(!src.contains("private_class_method :later"), "{src}");
 }
 
 /// Without it the methods stay instance-only — the behaviour every
