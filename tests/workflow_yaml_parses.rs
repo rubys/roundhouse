@@ -16,6 +16,93 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(unix)]
+#[test]
+fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let producer = &workflow["jobs"]["build-campfire-compare-spinel"];
+    let consumer = &workflow["jobs"]["campfire-compare-spinel"];
+    assert_eq!(producer["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(consumer["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        consumer["needs"].as_str(),
+        Some("build-campfire-compare-spinel")
+    );
+    assert_eq!(
+        producer["outputs"]["artifact-id"].as_str(),
+        Some("${{ steps.binary.outputs.artifact-id }}")
+    );
+    assert_eq!(
+        consumer["if"].as_str(),
+        Some(
+            "${{ !cancelled() && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}"
+        )
+    );
+    let steps = producer["steps"].as_sequence().unwrap();
+    let upload = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("binary"))
+        .unwrap();
+    assert!(upload["uses"]
+        .as_str()
+        .unwrap()
+        .starts_with("actions/upload-artifact@"));
+    assert_eq!(
+        upload["with"]["name"].as_str(),
+        Some("campfire-compare-spinel")
+    );
+    let matrix = consumer["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap();
+    let modes: Vec<_> = matrix
+        .iter()
+        .map(|entry| {
+            (
+                entry["gc"].as_str().unwrap(),
+                entry["flag"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            ("default", ""),
+            ("minor-gc", "--minor-gc"),
+            ("verify-gen", "--verify-gen")
+        ]
+    );
+
+    let report = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Report comparison availability"))
+        .unwrap();
+    assert_eq!(report["if"].as_str(), Some("${{ !cancelled() }}"));
+    assert_eq!(
+        report["env"]["ARTIFACT_ID"].as_str(),
+        Some("${{ steps.binary.outputs.artifact-id }}")
+    );
+    for (artifact_id, expected) in [
+        ("", "No Campfire comparison binary was uploaded. The default, minor-gc and verify-gen comparisons are blocked, not passed; see the producer failure above.\n"),
+        ("12345", "Campfire comparison binary uploaded; default, minor-gc and verify-gen comparisons can run.\n"),
+    ] {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let summary = std::env::temp_dir().join(format!("campfire-ready-{}-{unique}.md", std::process::id()));
+        let output = Command::new("bash")
+            .args(["-e", "-c", report["run"].as_str().unwrap()])
+            .env("ARTIFACT_ID", artifact_id)
+            .env("GITHUB_STEP_SUMMARY", &summary)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(fs::read_to_string(&summary).unwrap(), expected);
+        fs::remove_file(summary).unwrap();
+    }
+}
+
 #[test]
 fn every_workflow_file_parses_as_yaml() {
     let dir = Path::new(".github/workflows");

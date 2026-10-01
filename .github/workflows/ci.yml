@@ -926,6 +926,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
+    outputs:
+      artifact-id: ${{ steps.binary.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -951,11 +953,22 @@ jobs:
           make -C build/campfire-compare-spinel build
           tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
       - uses: actions/upload-artifact@v7
+        id: binary
         with:
           name: campfire-compare-spinel
           path: campfire-compare-spinel.tar.gz
           compression-level: 0
           retention-days: 1
+      - name: Report comparison availability
+        if: ${{ !cancelled() }}
+        env:
+          ARTIFACT_ID: ${{ steps.binary.outputs.artifact-id }}
+        run: |
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo 'Campfire comparison binary uploaded; default, minor-gc and verify-gen comparisons can run.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No Campfire comparison binary was uploaded. The default, minor-gc and verify-gen comparisons are blocked, not passed; see the producer failure above.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # campfire-compare-spinel: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
@@ -1001,6 +1014,9 @@ jobs:
   campfire-compare-spinel:
     name: campfire-compare-spinel (${{ matrix.gc }})
     needs: build-campfire-compare-spinel
+    # An advisory producer failure must not become three artifact-download
+    # failures. Only the upload's artifact ID proves the binary is available.
+    if: ${{ !cancelled() && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
