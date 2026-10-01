@@ -41,6 +41,71 @@ end
         .assert_passes();
 }
 
+/// Source inference must preserve Ruby parameter binding and the existing
+/// test lowering; inferred signatures are not permission to rewrite calls.
+#[test]
+fn original_test_helper_defaults_and_keyword_forwarding_run() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "test/models/source_helper_test.rb",
+            r#"require "test_helper"
+
+class SourceHelperTest < ActiveSupport::TestCase
+  setup { @prefix = "scope:" }
+
+  test "defaults and forwarding preserve original bindings" do
+    assert_equal ["FIRST"], normalized("first")
+    assert_equal ["chosen"], normalized("second", "chosen")
+    assert_equal ["explicit"], normalized("third", "unused", ["explicit"])
+    visited = 0
+    ["first", "last"].each do |value|
+      values_from(value: value).each do |inner|
+        assert_equal @prefix + value, inner
+        visited += 1
+      end
+    end
+    assert_equal 4, visited
+    assert_equal [13, "forwarded"], forwarding(13, value: "forwarded")
+    assert_equal [17, "direct"], target(17, value: "direct")
+    assert_equal({ value: "kept" }, whole_hash(19, value: "kept"))
+    puts "PASS original source helper assertions"
+  end
+
+  def normalized(value, upper = upper_for(value), values = [upper])
+    values
+  end
+
+  def upper_for(input)
+    input.upcase
+  end
+
+  def values_from(**details)
+    values_for(**details)
+  end
+
+  def values_for(value:)
+    [@prefix + value, @prefix + value]
+  end
+
+  def forwarding(number, **details)
+    target(number, **details)
+  end
+
+  def target(number, value:)
+    [number, value]
+  end
+
+  def whole_hash(*numbers, **details)
+    details
+  end
+end
+"#,
+        )
+        .run_test("test/models/source_helper_test.rb");
+    run.assert_passes();
+    assert!(run.stdout.contains("PASS original source helper assertions"));
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
