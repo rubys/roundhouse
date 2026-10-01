@@ -137,3 +137,49 @@ fn the_concerns_instance_method_is_still_reachable_via_include() {
          also appear as an instance method:\n{w}"
     );
 }
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+#[test]
+fn visibility_wrapped_hooks_keep_their_class_method_carrier_and_split_bridge() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/wrapped_hook.rb",
+            r#"module WrappedHook
+  private_class_method def self.included(base)
+    class << base
+      def wrapped_helper; 47; end
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "app/lib/split_bridge.rb",
+            r#"module SplitBridge
+  private_class_method def self.included(base)
+    base.extend(ClassMethods)
+  end
+end
+"#,
+        )
+        .write(
+            "app/lib/split_carrier.rb",
+            r#"module SplitBridge
+  module ClassMethods
+    def split_helper; 83; end
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ApplicationRecord\n  include WrappedHook, SplitBridge",
+        )
+        .run_ruby(
+            "raise 'wrapped hook lost' unless Article.wrapped_helper == 47\nraise 'split bridge lost' unless Article.split_helper == 83\nputs 'wrapped carriers preserved'",
+        )
+        .assert_passes();
+}

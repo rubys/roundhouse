@@ -2424,7 +2424,7 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
-            if let Some(def) = stmt.as_def_node() {
+            if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);
                 }
