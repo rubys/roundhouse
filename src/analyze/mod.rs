@@ -23,6 +23,7 @@
 //!
 //! Each of those comes when a fixture forces it.
 
+mod alba;
 mod body;
 pub(crate) use body::string_answers;
 pub mod async_color;
@@ -355,7 +356,16 @@ impl Analyzer {
             // (writer) all resolve.
             for (name, ty) in &model.attributes.fields {
                 let n = name.as_str();
-                cls.instance_methods.insert(name.clone(), ty.clone());
+                // Not the stored value: an enum's reader answers its label, or nil for a value no label names.
+                let reader_ty = if crate::dialect::enum_reads_label(model, name) {
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                } else {
+                    ty.clone()
+                };
+                cls.instance_methods.insert(name.clone(), reader_ty);
+                if model.enums.contains_key(name) {
+                    cls.instance_methods.entry(Symbol::from(format!("{n}_before_type_cast"))).or_insert(ty.clone());
+                }
                 let predicate = Symbol::from(format!("{n}?"));
                 cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
                 let writer = Symbol::from(format!("{n}="));
@@ -3915,7 +3925,7 @@ impl Analyzer {
                 for name in names {
                     // The includer's OWN def wins — unless it is this
                     // module's def, spliced in verbatim
-                    // (`splice_concern_class_methods_into_models`).
+                    // (`splice_concern_class_methods_into_includers`).
                     // Then it is one method with two `MethodDef`s and
                     // the observations belong to both.
                     let spliced_from_here = app

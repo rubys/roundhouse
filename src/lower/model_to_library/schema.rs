@@ -49,7 +49,10 @@ pub(super) fn push_schema_methods(
     // text via `<col>_raw=` directly.
     let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
     for col in &table.columns {
-        methods.push(synth_attr_reader(owner, col));
+        methods.push(synth_attr_reader(owner, col, model));
+        if model.enums.contains_key(&col.name) {
+            methods.push(synth_before_type_cast(owner, col));
+        }
         if is_temporal_col(col) {
             methods.push(synth_raw_reader(owner, col));
             // Rails-parity Time-accepting writer (lobsters' ban flow:
@@ -303,7 +306,7 @@ pub(super) fn push_schema_methods(
     }
 
     // def attributes; { col: @col, ... } excluding id; end
-    methods.push(synth_attributes(owner, table));
+    methods.push(synth_attributes(owner, table, model));
 
     // def [](name); case name; when :col then @col; ...; end; end
     methods.push(synth_index_read(owner, table, model));
@@ -738,7 +741,7 @@ fn and_bool(left: Expr, right: Expr) -> Expr {
     )
 }
 
-fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
+fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
     // Temporal columns store ISO-8601 TEXT (`ty_of_column` → Str) but
     // read back as a real `Time`: the reader parses the stored text so
     // `record.created_at` is a native `Time` for callers / analyze /
@@ -747,7 +750,9 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
     // renders `parse_db_time` (a stored-text→Time intrinsic) natively; a
     // target that hasn't wired one yet surfaces the honest not-supported
     // gap on this reader's `Ty::Time` return type.
-    let (body, ret_ty) = if is_temporal_col(col) {
+    let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
+        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+    } else if is_temporal_col(col) {
         // Nilable: a stored value can be absent (NULL / unset), so the
         // parse short-circuits to nil. `Time?` is the honest static type
         // and matches what a strict-null target infers from the nilable
@@ -781,6 +786,25 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+// Not the assigned input: Rails answers the label an unsaved write was given, but a saved or loaded record answers the stored value, which is what this holds.
+fn synth_before_type_cast(owner: &ClassId, col: &Column) -> MethodDef {
+    let slot = super::ty_of_column_slot(col);
+    MethodDef {
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from(format!("{}_before_type_cast", col.name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }), slot.clone()),
+        signature: Some(fn_sig(vec![], slot)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 
@@ -2010,7 +2034,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // is the default, and only the type-zero case (no default
         // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
-        let schema_default = schema_default_literal(col);
+        let schema_default = column_default_literal(model, col);
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
             && schema_default.is_none();
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
@@ -2118,6 +2142,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 },
                 super::ty_of_column_slot(col),
             );
+            let json_assign_is_none = json_assign.is_none();
             let value = if let Some(assign) = json_assign {
                 assign
             } else if nullable {
@@ -2195,6 +2220,9 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     parenthesized: false,
                 },
             ));
+            if overrides_schema_default(model, col) && json_assign_is_none {
+                stmts.push(given_value_assign(model, col, &attrs));
+            }
         }
     }
 
@@ -2515,7 +2543,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     }
 }
 
-fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     // Keys are the PUBLIC column names as STRINGS, which is what Rails'
     // `record.attributes` answers — unambiguously, in every version.
     // Symbols here made the Rails idiom silently empty:
@@ -2537,7 +2565,8 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
-            (super::lit_str(c.name.as_str().to_string()), col_ivar(c, col_ty))
+            let value = enum_label_read(model, c).unwrap_or_else(|| col_ivar(c, col_ty));
+            (super::lit_str(c.name.as_str().to_string()), value)
         })
         .collect();
 
@@ -2592,7 +2621,9 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // the bare read it always had; wrapping those too cost
             // them the ivar-read `.clone()` rust adds, moving out of
             // `&self`.
-            body: crate::lower::has_json::column_hash_read(model, &c.name).unwrap_or_else(|| {
+            body: crate::lower::has_json::column_hash_read(model, &c.name)
+                .or_else(|| enum_label_read(model, c))
+                .unwrap_or_else(|| {
                 let read = Expr::new(
                     Span::synthetic(),
                     ExprNode::Ivar { name: col_storage_name(c) },
@@ -2694,55 +2725,106 @@ fn nil_guarded(col: &Column, raw: Expr, call: Expr) -> Expr {
     )
 }
 
-fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
-    let mapping = model.enums.get(&col.name)?;
-    if mapping.is_empty() {
+/// `@status`'s label, the reader Rails generates for an enum: `"archived"` where the column stores 2 (or `"a"`).
+fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
+    if !crate::dialect::enum_reads_label(model, &col.name) {
         return None;
     }
-    let mut labels = Vec::new();
-    let mut values = Vec::new();
-    for (label, stored) in mapping {
-        let Literal::Int { value } = stored else { return None };
-        labels.push(with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Str { value: label.clone() } },
-            ),
-            Ty::Str,
-        ));
-        values.push(with_ty(
-            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: *value } }),
-            Ty::Int,
-        ));
-    }
-    let array = |elems: Vec<Expr>, of: Ty| {
-        with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Array { elements: elems, style: Default::default() },
-            ),
-            Ty::Array { elem: Box::new(of) },
-        )
-    };
-    Some(with_ty(
+    let stored = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
+        super::ty_of_column_slot(col),
+    );
+    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let method = if value_ty == Ty::Int { "enum_label" } else { "enum_label_str" };
+    let non_nil = with_ty(stored.clone(), value_ty);
+    let call = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] },
-                )),
-                method: Symbol::from("enum_int"),
-                args: vec![
-                    text,
-                    array(labels, Ty::Str),
-                    array(values, Ty::Int),
-                ],
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from(method),
+                args: vec![non_nil, labels, values],
                 block: None,
                 parenthesized: true,
             },
         ),
-        Ty::Int,
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+    );
+    Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+}
+
+/// The mapping as two parallel literal Arrays, and the stored values' type — `None` for a mapping that mixes kinds.
+fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
+    let mapping = model.enums.get(&col.name)?;
+    let value_ty = match mapping.first().map(|(_, v)| v) {
+        Some(Literal::Int { .. }) => Ty::Int,
+        Some(Literal::Str { .. }) => Ty::Str,
+        _ => return None,
+    };
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    for (label, stored) in mapping {
+        let lit = match (stored, &value_ty) {
+            (Literal::Int { .. }, Ty::Int) | (Literal::Str { .. }, Ty::Str) => stored.clone(),
+            _ => return None,
+        };
+        labels.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: label.clone() } }),
+            Ty::Str,
+        ));
+        values.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: lit }), value_ty.clone()));
+    }
+    let array = |elems: Vec<Expr>, of: Ty| {
+        with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: elems, style: Default::default() }),
+            Ty::Array { elem: Box::new(of) },
+        )
+    };
+    Some((array(labels, Ty::Str), array(values, value_ty.clone()), value_ty))
+}
+
+fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
+    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
+    let method = match (&value_ty, nullable) {
+        (Ty::Int, false) => "enum_int",
+        (Ty::Int, true) => "enum_int_or_nil",
+        (_, false) => "enum_str",
+        (_, true) => "enum_str_or_nil",
+    };
+    let attr = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: col.name.as_str().to_string() } }),
+        Ty::Str,
+    );
+    let mut args = vec![text, labels, values.clone()];
+    if value_ty == Ty::Int {
+        let ExprNode::Array { elements, .. } = &*values.node else { return None };
+        let texts = elements
+            .iter()
+            .map(|e| match &*e.node {
+                ExprNode::Lit { value: Literal::Int { value } } => Some(lit_str(value.to_string())),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        args.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
+            Ty::Array { elem: Box::new(Ty::Str) },
+        ));
+    }
+    args.push(attr);
+    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil] } } else { value_ty };
+    Some(with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        ret,
     ))
 }
 
@@ -2859,6 +2941,62 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 /// DIVERGENCE for lobsters' `default: true` and `default: 1`.
 /// Widening the ingest is its own change with its own measurement —
 /// it moves those columns' emitted constructors in a second app.
+// Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
+fn overrides_schema_default(model: &Model, col: &Column) -> bool {
+    column_default_literal(model, col).is_some()
+        && !is_temporal_col(col)
+        && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
+            || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
+}
+
+// Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
+fn given_value_assign(model: &Model, col: &Column, attrs: &Symbol) -> Expr {
+    let lookup = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(attrs.clone())),
+            method: Symbol::from("[]"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let slot_ty = super::ty_of_column_slot(col);
+    let value = enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| {
+        Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: slot_ty })
+    });
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: col_storage_setter(col),
+            args: vec![value],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let cond = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(attrs.clone())),
+            method: Symbol::from("key?"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() })
+}
+
+// Not the schema's alone: `enum :status, …, default: :active` is the value Rails gives an unset attribute, over the column default.
+fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
+    match model.enum_defaults.get(&col.name) {
+        Some(Literal::Int { value }) => Some(lit_int(*value)),
+        Some(Literal::Str { value }) => Some(lit_str(value.clone())),
+        _ => schema_default_literal(col),
+    }
+}
+
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
     let raw = col.default.as_ref()?;

@@ -360,7 +360,7 @@ run_test() {
     if [[ "$TARGET" == spinel ]]; then
         perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "./build/$t"
     else
-        ruby -Itest "$t.rb"
+        ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb"
     fi
 }
 

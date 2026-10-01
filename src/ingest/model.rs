@@ -32,191 +32,8 @@ use super::{IngestError, IngestResult};
 /// table is `push_subscriptions`.
 pub type TablePrefixes = std::collections::HashMap<String, String>;
 
-/// One entry per declared name, so unsupported values still shadow outer
-/// namespaces. Only unique direct string-array assignments can be folded.
-enum EnumConstant {
-    Namespace,
-    Mapping(Vec<(String, Literal)>),
-    Unsupported,
-}
-
-#[derive(Default)]
-pub(super) struct EnumConstants {
-    values: std::collections::HashMap<String, EnumConstant>,
-    nesting: std::collections::HashMap<(String, usize), Vec<String>>,
-    writes: Vec<(String, Vec<String>)>,
-}
-
-impl EnumConstants {
-    pub(super) fn record(&mut self, source: &[u8], file: &str) {
-        // Prism walks every write (including RHSs and multi-write targets).
-        // Track syntactic parents to fold only direct namespace declarations,
-        // while still invalidating writes beneath conditionals or blocks.
-        struct Collector<'a, 'pr> {
-            constants: &'a mut EnumConstants,
-            file: &'a str,
-            nesting: Vec<String>,
-            parents: Vec<Node<'pr>>,
-        }
-        impl<'pr> ruby_prism::Visit<'pr> for Collector<'_, 'pr> {
-            fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
-                let direct = self.parents.iter().all(|parent| matches!(parent,
-                    Node::ProgramNode { .. } | Node::StatementsNode { .. }
-                    | Node::ClassNode { .. } | Node::ModuleNode { .. }
-                ));
-                self.constants.record_write(&node, &self.nesting, direct);
-                let path = node.as_class_node().map(|c| c.constant_path())
-                    .or_else(|| node.as_module_node().map(|m| m.constant_path()));
-                if let Some(path) = path.and_then(|p| EnumConstants::path(&p)) {
-                    let owner = self.nesting.last().map(String::as_str).unwrap_or("");
-                    let name = EnumConstants::qualify(owner, &path);
-                    self.constants.values.entry(name.clone()).or_insert(EnumConstant::Namespace);
-                    if node.as_class_node().is_some() {
-                        self.constants.nesting.insert(
-                            (self.file.to_string(), node.location().start_offset()),
-                            std::iter::once(name.clone()).chain(self.nesting.iter().rev().cloned()).collect(),
-                        );
-                    }
-                    self.nesting.push(name);
-                }
-                self.parents.push(node);
-            }
-
-            fn visit_branch_node_leave(&mut self) {
-                let node = self.parents.pop().unwrap();
-                let path = node.as_class_node().map(|c| c.constant_path())
-                    .or_else(|| node.as_module_node().map(|m| m.constant_path()));
-                if path.and_then(|p| EnumConstants::path(&p)).is_some() {
-                    self.nesting.pop();
-                }
-            }
-
-            fn visit_leaf_node_enter(&mut self, node: Node<'pr>) {
-                self.constants.record_write(&node, &self.nesting, false);
-            }
-        }
-        let result = super::prism::parse(source, file);
-        if result.errors().next().is_none() {
-            ruby_prism::Visit::visit(&mut Collector {
-                constants: self, file, nesting: Vec::new(), parents: Vec::new(),
-            }, &result.node());
-        }
-    }
-
-    fn record_write(&mut self, node: &Node<'_>, nesting: &[String], direct: bool) {
-        let owner = nesting.last().map(String::as_str).unwrap_or("");
-        if let Some(write) = node.as_constant_write_node() {
-            let name = Self::qualify(owner, constant_id_str(&write.name()));
-            let value = write.value();
-            let literal = match value.as_call_node() {
-                Some(call) if constant_id_str(&call.name()) == "freeze"
-                    && call.arguments().is_none() && call.block().is_none() => call.receiver(),
-                _ => Some(value),
-            };
-            let labels = literal.filter(|_| direct).and_then(|node| {
-                node.as_array_node()?.elements().iter().enumerate()
-                    .map(|(i, el)| string_value(&el)
-                        .map(|label| (label, Literal::Int { value: i as i64 })))
-                    .collect()
-            });
-            // Reassignments/reopens have load-order-dependent semantics.
-            // Refuse them rather than choosing whichever file was read last.
-            self.values.entry(name)
-                .and_modify(|value| *value = EnumConstant::Unsupported)
-                .or_insert(labels.map_or(EnumConstant::Unsupported, EnumConstant::Mapping));
-        } else {
-            // Prism uses distinct nodes for qualified, compound and multi-
-            // writes. None is a direct literal declaration. Resolve qualified
-            // destinations only after every namespace has been collected.
-            let bare = node.as_constant_and_write_node().map(|w| w.name())
-                .or_else(|| node.as_constant_or_write_node().map(|w| w.name()))
-                .or_else(|| node.as_constant_operator_write_node().map(|w| w.name()))
-                .or_else(|| node.as_constant_target_node().map(|w| w.name()));
-            if let Some(name) = bare {
-                self.values.insert(Self::qualify(owner, constant_id_str(&name)), EnumConstant::Unsupported);
-            }
-            let target = node.as_constant_path_write_node().map(|w| w.target().as_node())
-                .or_else(|| node.as_constant_path_and_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_or_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_operator_write_node().map(|w| w.target().as_node()))
-                .or_else(|| node.as_constant_path_target_node().map(|w| w.as_node()));
-            if let Some(target) = target {
-                if let Some(path) = Self::path(&target) {
-                    self.writes.push((path, nesting.iter().rev().cloned().collect()));
-                }
-            }
-        }
-    }
-
-    pub(super) fn finish(&mut self) {
-        for (path, owners) in std::mem::take(&mut self.writes) {
-            if let Some(name) = self.resolve_name(&path, &owners) {
-                self.values.insert(name, EnumConstant::Unsupported);
-            }
-        }
-    }
-
-    fn qualify(owner: &str, name: &str) -> String {
-        if let Some(rooted) = name.strip_prefix("::") {
-            rooted.to_string()
-        } else if owner.is_empty() {
-            name.to_string()
-        } else {
-            format!("{owner}::{name}")
-        }
-    }
-
-    /// A static path, preserving root qualification and rejecting runtime
-    /// receivers such as `some_call::VALUES`. Also handles multi-write targets.
-    fn path(node: &Node<'_>) -> Option<String> {
-        if let Some(read) = node.as_constant_read_node() {
-            return Some(constant_id_str(&read.name()).to_string());
-        }
-        let (parent, name) = if let Some(path) = node.as_constant_path_node() {
-            (path.parent(), path.name()?)
-        } else {
-            let target = node.as_constant_path_target_node()?;
-            (target.parent(), target.name()?)
-        };
-        let mut path = match parent {
-            Some(parent) => format!("{}::", Self::path(&parent)?),
-            None if node.location().as_slice().starts_with(b"::") => "::".to_string(),
-            None => String::new(),
-        };
-        path.push_str(constant_id_str(&name));
-        Some(path)
-    }
-
-    fn resolve_name(&self, path: &str, owners: &[String]) -> Option<String> {
-        if let Some(rooted) = path.strip_prefix("::") {
-            return Some(rooted.to_string());
-        }
-        let first = path.split("::").next()?;
-        for owner in owners.iter().map(String::as_str).chain(std::iter::once("")) {
-            if self.values.contains_key(&Self::qualify(owner, first)) {
-                return Some(Self::qualify(owner, path));
-            }
-        }
-        None
-    }
-
-    fn resolve(&self, node: &Node<'_>, owners: &[String]) -> Option<Vec<(String, Literal)>> {
-        // Resolve the FIRST segment lexically, then read the rest strictly
-        // through that owner. Never fall back past a shadowing namespace.
-        let name = self.resolve_name(&Self::path(node)?, owners)?;
-        let mut namespace = name.as_str();
-        while let Some((parent, _)) = namespace.rsplit_once("::") {
-            if !matches!(self.values.get(parent), Some(EnumConstant::Namespace)) {
-                return None;
-            }
-            namespace = parent;
-        }
-        match self.values.get(&name)? {
-            EnumConstant::Mapping(mapping) => Some(mapping.clone()),
-            _ => None,
-        }
-    }
-}
+mod enum_constants;
+pub(super) use enum_constants::EnumConstants;
 
 /// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
 /// Deliberately narrow: only a module-level `self.` def whose body is a
@@ -262,7 +79,10 @@ pub fn ingest_model(
     schema: &Schema,
     prefixes: &TablePrefixes,
 ) -> IngestResult<Option<Model>> {
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &EnumConstants::default())
+    let mut constants = EnumConstants::default();
+    constants.record(source, file);
+    constants.finish();
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants)
 }
 
 pub(super) fn ingest_model_with_enum_constants(
@@ -335,6 +155,7 @@ pub(super) fn ingest_model_with_enum_constants(
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body: Vec<ModelBodyItem> = Vec::new();
     let mut enums: IndexMap<Symbol, Vec<(String, Literal)>> = IndexMap::new();
+    let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
@@ -393,6 +214,9 @@ pub(super) fn ingest_model_with_enum_constants(
             if let Some(call) = stmt.as_call_node() {
                 match expand_enum_decl(&call, file, &leading, &resolve_constant) {
                     Ok(Some(expanded)) => {
+                        if let Some(d) = expanded.default {
+                            enum_defaults.insert(expanded.column.clone(), d);
+                        }
                         enums.insert(expanded.column, expanded.mapping);
                         let mut blank = leading_blank;
                         for mut item in expanded.items {
@@ -493,6 +317,7 @@ pub(super) fn ingest_model_with_enum_constants(
         attributes,
         body,
         enums,
+        enum_defaults,
         span: Span {
             file: super::sources::file_id(file),
             start: class_loc.start_offset() as u32,
@@ -706,6 +531,18 @@ pub(super) fn ingest_model_body_item(
         if let Some(callback) = parse_callback(&call, &method) {
             return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments, span });
         }
+        // The same classifier sees model declarations and a concern's
+        // `included do`. Record before the latter drops the Unknown,
+        // and before ingesting a block that may contain further gaps.
+        // Name the DSL shape, not unverified gem ownership.
+        if matches!(method.as_str(), "aasm" | "state_machine")
+            && call.block().and_then(|b| b.as_block_node()).is_some()
+        {
+            super::survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: format!("state-machine DSL block `{method}` is not modeled"),
+            });
+        }
         return Ok(ModelBodyItem::Unknown {
             expr: ingest_expr(stmt, file)?,
             leading_comments,
@@ -749,7 +586,100 @@ pub(super) struct EnumExpansion {
     pub column: Symbol,
     /// Label → stored value, in declaration order.
     pub mapping: Vec<(String, Literal)>,
+    /// The stored value `default:` names.
+    pub default: Option<Literal>,
     pub items: Vec<ModelBodyItem>,
+}
+
+/// The same syntax contract serves expansion and post-ingest validation.
+/// Validation reads declarations only, never reconstructs model IR.
+struct EnumDeclaration<'pr> {
+    column: String,
+    mapping: Node<'pr>,
+    prefix: String,
+    suffix: String,
+    /// The label `default:` names, which seeds a new record over the
+    /// column default. Computed here because only this parse sees the
+    /// options hash.
+    default_label: Option<String>,
+}
+
+fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclaration<'pr>> {
+    if call.receiver().is_some() || constant_id_str(&call.name()) != "enum" {
+        return None;
+    }
+    let args = call.arguments()?;
+    let all_args = args.arguments();
+    let mut iter = all_args.iter();
+    let first = iter.next()?;
+
+    // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
+    // older `enum status: <mapping>, **opts`, where the column and its
+    // mapping are the first pair of one keyword hash.
+    let (column, mapping_node, prefix, suffix, default_label) = match symbol_value(&first) {
+        Some(col) => {
+            let column: String = col;
+            let mapping = iter.next();
+            let opts = iter.next();
+            let (prefix, suffix, default_label) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
+                Some(kh) => {
+                    let (p, s) = enum_affixes(&kh.elements(), &column);
+                    (p, s, enum_default_label(&kh.elements()))
+                }
+                None => (String::new(), String::new(), None),
+            };
+            (column, mapping, prefix, suffix, default_label)
+        }
+        None => {
+            let kh = first.as_keyword_hash_node()?;
+            let elements = kh.elements();
+            let pair = elements.iter().next()?.as_assoc_node()?;
+            let column = symbol_value(&pair.key())?;
+            let (prefix, suffix) = enum_affixes(&elements, &column);
+            let default_label = enum_default_label(&elements);
+            (column, Some(pair.value()), prefix, suffix, default_label)
+        }
+    };
+    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix, default_label })
+}
+
+fn enum_mapping_error(file: &str, column: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
+            column
+        ),
+    }
+}
+
+fn validate_sorbet_enum_mappings(
+    model: &Model,
+    source: &crate::span::SourceFile,
+    constants: &EnumConstants,
+) -> IngestResult<()> {
+    // This source was already parsed by ingest. Do not duplicate parse or
+    // unrelated model diagnostics, or rebuild the model to check one mapping.
+    let result = ruby_prism::parse(source.text.as_bytes());
+    let root = result.node();
+    let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
+        .find(|(_, class)| class.location().start_offset() == model.span.start as usize)
+        else { return Ok(()) };
+    let Some(body) = class.body() else { return Ok(()) };
+    let owners = constants.nesting.get(&(source.path.clone(), model.span.start as usize))
+        .cloned().unwrap_or_default();
+    for statement in flatten_statements(body) {
+        let Some(declaration) = statement.as_call_node().and_then(|call| enum_declaration(&call))
+            else { continue };
+        if let Some(receiver) = serialized_enum_receiver(&declaration.mapping) {
+            if constants.resolve(&receiver, &owners).is_none() {
+                super::survey::unwrap_or_record::<()>(Err(enum_mapping_error(
+                    &source.path, &declaration.column,
+                )))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn expand_enum_decl(
@@ -761,55 +691,22 @@ pub(super) fn expand_enum_decl(
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
-    if call.receiver().is_some() || constant_id_str(&call.name()) != "enum" {
-        return Ok(None);
-    }
-    let Some(args) = call.arguments() else { return Ok(None) };
-    let all_args = args.arguments();
-    let mut iter = all_args.iter();
-    let Some(first) = iter.next() else { return Ok(None) };
-
-    // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
-    // older `enum status: <mapping>, **opts`, where the column and its
-    // mapping are the first pair of one keyword hash.
-    let (column, mapping_node, prefix, suffix) = match symbol_value(&first) {
-        Some(col) => {
-            let column: String = col;
-            let mapping = iter.next();
-            let opts = iter.next();
-            let (prefix, suffix) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
-                Some(kh) => enum_affixes(&kh.elements(), &column),
-                None => (String::new(), String::new()),
-            };
-            (column, mapping, prefix, suffix)
-        }
-        None => {
-            let Some(kh) = first.as_keyword_hash_node() else { return Ok(None) };
-            let elements = kh.elements();
-            let Some(pair) = elements.iter().next().and_then(|e| e.as_assoc_node()) else {
-                return Ok(None);
-            };
-            let Some(column) = symbol_value(&pair.key()) else { return Ok(None) };
-            let (prefix, suffix) = enum_affixes(&elements, &column);
-            (column, Some(pair.value()), prefix, suffix)
-        }
-    };
-    let Some(mapping_node) = mapping_node else { return Ok(None) };
+    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label }) =
+        enum_declaration(call)
+        else { return Ok(None) };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`) — and everything
     // else `enum_label_values` resolves, now including a computed
     // mapping over that same constant (`enum :x, STATUSES.map { |s|
     // [s, s.to_s] }.to_h`).
-    let labels = enum_label_values(&mapping_node, resolve_constant).ok_or_else(|| {
-        IngestError::Unsupported {
-            file: file.into(),
-            message: format!(
-                "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
-                column
-            ),
-        }
-    })?;
+    // A Sorbet serialize-pair returns a HASH, not an array operand for the
+    // legacy recursive transformations. Admit it only as a complete mapping.
+    let labels = serialized_enum_receiver(&mapping_node)
+        .and_then(|receiver| resolve_constant(&receiver))
+        .or_else(|| enum_label_values(&mapping_node, resolve_constant))
+        .ok_or_else(|| enum_mapping_error(file, &column))?;
     let all_labels = labels.clone();
+    let default = default_label.and_then(|d| labels.iter().find(|(l, _)| *l == d).map(|(_, v)| v.clone()));
     // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
     // predicate, scope or bang writer Ruby could name: Rails reaches them
     // through `send`, which the emit has no equivalent of. Skipped.
@@ -836,6 +733,8 @@ pub(super) fn expand_enum_decl(
         )
     };
     let mut items = Vec::new();
+    // Not the stored value: the reader answers the label, as Rails' does.
+    let reads_label = crate::dialect::enum_mapping_reads_label(&labels);
     for (label, value) in labels.iter().cloned() {
         let base = format!("{prefix}{label}{suffix}");
         let pair = Expr::new(
@@ -891,6 +790,25 @@ pub(super) fn expand_enum_decl(
             },
             leading_blank_line: false,
         });
+        // `not_published`: Rails generates the negative scope beside each positive one.
+        let where_not = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Send { recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false },
+                )),
+                method: Symbol::from("not"),
+                args: vec![pair.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        items.push(ModelBodyItem::Scope {
+            scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        });
         items.push(method_def(
             format!("{base}?"),
             Expr::new(
@@ -898,7 +816,12 @@ pub(super) fn expand_enum_decl(
                 ExprNode::Send {
                     recv: Some(column_read()),
                     method: Symbol::from("=="),
-                    args: vec![Expr::new(span, ExprNode::Lit { value })],
+                    args: vec![Expr::new(
+                        span,
+                        ExprNode::Lit {
+                            value: if reads_label { Literal::Str { value: label.clone() } } else { value },
+                        },
+                    )],
                     block: None,
                     parenthesized: false,
                 },
@@ -940,7 +863,7 @@ pub(super) fn expand_enum_decl(
         leading_comments: Vec::new(),
         leading_blank_line: false,
     });
-    Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, items }))
+    Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, default, items }))
 }
 
 /// Label → stored value for an `enum` mapping. An array literal maps by
@@ -971,7 +894,7 @@ fn enum_label_values(
     }
     // `%i[…].freeze` / `{ … }.freeze` — the literal is the receiver.
     if let Some(call) = node.as_call_node() {
-        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
             if let Some(recv) = call.receiver() {
                 return enum_label_values(&recv, resolve_constant);
             }
@@ -1087,10 +1010,62 @@ fn enum_label_values(
     None
 }
 
+/// The one admitted consumer of enum-valued reads. Shared with the source
+/// guard so a mutating block cannot hide behind a method name like `to_h`.
+fn serialized_enum_receiver<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let call = node.as_call_node()?;
+    if constant_id_str(&call.name()) == "freeze"
+        && call.arguments().is_none() && call.block().is_none() {
+        return serialized_enum_receiver(&call.receiver()?);
+    }
+    if constant_id_str(&call.name()) != "to_h" || call.arguments().is_some() {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    let parameters = block.parameters()?.as_block_parameters_node()?;
+    let params = parameters.parameters()?;
+    if parameters.locals().iter().next().is_some() || params.optionals().iter().next().is_some()
+        || params.rest().is_some() || params.posts().iter().next().is_some()
+        || params.keywords().iter().next().is_some() || params.keyword_rest().is_some()
+        || params.block().is_some() {
+        return None;
+    }
+    let requireds: Vec<_> = params.requireds().iter().collect();
+    let [parameter] = requireds.as_slice() else { return None };
+    let name = parameter.as_required_parameter_node()?.name();
+    let statements = flatten_statements(block.body()?);
+    let [statement] = statements.as_slice() else { return None };
+    let pair = statement.as_array_node()?;
+    if pair.elements().iter().count() != 2 || pair.elements().iter().any(|element| {
+        let Some(call) = element.as_call_node() else { return true };
+        constant_id_str(&call.name()) != "serialize" || call.arguments().is_some()
+            || call.block().is_some() || !call.receiver().and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|read| constant_id_str(&read.name()) == constant_id_str(&name))
+    }) {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let values = receiver.as_call_node()?;
+    (constant_id_str(&values.name()) == "values"
+        && values.arguments().is_none() && values.block().is_none()).then_some(receiver)
+}
+
 /// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
 /// the column name" (Rails' own convention); a symbol or string names
 /// the affix directly. Returns the strings to splice around each label,
 /// already carrying their separating underscore.
+// `_default:` is the pre-Rails-7 spelling, as `_prefix:` is.
+fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
+    elements.iter().find_map(|el| {
+        let assoc = el.as_assoc_node()?;
+        let key = symbol_value(&assoc.key())?;
+        if key.trim_start_matches('_') != "default" {
+            return None;
+        }
+        symbol_value(&assoc.value()).or_else(|| string_value(&assoc.value()))
+    })
+}
+
 fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, String) {
     let mut prefix = String::new();
     let mut suffix = String::new();
@@ -1238,8 +1213,9 @@ pub(super) fn ingest_method(
     // params (`def avatar_path(size = 100)`) carrying their default expr so
     // the emitted method reproduces the arity — dropping the optional left
     // `def avatar_path` with a body still reading `size`, an ArgumentError
-    // at every call site that passes one. Keyword/rest/block params are
-    // rarer on model methods and still fall through unrecorded.
+    // at every call site that passes one. Every parameter kind the
+    // library-class path records is recorded here too, in Ruby's
+    // declaration order, so the `def` keeps the source arity.
     let mut params: Vec<crate::dialect::Param> = Vec::new();
     if let Some(pn) = def.parameters() {
         for req in pn.requireds().iter() {
@@ -1258,11 +1234,29 @@ pub(super) fn ingest_method(
                 ));
             }
         }
+        // `*rest`, and the required params Ruby allows after it
+        // (`def pair(first, *rest)`, `def f(*rest, last)`). Dropping
+        // the splat left `def tagged` with a body still reading
+        // `labels` — an ArgumentError at every call site that passes
+        // one, while the same method on a plain class kept it. An
+        // anonymous `*` has no name to bind and is skipped, as the
+        // library-class path skips it.
+        if let Some(rest) = pn.rest() {
+            if let Some(loc) = rest.as_rest_parameter_node().and_then(|rp| rp.name()) {
+                params.push(crate::dialect::Param::rest(Symbol::from(constant_id_str(&loc))));
+            }
+        }
+        for post in pn.posts().iter() {
+            if let Some(pp) = post.as_required_parameter_node() {
+                params.push(crate::dialect::Param::positional(Symbol::from(
+                    constant_id_str(&pp.name()),
+                )));
+            }
+        }
         // Keyword params (`def recent_threads(amount, for_user: nil)`),
         // required (`k:`) and optional (`k: default`) alike. Dropping
         // them left `def recent_threads(amount)` with a body reading
         // `for_user` — an ArgumentError at every kwarg call site.
-        // Rest/block params still fall through unrecorded.
         for kw in pn.keywords().iter() {
             if let Some(okw) = kw.as_optional_keyword_parameter_node() {
                 let default = ingest_expr(&okw.value(), file)?;
@@ -1284,22 +1278,47 @@ pub(super) fn ingest_method(
         // notification` with a body still reading `params` — every
         // caller an ArgumentError, and the forward into
         // `WebPush::Notification.new(**params, …)` a bare name.
+        //
+        // Beside a positional `*rest` the flattening does not parse
+        // (`def both(*args, options = {})`), so there the slot stays a
+        // real `**kwrest`, as the library-class path keeps it.
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
-                    let mut p = crate::dialect::Param::with_default(
-                        Symbol::from(constant_id_str(&loc)),
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Hash { entries: vec![], kwargs: false },
-                        ),
-                    );
+                    let name = Symbol::from(constant_id_str(&loc));
+                    let mut p = if params.iter().any(|p| p.rest) {
+                        let mut p = crate::dialect::Param::keyword(name, None);
+                        p.rest = true;
+                        p
+                    } else {
+                        crate::dialect::Param::with_default(
+                            name,
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Hash { entries: vec![], kwargs: false },
+                            ),
+                        )
+                    };
                     p.from_kwrest = true;
                     params.push(p);
                 }
             }
         }
     }
+
+    // `&blk` rides in `MethodDef.block_param`, not the flat list, as
+    // the library-class path records it: it fills the call-site
+    // `block:` slot, and the emitter closes the `def` with `&blk` so a
+    // body that passes it on (`each(&blk)`) still binds the name.
+    // Ruby 3.4's anonymous `&` gets the same synthesized name the
+    // library-class path gives it, so bare-`&` forwarding binds.
+    let block_param = def.parameters().and_then(|pn| pn.block()).map(|block| {
+        let name = block
+            .name()
+            .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+            .unwrap_or("__blk");
+        crate::dialect::Param::positional(Symbol::from(name))
+    });
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
@@ -1320,8 +1339,8 @@ pub(super) fn ingest_method(
         // Source-defined `def` in a Rails model — Method by default.
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        mutates_self: false,
+        block_param,
     })
 }
 

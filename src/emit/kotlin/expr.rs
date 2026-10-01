@@ -1547,7 +1547,12 @@ fn emit_send(
     if method == "raise" && recv.is_none() && !args.is_empty() {
         if let ExprNode::Const { path } = &*args[0].node {
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let cls = if joined.is_empty() { "RuntimeException".to_string() } else { type_name(&joined) };
+            // Not `ArgumentError(...)`: Kotlin has no such class, and its stdlib spelling is IllegalArgumentException.
+            let cls = match joined.as_str() {
+                "" => "RuntimeException".to_string(),
+                "ArgumentError" => "IllegalArgumentException".to_string(),
+                _ => type_name(&joined),
+            };
             return format!("throw {cls}({})", args_s[1..].join(", "));
         }
         return format!("throw RuntimeException({})", args_s.join(", "));

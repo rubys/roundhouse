@@ -39,6 +39,9 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = crate::current_set::source_refusals(app);
+    // Only validated synthesized Alba serializers, with per-constructor
+    // evidence; this does not widen the general library diagnostic policy.
+    out.extend(super::alba::diagnose(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual

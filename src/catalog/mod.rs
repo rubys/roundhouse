@@ -927,6 +927,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::Str),
     },
     CatalogedMethod {
+        name: "write_attribute",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
+    CatalogedMethod {
         name: "[]",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::Pure,
