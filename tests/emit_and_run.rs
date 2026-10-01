@@ -192,6 +192,31 @@ puts "module visibility checks passed"
         .assert_passes();
 }
 
+/// Alba's inherited declarations are executable property reads, not just a
+/// return-type assertion. Boot loads the generated classes without Alba.
+#[test]
+fn alba_inherited_attributes_and_one_nested_resource_run() {
+    emit_and_run::real_blog()
+        .write("app/lib/alba_resources.rb", include_str!("support/alba.rb"))
+        .write("app/controllers/alba_probes_controller.rb", r#"
+class AlbaProbesController < ApplicationController
+  def index
+    author = AlbaAuthor.new(9, "Ada")
+    article = AlbaArticle.new(7, "Syn", author)
+    render json: ArticleResource.new(article).to_h
+  end
+end
+"#)
+        .run_ruby(r#"
+expected = {"id" => 7, "title" => "Synthetic", "author" => {"id" => 9, "name" => "Ada"}}
+actual = SurveyProbe.call
+raise actual.inspect unless actual == expected
+raise "external Alba loaded" if defined?(Alba::Resource)
+puts "PASS portable Alba source-property contract"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a
@@ -1051,6 +1076,89 @@ fn method_ref_block_arg_runs() {
         .assert_passes();
 }
 
+/// A clean factory call must construct the receiving T::Struct, not
+/// the concern or whichever includer was seen first. Exercise native
+/// emitted consumers as well as the objects, independently of the
+/// analyzer's inferred return types (invariant 6).
+#[test]
+fn a_shared_struct_factory_runs_for_both_includers_in_both_orders() {
+    let reading = "class Reading < T::Struct\n  include Factory\n  PREFIX = \"local:\"\n  const :label, String\nend\n";
+    let packet = "class Packet < T::Struct\n  include Factory\n  const :size, Integer\nend\n";
+    for declarations in [format!("{reading}{packet}"), format!("{packet}{reading}")] {
+        emit_and_run::real_blog()
+            .write("app/services/factory.rb", r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+    def prefix
+      "old:"
+    end
+  end
+  def self.prefix
+    "initial module:"
+  end
+end
+"#)
+            // Reopening a carrier must retain build and take the newer
+            // prefix, whose default still belongs to Factory's scope.
+            .write("app/services/factory_extension.rb", r#"module Factory
+  PREFIX = "reading:"
+  module ClassMethods
+    def fixed
+      Reading.new(label: "fixed").freeze
+    end
+    def prefix(value = PREFIX)
+      value
+    end
+  end
+  def self.prefix
+    "module:"
+  end
+end
+"#)
+            .write("app/services/values.rb", &declarations)
+            .write("app/services/factory_consumer.rb", r#"class FactoryConsumer
+  def self.label
+    Reading.prefix + Reading.build(label: "sensor").label.upcase
+  end
+  def self.size
+    Packet.build(size: 7).size * 3
+  end
+end
+"#)
+            .write("app/controllers/factory_probes_controller.rb", r#"class FactoryProbesController < ApplicationController
+  def index
+    @label = Reading.build(label: "probe").label
+    @size = Packet.build(size: 7).size
+    render plain: FactoryConsumer.label
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "probe")
+packet = Packet.build(size: 7)
+raise "reading identity" unless reading.class == Reading
+raise "reading field" unless reading.label == "probe"
+raise "reading freeze" unless reading.frozen?
+raise "packet identity" unless packet.class == Packet
+raise "packet field" unless packet.size == 7
+raise "packet freeze" unless packet.frozen?
+raise "label consumer" unless FactoryConsumer.label == "reading:SENSOR"
+raise "size consumer" unless FactoryConsumer.size == 21
+raise "module singleton" unless Factory.prefix == "module:"
+fixed = Packet.fixed
+raise "fixed-other identity" unless fixed.class == Reading
+raise "fixed-other field" unless fixed.label == "fixed"
+raise "fixed-other freeze" unless fixed.frozen?
+"#)
+            .assert_passes();
+    }
+}
+
 /// A literal table override must reach the emitted row readers and SQL,
 /// not merely quiet the analyzer. Two differently named models share the
 /// real articles table via string/symbol declarations; writes through either
@@ -1465,6 +1573,114 @@ end
         .assert_passes();
 }
 
+/// A Concern's enum must reach a concrete child's readers and query mapping,
+/// without replacing that child's own enum or leaking to an unrelated model.
+#[test]
+fn an_abstract_bases_concern_enum_runs_on_its_child() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .edit(
+            "db/schema.rb",
+            "create_table \"comments\", force: :cascade do |t|",
+            "create_table \"comments\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .write(
+            "app/models/concerns/publication_state.rb",
+            "module PublicationState\n  extend ActiveSupport::Concern\n  included { enum :state, { draft: 0, live: 3 } }\nend\n",
+        )
+        .write(
+            "app/models/concerns/local_state.rb",
+            "module LocalState\n  extend ActiveSupport::Concern\n  included { enum :state, { queued: 2, shipped: 7 } }\nend\n",
+        )
+        .write(
+            "app/models/content_base.rb",
+            "class ContentBase < ApplicationRecord\n  self.abstract_class = true\n  self.table_name = \"articles\"\n  include PublicationState\nend\n",
+        )
+        .write(
+            "app/models/direct_base.rb",
+            "class DirectBase < ApplicationRecord\n  self.abstract_class = true\n  self.table_name = \"articles\"\n  enum :state, { draft: 0, live: 3 }\nend\n",
+        )
+        .write(
+            "app/models/special_article.rb",
+            r#"class SpecialArticle < DirectBase
+  self.table_name = "articles"
+  include LocalState
+
+  def self.shipped_count(id)
+    where(state: :shipped).where(id: id).count
+  end
+
+  def self.queued_count(id)
+    where(state: :queued).where(id: id).count
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            r#"class Article < ContentBase
+  def self.live_count(id)
+    where(state: :live).where(id: id).count
+  end
+
+  def self.draft_count(id)
+    where(state: :draft).where(id: id).count
+  end"#,
+        )
+        // Query the app-owned methods: the global lowering deliberately
+        // cannot guess a test-side `state` label across conflicting maps.
+        .write(
+            "test/models/concern_enum_inheritance_test.rb",
+            r#"require "test_helper"
+
+class ConcernEnumInheritanceTest < ActiveSupport::TestCase
+  test "a base Concern supplies labels and stored query values to its child" do
+    article = articles(:one)
+    article.update(state: :live)
+    reloaded = Article.find(article.id)
+    assert_equal "live", reloaded.state
+    assert_equal "live", reloaded[:state]
+    assert_equal "live", reloaded.attributes["state"]
+    assert reloaded.live?
+    assert !reloaded.draft?
+    assert_equal 1, Article.live_count(article.id)
+    assert_equal 1, Article.where(state: 3).where(id: article.id).count
+    assert_equal 0, Article.draft_count(article.id)
+  end
+
+  test "a child Concern keeps its own asymmetric enum mapping" do
+    article = SpecialArticle.create!(title: "Override", body: "Long enough body", state: :shipped)
+    reloaded = SpecialArticle.find(article.id)
+    assert_equal "shipped", reloaded.state
+    assert_equal "shipped", reloaded[:state]
+    assert_equal "shipped", reloaded.attributes["state"]
+    assert reloaded.shipped?
+    assert !reloaded.queued?
+    assert_equal 1, SpecialArticle.shipped_count(article.id)
+    assert_equal 1, SpecialArticle.where(state: 7).where(id: article.id).count
+    assert_equal 0, SpecialArticle.queued_count(article.id)
+  end
+
+  test "an unrelated model keeps an ordinary integer reader" do
+    comment = Comment.new(state: 3)
+    assert_equal 3, comment.state
+    assert_equal 3, comment[:state]
+    assert_equal 3, comment.attributes["state"]
+    assert !comment.respond_to?(:live?)
+    assert !comment.respond_to?(:shipped?)
+  end
+end
+"#,
+        )
+        .run_test("test/models/concern_enum_inheritance_test.rb")
+        .assert_passes();
+}
+
 /// Not left on the String: `humanize` and `titleize` are ActiveSupport reopens, answered here as ActiveSupport does.
 #[test]
 fn string_humanize_and_titleize_run() {
@@ -1492,4 +1708,62 @@ end
         )
         .run_test("test/models/article_inflections_test.rb")
         .assert_passes();
+}
+
+/// The exact inclusion bridge and its carrier can be in different
+/// reopenings. Consuming the bridge must follow the carrier's identity,
+/// not whether both declarations happened to share a source file.
+#[test]
+fn a_reopened_factory_carrier_runs_with_its_bridge_in_either_file_order() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+  end
+end
+"#)
+            .write("app/services/values.rb", r#"class Reading < T::Struct
+  include Factory
+  const :label, String
+end
+class Packet < T::Struct
+  include Factory
+  const :size, Integer
+end
+"#)
+            .write("app/services/split_factory_consumer.rb", r#"class SplitFactoryConsumer
+  def self.label
+    Reading.build(label: "split").label.upcase
+  end
+  def self.size
+    Packet.build(size: 11).size * 3
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "split")
+packet = Packet.build(size: 11)
+raise "split reading identity" unless reading.class == Reading
+raise "split reading field" unless reading.label == "split"
+raise "split reading freeze" unless reading.frozen?
+raise "split packet identity" unless packet.class == Packet
+raise "split packet field" unless packet.size == 11
+raise "split packet freeze" unless packet.frozen?
+raise "split label consumer" unless SplitFactoryConsumer.label == "SPLIT"
+raise "split size consumer" unless SplitFactoryConsumer.size == 33
+"#)
+            .assert_passes();
+    }
 }

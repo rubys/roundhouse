@@ -156,7 +156,7 @@ fn ingest_multi_write(
 /// is one: `T.let(x, Type)` / `T.cast` / `T.must` / `T.must_because` /
 /// `T.unsafe` / `T.bind` / `T.assert_type!` → `x`. `T.nilable(...)` and
 /// friends are type expressions, not values, and are not listed.
-fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+pub(super) fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
     let call = node.as_call_node()?;
     let method = call.name();
     if !matches!(

@@ -118,6 +118,13 @@ and `tests/spinel_toolchain.rs` (whole-app source-equivalence
 round-trip was retired in favor of compile-equivalence via Spinel —
 see the header of `src/emit/ruby.rs`).
 
+### Writebook inventory
+
+The ignored, pinned external-corpus gate is documented in
+[`docs/writebook.md`](docs/writebook.md). It inventories ingest, analysis,
+lowering, Ruby/Spinel emission diagnostics, and source coverage; it is
+intentionally not a compilation/runtime conformance claim.
+
 ## Debugging tools
 
 ### `roundhouse-ast`
