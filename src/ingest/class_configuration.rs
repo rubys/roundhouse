@@ -28,7 +28,6 @@ struct Configuration {
 
 pub(super) fn expand(app: &mut App, carriers: &[ConcernClassMethodSpans]) -> IngestResult<()> {
     let catalog = concern_class_method_catalog(&app.library_classes, carriers);
-    let verified = verified_concerns(app, carriers);
     let mut configurations: Vec<_> = catalog
         .iter()
         .flat_map(|(carrier, (methods, _))| {
@@ -52,6 +51,7 @@ pub(super) fn expand(app: &mut App, carriers: &[ConcernClassMethodSpans]) -> Ing
     }
 
     let surfaces = controller_concern_surfaces(app);
+    let verified = verified_concerns(app, carriers, &surfaces.module_includes);
     for controller in &mut app.controllers {
         let surface = &surfaces.controllers[&controller.name];
         let candidates: Vec<_> = configurations
@@ -79,15 +79,11 @@ pub(super) fn expand(app: &mut App, carriers: &[ConcernClassMethodSpans]) -> Ing
 
 /// Framework identity is evidence, not the spelling `class_methods` alone.
 /// No cross-file boot-order assumptions or user-defined DSL/hook execution.
-fn verified_concerns(app: &App, carriers: &[ConcernClassMethodSpans]) -> HashSet<ClassId> {
-    if app.library_classes.iter().any(|lc| {
-        matches!(
-            lc.name.0.as_str(),
-            "ActiveSupport" | "ActiveSupport::Concern"
-        )
-    }) {
-        return HashSet::new();
-    }
+fn verified_concerns(
+    app: &App,
+    carriers: &[ConcernClassMethodSpans],
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+) -> HashSet<ClassId> {
     let mut extensions: HashMap<ClassId, Vec<crate::span::Span>> = HashMap::new();
     for carrier in carriers {
         extensions
@@ -98,7 +94,30 @@ fn verified_concerns(app: &App, carriers: &[ConcernClassMethodSpans]) -> HashSet
     extensions
         .iter()
         .filter_map(|(owner, spans)| {
-            let source_is_verified = !spans.is_empty()
+            // A literal path still resolves through Ruby's lexical
+            // constants and the innermost module's included ancestors.
+            // Refuse identity barriers, without evaluating their values
+            // or searching enclosing classes' superclass chains.
+            let included = filter_registration_order(&[vec![owner.clone()]], module_includes);
+            let lexical_scope = |scope: &str| {
+                owner.0.as_str() == scope
+                    || owner
+                        .0
+                        .as_str()
+                        .strip_prefix(scope)
+                        .is_some_and(|rest| rest.starts_with("::"))
+            };
+            let identity_scope = |scope: &str| {
+                scope.is_empty()
+                    || scope == "Object"
+                    || lexical_scope(scope)
+                    || included.iter().any(|id| id.0.as_str() == scope)
+            };
+            let shadows_framework = carriers.iter().any(|carrier| {
+                carrier.shadows_framework && identity_scope(carrier.owner.0.as_str())
+            });
+            let source_is_verified = !shadows_framework
+                && !spans.is_empty()
                 && carriers.iter().filter(|c| &c.owner == owner).all(|c| {
                     !c.has_other_extensions
                         && c.concern_calls.iter().all(|call| {

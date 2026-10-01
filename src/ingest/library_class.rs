@@ -2336,6 +2336,9 @@ pub struct ConcernClassMethodSpans {
     pub concern_extensions: Vec<Span>,
     pub concern_calls: Vec<Span>,
     pub has_other_extensions: bool,
+    /// Direct source binding barriers, including declarations that the
+    /// library IR omits (empty namespaces, model/controller constants).
+    pub shadows_framework: bool,
 }
 
 pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
@@ -2439,10 +2442,77 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 concern_extensions,
                 concern_calls,
                 has_other_extensions,
+                shadows_framework: false,
             });
         }
     }
+    // Framework identity must not depend on which declarations survive
+    // library-shape ingestion. This walk records binding barriers only;
+    // it neither evaluates constants nor executes class bodies.
+    let mut shadows = HashSet::new();
+    framework_shadow_scopes(&root, &[], &mut shadows);
+    for scope in shadows {
+        out.push(ConcernClassMethodSpans {
+            owner: ClassId(Symbol::from(scope.join("::"))),
+            methods: Vec::new(),
+            bridges: Vec::new(),
+            has_nested_carrier: false,
+            concern_extensions: Vec::new(),
+            concern_calls: Vec::new(),
+            has_other_extensions: false,
+            shadows_framework: true,
+        });
+    }
     out
+}
+
+fn framework_shadow_scopes(
+    node: &ruby_prism::Node<'_>,
+    scope: &[String],
+    out: &mut HashSet<Vec<String>>,
+) {
+    if let Some(program) = node.as_program_node() {
+        framework_shadow_scopes(&program.statements().as_node(), scope, out);
+    } else if let Some(statements) = node.as_statements_node() {
+        for statement in statements.body().iter() {
+            framework_shadow_scopes(&statement, scope, out);
+        }
+    } else if let Some(write) = node.as_constant_write_node() {
+        if constant_id_str(&write.name()) == "ActiveSupport" {
+            out.insert(scope.to_vec());
+        }
+    } else if let Some(write) = node.as_constant_path_write_node() {
+        if let Some(path) = constant_path_of(&write.target().as_node()) {
+            if let Some(index) = path.iter().position(|name| name == "ActiveSupport") {
+                let parent = path[..index].to_vec();
+                out.insert(parent.clone());
+                let mut relative = scope.to_vec();
+                relative.extend(parent);
+                out.insert(relative);
+            }
+        }
+    } else {
+        let declaration = if let Some(module) = node.as_module_node() {
+            module_name_path(&module).map(|path| (path, module.body()))
+        } else if let Some(class) = node.as_class_node() {
+            class_name_path(&class).map(|path| (path, class.body()))
+        } else {
+            None
+        };
+        if let Some((path, body)) = declaration {
+            let mut inner = scope.to_vec();
+            inner.extend(path);
+            if inner.last().is_some_and(|name| name == "ActiveSupport") {
+                out.insert(inner[..inner.len() - 1].to_vec());
+            }
+            if inner.as_slice() == ["ActiveSupport", "Concern"] {
+                out.insert(Vec::new());
+            }
+            if let Some(body) = body {
+                framework_shadow_scopes(&body, &inner, out);
+            }
+        }
+    }
 }
 
 pub fn ingest_concern_filters(

@@ -534,6 +534,100 @@ fn configuration_requires_the_actual_unmodified_concern_api() {
 }
 
 #[test]
+fn configuration_refuses_lexically_shadowed_framework_constants() {
+    let local = WINDOW_SETTINGS.replace(
+        "extend ActiveSupport::Concern",
+        "ActiveSupport = String\n extend ActiveSupport::Concern",
+    );
+    assert!(configuration_app(&local, "configure_window mode: :month").is_err());
+
+    let nested = format!("module Namespace\n ActiveSupport = String\n{WINDOW_SETTINGS}\nend\n");
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", nested.as_str()),
+        ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include Namespace::WindowSettings\n configure_window mode: :month\nend\n"),
+    ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+    assert!(ingest_app_from_tree(tree).is_err());
+
+    // An unrelated namespace is not on this carrier's lexical lookup path.
+    let unrelated = format!("module Unrelated\n ActiveSupport = String\nend\n{WINDOW_SETTINGS}");
+    assert!(configuration_app(&unrelated, "configure_window mode: :month").is_ok());
+
+    for prefix in [
+        "ActiveSupport = String",
+        "module ActiveSupport; end",
+        "module ActiveSupport::Concern; end",
+        "WindowSettings::ActiveSupport = String",
+        "ActiveSupport::Concern = String",
+    ] {
+        let concern = format!("{prefix}\n{WINDOW_SETTINGS}");
+        assert!(
+            configuration_app(&concern, "configure_window mode: :month").is_err(),
+            "identity barrier {prefix}"
+        );
+    }
+}
+
+#[test]
+fn configuration_refuses_model_and_controller_lexical_shadows() {
+    for (path, base) in [
+        ("app/models/namespace.rb", "ActiveRecord::Base"),
+        (
+            "app/controllers/namespace_controller.rb",
+            "ActionController::Base",
+        ),
+    ] {
+        let source =
+            format!("class Namespace < {base}\n ActiveSupport = String\n{WINDOW_SETTINGS}\nend\n");
+        let tree = [
+            (path, source.as_str()),
+            ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include Namespace::WindowSettings\n configure_window mode: :month\nend\n"),
+        ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+        if let Ok(mut app) = ingest_app_from_tree(tree) {
+            let methods = app
+                .controllers
+                .iter()
+                .map(|c| c.class_methods().count())
+                .sum::<usize>();
+            roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+            let errors: Vec<_> = roundhouse::analyze::diagnose(&app)
+                .into_iter()
+                .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+                .collect();
+            panic!(
+                "accepted {base} lexical shadow with {methods} synthesized methods; actual diagnostics: {errors:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn configuration_refuses_included_ancestor_framework_shadows() {
+    let concern = format!(
+        "module Shadow\n ActiveSupport = String\nend\n{}",
+        WINDOW_SETTINGS.replace(
+            "extend ActiveSupport::Concern",
+            "extend ActiveSupport::Concern\n include Shadow\n extend ActiveSupport::Concern",
+        )
+    );
+    let result = configuration_app(&concern, "configure_window mode: :month");
+    assert!(
+        result.is_err(),
+        "an included module shadows the second extension"
+    );
+
+    // The superclass of an enclosing lexical class is NOT searched from
+    // its nested module, unlike the innermost module's included ancestors.
+    let source = format!(
+        "class Parent\n ActiveSupport = String\nend\nclass Namespace < Parent\n{WINDOW_SETTINGS}\nend\n"
+    );
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", source.as_str()),
+        ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include Namespace::WindowSettings\n configure_window mode: :month\nend\n"),
+    ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+    assert!(ingest_app_from_tree(tree).is_ok());
+}
+
+#[test]
 fn configuration_requires_concern_identity_through_dependency_wrappers() {
     for (wrapper, supported) in [
         (
