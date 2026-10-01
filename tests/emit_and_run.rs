@@ -17,6 +17,31 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// Alba's inherited declarations are executable property reads, not just a
+/// return-type assertion. Boot loads the generated classes without Alba.
+#[test]
+fn alba_inherited_attributes_and_one_nested_resource_run() {
+    emit_and_run::real_blog()
+        .write("app/lib/alba_resources.rb", include_str!("support/alba.rb"))
+        .write("app/controllers/alba_probes_controller.rb", r#"
+class AlbaProbesController < ApplicationController
+  def index
+    author = AlbaAuthor.new(9, "Ada")
+    article = AlbaArticle.new(7, "Syn", author)
+    render json: ArticleResource.new(article).to_h
+  end
+end
+"#)
+        .run_ruby(r#"
+expected = {"id" => 7, "title" => "Synthetic", "author" => {"id" => 9, "name" => "Ada"}}
+actual = SurveyProbe.call
+raise actual.inspect unless actual == expected
+raise "external Alba loaded" if defined?(Alba::Resource)
+puts "PASS portable Alba source-property contract"
+"#)
+        .assert_passes();
+}
+
 /// A delegated setter going from broken (`def behavior=\n  x.behavior=\n
 /// end` — a `def` with no parameter and a bare `x.y=` call, two syntax
 /// errors) to working is a claim the emitted program actually runs a
@@ -876,6 +901,89 @@ fn method_ref_block_arg_runs() {
         .assert_passes();
 }
 
+/// A clean factory call must construct the receiving T::Struct, not
+/// the concern or whichever includer was seen first. Exercise native
+/// emitted consumers as well as the objects, independently of the
+/// analyzer's inferred return types (invariant 6).
+#[test]
+fn a_shared_struct_factory_runs_for_both_includers_in_both_orders() {
+    let reading = "class Reading < T::Struct\n  include Factory\n  PREFIX = \"local:\"\n  const :label, String\nend\n";
+    let packet = "class Packet < T::Struct\n  include Factory\n  const :size, Integer\nend\n";
+    for declarations in [format!("{reading}{packet}"), format!("{packet}{reading}")] {
+        emit_and_run::real_blog()
+            .write("app/services/factory.rb", r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+    def prefix
+      "old:"
+    end
+  end
+  def self.prefix
+    "initial module:"
+  end
+end
+"#)
+            // Reopening a carrier must retain build and take the newer
+            // prefix, whose default still belongs to Factory's scope.
+            .write("app/services/factory_extension.rb", r#"module Factory
+  PREFIX = "reading:"
+  module ClassMethods
+    def fixed
+      Reading.new(label: "fixed").freeze
+    end
+    def prefix(value = PREFIX)
+      value
+    end
+  end
+  def self.prefix
+    "module:"
+  end
+end
+"#)
+            .write("app/services/values.rb", &declarations)
+            .write("app/services/factory_consumer.rb", r#"class FactoryConsumer
+  def self.label
+    Reading.prefix + Reading.build(label: "sensor").label.upcase
+  end
+  def self.size
+    Packet.build(size: 7).size * 3
+  end
+end
+"#)
+            .write("app/controllers/factory_probes_controller.rb", r#"class FactoryProbesController < ApplicationController
+  def index
+    @label = Reading.build(label: "probe").label
+    @size = Packet.build(size: 7).size
+    render plain: FactoryConsumer.label
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "probe")
+packet = Packet.build(size: 7)
+raise "reading identity" unless reading.class == Reading
+raise "reading field" unless reading.label == "probe"
+raise "reading freeze" unless reading.frozen?
+raise "packet identity" unless packet.class == Packet
+raise "packet field" unless packet.size == 7
+raise "packet freeze" unless packet.frozen?
+raise "label consumer" unless FactoryConsumer.label == "reading:SENSOR"
+raise "size consumer" unless FactoryConsumer.size == 21
+raise "module singleton" unless Factory.prefix == "module:"
+fixed = Packet.fixed
+raise "fixed-other identity" unless fixed.class == Reading
+raise "fixed-other field" unless fixed.label == "fixed"
+raise "fixed-other freeze" unless fixed.frozen?
+"#)
+            .assert_passes();
+    }
+}
+
 /// A literal table override must reach the emitted row readers and SQL,
 /// not merely quiet the analyzer. Two differently named models share the
 /// real articles table via string/symbol declarations; writes through either
@@ -981,6 +1089,234 @@ end
         .assert_passes();
 }
 
+/// Not only a string default: schema.rb's unquoted `default: true`, `default: 1.5` and `default: -3` reach a new record, and a value the caller passes still wins.
+#[test]
+fn a_schema_default_that_is_not_a_string_seeds_a_new_record() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.boolean \"visible\", default: true\n    t.boolean \"listed\", default: true, null: false\n    t.float \"score\", default: 1.5\n    t.integer \"rank\", default: 7\n    t.integer \"offset\", default: -3, null: false\n    t.integer \"state\", default: 1, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }",
+        )
+        .write(
+            "test/models/article_default_test.rb",
+            r#"require "test_helper"
+
+class ArticleDefaultTest < ActiveSupport::TestCase
+  test "an unset column takes its schema default" do
+    article = Article.new
+    assert_equal true, article.visible
+    assert_equal true, article.listed
+    assert_equal 1.5, article.score
+    assert_equal 7, article.rank
+    assert_equal(-3, article.offset)
+    assert article.published?
+  end
+
+  test "a created record keeps the default" do
+    article = Article.create!(title: "Defaults", body: "A body long enough to validate.")
+    reloaded = Article.find(article.id)
+    assert_equal true, reloaded.visible
+    assert_equal 7, reloaded.rank
+    assert reloaded.published?
+  end
+
+  test "a value the caller passes wins over the default" do
+    article = Article.new(visible: false, listed: false, rank: nil, score: nil, state: "draft")
+    assert_equal false, article.visible
+    assert_equal false, article.listed
+    assert_nil article.rank
+    assert_nil article.score
+    assert article.draft?
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_default_test.rb")
+        .assert_passes();
+}
+
+/// Not a NoMethodError: an enum's `not_<label>` scope and `<column>_before_type_cast` exist, as Rails generates them.
+#[test]
+fn an_enum_negative_scope_and_before_type_cast_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false\n    t.string \"tone\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n  enum :tone, { quiet: \"q\", loud: \"l\" }, prefix: true",
+        )
+        .write(
+            "test/models/article_enum_scope_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumScopeTest < ActiveSupport::TestCase
+  test "negative scopes" do
+    article = Article.create!(title: "Scopes", body: "A body long enough to validate.", state: :published, tone: :loud)
+    assert_equal 1, Article.not_draft.where(id: article.id).count
+    assert_equal 0, Article.not_published.where(id: article.id).count
+    assert_equal 0, Article.not_tone_loud.where(id: article.id).count
+  end
+
+  test "the stored value before the label" do
+    article = Article.create!(title: "Raw", body: "A body long enough to validate.", state: :published, tone: :loud)
+    reloaded = Article.find(article.id)
+    assert_equal 1, reloaded.state_before_type_cast
+    assert_equal "l", reloaded.tone_before_type_cast
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_scope_test.rb")
+        .assert_passes();
+}
+
+/// Not a NoMethodError: `read_attribute`/`write_attribute` are a model's `[]`/`[]=`, inside the model and on a record alike.
+#[test]
+fn read_and_write_attribute_reach_the_column() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n\n  def shout_title\n    write_attribute(:title, read_attribute(:title).upcase)\n  end",
+        )
+        .write(
+            "test/models/article_attribute_test.rb",
+            r#"require "test_helper"
+
+class ArticleAttributeTest < ActiveSupport::TestCase
+  test "read_attribute and write_attribute on a record" do
+    article = articles(:one)
+    article.write_attribute(:state, "published")
+    assert_equal "published", article.read_attribute(:state)
+    assert_equal "published", article.read_attribute("state")
+    article.save!
+    assert Article.find(article.id).published?
+  end
+
+  test "the bare forms inside the model" do
+    article = Article.new(title: "quiet")
+    article.shout_title
+    assert_equal "QUIET", article.title
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_attribute_test.rb")
+        .assert_passes();
+}
+
+/// Not the column default: `enum …, default:` is the value Rails gives an unset attribute, and a value the caller passes still wins.
+#[test]
+fn an_enum_default_option_seeds_a_new_record() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"priority\"\n    t.string \"tone\", default: \"quiet\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :priority, { low: 0, high: 1 }, default: :high\n  enum :tone, { quiet: \"quiet\", loud: \"loud\" }, default: :loud",
+        )
+        .write(
+            "test/models/article_enum_default_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumDefaultTest < ActiveSupport::TestCase
+  test "an unset enum takes the declared default" do
+    article = Article.new
+    assert article.high?
+    assert article.loud?
+  end
+
+  test "a created record keeps it" do
+    article = Article.create!(title: "Defaults", body: "A body long enough to validate.")
+    reloaded = Article.find(article.id)
+    assert_equal "high", reloaded.priority
+    assert_equal "loud", reloaded.tone
+  end
+
+  test "a value the caller passes wins" do
+    article = Article.new(priority: :low, tone: :quiet)
+    assert article.low?
+    assert article.quiet?
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_default_test.rb")
+        .assert_passes();
+}
+
+/// Not stored as 0: a label no mapping names raises ArgumentError as Rails' enum type does, and a string-backed enum reads back its label.
+#[test]
+fn an_enum_rejects_a_label_it_does_not_name() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false\n    t.integer \"priority\"\n    t.string \"tone\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n  enum :priority, { low: 0, high: 1 }\n  enum :tone, { quiet: \"q\", loud: \"l\" }",
+        )
+        .write(
+            "test/models/article_enum_reject_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumRejectTest < ActiveSupport::TestCase
+  test "a label the mapping does not name raises" do
+    labels = ["bogus", "Draft", "loud!"]
+    article = articles(:one)
+    assert_raises(ArgumentError) { article.state = labels[0] }
+    assert_raises(ArgumentError) { article.state = labels[1] }
+    assert_raises(ArgumentError) { article.update(state: labels[0]) }
+    assert_raises(ArgumentError) { article[:state] = labels[0] }
+    assert_raises(ArgumentError) { Article.new(state: labels[0]) }
+    assert_raises(ArgumentError) { article.tone = labels[2] }
+    assert_equal "draft", Article.find(article.id).state
+  end
+
+  test "a blank value clears a nullable enum" do
+    blank = ""
+    article = Article.new(priority: "high")
+    article.priority = blank
+    assert_nil article.priority
+  end
+
+  test "a string-backed enum stores its value and reads its label" do
+    article = Article.create!(title: "Tone", body: "A body long enough to validate.", tone: :loud)
+    reloaded = Article.find(article.id)
+    assert_equal "loud", reloaded.tone
+    assert reloaded.loud?
+    assert_equal 1, Article.loud.where(id: article.id).count
+    assert_equal({ "quiet" => "q", "loud" => "l" }, Article.tones)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_reject_test.rb")
+        .assert_passes();
+}
+
 /// Not `"published".to_i`: an enum column assigned a label at run time stores the label's value, as Rails does.
 #[test]
 fn an_enum_label_assigned_at_run_time_stores_its_value() {
@@ -1021,4 +1357,130 @@ end
         )
         .run_test("test/models/article_enum_label_test.rb")
         .assert_passes();
+}
+
+/// Not the stored integer: an integer-mapped enum reads back its label, as Rails' reader, `[]` and `attributes` do.
+#[test]
+fn an_integer_enum_reads_back_its_label() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n\n  def state_label\n    state.humanize\n  end",
+        )
+        .write(
+            "test/models/article_enum_reader_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumReaderTest < ActiveSupport::TestCase
+  test "an integer enum reads back its label" do
+    article = articles(:one)
+    article.update(state: :published)
+    reloaded = Article.find(article.id)
+    assert_equal "published", reloaded.state
+    assert_equal "Published", reloaded.state_label
+    assert_equal "published", reloaded[:state]
+    assert_equal "published", reloaded.attributes["state"]
+    assert reloaded.published?
+    assert !reloaded.draft?
+    assert reloaded.state == "published"
+    assert_equal 1, Article.where(state: :published).where(id: article.id).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_reader_test.rb")
+        .assert_passes();
+}
+
+/// Not left on the String: `humanize` and `titleize` are ActiveSupport reopens, answered here as ActiveSupport does.
+#[test]
+fn string_humanize_and_titleize_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.inflections_probe
+    ["employee_salary".humanize, "author_id".humanize, "hello-world".titleize, "SSLError".titleize, "raiders_of_the_lost_ark".titleize].join("|")
+  end"#,
+        )
+        .write(
+            "test/models/article_inflections_test.rb",
+            r#"require "test_helper"
+
+class ArticleInflectionsTest < ActiveSupport::TestCase
+  test "humanize and titleize answer as ActiveSupport does" do
+    assert_equal "Employee salary|Author|Hello World|Ssl Error|Raiders Of The Lost Ark", Article.inflections_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_inflections_test.rb")
+        .assert_passes();
+}
+
+/// The exact inclusion bridge and its carrier can be in different
+/// reopenings. Consuming the bridge must follow the carrier's identity,
+/// not whether both declarations happened to share a source file.
+#[test]
+fn a_reopened_factory_carrier_runs_with_its_bridge_in_either_file_order() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  def self.included(base)
+    base.extend(ClassMethods)
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build(**fields)
+      new(**fields).freeze
+    end
+  end
+end
+"#)
+            .write("app/services/values.rb", r#"class Reading < T::Struct
+  include Factory
+  const :label, String
+end
+class Packet < T::Struct
+  include Factory
+  const :size, Integer
+end
+"#)
+            .write("app/services/split_factory_consumer.rb", r#"class SplitFactoryConsumer
+  def self.label
+    Reading.build(label: "split").label.upcase
+  end
+  def self.size
+    Packet.build(size: 11).size * 3
+  end
+end
+"#)
+            .run_ruby(r#"
+reading = Reading.build(label: "split")
+packet = Packet.build(size: 11)
+raise "split reading identity" unless reading.class == Reading
+raise "split reading field" unless reading.label == "split"
+raise "split reading freeze" unless reading.frozen?
+raise "split packet identity" unless packet.class == Packet
+raise "split packet field" unless packet.size == 11
+raise "split packet freeze" unless packet.frozen?
+raise "split label consumer" unless SplitFactoryConsumer.label == "SPLIT"
+raise "split size consumer" unless SplitFactoryConsumer.size == 33
+"#)
+            .assert_passes();
+    }
 }

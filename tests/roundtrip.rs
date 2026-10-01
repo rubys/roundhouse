@@ -58,6 +58,7 @@ fn tiny_blog_round_trips() {
         attributes: Row { fields: attrs, rest: None },
         body: vec![],
         enums: Default::default(),
+        enum_defaults: Default::default(),
         sti_subclass_names: Vec::new(),
         span: Span::synthetic(),
     };

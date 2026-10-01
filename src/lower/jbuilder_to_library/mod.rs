@@ -246,18 +246,11 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     } else {
         columns_for_arg(&arg_name, dir, is_partial, stem, app)
     };
-    let arg_enums = if arg_columns.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        enums_for_arg(dir, app)
-    };
-
     let ctx = Ctx {
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         arg_name: arg_name.clone(),
         arg_columns,
-        arg_enums,
         direct_helpers: app
             .routes
             .direct_helpers
@@ -354,14 +347,6 @@ struct Ctx {
     /// datetime columns through `JsonBuilder.encode_datetime` rather
     /// than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
-    /// The integer-backed `enum` columns of that model, each with its
-    /// labels in declaration order (`role` → `["member",
-    /// "administrator", "bot"]`). Rails serializes an enum attribute as
-    /// its LABEL; the column reader here answers the stored integer, so
-    /// `json.(user, :role)` routes through `JsonBuilder.encode_enum`.
-    /// A String-backed enum (campfire's `involvement`, mapped to
-    /// itself) stores the label already and is not listed.
-    arg_enums: std::collections::HashMap<Symbol, Vec<String>>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
     /// whatever the CALLER hands it — campfire's `direct
@@ -547,8 +532,6 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     );
                     let encoded = if use_datetime {
                         json_builder_call("encode_datetime", value)
-                    } else if let Some(labels) = ctx.arg_enums.get(attr).filter(|_| obj_is_arg) {
-                        json_builder_enum(labels, value)
                     } else {
                         json_builder_encode(value)
                     };
@@ -1180,28 +1163,6 @@ fn json_builder_encode(value: Expr) -> Expr {
     json_builder_call("encode_value", value)
 }
 
-/// `JsonBuilder.encode_enum(["member", "administrator", "bot"], <value>)`.
-fn json_builder_enum(labels: &[String], value: Expr) -> Expr {
-    let elements = labels
-        .iter()
-        .map(|l| {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: crate::expr::Literal::Str { value: l.clone() } },
-            )
-        })
-        .collect();
-    let labels = Expr::new(
-        Span::synthetic(),
-        ExprNode::Array { elements, style: crate::expr::ArrayStyle::default() },
-    );
-    let recv = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("JsonBuilder")] },
-    );
-    send(Some(recv), "encode_enum", vec![labels, value], None, true)
-}
-
 fn json_builder_call(method: &str, value: Expr) -> Expr {
     let recv = Expr::new(
         Span::synthetic(),
@@ -1270,37 +1231,6 @@ fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
 /// backed by a schema table. Returns an empty map for layouts,
 /// index views (arg is a collection, not a single record), and any
 /// arg we can't tie back to a schema row.
-/// The integer-backed enums of the model `dir` resolves to, labels in
-/// declaration order — only those whose stored values are exactly
-/// `0..n`, which is what `labels[value]` indexes, and only on a NOT
-/// NULL column: `encode_enum` takes a plain Integer, because the
-/// strict targets' emits do not narrow an `Integer?` past a `nil?`
-/// guard (framework-tests-rust and -swift both said so). Same dir →
-/// model resolution as `columns_for_arg`.
-fn enums_for_arg(dir: &str, app: &App) -> std::collections::HashMap<Symbol, Vec<String>> {
-    let mut out = std::collections::HashMap::new();
-    let model_class = crate::naming::singularize_camelize(dir);
-    let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == model_class) else {
-        return out;
-    };
-    let Some(table) = app.schema.tables.get(&model.table.0) else {
-        return out;
-    };
-    for (col, pairs) in &model.enums {
-        let not_null = table.columns.iter().any(|c| &c.name == col && !c.nullable);
-        if !not_null {
-            continue;
-        }
-        let sequential = pairs.iter().enumerate().all(|(i, (_, lit))| {
-            matches!(lit, crate::expr::Literal::Int { value } if *value == i as i64)
-        });
-        if sequential && !pairs.is_empty() {
-            out.insert(col.clone(), pairs.iter().map(|(label, _)| label.clone()).collect());
-        }
-    }
-    out
-}
-
 fn columns_for_arg(
     arg_name: &str,
     dir: &str,
