@@ -1170,6 +1170,7 @@ fn ingest_resources_route(
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
     let mut param: Option<Symbol> = None;
+    let mut only_none = false;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -1184,6 +1185,17 @@ fn ingest_resources_route(
                 // opposite of what a restriction means (#85).
                 "only" | "except" => {
                     let list = symbol_list_value(&value);
+                    let empty_literal =
+                        value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
+                    // `resources :users, only: [] do … end` is how an app
+                    // nests routes under a parent with no routes of its
+                    // own. The expander reads an empty `only` as "all
+                    // seven", so an empty literal becomes an `except:` of
+                    // every action. `except: []` restricts nothing.
+                    if empty_literal {
+                        only_none |= key.as_str() == "only";
+                        continue;
+                    }
                     if list.is_empty() {
                         return Err(IngestError::Unsupported {
                             file: file.into(),
@@ -1221,6 +1233,14 @@ fn ingest_resources_route(
                 _ => {}
             }
         }
+    }
+
+    if only_none {
+        only.clear();
+        except = ["index", "new", "create", "show", "edit", "update", "destroy"]
+            .into_iter()
+            .map(Symbol::from)
+            .collect();
     }
 
     let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;

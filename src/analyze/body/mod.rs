@@ -1063,6 +1063,11 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) =
+                    self.column_attribute_access_ty(recv_ty.as_ref(), method, args)
+                {
+                    return t;
+                }
                 if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
                     return t;
                 }
