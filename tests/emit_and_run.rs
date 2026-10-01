@@ -1726,3 +1726,18 @@ raise "split size consumer" unless SplitFactoryConsumer.size == 33
             .assert_passes();
     }
 }
+
+/// `resources :x, only: [] do … end` nests routes under a parent with no
+/// routes of its own. Ingest rejected the empty list and dropped the
+/// parent with every route nested in it.
+#[test]
+fn nested_routes_under_an_only_empty_parent_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do\n    resources :comments, only: [:create, :destroy]\n  end\n",
+            "  resources :articles\n  resources :articles, only: [] do\n    resources :comments, only: [:create, :destroy]\n  end\n",
+        )
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
