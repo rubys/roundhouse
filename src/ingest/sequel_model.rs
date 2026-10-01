@@ -93,6 +93,7 @@ pub fn ingest_sequel_model(
         attributes,
         body,
         enums: indexmap::IndexMap::new(),
+        enum_defaults: indexmap::IndexMap::new(),
         sti_subclass_names: Vec::new(),
         span: Span {
             file: super::sources::file_id(file),

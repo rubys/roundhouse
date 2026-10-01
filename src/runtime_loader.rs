@@ -654,6 +654,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             ("NotImplementedError", "errors_ext"),
             ("RecordNotFound", "errors_ext"),
             ("RecordInvalid", "errors_ext"),
+            ("ArgumentError", "errors_ext"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

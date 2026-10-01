@@ -21,8 +21,8 @@ struct AncestryEdge {
     scopes: Option<Vec<ClassId>>,
 }
 
-/// Declared classes/namespaces and recorded parents/includes. Empty and
-/// include-only modules are supplemented from source, not added to typed IR.
+/// Declared classes/namespaces and recorded parents/includes. Literal source
+/// includes survive omitted modules and mixins consumed by shared lowering.
 pub(super) struct GemAncestry {
     edges: HashMap<ClassId, Vec<AncestryEdge>>,
 }
@@ -58,9 +58,9 @@ impl GemAncestry {
             );
         }
         let mut ancestry = Self { edges };
-        // Include-only reopens may be omitted even when an earlier declaration
-        // survives. Supplement all literal module includes, without replacing
-        // lossy IR edges that may come from other declarations/concern blocks.
+        // Include-only reopens may be omitted, and modeled class mixins may
+        // be consumed. Supplement literal source includes without replacing
+        // lossy IR edges from other declarations/concern blocks.
         for source in app.sources.iter().filter(|s| s.path.ends_with(".rb")) {
             let parsed = ruby_prism::parse(source.text.as_bytes());
             if parsed.errors().next().is_none() {
@@ -91,9 +91,7 @@ impl GemAncestry {
             };
             scopes.push(id.clone());
             if let Some(body) = body {
-                if node.as_module_node().is_some() {
-                    self.record_module_includes(&body, &id, scopes);
-                }
+                self.record_literal_includes(&body, &id, scopes);
                 self.record_declarations(&body, scopes);
             }
             scopes.pop();
@@ -128,7 +126,7 @@ impl GemAncestry {
         Some(id)
     }
 
-    fn record_module_includes(
+    fn record_literal_includes(
         &mut self,
         body: &ruby_prism::Node<'_>,
         owner: &ClassId,
