@@ -1332,6 +1332,172 @@ pub fn all_scope_names(scopes: &ScopeRegistry) -> HashSet<Symbol> {
     scopes.values().flat_map(|m| m.keys().cloned()).collect()
 }
 
+/// Literal reflective hops on Rails' PUBLIC generated association/scope
+/// surface must be visible to the ordinary relation-threading pass.
+/// Never erase reflection on arbitrary user methods: `send` can call a
+/// private helper where `public_send` and a direct receiver call cannot.
+pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: &AssocRegistry) {
+    expr.node
+        .for_each_child_mut(&mut |child| ground_literal_model_dispatch(child, app, assocs));
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        ..
+    } = &mut *expr.node
+    else {
+        return;
+    };
+    if !matches!(method.as_str(), "send" | "__send__" | "public_send") {
+        return;
+    }
+    let Some(Expr { node, .. }) = args.first() else {
+        return;
+    };
+    let name = match &**node {
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => value.clone(),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => Symbol::from(value.as_str()),
+        _ => return,
+    };
+    let Some(ty) = recv.ty.as_ref().map(|ty| ty.peel_nilable()) else {
+        return;
+    };
+    let (id, association) = match ty {
+        crate::ty::Ty::Class { id, .. } => (id, !matches!(&*recv.node, ExprNode::Const { .. })),
+        crate::ty::Ty::Relation { of } => (of, false),
+        crate::ty::Ty::Array { elem } => {
+            let crate::ty::Ty::Class { id, .. } = elem.peel_nilable() else {
+                return;
+            };
+            // An arbitrary Array[Model] is not a Rails collection proxy.
+            // Only the association read the seed arm can reproduce is.
+            let ExprNode::Send {
+                recv: Some(owner),
+                method: aname,
+                args: aargs,
+                block: None,
+                ..
+            } = &*recv.node
+            else {
+                return;
+            };
+            if !aargs.is_empty() {
+                return;
+            }
+            let owner_id = owner.ty.as_ref().and_then(|ty| match ty.peel_nilable() {
+                crate::ty::Ty::Class { id, .. } => Some(id),
+                _ => None,
+            });
+            if !owner_id
+                .and_then(|owner| assocs.has_many_fk(owner, aname))
+                .is_some_and(|(target, _)| target == id)
+            {
+                return;
+            }
+            // Replacing the read with a relation seed bypasses this
+            // reader. It is safe only while the macro-generated reader
+            // still owns the name throughout the recorded ancestry.
+            if owner_id.is_some_and(|owner| {
+                app_method(app, owner, aname, crate::dialect::MethodReceiver::Instance)
+            }) {
+                return;
+            }
+            (id, false)
+        }
+        _ => return,
+    };
+    let Some(model) = app.models.iter().find(|m| &m.name == id) else {
+        return;
+    };
+    let side = if association {
+        crate::dialect::MethodReceiver::Instance
+    } else {
+        crate::dialect::MethodReceiver::Class
+    };
+    // Both calls being collapsed must still be framework-owned. A
+    // dispatcher override changes `send` itself; a target override means
+    // the literal does not select the macro-generated public method.
+    if app_method(app, id, method, side) || app_method(app, id, &name, side) {
+        return;
+    }
+    let generated = if association {
+        args.len() == 1 && model.associations().any(|a| a.name() == &name)
+    } else {
+        model.scopes().any(|s| s.name == name)
+    };
+    if generated {
+        *method = name;
+        args.remove(0);
+    }
+}
+
+/// Whether app metadata proves that `id`'s lookup chain contains a
+/// user-defined method. This deliberately walks models, library classes,
+/// includes, and parents. Unknown framework roots terminate the walk;
+/// app-owned links are represented by one of these two class shapes.
+pub(crate) fn app_method(
+    app: &crate::App,
+    id: &ClassId,
+    name: &Symbol,
+    side: crate::dialect::MethodReceiver,
+) -> bool {
+    fn visit(
+        app: &crate::App,
+        id: &ClassId,
+        name: &Symbol,
+        side: crate::dialect::MethodReceiver,
+        seen: &mut HashSet<ClassId>,
+    ) -> bool {
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        if let Some(model) = app.models.iter().find(|m| &m.name == id) {
+            if model
+                .methods()
+                .any(|m| m.name == *name && m.receiver == side)
+            {
+                return true;
+            }
+            if crate::analyze::model_includes(model)
+                .iter()
+                .any(|inc| visit(app, inc, name, side, seen))
+            {
+                return true;
+            }
+            return model
+                .parent
+                .as_ref()
+                .is_some_and(|p| visit(app, p, name, side, seen));
+        }
+        if let Some(class) = app.library_classes.iter().find(|c| &c.name == id) {
+            if class
+                .methods
+                .iter()
+                .any(|m| m.name == *name && m.receiver == side)
+            {
+                return true;
+            }
+            if class
+                .includes
+                .iter()
+                .any(|inc| visit(app, inc, name, side, seen))
+            {
+                return true;
+            }
+            return class
+                .parent
+                .as_ref()
+                .is_some_and(|p| visit(app, p, name, side, seen));
+        }
+        false
+    }
+    visit(app, id, name, side, &mut HashSet::new())
+}
+
 /// True if `expr` (or a descendant) calls a method whose name is a scope.
 pub fn mentions_scope(expr: &Expr, names: &HashSet<Symbol>) -> bool {
     let mut found = false;

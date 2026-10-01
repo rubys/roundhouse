@@ -1539,6 +1539,7 @@ end
     super::channel_callbacks::lower_channel_names(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
+    super::model_macros::expand_model_macros(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);

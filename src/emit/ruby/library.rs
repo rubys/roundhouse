@@ -1024,6 +1024,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // has to be inserted on the MODEL.
     let (assoc_class_methods, declined) =
         crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
+    for lc in lcs.iter_mut() {
+        for method in &mut lc.methods {
+            crate::lower::scope_chain::ground_literal_model_dispatch(&mut method.body, app, &assocs);
+        }
+    }
     // Reported by the pass that owns the model's own file — this runs
     // once per emitted family over a different `lcs`, and the ledger
     // line should appear once, beside the class it is about.
