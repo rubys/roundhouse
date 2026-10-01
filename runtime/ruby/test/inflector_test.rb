@@ -27,11 +27,18 @@ class InflectorTest < Minitest::Test
 
   def test_pluralize_formatted_count_preserves_rails_singular_boundaries
     assert_equal "1 word", Inflector.pluralize_formatted("1", "word")
+    assert_equal "1.0 word", Inflector.pluralize_formatted("1.0", "word")
     assert_equal "1.00 word", Inflector.pluralize_formatted("1.00", "word")
     assert_equal "01 words", Inflector.pluralize_formatted("01", "word")
+    assert_equal "1. words", Inflector.pluralize_formatted("1.", "word")
+    assert_equal "10. words", Inflector.pluralize_formatted("10.", "word")
+    assert_equal "10.0 words", Inflector.pluralize_formatted("10.0", "word")
     assert_equal "1.01 words", Inflector.pluralize_formatted("1.01", "word")
+    assert_equal "1.0002 words", Inflector.pluralize_formatted("1.0002", "word")
     assert_equal "1,001 words", Inflector.pluralize_formatted("1,001", "word")
     assert_equal " words", Inflector.pluralize_formatted("", "word")
     assert_equal "2\n1.0\n word", Inflector.pluralize_formatted("2\n1.0\n", "word")
+    assert_equal "1\r\n words", Inflector.pluralize_formatted("1\r\n", "word")
+    assert_equal "1.٠ words", Inflector.pluralize_formatted("1.٠", "word")
   end
 end
