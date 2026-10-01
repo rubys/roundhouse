@@ -598,6 +598,7 @@ struct EnumDeclaration<'pr> {
     mapping: Node<'pr>,
     prefix: String,
     suffix: String,
+    default_label: Option<String>,
 }
 
 fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclaration<'pr>> {
@@ -636,7 +637,7 @@ fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclara
             (column, Some(pair.value()), prefix, suffix, default_label)
         }
     };
-    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix })
+    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix, default_label })
 }
 
 fn enum_mapping_error(file: &str, column: &str) -> IngestError {
@@ -687,7 +688,7 @@ pub(super) fn expand_enum_decl(
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
-    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix }) = enum_declaration(call)
+    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label }) = enum_declaration(call)
         else { return Ok(None) };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`) — and everything
