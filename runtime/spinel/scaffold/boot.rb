@@ -133,6 +133,7 @@ require_relative "runtime/typed_store"
 # JSON sibling of the line above. After runtime/json_builder, whose
 # string escaper it uses.
 require_relative "runtime/schematized_json"
+require_relative "runtime/json_column"
 require_relative "runtime/broadcasts"
 # The job queue and its drain flag. `thread_state` below REOPENS
 # ActiveJob and reads `PENDING`, and main.rb calls `ActiveJob.
@@ -238,4 +239,3 @@ require_relative "runtime/csrf_token"
 # AFTER runtime/rails defines the unsynchronized shared one. Same
 # ordering contract as the csrf reopen above.
 require_relative "runtime/fragment_cache"
-

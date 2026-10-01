@@ -240,3 +240,28 @@ fn namespace_inside_a_resource_keeps_the_nesting() {
         "{r:?}"
     );
 }
+
+#[test]
+fn only_empty_keeps_the_nested_routes_and_drops_the_parents() {
+    // Rails 7.2.4:
+    //   post_summary  GET /posts/:post_id/summary
+    //   account_logos GET /account/logos
+    // `only: []` is a valid, empty restriction, not "no restriction".
+    let r = routes_of(
+        r#"
+  resources :posts, only: [] do
+    resource :summary, only: :show
+  end
+  resource :account, only: [] do
+    resources :logos, only: :index
+  end
+"#,
+    );
+    assert_eq!(
+        r,
+        vec![
+            ("post_summary".to_string(), "/posts/:post_id/summary".to_string()),
+            ("account_logos".to_string(), "/account/logos".to_string()),
+        ]
+    );
+}
