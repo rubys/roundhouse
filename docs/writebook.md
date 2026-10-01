@@ -59,11 +59,15 @@ requires a reviewed baseline refresh as well.
    Until it lands, the survey skips that resource and its nested edits route,
    while retaining the other routes; the inventory honestly records that gap.
    Refresh the baseline when the nested route is recovered.
-2. **Bounded model macros.** Expand `positioned_within` at its literal call
-   site into ordinary methods. Bind positional/keyword arguments correctly,
-   preserve captured values, lexical constants and private visibility, and
-   commit an expansion only if the entire macro is supported. Prove the
-   generated methods with an `emit_and_run` overlay before removing diagnostics.
+2. **Bounded model macros.** `positioned_within` now specializes at its literal
+   call site into ordinary methods before inference and lowering. The shared
+   ingester binds positional and required/optional keyword Symbol arguments
+   per includer, preserves private visibility, and rejects the entire expansion
+   on unsupported captures, lexical constants, side effects, ambiguous providers
+   or method collisions. `tests/model_macro_expansion.rs` executes the generated
+   helpers against an emitted Ruby database, including parent/filter selection,
+   ordering, self-exclusion and private dispatch. This proves those helpers,
+   not Positionable's complete locking/rebalancing behavior or native Writebook.
 3. **Markdown declarations and runtime.** `has_markdown` remains unsupported.
    Its statically known `class_eval` template could be parsed without executing
    application Ruby, but allowing that would amend the boundary in

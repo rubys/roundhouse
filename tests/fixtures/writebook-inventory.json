@@ -983,9 +983,7 @@
     "Warning|unresolved_type|app/models/concerns/positionable.rb:23:7|method call `define_method` has unresolved type": 1,
     "Warning|unresolved_type|app/models/concerns/positionable.rb:24:33|local read `association` has unresolved type": 1,
     "Warning|unresolved_type|app/models/concerns/positionable.rb:24:51|local read `filter` has unresolved type": 1,
-    "Warning|unresolved_type|app/models/concerns/positionable.rb:24:9|method call `positioning_parent` has unresolved type": 1,
     "Warning|unresolved_type|app/models/concerns/positionable.rb:27:7|method call `define_method` has unresolved type": 1,
-    "Warning|unresolved_type|app/models/concerns/positionable.rb:28:9|method call `all_positioned_siblings` has unresolved type": 1,
     "Warning|unresolved_type|app/models/concerns/positionable.rb:31:7|method call `private` has unresolved type": 1,
     "Warning|unresolved_type|app/models/edit.rb:10:53|local read `edit` has unresolved type": 1,
     "Warning|unresolved_type|app/models/edit.rb:11:52|local read `edit` has unresolved type": 1,
@@ -1158,6 +1156,11 @@
     "test/fixtures/active_storage/blobs.yml|not a fixture set: `handbook_reading_image_blob` is a scalar, where Rails expects label → fields": 1
   },
   "lowering": {
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Access] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Book] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 7,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Edit] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
+    "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`not` returns Relation[User] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Access] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Book] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 7,
     "Warning|lower_residue|<synthetic>|relation chain stays dynamic (`where` returns Relation[Edit] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 2,
@@ -1276,7 +1279,6 @@
       "Warning|unsupported|app/models/edit.rb:3:3|delegated_type not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/edit.rb:7:3|after_destroy not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:5:3|delegated_type not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/leaf.rb:6:3|positioned_within not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/page.rb:4:3|cattr_accessor not supported (all targets): model DSL call on `Page` not lowered": 1,
       "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
@@ -1349,7 +1351,6 @@
       "Warning|unsupported|app/models/edit.rb:3:3|delegated_type not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/edit.rb:7:3|after_destroy not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:5:3|delegated_type not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/leaf.rb:6:3|positioned_within not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/page.rb:4:3|cattr_accessor not supported (all targets): model DSL call on `Page` not lowered": 1,
       "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
