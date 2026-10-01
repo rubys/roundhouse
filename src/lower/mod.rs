@@ -91,6 +91,7 @@ pub mod random_formatter;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
+pub mod attribute_aliases;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
@@ -328,6 +329,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("number_to_fs", &[]),
     // `str.humanize` → `ActiveSupport.humanize(str)`; a rewrite of a name no other pass produces or consumes.
     ("string_inflections", &[]),
+    // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
+    ("attribute_aliases", &[]),
     // `hash.to_json` → `JSON.generate(hash)`; a receiver-shape rewrite
     // of a name no other pass produces or consumes.
     ("to_json", &[]),
@@ -751,6 +754,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("number_to_fs");
     string_inflections::apply_string_inflection_grounding(app);
     ran!("string_inflections");
+    attribute_aliases::apply_attribute_alias_lowering(app);
+    ran!("attribute_aliases");
     to_json::apply_to_json_lowering(app);
     ran!("to_json");
     csv_generate::apply_csv_generate_lowering(app);

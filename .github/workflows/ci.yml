@@ -29,8 +29,55 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: 90b330024dec3e757c79b6a7e6568f93da8e3148
+  WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
 
 jobs:
+  writebook-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch pinned Writebook source
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
+          mkdir /tmp/writebook
+          tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      - name: Build Roundhouse and run inventory
+        env:
+          WRITEBOOK_ROOT: /tmp/writebook
+          WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
+        run: |
+          cargo build --release --bin roundhouse
+          cargo test --test writebook --release -- --ignored --nocapture
+      - name: Save complete check report
+        if: always()
+        env:
+          WRITEBOOK_ROOT: /tmp/writebook
+        run: |
+          set +e
+          target/release/roundhouse check --continue "$WRITEBOOK_ROOT" > writebook-check.txt 2>&1
+          status=$?
+          set -e
+          cat writebook-check.txt
+          test "$(grep -c '^roundhouse-check: .* — ' writebook-check.txt)" -eq 1
+          summary=$(grep '^roundhouse-check: .* — ' writebook-check.txt)
+          pattern='^roundhouse-check: .* — ([0-9]+) parse error\(s\), ([0-9]+) error\(s\), [0-9]+ warning\(s\), [0-9]+ gap-attributed note\(s\), [0-9]+ survey gap\(s\)$'
+          [[ "$summary" =~ $pattern ]]
+          expected=0
+          if (( BASH_REMATCH[1] + BASH_REMATCH[2] > 0 )); then expected=1; fi
+          test "$status" -eq "$expected"
+      - name: Upload Writebook reports and baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writebook-inventory
+          path: |
+            writebook-check.txt
+            writebook-inventory-current.json
+            tests/fixtures/writebook-inventory.json
+
   # -------------------------------------------------------------------
   # Generate the real-blog fixture once, upload as artifact. Every
   # downstream test job downloads + extracts it — pay the Ruby/Rails
@@ -927,6 +974,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
+    outputs:
+      artifact-id: ${{ steps.binary.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -990,11 +1039,22 @@ jobs:
           path: ci-campfire-repro
           retention-days: 7
       - uses: actions/upload-artifact@v7
+        id: binary
         with:
           name: campfire-compare-spinel
           path: campfire-compare-spinel.tar.gz
           compression-level: 0
           retention-days: 1
+      - name: Report comparison availability
+        if: ${{ !cancelled() }}
+        env:
+          ARTIFACT_ID: ${{ steps.binary.outputs.artifact-id }}
+        run: |
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo 'Campfire comparison binary uploaded; default, minor-gc and verify-gen comparisons can run.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No Campfire comparison binary was uploaded. The default, minor-gc and verify-gen comparisons are blocked, not passed; see the producer failure above.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # campfire-compare-spinel: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
@@ -1040,6 +1100,9 @@ jobs:
   campfire-compare-spinel:
     name: campfire-compare-spinel (${{ matrix.gc }})
     needs: build-campfire-compare-spinel
+    # An advisory producer failure must not become three artifact-download
+    # failures. Only the upload's artifact ID proves the binary is available.
+    if: ${{ !cancelled() && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -1105,8 +1168,52 @@ jobs:
         run: gem install websocket-driver --no-document
       - name: scripts/campfire-compare --spinel ${{ matrix.flag }}
         run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel ${{ matrix.flag }} /tmp/campfire
+
+  # A different app (the model-scenario overlay), so it needs its own
+  # build, not the comparison binary. Start after the toolchain is ready
+  # instead of serializing it behind the shared build and request walk.
+  campfire-db-differential-spinel:
+    needs: build-spinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    services:
+      redis:
+        image: redis
+        ports: ['6379:6379']
+    env:
+      BUNDLE_PATH: vendor/bundle
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+      - name: Fetch pinned once-campfire
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Cache the prepared oracle
+        id: oracle
+        uses: actions/cache@v4
+        with:
+          path: build/campfire-oracle
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+      - name: Prepare the Rails oracle (cache miss)
+        if: steps.oracle.outputs.cache-hit != 'true'
+        run: scripts/campfire-oracle prepare --app /tmp/campfire
       - name: scripts/campfire-db-differential --spinel
-        if: matrix.gc == 'default'
         run: scripts/campfire-db-differential --spinel /tmp/campfire
 
   campfire-conformance:
@@ -1223,6 +1330,8 @@ jobs:
       #             cannot silently take the pool with it.
       - name: Install the gems the emitted suite loads
         run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer --no-document
+      - name: Verify the suite's bcrypt test configuration
+        run: ruby tests/campfire_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail

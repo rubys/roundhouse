@@ -81,6 +81,11 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enums: IndexMap<Symbol, Vec<(String, crate::expr::Literal)>>,
 
+    /// `enum :status, …, default: :active` — the stored value an unset
+    /// attribute starts at, which Rails prefers over the column default.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub enum_defaults: IndexMap<Symbol, crate::expr::Literal>,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns
@@ -788,6 +793,12 @@ pub struct LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Validated Alba source declarations expanded to ordinary methods before
+    /// inference. Analysis checks each constructor site, not a joined type
+    /// alone. This remains a source library class, not a model/params sibling.
+    AlbaResource {
+        declaration_span: Span,
+    },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
     /// model name (e.g. `:article`); `fields` is the permitted column
