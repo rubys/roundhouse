@@ -881,7 +881,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // Integer/String scalars or arrays, not new untyped parameters.
     // runtime_src_integration's zero-unresolved-type gate remains green;
     // emit_and_run pins the result and exception/state semantics.
-    const CEILING: usize = 1123;
+    // 1123 -> 1126, +3 MEASURED: connection's Integer serialization
+    // guard's is_a? / match? receiver reads and match negation.
+    // This limited probe lacks branch-local union narrowing;
+    // the full-context runtime still has 519 gradual sites and zero
+    // unresolved types. The concrete cast result adds nil, never untyped.
+    const CEILING: usize = 1126;
 
     assert!(
         all_untyped.len() <= CEILING,

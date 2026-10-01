@@ -202,6 +202,47 @@ puts "ok"
         .assert_passes();
 }
 
+/// Integer serialization is not blindly String#to_i: nonnumeric labels
+/// must not alias an existing row zero. Invalid IDs still count toward the
+/// array finder's required cardinality, except when pagination excludes them.
+#[test]
+fn relation_find_rejects_nonnumeric_ids_without_aliasing_zero() {
+    emit_and_run::real_blog()
+        .run_ruby(r#"
+Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'long enough body', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (31, 'thirty-one', 'long enough body', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+rel = ActiveRecord::Relation.new(Article).where("id IN (0, 31)")
+prior_sql = rel.to_sql
+rel.to_a
+raise "valid zero" unless rel.find("0").id == 0
+raise "zero prefix" unless rel.find("0x").id == 0
+raise "numeric prefix" unless rel.find("31-sarah").id == 31
+raise "whitespace/sign" unless rel.find(" \t+31-slug").id == 31
+["bogus", "", " ", "+", "-", "٠"].each do |id|
+  [id, [id], [id, 31]].each do |input|
+    begin
+      rel.find(input)
+      raise "invalid id aliased a record: #{input.inspect}"
+    rescue ActiveRecord::RecordNotFound
+    end
+  end
+end
+raise "scope/cache poisoned" unless rel.to_sql == prior_sql && rel.to_a.map(&:id) == [0, 31]
+unordered = ActiveRecord::Relation.new(Article).offset(1)
+raise "excluded invalid input" unless unordered.find(["bogus", 31]).map(&:id) == [31]
+ordered = ActiveRecord::Relation.new(Article).order(:id).limit(1)
+raise "ordered limit cardinality" unless ordered.find(["bogus", 31]).map(&:id) == [31]
+ordered.offset(1)
+begin
+  ordered.find(["bogus", 31])
+  raise "invalid input dropped from expected size"
+rescue ActiveRecord::RecordNotFound
+end
+puts "ok"
+"#)
+        .assert_passes();
+}
+
 /// A custom String primary key must not take the default Integer cast.
 #[test]
 fn relation_find_with_string_keys_runs() {
