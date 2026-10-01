@@ -60,6 +60,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         for action in controller.actions() {
             diagnose_expr_in(&action.body, &mut out, !filter_targets.contains(&action.name));
         }
+        for method in controller.class_methods() {
+            diagnose_expr(&method.body, &mut out);
+        }
     }
     for model in &app.models {
         for scope in model.scopes() {

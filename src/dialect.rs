@@ -731,6 +731,11 @@ pub struct LibraryClass {
     /// — surface form is sacrificed for downstream uniformity per the
     /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
+    /// Ordered, statically resolved class-instance-variable writes.
+    /// Unlike instance fields these belong to the receiving class object:
+    /// methods inherit, but their initialized values do not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_ivar_initializers: Vec<Expr>,
     /// Schema columns this class stores that the DB declares NULLABLE.
     /// The slot types already say `Union{[T, Nil]}`, but that shape is
     /// not by itself a column: a framework slot like Flash's `@notice`
@@ -977,6 +982,21 @@ impl Controller {
             _ => None,
         })
     }
+
+    pub fn class_methods(&self) -> impl Iterator<Item = &MethodDef> {
+        self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::ClassMethod { method, .. } => Some(method),
+            _ => None,
+        })
+    }
+}
+
+/// The two method forms admitted by finite class configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassConfigurationRole {
+    Writer,
+    Reader,
 }
 
 /// One statement inside a controller class body, in source order.
@@ -1003,6 +1023,28 @@ pub enum ControllerBodyItem {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
     },
+    /// A finite Concern configuration method, never a routed action.
+    ClassMethod {
+        method: MethodDef,
+        /// Finite macro carrier and storage slot.
+        /// Used to infer a shared method contract without sharing values.
+        configuration_slot: (ClassId, Symbol),
+        configuration_role: ClassConfigurationRole,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    /// A finite configuration macro's class-instance-variable write.
+    /// Kept separate from instance state and from unrecognized DSL calls.
+    ClassIvarInit {
+        expr: Expr,
+        carrier: ClassId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
     PrivateMarker {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         leading_comments: Vec<Comment>,
@@ -1023,6 +1065,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_comments, .. }
             | Self::Action { leading_comments, .. }
+            | Self::ClassMethod { leading_comments, .. }
+            | Self::ClassIvarInit { leading_comments, .. }
             | Self::PrivateMarker { leading_comments, .. }
             | Self::Unknown { leading_comments, .. } => leading_comments,
         }
@@ -1032,6 +1076,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_comments, .. }
             | Self::Action { leading_comments, .. }
+            | Self::ClassMethod { leading_comments, .. }
+            | Self::ClassIvarInit { leading_comments, .. }
             | Self::PrivateMarker { leading_comments, .. }
             | Self::Unknown { leading_comments, .. } => leading_comments,
         }
@@ -1041,6 +1087,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_blank_line, .. }
             | Self::Action { leading_blank_line, .. }
+            | Self::ClassMethod { leading_blank_line, .. }
+            | Self::ClassIvarInit { leading_blank_line, .. }
             | Self::PrivateMarker { leading_blank_line, .. }
             | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
         }
@@ -1050,6 +1098,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_blank_line, .. }
             | Self::Action { leading_blank_line, .. }
+            | Self::ClassMethod { leading_blank_line, .. }
+            | Self::ClassIvarInit { leading_blank_line, .. }
             | Self::PrivateMarker { leading_blank_line, .. }
             | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
         }

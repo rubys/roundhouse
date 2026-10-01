@@ -25,6 +25,7 @@
 
 mod alba;
 mod body;
+mod class_configuration;
 pub(crate) use body::string_answers;
 pub mod async_color;
 pub mod attribution;
@@ -1443,6 +1444,8 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .map(|lc| (lc.name.clone(), lc.includes.clone()))
             .collect();
+
+        self.analyze_class_configuration(&mut app.controllers);
 
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
@@ -3400,6 +3403,11 @@ impl Analyzer {
         // no class-receiver variant).
         for controller in &app.controllers {
             let class_id = &controller.name;
+            for method in controller.class_methods() {
+                let ret = self.method_return_ty(class_id, method);
+                let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
+                Self::register_method_return(target, &method.name, ret.as_ref());
+            }
             for action in controller.actions() {
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
@@ -3795,6 +3803,9 @@ impl Analyzer {
         for controller in &app.controllers {
             for action in controller.actions() {
                 self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
+            }
+            for method in controller.class_methods() {
+                self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
             }
         }
         for view in &app.views {

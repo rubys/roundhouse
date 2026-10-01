@@ -867,6 +867,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- emitted ---\n{ex}\n---------------");
@@ -958,6 +959,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- match_pattern ---\n{ex}\n---------------------");
@@ -990,6 +992,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("length(table)"), "list length via Kernel.length:\n{ex}");
@@ -1030,6 +1033,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
@@ -1083,6 +1087,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
@@ -1160,6 +1165,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
@@ -1273,6 +1279,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("all__loop(stmt, results)"), "entry calls drain helper:\n{ex}");

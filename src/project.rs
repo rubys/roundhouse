@@ -740,6 +740,16 @@ pub fn target_files(
     ) {
         report_keyword_params(app, target.as_str());
     }
+    if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        for controller in &app.controllers {
+            if controller.class_methods().next().is_some() {
+                return Err(format!("finite class-side configuration is not supported ({})", target.as_str()));
+            }
+        }
+        if app.library_classes.iter().any(|lc| !lc.class_ivar_initializers.is_empty()) {
+            return Err(format!("class-instance-variable initialization is not supported ({})", target.as_str()));
+        }
+    }
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
@@ -7084,6 +7094,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
 
         // The app declares one: the arm names it.
@@ -7255,6 +7266,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         });
         let mut files = vec![("boot.rb".to_string(), "# boot\n".to_string())];
         apply_module_mixins(&mut files, &modapp, MixinForm::Reopen);

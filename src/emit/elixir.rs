@@ -805,6 +805,7 @@ fn module_funcs_to_library_class(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

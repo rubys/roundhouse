@@ -499,6 +499,12 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             );
         }
         for method in &mut methods {
+            if method.receiver == MethodReceiver::Class {
+                // The analyzer typed these against class-object state.
+                // Controller action rewrites and framework instance ivar
+                // seeding do not apply to this separate receiver domain.
+                continue;
+            }
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             // Stage 3: now that bodies are typed, rewrite
             // `<typed-params>[:field]` → `<typed-params>.field`.
@@ -566,6 +572,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             origin: None,
             constants: collect_class_constants(controller),
             unknown_calls: collect_delegate_calls(controller),
+            class_ivar_initializers: collect_class_ivar_initializers(controller),
         };
         let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
         lc.methods.extend(forwarders);
@@ -635,10 +642,18 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         origin: None,
         constants: collect_class_constants(controller),
         unknown_calls: collect_delegate_calls(controller),
+        class_ivar_initializers: collect_class_ivar_initializers(controller),
     };
     let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
     lc.methods.extend(forwarders);
     lc
+}
+
+fn collect_class_ivar_initializers(controller: &Controller) -> Vec<Expr> {
+    controller.body.iter().filter_map(|item| match item {
+        ControllerBodyItem::ClassIvarInit { expr, .. } => Some(expr.clone()),
+        _ => None,
+    }).collect()
 }
 
 /// Collect class-level constant definitions (`NAME = <expr>`) from a
@@ -1013,7 +1028,7 @@ fn build_methods(
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
 ) -> Vec<MethodDef> {
-    let mut methods: Vec<MethodDef> = Vec::new();
+    let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
     // Names this controller's ancestry DEFINES that the route-helper
     // rewrite would otherwise claim by suffix alone.

@@ -298,6 +298,7 @@ pub(super) fn library_class_and_struct_base(
             origin: None,
             constants,
             unknown_calls,
+            class_ivar_initializers: Vec::new(),
         },
         base,
     ))
@@ -1015,6 +1016,7 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         }),
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -1049,6 +1051,7 @@ fn library_class_from_module_node_with_scope(
         origin: None,
         constants,
         unknown_calls,
+        class_ivar_initializers: Vec::new(),
     })
 }
 
@@ -2328,6 +2331,11 @@ pub struct ConcernClassMethodSpans {
     pub methods: Vec<Span>,
     pub bridges: Vec<Span>,
     pub has_nested_carrier: bool,
+    /// Literal framework identity and calls that require it to be installed.
+    /// Finite configuration uses these; factory bridge splicing is unchanged.
+    pub concern_extensions: Vec<Span>,
+    pub concern_calls: Vec<Span>,
+    pub has_other_extensions: bool,
 }
 
 pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
@@ -2335,7 +2343,11 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
             if let Some(def) = stmt.as_def_node() {
-                out.push(super::util::def_name_span(&def, file));
+                // The carrier's instance definitions become includer
+                // class methods. Its own singletons do not cross.
+                if def.receiver().is_none() {
+                    out.push(super::util::def_name_span(&def, file));
+                }
             }
         }
     }
@@ -2358,6 +2370,9 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
         let mut spans: Vec<Span> = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
+        let mut concern_extensions = Vec::new();
+        let mut concern_calls = Vec::new();
+        let mut has_other_extensions = false;
         for stmt in flatten_statements(body) {
             if let Some(m) = stmt.as_module_node() {
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
@@ -2367,6 +2382,29 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 continue;
             }
             if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none() {
+                    let loc = call.location();
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: loc.start_offset() as u32,
+                        end: loc.end_offset() as u32,
+                    };
+                    match constant_id_str(&call.name()) {
+                        "extend" => {
+                            if call.block().is_none() && call.arguments().is_some_and(|args| {
+                                args.arguments().len() == 1 && args.arguments().iter().any(|arg| {
+                                    constant_path_of(&arg).is_some_and(|p| p.join("::") == "ActiveSupport::Concern")
+                                })
+                            }) {
+                                concern_extensions.push(span);
+                            } else {
+                                has_other_extensions = true;
+                            }
+                        }
+                        "class_methods" | "include" | "prepend" => concern_calls.push(span),
+                        _ => {}
+                    }
+                }
                 if call.receiver().is_none()
                     && constant_id_str(&call.name()) == "class_methods"
                 {
@@ -2392,12 +2430,15 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 }
             }
         }
-        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier {
+        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier || !concern_extensions.is_empty() {
             out.push(ConcernClassMethodSpans {
                 owner: id,
                 methods: spans,
                 bridges,
                 has_nested_carrier,
+                concern_extensions,
+                concern_calls,
+                has_other_extensions,
             });
         }
     }

@@ -314,6 +314,7 @@ fn lower_models_inner(
             origin: None,
             constants: collect_model_constants(model),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         });
     }
     // Type-check Row class method bodies too so the strict typing residual
@@ -475,6 +476,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         origin: None,
         constants: collect_model_constants(model),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

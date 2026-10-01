@@ -94,7 +94,7 @@ impl Overlay {
     /// Emit, then run one of the emitted test files
     /// (`ruby -Itest -I. <path>` in the emitted tree).
     pub fn run_test(self, test_path: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let output = ruby()
             .args(["-Itest", "-I."])
             .arg(test_path)
@@ -108,7 +108,7 @@ impl Overlay {
     /// required and the default adapter configured on an in-memory
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let script = format!(
             "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
         );
@@ -122,9 +122,28 @@ impl Overlay {
         Run::new("ruby -e <script>".into(), emitted, errors, output)
     }
 
+    /// Compile the unchanged Spinel output and run its native binary.
+    /// The consumer boots libraries, not the HTTP server or a database.
+    pub fn run_spinel(self, script: &str) -> Run {
+        let (emitted, errors) = self.emit(BuildTarget::Spinel);
+        std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
+            .expect("write native consumer");
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let compiled = Command::new(&compiler).args(["contract.rb", "-o", "contract"])
+            .current_dir(&emitted).output().expect("spawn spinel");
+        std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
+        std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
+        if !compiled.status.success() {
+            return Run::new(format!("{compiler} contract.rb -o contract"), emitted, errors, compiled);
+        }
+        let output = Command::new(emitted.join("contract")).current_dir(&emitted)
+            .output().expect("run native consumer");
+        Run::new(format!("{compiler} contract.rb -o contract && ./contract"), emitted, errors, output)
+    }
+
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
     /// target. Returns the emitted tree and `check`'s error diagnostics.
-    fn emit(self) -> (PathBuf, Vec<String>) {
+    fn emit(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
         let scratch = scratch_dir();
         let source = scratch.join("app");
         copy_tree(&self.base, &source);
@@ -160,8 +179,8 @@ impl Overlay {
             .collect();
 
         let emitted = scratch.join("emitted");
-        let files = roundhouse::project::target_files(&app, &source, BuildTarget::Ruby)
-            .expect("ruby target files");
+        let files = roundhouse::project::target_files(&app, &source, target)
+            .expect("target files");
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
         (emitted, errors)
     }

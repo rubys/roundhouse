@@ -51,6 +51,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }];
     super::decide::decide_classes(&mut wrap);
     colored = wrap.into_iter().next().unwrap().methods;
