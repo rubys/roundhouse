@@ -52,6 +52,7 @@ pub(super) fn push_schema_methods(
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_before_type_cast(owner, col));
+            methods.push(synth_enum_storage_writer(owner, col));
         }
         if is_temporal_col(col) {
             methods.push(synth_raw_reader(owner, col));
@@ -268,7 +269,7 @@ pub(super) fn push_schema_methods(
     // (typed slots from the schema), output is the persisted model. No
     // Hash flowing through. Pattern (b) from the handoff: separate
     // class-method factories rather than overloaded initialize.
-    methods.push(synth_from_row(owner, table, model_declares_after_initialize(model)));
+    methods.push(synth_from_row(owner, table, model));
 
     // def self.from_stmt(stmt); instance = new; instance.<col> = Db.column_*(stmt, i); ...; mark_persisted!; instance; end
     //
@@ -281,7 +282,7 @@ pub(super) fn push_schema_methods(
     // column in that order (`ColumnSpec::All`). The Arel visitor only
     // routes `All`-projection hydrate sites here; a future `Named`
     // (partial/reordered) projection stays on its own inline path.
-    methods.push(synth_from_stmt(owner, table, model_declares_after_initialize(model)));
+    methods.push(synth_from_stmt(owner, table, model));
 
     // (No per-model `assign_from_row`: `Base#reload` dispatches to the
     // synthesized `_adapter_reload`, which re-reads the row off a
@@ -653,6 +654,26 @@ pub fn col_storage_name(col: &Column) -> Symbol {
 /// (`<col>=`, or `<col>_raw=` for a temporal column).
 fn col_storage_setter(col: &Column) -> Symbol {
     Symbol::from(format!("{}=", col_storage_name(col).as_str()))
+}
+
+/// Hydration is a storage write, not a user enum assignment. Unknown stored
+/// values remain intact and the enum reader answers nil for them.
+fn hydration_setter(model: &Model, col: &Column) -> Symbol {
+    if model.enums.contains_key(&col.name) {
+        enum_storage_writer(col)
+    } else {
+        col_storage_setter(col)
+    }
+}
+
+pub(crate) fn enum_storage_writer(col: &Column) -> Symbol {
+    Symbol::from(format!("_write_{}_raw", col.name.as_str()))
+}
+
+/// Fixture omissions are schema row data, not enum DSL defaults for `new`.
+pub(crate) fn schema_storage_default(col: &Column) -> Expr {
+    schema_default_literal(col)
+        .unwrap_or_else(|| default_literal_for_ty(&super::ty_of_column_slot(col)))
 }
 
 /// Storage setter for a field known only by name (permit lists). Falls
@@ -1172,6 +1193,31 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     }
 }
 
+/// Internal enum hydration accepts the typed DB slot without assignment
+/// validation. This is a method, not an additional public attribute/field.
+fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value = Symbol::from("value");
+    let slot_ty = super::ty_of_column_slot(col);
+    let assign = Expr::new(Span::synthetic(), ExprNode::Assign {
+        target: LValue::Ivar { name: col_storage_name(col) },
+        value: with_ty(var_ref(value.clone()), slot_ty.clone()),
+    });
+    MethodDef {
+        name_span: Span::synthetic(),
+        name: enum_storage_writer(col),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body: seq(vec![assign, nil_lit()]),
+        signature: Some(fn_sig(vec![(value, slot_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
 fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
@@ -1511,7 +1557,7 @@ fn hydrate_new_args(fire_after_initialize: bool) -> Vec<Expr> {
     if fire_after_initialize { vec![hydrate_attrs_const()] } else { Vec::new() }
 }
 
-fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -> MethodDef {
+fn synth_from_row(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
     let row_class = row_class_id(owner);
@@ -1521,7 +1567,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         ExprNode::Send {
             recv: Some(class_const(owner)),
             method: Symbol::from("new"),
-            args: hydrate_new_args(fire_after_initialize),
+            args: hydrate_new_args(model_declares_after_initialize(model)),
             block: None,
             parenthesized: true,
         },
@@ -1570,7 +1616,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: col_storage_setter(col),
+                method: hydration_setter(model, col),
                 args: vec![cast_field],
                 block: None,
                 parenthesized: false,
@@ -1639,7 +1685,8 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
 /// No `Cast` wrapping (unlike `from_row`): `column_*` returns the exact
 /// non-nilable scalar each setter expects, so the types line up
 /// directly. Marks the instance persisted before returning it.
-fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) -> MethodDef {
+fn synth_from_stmt(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
+    let fire_after_initialize = model_declares_after_initialize(model);
     let stmt = Symbol::from("stmt");
     let instance = Symbol::from("instance");
     let db = ClassId(Symbol::from("Db"));
@@ -1684,7 +1731,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: col_storage_setter(col),
+                method: hydration_setter(model, col),
                 args: vec![read_call],
                 block: None,
                 parenthesized: false,
@@ -2105,7 +2152,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     let attrs = Symbol::from("attrs");
 
     let mut stmts: Vec<Expr> = Vec::new();
-    // super() — calls ActiveRecord::Base#initialize.
+    // Do not forward explicit attrs to a parent's possibly different enum mapping.
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Super { args: Some(Vec::new()) },
@@ -2160,6 +2207,33 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // future per-column override hooks; today every column flows
         // through the same default-lookup shape.
         let _ = is_id_column(&col.name);
+
+        if model.enums.contains_key(&col.name) {
+            let slot_ty = super::ty_of_column_slot(col);
+            let default = if nullable { nil_lit() } else { default };
+            let provided = bool_send(var_ref(attrs.clone()), "key?", lit_sym(col.name.clone()));
+            let value = with_ty(Expr::new(Span::synthetic(), ExprNode::If {
+                cond: provided,
+                then_branch: enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| {
+                    Expr::new(Span::synthetic(), ExprNode::Cast {
+                        value: lookup, target_ty: slot_ty.clone(),
+                    })
+                }),
+                else_branch: default,
+            }), slot_ty.clone());
+            // Flat ivar initialization survives strict constructor extraction
+            // and cannot virtually dispatch a parent's default to a child writer.
+            stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
+                target: LValue::Ivar { name: col_storage_name(col) }, value,
+            }));
+            // Only explicitly supplied values reach the public writer. Keep
+            // its existing normalized-input dispatch, never validate defaults.
+            stmts.push(given_value_assign(col, &attrs,
+                with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar {
+                    name: col_storage_name(col),
+                }), slot_ty)));
+            continue;
+        }
 
         if is_temporal_col(col) {
             // Temporal columns: callers pass native `Time` values
@@ -2242,6 +2316,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // A has_json column: `new(settings: { … })` is Rails'
             // `settings=`, the per-key cast-and-merge — through the
             // seam, over the `|| <default>` a NOT NULL column keeps.
+            let given = lookup.clone();
             let json_assign = crate::lower::has_json::column_assign(
                 model,
                 &col.name,
@@ -2353,7 +2428,10 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 },
             ));
             if overrides_schema_default(model, col) && json_assign_is_none {
-                stmts.push(given_value_assign(model, col, &attrs));
+                let given = Expr::new(Span::synthetic(), ExprNode::Cast {
+                    value: given, target_ty: super::ty_of_column_slot(col),
+                });
+                stmts.push(given_value_assign(col, &attrs, given));
             }
         }
     }
@@ -2651,9 +2729,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     let signature = Ty::Fn {
         params: vec![crate::ty::Param {
-            name: attrs.clone(),
-            ty: attrs_ty,
-            kind: crate::ty::ParamKind::Optional,
+            name: attrs.clone(), ty: attrs_ty, kind: crate::ty::ParamKind::Optional,
         }],
         block: None,
         ret: Box::new(Ty::Nil),
@@ -3094,21 +3170,7 @@ fn overrides_schema_default(model: &Model, col: &Column) -> bool {
 }
 
 // Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
-fn given_value_assign(model: &Model, col: &Column, attrs: &Symbol) -> Expr {
-    let lookup = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(var_ref(attrs.clone())),
-            method: Symbol::from("[]"),
-            args: vec![lit_sym(col.name.clone())],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    let slot_ty = super::ty_of_column_slot(col);
-    let value = enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| {
-        Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: slot_ty })
-    });
+fn given_value_assign(col: &Column, attrs: &Symbol, value: Expr) -> Expr {
     let assign = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
