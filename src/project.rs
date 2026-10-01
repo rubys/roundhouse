@@ -3248,6 +3248,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         ));
     }
 
+    // Schema-less json/jsonb column seam. The flat walk emits the Ruby
+    // implementation; this sidecar preserves its gradual logical value
+    // while keeping the database slot String-typed.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/json_column.rbs")
+            .map_err(|e| format!("read runtime/spinel/json_column.rbs: {e}"))?;
+        files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
+    }
+
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).

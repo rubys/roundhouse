@@ -18,6 +18,37 @@ use crate::ty::Ty;
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
 impl<'a> BodyTyper<'a> {
+    /// `record[:column]` / `read_attribute(:column)` (and their writer
+    /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
+    /// can only describe their fallback shape, but a literal key and a
+    /// concrete model receiver make the exact column type available.
+    pub(super) fn column_attribute_access_ty(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        let model = match recv_ty? {
+            Ty::Class { id, .. } => id,
+            _ => return None,
+        };
+        let key_arg = match method.as_str() {
+            "[]" | "read_attribute" if args.len() == 1 => &args[0],
+            "[]=" | "write_attribute" if args.len() == 2 => &args[0],
+            _ => return None,
+        };
+        let methods = &self.classes().get(model)?.instance_methods;
+        match &*key_arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                methods.get(value).cloned()
+            }
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+                methods.get(&Symbol::from(value.as_str())).cloned()
+            }
+            _ => None,
+        }
+    }
+
     /// `pluck(:col)` / `pick(:col)` on a relation over a known model.
     ///
     /// The class-side registration in `analyze/mod.rs` types these

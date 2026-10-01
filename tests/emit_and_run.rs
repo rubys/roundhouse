@@ -1462,6 +1462,49 @@ end
         .assert_passes();
 }
 
+/// A schema-less json/jsonb column is decoded at the public attribute
+/// boundary and encoded again on assignment. In particular, the three
+/// Rails spellings (`record.data`, `record[:data]`, and
+/// `read_attribute(:data)`) must not expose SQLite's serialized text.
+#[test]
+fn json_columns_round_trip_decoded_values() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.json \"metadata\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  def metadata_names\n    read_attribute(:metadata).map { |entry| entry[\"name\"] }\n  end",
+        )
+        .write(
+            "test/models/article_json_column_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonColumnTest < ActiveSupport::TestCase
+  test "json values are decoded on every public read and encoded on write" do
+    value = [{ "name" => "Ada", "enabled" => true }]
+    article = Article.create!(title: "JSON", body: "A body long enough to validate.", metadata: value)
+    article = Article.find(article.id)
+
+    assert_equal value, article.metadata
+    assert_equal value, article[:metadata]
+    assert_equal value, article.attributes["metadata"]
+    assert_equal ["Ada"], article.metadata_names
+
+    article.write_attribute(:metadata, { "name" => "Grace", "enabled" => false })
+    article.save!
+    assert_equal({ "name" => "Grace", "enabled" => false }, Article.find(article.id).metadata)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_json_column_test.rb")
+        .assert_passes();
+}
+
 /// Not the column default: `enum …, default:` is the value Rails gives an unset attribute, and a value the caller passes still wins.
 #[test]
 fn an_enum_default_option_seeds_a_new_record() {
