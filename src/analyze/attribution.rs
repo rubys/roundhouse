@@ -357,13 +357,22 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
             DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
                 crate::gems::gem_claiming_method(lock, n.as_str()).map(|gem| (gem, None))
             }
+            DiagnosticKind::Unsupported { construct, detail, .. }
+                if construct.as_str() == "constant" =>
+            {
+                crate::gems::gem_owning_constant(&census, detail).map(|gem| (gem, None))
+            }
             _ => None,
         }
     };
     let mut sites: Vec<(FileId, u32, String)> = Vec::new();
     for d in diags.iter_mut() {
         // Already a coverage note (an ingest gap claimed it first).
-        if !eligible(&d.kind) || d.severity == Severity::Info {
+        let unknown_constant = matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "constant"
+        );
+        if (!eligible(&d.kind) && !unknown_constant) || d.severity == Severity::Info {
             continue;
         }
         if let Some((gem, evidence)) = gem_for(d) {
@@ -577,6 +586,22 @@ mod tests {
         )];
         attribute_ingest_gaps(&mut diags, &app, &gaps);
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn unknown_gem_constant_is_a_coverage_note_not_a_user_error() {
+        let mut app = App::new();
+        app.gem_lock = Some(crate::gems::Lockfile::parse(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    acme-core (1.0.0)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  acme-core\n",
+        ));
+        let mut diags = vec![
+            Diagnostic::unsupported(Span::synthetic(), None, "constant", "AcmeCore::Client"),
+            Diagnostic::unsupported(Span::synthetic(), None, "other construct", "AcmeCore::Client"),
+        ];
+        attribute_unknown_gems(&mut diags, &app);
+        assert_eq!(diags[0].severity, Severity::Info);
+        assert!(diags[0].message.contains("acme-core"));
+        assert_eq!(diags[1].severity, Severity::Error);
     }
 
     #[test]

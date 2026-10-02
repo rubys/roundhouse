@@ -67,7 +67,7 @@ module ActionDispatch
     # one place — the snapshot — rather than growing a second
     # "don't persist" flag per field.
     def now
-      FlashNow.new(self)
+      ActionDispatch::FlashNow.new(self)
     end
 
     # Move a key's snapshot up to its current value. Only `now` calls
@@ -211,7 +211,7 @@ module ActionDispatch
     # on top. `other` may be a Hash or another Flash — either responds
     # to `each` with `(k, v)` pairs.
     def merge(other)
-      result = Flash.new
+      result = ActionDispatch::Flash.new
       result.notice = @notice
       result.alert  = @alert
       other.each do |k, v|

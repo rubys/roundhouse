@@ -368,6 +368,10 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// Rubydex answers for `sources`, resolved while ingest finished.
+    /// The analyzer resolves the sources itself when this is absent.
+    #[serde(skip)]
+    pub const_resolver: crate::analyze::PreparedConstResolver,
     /// Per-controller resolved request machinery, computed once by
     /// analyze's parent-chain walk and persisted (the self-describing-IR
     /// move: `run_typing_passes` already built these to seed ivars, and
@@ -683,6 +687,7 @@ impl App {
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
+            const_resolver: Default::default(),
             root: String::new(),
             app_roots: Vec::new(),
         }

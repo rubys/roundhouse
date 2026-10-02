@@ -77,18 +77,9 @@ pub fn lower_test_modules_with_inner(
     for (id, info) in extras {
         classes.insert(id, info);
     }
-    // Every app model is at least PRESENT under its bare name, whether
-    // or not the caller supplied a registry entry for it. The
-    // bare-const expander resolves a bare `Session` to a qualified
-    // `…::Session` only when nothing is registered bare (see
-    // `analyze::body::expand_bare_const`), so a missing model here is
-    // not a typing gap — it silently retargets the call. campfire
-    // defines `Session < ApplicationRecord`, and the framework stub
-    // `ActionDispatch::Session` claimed every `Session.count` /
-    // `.create!` / `.find_by` in its test suite. `or_insert` so a
-    // caller's real ClassInfo still wins; this only closes the hole.
-    // Ahead of the framework stubs, which is where the collision comes
-    // from.
+    // A standalone test body has no Ruby source index. Register every
+    // app model under its exact name so class-method dispatch resolves
+    // even when the caller omits it from `extras`. Preserve real entries.
     for model in models {
         classes.entry(model.name.clone()).or_default();
     }

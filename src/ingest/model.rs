@@ -833,7 +833,7 @@ pub(super) fn expand_enum_decl(
                     args: vec![Expr::new(
                         span,
                         ExprNode::Lit {
-                            value: if reads_label { Literal::Str { value: label.clone() } } else { value },
+                            value: if reads_label { Literal::Str { value: all_labels.iter().find(|(_, stored)| stored == &value).map(|(canonical, _)| canonical.clone()).unwrap_or_else(|| label.clone()) } } else { value },
                         },
                     )],
                     block: None,

@@ -4227,7 +4227,7 @@ pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     }
     let recv = Expr::new(
         Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
+        ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
     );
     // Trailing-kwargs vs explicit-Hash decision happens in the body
     // typer's `normalize_trailing_kwargs` — it consults the receiver

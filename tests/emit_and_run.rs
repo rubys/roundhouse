@@ -563,6 +563,34 @@ fn a_lambda_target_before_action_gates_the_action_it_guards() {
         .assert_passes();
 }
 
+/// An inner class wins over another class with the same last segment.
+#[test]
+fn a_bare_inner_class_runs_after_resolution() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/ui/selector.rb",
+            "module UI\n  class Selector\n    class Mode\n      def self.value\n        \"selected\"\n      end\n    end\n    def self.value\n      Mode.value\n    end\n  end\n  class Other\n    class Mode\n    end\n  end\nend\n",
+        )
+        .run_ruby("raise 'wrong inner class' unless UI::Selector.value == 'selected'")
+        .assert_passes();
+}
+
+/// `class UI::ExplicitSelector` does not lexically include `UI`, even
+/// though emitted Ruby nests it there. Keep a top-level same-suffix class
+/// distinct from the one inside UI after source-backed resolution.
+#[test]
+fn a_compact_class_uses_its_source_lexical_constant() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/ui/explicit_selector.rb",
+            "class SourceScopeResolution\n  def self.value\n    \"top-level\"\n  end\nend\nmodule UI\n  class SourceScopeResolution\n    def self.value\n      \"nested\"\n    end\n  end\nend\nclass UI::ExplicitSelector\n  def self.value\n    SourceScopeResolution.value\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise 'wrong lexical constant' unless UI::ExplicitSelector.value == 'top-level'",
+        )
+        .assert_passes();
+}
+
 /// Array `find` is not a scalar lookup or a permissive `where(id: ids)`:
 /// it raises on a missing scoped row, and preserves requested order unless
 /// the relation carries an explicit order. The terminal cannot poison its
@@ -639,6 +667,53 @@ raise "projected key" unless selected.find([b.id, a.id]).map(&:id) == [b.id, a.i
 raise "projection poisoned" unless selected.to_sql == prior_sql
 puts "ok"
 "##,
+        )
+        .assert_passes();
+}
+
+/// The runtime defines this exception in `active_support_ext.rb`.
+#[test]
+fn framework_exception_resolves_from_real_runtime_source() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/signature_probe.rb",
+            "class SignatureProbe\n  def self.call\n    begin\n      raise ActiveSupport::MessageVerifier::InvalidSignature\n    rescue ActiveSupport::MessageVerifier::InvalidSignature\n      \"handled\"\n    end\n  end\nend\n",
+        )
+        .run_ruby("raise 'signature error was not caught' unless SignatureProbe.call == 'handled'")
+        .assert_passes();
+}
+
+/// Rubydex promotes `X = <call>` to a module once code calls a method
+/// on `X`. These are still values: `.freeze` and `.map` build a Hash, an
+/// Array, and a String, and each read must type and run as that value.
+#[test]
+fn a_constant_assigned_from_a_call_runs_as_its_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/frozen_table.rb",
+            "class FrozenTable\n  STATUSES = { processed: \"processed\" }.freeze\n  NAMES = [\"a\", \"b\"].freeze\n  LABEL = \"label\".freeze\n  DOUBLED = [1, 2].map { |n| n * 2 }\n  def self.summary\n    [STATUSES[:processed].upcase, NAMES.first, LABEL.upcase, DOUBLED.last.to_s].join(\",\")\n  end\nend\n",
+        )
+        .run_ruby("raise 'frozen constant' unless FrozenTable.summary == 'PROCESSED,a,LABEL,4'")
+        .assert_passes();
+}
+
+/// Ingest copies a concern's methods into the controller that includes
+/// it, and the emitted controller drops the `include`. A class that
+/// resolved inside the concern's module must still name that class
+/// after the move.
+#[test]
+fn a_concern_class_reference_survives_the_copy_into_its_controller() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/price_support.rb",
+            "module PriceSupport\n  class RateCalculator\n    def self.value\n      7\n    end\n  end\n\n  def price\n    RateCalculator.value\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/quotes_controller.rb",
+            "class QuotesController < ApplicationController\n  include PriceSupport\n\n  def show\n    @value = price\n  end\nend\n",
+        )
+        .run_ruby(
+            "require_relative 'app/controllers/quotes_controller'\nraise 'concern class reference' unless QuotesController.new.price == 7",
         )
         .assert_passes();
 }
@@ -723,6 +798,74 @@ raise "string keys or partial index lost" unless rel.find(["fresh-41", "2-apples
 puts "ok"
 "#,
         )
+        .assert_passes();
+}
+
+/// Ingest hoists a file-level constant into the first class of the
+/// file, but Ruby declares it on Object. The inferred value must belong
+/// to the declaration that the read resolves to.
+#[test]
+fn a_file_level_constant_runs_from_the_class_below_it() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/review_probe.rb",
+            "ROOT_LIMIT = 7\n\nclass LimitReader\n  def self.value\n    ROOT_LIMIT\n  end\nend\n",
+        )
+        .run_ruby("raise 'file-level constant' unless LimitReader.value == 7")
+        .assert_passes();
+}
+
+/// ERB views are not indexed. A qualified class read there must not
+/// take the value of an unrelated constant with the same last segment,
+/// and a qualified value read takes the value declared at its full name.
+#[test]
+fn a_qualified_class_in_a_view_ignores_a_same_named_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/archive.rb",
+            "module Marker\n  Item = 1\nend\n\nmodule Archive\n  class Item\n    def self.label\n      \"archive\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>",
+            "<% content_for :title, \"Articles\" %>\n<p id=\"archive-label\"><%= Archive::Item.label %></p>\n<p id=\"marker-item\"><%= Marker::Item + 1 %></p>",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1\", \"Articles\"\n    assert_select \"#archive-label\", \"archive\"\n    assert_select \"#marker-item\", \"2\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// Each constant in the chain reads the one before it. The value must
+/// reach the end of a chain longer than any fixed number of rounds.
+#[test]
+fn a_long_constant_chain_reaches_its_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/chain.rb",
+            "class Chain\n  A = 1\n  B = A\n  C = B\n  D = C\n  E = D\n  F = E\n\n  def self.value\n    F\n  end\nend\n",
+        )
+        .run_ruby("raise 'constant chain' unless Chain.value == 1")
+        .assert_passes();
+}
+
+/// Rubydex declares Object, BasicObject, Kernel, Module and Class
+/// itself. Those are Ruby's own classes, not unknown constants.
+#[test]
+fn object_new_runs_as_the_ruby_built_in() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/object_reader.rb",
+            "class ObjectReader\n  def self.value\n    Object.new\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/sentinels_controller.rb",
+            "class SentinelsController < ApplicationController\n  def show\n    @sentinel = Object.new\n  end\nend\n",
+        )
+        .run_ruby("raise 'Object.new' unless ObjectReader.value.instance_of?(Object)")
         .assert_passes();
 }
 
@@ -2378,6 +2521,99 @@ end
         .assert_passes();
 }
 
+#[test]
+fn safe_navigation_comparisons_execute_for_nil_and_string_values() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def title_long?
+    ((title && title.length) || 0) > 1
+  end
+  def title_short?
+    (title&.length || 0) < 1
+  end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "long")
+raise "truthy chain" unless article.title_long? && !article.title_short?
+article.title = nil
+raise "nil chain" unless !article.title_long? && article.title_short?
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn forwarded_proc_expressions_execute_once_in_an_emitted_app() {
+    emit_and_run::real_blog()
+        .write("app/services/block_forward_probe.rb", r#"class BlockForwardProbe
+  def initialize
+    @calls = 0
+    @callback = ->(x) { x * 2 }
+  end
+  def compute(n)
+    @calls += 1
+    ->(x) { x + n }
+  end
+  def run
+    doubled = [1, 2].map(&@callback)
+    added = [1, 2].map(&compute(3))
+    [doubled, added, @calls]
+  end
+end
+"#)
+        .run_ruby("raise 'forwarded expression' unless BlockForwardProbe.new.run == [[2, 4], [4, 5], 1]")
+        .assert_passes();
+}
+
+#[test]
+fn typed_instance_keywords_bind_values_and_keep_positional_hashes() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_fetcher.rb", r##"
+class KeywordFetcher
+  def fetch(url, ip: url.upcase)
+    "#{url}@#{ip}"
+  end
+
+  def merge(url, opts = {})
+    "#{url}#{opts}"
+  end
+end
+"##)
+        .write("app/services/keyword_locator.rb", r#"
+class KeywordLocator
+  def locate(url)
+    KeywordFetcher.new.fetch(url, ip: "192.0.2.1")
+  end
+
+  def merged(url)
+    KeywordFetcher.new.merge(url, opts: 1)
+  end
+end
+"#)
+        .run_ruby(r#"
+locator = KeywordLocator.new
+raise "keyword bound to hash" unless locator.locate("host") == "host@192.0.2.1"
+raise "positional hash rewritten" unless locator.merged("host") == 'host{opts: 1}'
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn multiple_erb_openers_execute_inside_an_output_block() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
+<% [1, 2].each do |number|
+       unless number.nil? %><%= number %><% end %><% end %><% end %></span>"#,
+        "    assert_select \"span.multi-opener\", \"12\"\n")
+        .assert_passes();
+}
+
+#[test]
+fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="commented-title"><%= capture do %>
+<% [1, 2].each do |number| %><%= "n: #{number}" #@label %><% end #$numbers %><% end #{capture} %></span>"#,
+        "    assert_select \"span.commented-title\", \"n: 1n: 2\"\n")
+        .assert_passes();
+}
+
 /// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
 #[test]
 fn an_app_with_no_views_boots() {
@@ -2408,6 +2644,108 @@ fn an_app_with_no_views_boots() {
 raise "GET /widgets answered #{status}" unless status == 204
 "#,
         )
+        .assert_passes();
+}
+
+#[test]
+fn bundled_uri_and_http_exception_constants_run() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/services/http_constant_probe.rb",
+            r#"class HttpConstantProbe
+  def self.http?(url)
+    URI.parse(url).is_a?(URI::HTTP)
+  end
+
+  def self.invalid_uri
+    begin
+      URI.parse("https://bad host/")
+    rescue URI::InvalidURIError
+      "invalid"
+    end
+  end
+
+  def self.construct
+    URI::HTTP.new("http", nil, "example.test", 80, nil, "/", nil, nil, nil).to_s
+  end
+
+  def self.invalid_constructor
+    begin
+      URI::HTTP.new
+    rescue ArgumentError
+      "arity"
+    end
+  end
+
+  def self.timeout(kind)
+    begin
+      if kind == "open"
+        raise Net::OpenTimeout
+      else
+        raise Net::ReadTimeout
+      end
+    rescue Net::OpenTimeout
+      "open"
+    rescue Net::ReadTimeout
+      "read"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise unless HttpConstantProbe.http?("https://example.test/")
+raise if HttpConstantProbe.http?("ftp://example.test/")
+raise unless HttpConstantProbe.invalid_uri == "invalid"
+raise unless HttpConstantProbe.construct == "http://example.test/"
+raise unless HttpConstantProbe.invalid_constructor == "arity"
+raise unless HttpConstantProbe.timeout("open") == "open"
+raise unless HttpConstantProbe.timeout("read") == "read"
+"#,
+        );
+    let probe = std::fs::read_to_string(run.emitted.join("app/models/http_constant_probe.rb")).unwrap();
+    assert!(probe.lines().any(|line| line == "require \"uri\""), "{probe}");
+    run.assert_passes();
+}
+
+#[test]
+fn bundled_response_io_json_and_runtime_value_constants_run() {
+    emit_and_run::real_blog()
+        .write("app/services/bundled_value_probe.rb", r#"class BundledValueProbe
+  def self.responses
+    [Net::HTTPOK.new("1.1", "200", "OK").is_a?(Net::HTTPOK),
+     Net::HTTPRedirection.new("1.1", "302", "Found").is_a?(Net::HTTPRedirection)]
+  end
+  def self.buffer
+    io = StringIO.new
+    io << "abc"
+    io.string
+  end
+  def self.encode
+    JSON.generate([17, "hello"])
+  end
+  def self.ssl_error
+    begin
+      raise OpenSSL::OpenSSLError
+    rescue OpenSSL::OpenSSLError
+      "ssl"
+    end
+  end
+  def self.attributes
+    ActionText::Attachment::ATTRIBUTES.include?("sgid")
+  end
+  def self.allowed_tags
+    Rails::HTML5::SafeListSanitizer.allowed_tags.include?("a")
+  end
+end
+"#)
+        .run_ruby(r#"raise unless BundledValueProbe.responses == [true, true]
+raise unless BundledValueProbe.buffer == "abc"
+raise unless BundledValueProbe.encode == '[17,"hello"]'
+raise unless BundledValueProbe.ssl_error == "ssl"
+raise unless BundledValueProbe.attributes
+raise unless BundledValueProbe.allowed_tags
+"#)
         .assert_passes();
 }
 

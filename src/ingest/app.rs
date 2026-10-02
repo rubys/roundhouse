@@ -171,7 +171,12 @@ pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming
 /// into `rails dbconsole`) out of the tree. Core classes and framework
 /// roots are never taken from here: a top-level definition of one is a
 /// reopen of something the runtime already provides.
-fn keep_initializer_defined(app: &mut App, dir: &Path, candidates: Vec<LibraryClass>) {
+fn keep_initializer_defined(
+    app: &mut App,
+    dir: &Path,
+    sources: &[crate::span::SourceFile],
+    candidates: Vec<LibraryClass>,
+) {
     const FRAMEWORK_ROOTS: &[&str] = &[
         "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
         "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
@@ -187,7 +192,7 @@ fn keep_initializer_defined(app: &mut App, dir: &Path, candidates: Vec<LibraryCl
     let root = dir.display().to_string();
     let root = root.trim_end_matches('/');
     let referenced = |name: &str| {
-        app.sources.iter().any(|f| {
+        sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
             (rel.starts_with("app/") || rel.starts_with("lib/"))
                 && f.text.match_indices(name).any(|(i, _)| {
@@ -1341,6 +1346,19 @@ end
         }
     }
 
+    // Every app source is registered by here. Rubydex resolves a
+    // SNAPSHOT on another thread while the passes below run, and those
+    // passes read the same snapshot. It is not the real `drain`: the
+    // passes below re-ingest generated Ruby and look up the `FileId`s of
+    // real files again, so the registry must stay live until they have
+    // run. Draining here and letting the registry start over at
+    // `FileId(1)` is how a synthesized parse failure once rendered
+    // against an unrelated real file (see `ingest::sources`'s module
+    // doc). The real drain runs after them, below.
+    let sources = std::sync::Arc::new(super::sources::snapshot());
+    let const_resolver =
+        crate::analyze::ConstResolverTask::start(std::sync::Arc::clone(&sources));
+
     // Logical stylesheets — file stems of `.css` files found in
     // `app/assets/stylesheets/` and `app/assets/builds/`. Rails'
     // `stylesheet_link_tag :app` with Propshaft + tailwindcss-rails
@@ -1509,24 +1527,11 @@ end
         }
     }
 
-    // A SNAPSHOT, not the real `drain`: `keep_initializer_defined` just
-    // below needs to read the app's real source text right now, but
-    // the real files' `FileId`s must stay live (not reset to empty)
-    // through every synthesizing pass below — `current_attributes`,
-    // `delegate`, `channel_callbacks`, `allow_browser`, `rate_limit` —
-    // each of which re-ingests generated Ruby of its own. Draining here
-    // and letting the registry start over at `FileId(1)` mid-pipeline
-    // is exactly how a synthesized parse failure once rendered against
-    // an unrelated real file that happened to share the reused id (see
-    // `ingest::sources`'s module doc). The real `drain` — the one that
-    // actually clears the registry and becomes `app.sources` for
-    // good — runs after all of them, below.
-    app.sources = super::sources::snapshot();
-    enum_constants.validate_consumed_sources(&app, &enum_input_files)?;
-    keep_initializer_defined(&mut app, dir, initializer_defined);
+    enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
+    keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
-    let concern_class_method_spans: Vec<_> = app.sources.iter()
+    let concern_class_method_spans: Vec<_> = sources.iter()
         .filter(|source| source.path.ends_with(".rb"))
         .flat_map(|source| ingest_concern_class_method_spans(source.text.as_bytes(), &source.path))
         .collect();
@@ -1545,7 +1550,7 @@ end
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
     // Rejected declarations still fail ingest, but survey must ledger them.
-    super::alba::lower_alba_resources(&mut app).inspect_err(survey::record)?;
+    super::alba::lower_alba_resources(&mut app, &sources).inspect_err(survey::record)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -1566,13 +1571,17 @@ end
     super::allow_browser::lower_allow_browser(&mut app);
     super::rate_limit::lower_rate_limit(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
-    // Ruby has run — see the snapshot comment above. `app.sources`
-    // held the pre-synthesis snapshot until now; this replaces it with
-    // the complete, contiguously-numbered table (each synthesized
-    // pass's own `"<label>"` re-ingest never took a slot in it at all —
-    // `sources::register` refuses a label starting with `<` — so this
-    // is the same real-file list the snapshot already had).
+    // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
+    // slot (`sources::register` refuses a label starting with `<`), so
+    // this is the same real-file list that Rubydex indexes, and its
+    // answers use these `FileId`s.
     app.sources = super::sources::drain();
+    debug_assert_eq!(
+        app.sources.len(),
+        sources.len(),
+        "a pass registered a source after Rubydex took its snapshot"
+    );
+    drop(sources);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
@@ -1609,6 +1618,11 @@ end
 
     collect_binary_assets(vfs, dir, &mut app);
 
+    debug_assert!(
+        super::sources::drain().is_empty(),
+        "a pass registered a source after ingest drained the registry"
+    );
+    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     Ok(app)
 }
 

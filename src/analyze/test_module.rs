@@ -8,6 +8,13 @@ use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
 pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
+    // File-local stand-ins are real source declarations too. Use the
+    // same declared surface as test lowering, without replacing an
+    // already registered production class or guessing a return type.
+    for inner in app.test_modules.iter().flat_map(|module| &module.inner_classes) {
+        classes.entry(inner.name.clone())
+            .or_insert_with(|| crate::lower::class_info_from_library_class(inner));
+    }
     for module in &app.test_modules {
         let cls = classes.entry(module.name.clone()).or_default();
         cls.parent = module.parent.clone();

@@ -42,8 +42,11 @@ pub fn emit_expr(e: &Expr) -> String {
     // `Unsupported` kind: an `IncompatibleBinop` the analyzer stamps is
     // left to Ruby itself, which raises at the same site on its own.
     if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic {
-        return crate::emit::diagnostics::StubStyle::Raise
+        // This is an expression, including in a rescue list or a binary
+        // operand. A bare command-style `raise` is not valid there.
+        let stub = crate::emit::diagnostics::StubStyle::Raise
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
+        return format!("({stub})");
     }
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));

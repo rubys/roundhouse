@@ -93,7 +93,7 @@ module ActionDispatch
     end
 
     def merge(other)
-      result = Session.new(to_h)
+      result = ActionDispatch::Session.new(to_h)
       other.each do |k, v|
         result[k] = v
       end
@@ -149,11 +149,11 @@ module ActionDispatch
     # empty is dropped; a pair with no `=` keeps its key with an empty
     # value (our encoder always writes the `=`).
     def self.from_cookie(raw)
-      session = Session.new
+      session = ActionDispatch::Session.new
       raw.to_s.split("&").each do |pair|
         parts = pair.to_s.split("=")
-        k = parts.length > 0 ? Session.cookie_decode(parts[0].to_s) : ""
-        v = parts.length > 1 ? Session.cookie_decode(parts[1].to_s) : ""
+        k = parts.length > 0 ? ActionDispatch::Session.cookie_decode(parts[0].to_s) : ""
+        v = parts.length > 1 ? ActionDispatch::Session.cookie_decode(parts[1].to_s) : ""
         session[k] = v unless k.empty?
       end
       session
@@ -166,7 +166,7 @@ module ActionDispatch
       # target's keys-intrinsic on an actual map (go templates `keys`
       # into len/range of the receiver).
       ks = to_h.keys
-      ks.map { |k| "#{Session.cookie_encode(k)}=#{Session.cookie_encode(self[k].to_s)}" }.join("&")
+      ks.map { |k| "#{ActionDispatch::Session.cookie_encode(k)}=#{ActionDispatch::Session.cookie_encode(self[k].to_s)}" }.join("&")
     end
 
     def self.cookie_encode(s)

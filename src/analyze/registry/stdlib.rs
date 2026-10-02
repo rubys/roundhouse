@@ -406,6 +406,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
+        // Both CRuby's bundled libraries and Spinel's uri/net packages
+        // define these exception classes; emitted requires load them.
+        "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+        "OpenSSL::OpenSSLError",
     ] {
         register_stdlib_class(classes, exc, &[], &[
             ("message", Ty::Str),
@@ -501,6 +505,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("parse", Ty::Untyped), ("join", Ty::Untyped),
         ("escape", Ty::Str), ("unescape", Ty::Str),
         ("encode_www_form", Ty::Str), ("decode_www_form", Ty::Untyped),
+    ], &[]);
+    // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
+    // real bundled class, without claiming any extra instance methods.
+    register_stdlib_class(classes, "URI::HTTP", &[], &[]);
+    for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
+        register_stdlib_class(classes, response, &[], &[]);
+    }
+    // The implementation is bundled on Ruby/Spinel. Other targets
+    // report the missing runtime at project emission.
+    let string_io = Ty::Class { id: ClassId(Symbol::from("StringIO")), args: vec![] };
+    register_stdlib_class(classes, "StringIO", &[], &[
+        ("string", Ty::Str), ("<<", string_io),
+    ]);
+    // JSON dispatch is already intrinsic in BodyTyper and the emitters;
+    // a source-backed reference must also recognize its exact namespace.
+    register_stdlib_class(classes, "JSON", &[], &[]);
+    // CRuby supplies Sets here, the Spinel port supplies Arrays. Both
+    // implement the collection operations the app uses; don't invent
+    // one concrete representation for the two runtimes.
+    register_stdlib_class(classes, "Rails::HTML5::SafeListSanitizer", &[
+        ("allowed_tags", Ty::Untyped), ("allowed_attributes", Ty::Untyped),
     ], &[]);
     // `Set` is a value type: `Set.new` yields `Class { Set }` (via the
     // universal `.new`), then these instance methods dispatch on it.

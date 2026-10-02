@@ -227,7 +227,7 @@ fn absurd_raise(span: Span, value: Expr) -> ExprNode {
             span,
             ExprNode::Send {
                 recv: Some(Expr::new(
-                    span,
+                    Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("TypeError")] },
                 )),
                 method: Symbol::from("new"),
@@ -2111,32 +2111,8 @@ fn ingest_call_block(
                     ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
                 )));
             }
-            // `&@ivar` — an instance variable holding a Proc. Its own
-            // message, rather than lumping it with the generic
-            // fallback: the survey otherwise can't tell "an ivar" from
-            // "some other unhandled shape" without re-deriving it.
-            if expr.as_instance_variable_read_node().is_some() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "block argument is an instance variable".into(),
-                });
-            }
-            // `&some_call(...)` — an arbitrary call's result (already
-            // ruled out as `method(:x)`/`proc { }`/`lambda { }` above).
-            // Its return value's shape is opaque at ingest time, unlike
-            // the specific forms handled above.
-            if expr.as_call_node().is_some() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "block argument is a call result".into(),
-                });
-            }
-            // Other `&expr` shapes (`&:sym.to_proc`, `&(a || b)`, …) are
-            // not yet supported.
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "block-argument forms other than `&:symbol`, `&local_var`, `&method(:name)`, `&proc { }`/`&lambda { }`, and `&->() { }` not yet supported".into(),
-            });
+            // Any other proc-valued expression is evaluated once and passed as the block.
+            return Ok(Some(ingest_expr(&expr, file)?));
         }
         // Ruby 3.4 anonymous block forwarding (`fetch(key, &)`) —
         // reference the synthesized `__blk` binding the def-side

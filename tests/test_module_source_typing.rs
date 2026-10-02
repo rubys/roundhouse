@@ -582,3 +582,156 @@ end
         "fixture must not hide a real inherited source method"
     );
 }
+
+#[test]
+fn source_test_constants_keep_declaration_ownership_after_reanalysis() {
+    let mut app = ingest(
+        r#"
+class NumericProbeTest < ActiveSupport::TestCase
+  VALUES = NEXT_VALUES
+  NEXT_VALUES = [3, 7].freeze
+  def values
+    VALUES
+  end
+  test "numeric constant" do
+    VALUES.each { |value| value + 2 }
+  end
+end
+class TextProbeTest < ActiveSupport::TestCase
+  VALUES = ["first", "last"].freeze
+  def values
+    VALUES
+  end
+  test "text constant" do
+    VALUES.each { |value| value.upcase }
+    NumericProbeTest::VALUES.each { |value| value + 5 }
+  end
+end
+"#,
+    );
+    for _ in 0..2 {
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+        for (name, element, expected_receivers) in [
+            ("NumericProbeTest", Ty::Int, vec![Ty::Int]),
+            ("TextProbeTest", Ty::Str, vec![Ty::Str, Ty::Int]),
+        ] {
+            let module = app
+                .test_modules
+                .iter()
+                .find(|module| module.name.0.as_str() == name)
+                .unwrap();
+            let expected = Ty::Array {
+                elem: Box::new(element),
+            };
+            assert_eq!(module.helpers[0].body.ty, Some(expected.clone()), "{name}");
+            assert!(matches!(&module.helpers[0].signature,
+                Some(Ty::Fn { ret, .. }) if **ret == expected));
+            let mut receivers = Vec::new();
+            each_receivers(&module.tests[0].body, &mut receivers);
+            assert_eq!(
+                receivers,
+                expected_receivers
+                    .into_iter()
+                    .map(|elem| Some(Ty::Array {
+                        elem: Box::new(elem)
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            fn check_values(expr: &Expr) {
+                if matches!(&*expr.node, ExprNode::Const { .. } | ExprNode::Var { .. }) {
+                    assert!(
+                        expr.ty.as_ref().is_some_and(|ty| !ty.is_unknown()),
+                        "{expr:?}"
+                    );
+                    assert!(expr.diagnostic.is_none(), "{expr:?}");
+                }
+                expr.node.for_each_child(&mut check_values);
+            }
+            check_values(&module.tests[0].body);
+        }
+        app = serde_json::from_str(&serde_json::to_string(&app).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn source_tests_resolve_file_local_helper_classes_and_their_value_constants() {
+    let mut app = ingest(
+        r#"
+class LocalStandIn
+  VALUES = [13, 29]
+end
+class SourceProbeTest < ActiveSupport::TestCase
+  def stand_in
+    LocalStandIn.new
+  end
+  test "helper constant" do
+    LocalStandIn::VALUES.each { |value| value + 3 }
+  end
+end
+"#,
+    );
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let module = &app.test_modules[0];
+    assert_eq!(
+        module.helpers[0].body.ty,
+        Some(Ty::Class {
+            id: roundhouse::ident::ClassId("LocalStandIn".into()),
+            args: vec![],
+        })
+    );
+    let mut receivers = Vec::new();
+    each_receivers(&module.tests[0].body, &mut receivers);
+    assert_eq!(
+        receivers,
+        vec![Some(Ty::Array {
+            elem: Box::new(Ty::Int)
+        })]
+    );
+}
+
+#[test]
+fn test_constants_do_not_replace_or_poison_production_view_fallbacks() {
+    let mut app = ingest_app_from_tree([
+        ("app/helpers/production_values_helper.rb",
+            "module ProductionValuesHelper\n  VALUES = [19, 31]\nend\n"),
+        ("app/views/probes/index.html.erb",
+            "<% VALUES.each { |value| value + 2 } %>"),
+        ("test/models/source_probe_test.rb",
+            "class SourceProbeTest < ActiveSupport::TestCase\n  VALUES = [\"test only\"]\n  TEST_ONLY = [\"must not leak\"]\nend\n"),
+        ("app/views/probes/other.html.erb",
+            "<% TEST_ONLY.each { |value| value.upcase } %>"),
+    ].into_iter().map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect()).unwrap();
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let mut receivers = Vec::new();
+    each_receivers(
+        &app.views
+            .iter()
+            .find(|view| view.name.as_str() == "probes/index")
+            .unwrap()
+            .body,
+        &mut receivers,
+    );
+    assert_eq!(
+        receivers,
+        vec![Some(Ty::Array {
+            elem: Box::new(Ty::Int)
+        })]
+    );
+    receivers.clear();
+    each_receivers(
+        &app.views
+            .iter()
+            .find(|view| view.name.as_str() == "probes/other")
+            .unwrap()
+            .body,
+        &mut receivers,
+    );
+    assert_eq!(
+        receivers,
+        vec![Some(Ty::Class {
+            id: roundhouse::ident::ClassId("TEST_ONLY".into()),
+            args: vec![],
+        })]
+    );
+}

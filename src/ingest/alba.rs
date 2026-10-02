@@ -28,13 +28,16 @@ struct ResourceDecl {
     span: Span,
 }
 
-pub(super) fn lower_alba_resources(app: &mut crate::App) -> IngestResult<()> {
+pub(super) fn lower_alba_resources(
+    app: &mut crate::App,
+    sources: &[crate::span::SourceFile],
+) -> IngestResult<()> {
     let resources = selected_resources(&app.library_classes);
     if resources.is_empty() {
         return Ok(());
     }
-    let declarations = collect_resource_declarations(app, &resources)?;
-    let flattened = validate_resource_graph(app, &resources, &declarations)?;
+    let declarations = collect_resource_declarations(sources, &resources)?;
+    let flattened = validate_resource_graph(app, sources, &resources, &declarations)?;
     for class in &mut app.library_classes {
         if let Some(fields) = flattened.get(&class.name) {
             synthesize_methods(class, fields, declarations[&class.name].span)?;
@@ -229,11 +232,11 @@ impl<'pr> ruby_prism::Visit<'pr> for SourceGuard<'_> {
 }
 
 fn collect_resource_declarations(
-    app: &crate::App,
+    sources: &[crate::span::SourceFile],
     resources: &HashSet<ClassId>,
 ) -> IngestResult<HashMap<ClassId, ResourceDecl>> {
     let mut declarations = HashMap::new();
-    for source in &app.sources {
+    for source in sources {
         // Mutation-only files must be included, not merely declaration files.
         if !resources
             .iter()
@@ -365,6 +368,7 @@ fn collect_fields(
 
 fn validate_resource_graph(
     app: &crate::App,
+    sources: &[crate::span::SourceFile],
     resources: &HashSet<ClassId>,
     declarations: &HashMap<ClassId, ResourceDecl>,
 ) -> IngestResult<HashMap<ClassId, Vec<Field>>> {
@@ -376,7 +380,7 @@ fn validate_resource_graph(
                 message: format!("cannot establish complete source for {}", id.0),
             });
         };
-        let source = &app.sources[decl.span.file.0 as usize - 1];
+        let source = &sources[decl.span.file.0 as usize - 1];
         let fail = |reason| refuse(source, decl.span.start as usize, reason);
         if app
             .library_classes
@@ -432,7 +436,7 @@ fn validate_resource_graph(
     for (id, all) in &flattened {
         for target in all.iter().filter_map(|f| f.resource.as_ref()) {
             let decl = &declarations[id];
-            let source = &app.sources[decl.span.file.0 as usize - 1];
+            let source = &sources[decl.span.file.0 as usize - 1];
             let Some(nested) = flattened.get(target) else {
                 return Err(refuse(
                     source,

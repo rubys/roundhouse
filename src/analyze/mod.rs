@@ -26,6 +26,8 @@
 mod alba;
 mod body;
 pub(crate) use body::string_answers;
+pub(crate) use body::ConstResolverTask;
+pub use body::PreparedConstResolver;
 pub mod async_color;
 pub mod attribution;
 pub mod preload;
@@ -53,6 +55,8 @@ pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
 use std::collections::{BTreeSet, HashMap};
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
@@ -108,12 +112,11 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
-    /// `body::ConstIndex` over `classes`, with the class count it was
-    /// built at. The registry only grows, so a count change is exactly
-    /// when it goes stale.
-    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
+    /// Resolved once from the source snapshot supplied to `Analyzer::new`.
+    const_resolver: std::sync::Arc<body::ConstResolver>,
+    /// Inferred values keyed by Rubydex declaration IDs, not by names.
+    typed_constants: IdentityHashMap<DeclarationId, Ty>,
 }
-
 
 impl Analyzer {
     /// Build an analyzer with the default database adapter
@@ -781,8 +784,9 @@ impl Analyzer {
             adapter,
             concern_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
-            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
+            const_resolver: app.const_resolver.for_sources(&app.sources),
+            typed_constants: IdentityHashMap::default(),
         }
     }
 
@@ -791,19 +795,8 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
-            .with_const_index(self.const_index())
-    }
-
-    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
-        let mut slot = self.const_index.lock().unwrap();
-        if let Some((count, index)) = &*slot {
-            if *count == self.classes.len() {
-                return index.clone();
-            }
-        }
-        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
-        *slot = Some((self.classes.len(), index.clone()));
-        index
+            .with_const_resolver(self.const_resolver.clone())
+            .with_typed_constants(&self.typed_constants)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -853,8 +846,8 @@ impl Analyzer {
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
         for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
-            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -863,7 +856,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
+            crate::timings::phase(format_args!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -1197,32 +1190,30 @@ impl Analyzer {
         }
     }
 
-    /// Collect every app-level constant (`CONST = <value>`) declared in a
-    /// model or controller body, type its value, and build a global
-    /// name→type registry keyed by the constant's last path segment — the
-    /// shape `ExprNode::Const` dispatch consults (`Vote::COMMENT_REASONS`
-    /// looks up `COMMENT_REASONS`). This is the cross-class channel: a
-    /// constant declared in `Vote` resolves when referenced from a
-    /// controller, a view, another model, or seeds — none of which the
-    /// per-class `extract_*_const_assignments` tables reach.
-    ///
-    /// Typed as a small fixpoint so a constant defined in terms of another
-    /// (`ALL_COMMENT_REASONS = COMMENT_REASONS.merge(...).freeze`) resolves
-    /// once its dependency does. A name declared in two classes with
-    /// conflicting types is dropped as ambiguous: a bare reference can't
-    /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
-    /// `Ty::Var` results are skipped — uninformative, and registering them
-    /// would only mask the `Const` fallback without adding signal.
+    /// Type each app constant value. Rubydex already owns the constant
+    /// names and their lexical resolution, so source reads use its
+    /// `DeclarationId` to find these inferred types. The bare-name map
+    /// remains only for generated expressions without Ruby source.
+    /// The rounds continue until no value changes, so `B = A` can use
+    /// the value of `A` from the round before.
     fn build_constant_registry(
         &self,
         app: &App,
-    ) -> (HashMap<Symbol, Ty>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
-        // (defining class's self_ty, last-segment name, cloned value expr).
-        let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
+    ) -> (HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>) {
+        // Ingest can move a constant to another IR owner: a file-level
+        // constant goes to the first class of its file. The declaration
+        // ID comes from the source position, not from the owner.
+        let declaration_id = |name: &Symbol, value: &Expr| {
+            self.const_resolver.constant_declaration(value.span, name.as_str())
+        };
+        // (defining class, last-segment name, Rubydex ID, value,
+        // eligible for the production generated-expression fallback).
+        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr, bool)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
             if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
                 if let Some(last) = path.last() {
-                    entries.push((self_ty, last.clone(), value.clone()));
+                    let id = declaration_id(last, value);
+                    entries.push((self_ty, last.clone(), id, value.clone(), true));
                 }
             }
         };
@@ -1253,25 +1244,41 @@ impl Analyzer {
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
-                entries.push((
-                    Ty::Class { id: lc.name.clone(), args: vec![] },
-                    name.clone(),
-                    value.clone(),
-                ));
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
+            }
+        }
+        // Original source tests use the same DeclarationId contract.
+        // Their constants participate in the value fixpoint, but must
+        // not change the bare-name fallback used by production views.
+        for module in &app.test_modules {
+            for (owner, constants) in std::iter::once((&module.name, &module.constants))
+                .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
+            {
+                for (name, value) in constants {
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+                }
             }
         }
 
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-        // Cap matches the outer analyze fixpoint; one level of constant
-        // dependency needs two passes, the cap leaves slack.
-        for _ in 0..4 {
+        let mut resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+        // Each round can type one more link of a `B = A` chain, so n
+        // values need at most n + 1 rounds when no value changes after
+        // it is typed. A cycle (`A = B`, `B = A`) never types and stays
+        // unknown, and the read reports it. The bound also stops values
+        // that change on each round.
+        for _ in 0..=entries.len() {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
+            let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
             let shared = body::ConstScope::global(map.clone());
-            for (self_ty, name, value) in entries.iter_mut() {
-                if ambiguous.contains(name) {
-                    continue;
-                }
+            let typer = BodyTyper::new(&self.classes)
+                .with_inquirers(&self.inquirers)
+                .with_const_resolver(self.const_resolver.clone())
+                .with_typed_constants(&resolved);
+            for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
@@ -1280,8 +1287,14 @@ impl Analyzer {
                     annotate_self_dispatch: false,
                     in_view: false,
                 };
-                let ty = self.body_typer().analyze_expr(value, &ctx);
+                let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                if let Some(id) = id {
+                    next_resolved.insert(*id, ty.clone());
+                }
+                if !*production || ambiguous.contains(name) {
                     continue;
                 }
                 match next.get(name) {
@@ -1293,39 +1306,16 @@ impl Analyzer {
                     }
                 }
             }
-            for a in &ambiguous {
-                next.remove(a);
+            for name in &ambiguous {
+                next.remove(name);
             }
-            if next == map {
+            if next == map && next_resolved == resolved {
                 break;
             }
             map = next;
+            resolved = next_resolved;
         }
-        // The same types, kept per owning class as well: a qualified
-        // read can then be answered exactly, including for a name two
-        // classes both define — which the map above has to drop.
-        let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = body::ConstScope::global(map.clone());
-        for (self_ty, name, value) in entries.iter_mut() {
-            let owner = match &self_ty {
-                Ty::Class { id, .. } => id.clone(),
-                _ => continue,
-            };
-            let ctx = Ctx {
-                self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
-                constants: shared.clone(),
-                annotate_self_dispatch: false,
-                in_view: false,
-            };
-            let ty = self.body_typer().analyze_expr(value, &ctx);
-            if matches!(ty, Ty::Var { .. }) {
-                continue;
-            }
-            per_class.entry(owner).or_default().insert(name.clone(), ty);
-        }
-        (map, per_class)
+        (map, resolved)
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -1335,18 +1325,12 @@ impl Analyzer {
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
     fn run_typing_passes(&mut self, app: &mut App) {
-        // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
-        // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
-        // and seeds so cross-class constant references resolve to the
-        // value's type instead of the `Ty::Class { id: ConstName }`
-        // fallback. Seeded under each class's own constants (own shadows
-        // global on a name clash).
-        let (global_constants, class_constants) = self.build_constant_registry(app);
-        // Shared by every context below — see `Ctx::constants`.
-        let global_constants = body::ConstScope::global(global_constants);
-        for (id, constants) in class_constants {
-            self.classes.entry(id).or_default().constants.extend(constants);
-        }
+        // Source-backed constant reads use Rubydex declaration IDs.
+        // A bare-name fallback remains for generated expressions without
+        // a Ruby source reference.
+        let (fallback, resolved_values) = self.build_constant_registry(app);
+        self.typed_constants = resolved_values;
+        let global_constants = body::ConstScope::global(fallback);
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from

@@ -60,6 +60,17 @@ This is a bounded Date surface, not all of ActiveSupport's Date extensions:
 unmodeled methods still diagnose, and nonliteral strict-local defaults
 remain an existing ingestion gap.
 
+### Forwarding a computed Proc
+
+Ruby emission preserves `items.map(&@callback)` and
+`items.map(&factory())`, including evaluating `factory()` once before
+the call. Arbitrary `&expr` forwarding is not implemented for `rust`,
+`crystal`, `go`, `python`, `kotlin`, `swift` or `elixir`: these targets
+reject it at the project boundary, even with `--allow-unsupported`,
+rather than dropping the callback or evaluating its producer per item.
+Existing literal blocks, local block variables and bound-method
+references retain their target-specific support and limitations.
+
 ## Apps that aren't fully covered yet
 
 By default, ingest is strict — the first construct roundhouse does not

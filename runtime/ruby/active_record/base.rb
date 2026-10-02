@@ -32,7 +32,7 @@ module ActiveRecord
     found = -1
     i = 0
     while i < values.length
-      found = i if values[i] == value
+      found = i if found == -1 && values[i] == value
       i += 1
     end
     found == -1 ? nil : labels[found]
@@ -82,7 +82,7 @@ module ActiveRecord
     found = -1
     i = 0
     while i < values.length
-      found = i if values[i] == value
+      found = i if found == -1 && values[i] == value
       i += 1
     end
     found == -1 ? nil : labels[found]

@@ -15,7 +15,7 @@ use ruby_prism::{Node, parse};
 use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::ingest::ingest_expr;
 use crate::rbs::parse_signatures;
 use crate::span::Span;
@@ -35,16 +35,20 @@ const VIRTUAL_FILE: &str = "<runtime>";
 /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
 /// table.
 pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<Symbol, Ty>, String> {
+    Ok(parse_module_constant_tables(source, false).0)
+}
+
+type ConstantTypes = std::collections::HashMap<Symbol, Ty>;
+type OwnedConstantTypes = std::collections::HashMap<ClassId, ConstantTypes>;
+
+pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (ConstantTypes, OwnedConstantTypes) {
+    let mut global = ConstantTypes::new();
+    let mut by_owner = OwnedConstantTypes::new();
     let result = parse(source.as_bytes());
-    let mut out = std::collections::HashMap::new();
-    if result.errors().count() > 0 {
-        // Errors will surface elsewhere; return empty here so the caller
-        // doesn't double-report.
-        return Ok(out);
+    if result.errors().count() == 0 {
+        walk_constants(&result.node(), "", &mut global, &mut by_owner, with_owners);
     }
-    let root = result.node();
-    walk_constants(&root, &mut out);
-    Ok(out)
+    (global, by_owner)
 }
 
 /// Parallel to `parse_module_constants` but returns each constant as
@@ -204,40 +208,55 @@ fn collect_constant_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)
     }
 }
 
-fn walk_constants(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
+fn walk_constants(
+    node: &Node<'_>,
+    owner: &str,
+    global: &mut ConstantTypes,
+    by_owner: &mut OwnedConstantTypes,
+    with_owners: bool,
+) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_constant_from_stmt(&stmt, out);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_constant_from_stmt(&stmt, out);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
         }
     }
 }
 
-fn collect_constant_from_stmt(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
-    // Recurse into module/class bodies. Constants commonly live one
-    // level inside `module Foo ... end` or `class Bar ... end`.
+fn collect_constant_from_stmt(
+    node: &Node<'_>,
+    owner: &str,
+    global: &mut ConstantTypes,
+    by_owner: &mut OwnedConstantTypes,
+    with_owners: bool,
+) {
     if let Some(module) = node.as_module_node() {
+        let Ok(name) = std::str::from_utf8(module.name().as_slice()) else { return };
         if let Some(body) = module.body() {
-            walk_constants(&body, out);
+            let nested = join_owner(owner, name);
+            walk_constants(&body, &nested, global, by_owner, with_owners);
         }
         return;
     }
     if let Some(class) = node.as_class_node() {
+        let Ok(name) = std::str::from_utf8(class.name().as_slice()) else { return };
         if let Some(body) = class.body() {
-            walk_constants(&body, out);
+            let nested = join_owner(owner, name);
+            walk_constants(&body, &nested, global, by_owner, with_owners);
         }
         return;
     }
-    // Top-level constant assignment: `CONST = literal[.freeze]?`.
     if let Some(write) = node.as_constant_write_node() {
-        let name_bytes = write.name().as_slice();
-        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
-        let value = write.value();
-        if let Some(ty) = type_of_const_literal(&value) {
-            out.insert(Symbol::new(name_str), ty);
+        let Ok(name) = std::str::from_utf8(write.name().as_slice()) else { return };
+        if let Some(ty) = type_of_const_literal(&write.value()) {
+            let name = Symbol::from(name);
+            if with_owners && !owner.is_empty() {
+                by_owner.entry(ClassId(Symbol::from(owner))).or_default().insert(name.clone(), ty.clone());
+            }
+            global.insert(name, ty);
         }
     }
 }
@@ -413,9 +432,13 @@ pub fn parse_library_with_rbs(
     // method orphan filter). Done up front so the class registry below
     // can be built from typed methods.
     // (Done inside the per-class loop below.)
-    let constants = crate::analyze::ConstScope::global(
-        parse_module_constants(std::str::from_utf8(ruby_src).unwrap_or("")).unwrap_or_default(),
-    );
+    let ruby_text = String::from_utf8_lossy(ruby_src);
+    let (literal_constants, owned_constants) = parse_module_constant_tables(&ruby_text, true);
+    let constants = crate::analyze::ConstScope::global(literal_constants);
+    let class_constants: std::collections::HashMap<_, _> = owned_constants
+        .into_iter()
+        .map(|(owner, own)| (owner, constants.with_own(own)))
+        .collect();
 
     // Step 1: attach RBS signatures to each method, with arity check.
     // After this loop every method has its `signature` populated.
@@ -515,8 +538,13 @@ pub fn parse_library_with_rbs(
     // their return types flow into outer expressions (e.g. `errors`'s
     // `Array[String]` reaches `errors << "..."` so `<<` resolves to
     // `.push()` per the type-aware operator dispatch).
+    // Standalone runtime files lack the declarations in their sibling
+    // files. Their constant values use owner-first lookup with the
+    // legacy bare-name fallback; other class reads keep exact paths without a
+    // partial Rubydex graph that would misreport them as missing.
     let typer = crate::analyze::BodyTyper::new(&class_registry);
     for lc in &mut library_classes {
+        let scope_constants = class_constants.get(&lc.name).unwrap_or(&constants);
         let build_ctx = |m: &MethodDef,
                          ivars: &std::collections::HashMap<Symbol, Ty>|
          -> crate::analyze::Ctx {
@@ -531,7 +559,7 @@ pub fn parse_library_with_rbs(
                 args: vec![],
             });
             ctx.ivar_bindings = ivars.clone();
-            ctx.constants = constants.clone();
+            ctx.constants = scope_constants.clone();
             // Opt in to typer's self-dispatch annotation: bare Sends
             // that resolve through this class's methods get
             // `Some(SelfRef)` written back on their recv. Per-target

@@ -2566,6 +2566,35 @@ fn layout_header_helpers_and_their_concat_chain_are_hoisted_once() {
     assert!(body.contains("HOISTED_JAVASCRIPT_IMPORTMAP_TAGS"), "{body}");
 }
 
+#[test]
+fn unsupported_expressions_raise_without_breaking_ruby_syntax() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::ident::Symbol;
+    use roundhouse::span::Span;
+
+    let mut expr = Expr::new(Span::synthetic(), ExprNode::Const {
+        path: vec![Symbol::from("Missing")],
+    });
+    expr.diagnostic = Some(DiagnosticKind::Unsupported {
+        target: None,
+        construct: Symbol::from("constant"),
+        detail: "Missing".into(),
+    });
+    let stub = ruby::emit_expr(&expr);
+    for context in [
+        format!("[1] + {stub}"),
+        format!("begin\n  raise ArgumentError\nrescue {stub}\nend"),
+    ] {
+        let script = format!(
+            "begin\n{context}\nraise 'stub did not raise'\nrescue RuntimeError => e\n\
+             raise e.message unless e.message == 'roundhouse: constant not supported (all targets)'\nend"
+        );
+        let result = std::process::Command::new("ruby").args(["-e", &script]).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+}
+
 // ── lazy per-record state ───────────────────────────────────────
 
 /// A has_many cache starts `nil` and is made on first read through a

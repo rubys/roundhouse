@@ -5391,6 +5391,24 @@ fn root_shadowed_constants(
     if head.as_str().starts_with("::") {
         return;
     }
+    // Emission nests compact declarations such as `class UI::Explicit`
+    // under `module UI`. Rubydex already resolved the source reference.
+    // Root its actual class when the new nesting would bind the head to
+    // another class; a typed VALUE constant never carries this mark.
+    if expr.decisions & crate::expr::RESOLVED_CLASS_REF != 0 {
+        if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+            let resolved = id.0.as_str();
+            for prefix in prefixes.iter().rev() {
+                if known(&format!("{prefix}::{}", head.as_str())) {
+                    if format!("{prefix}::{joined}") != resolved {
+                        *path = resolved.split("::").map(Symbol::from).collect();
+                        path[0] = Symbol::from(format!("::{}", path[0].as_str()));
+                    }
+                    return;
+                }
+            }
+        }
+    }
     // Either the name's OWN segments shadow it (the pre-existing rule:
     // `Views::Stats` referencing `Stats`, `Message::Broadcasts`
     // referencing the runtime's `Broadcasts`) …
