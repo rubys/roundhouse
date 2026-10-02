@@ -165,6 +165,7 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         return None;
     };
     let name = path.last()?;
+    let core = path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty());
     Some(match name.as_str() {
         "Integer" => Ty::Int,
         // `Numeric` covers Int and Float in Ruby's hierarchy. Union
@@ -184,13 +185,19 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // tells us "this is a Hash of *some* shape," and downstream
         // dispatch should propagate that gradualness rather than
         // leave block params as Var.
-        "Array" => Ty::Array { elem: Box::new(Ty::Untyped) },
-        "Hash" => Ty::Hash {
+        "Array" if core => Ty::Array { elem: Box::new(Ty::Untyped) },
+        "Hash" if core => Ty::Hash {
             key: Box::new(Ty::Untyped),
             value: Box::new(Ty::Untyped),
         },
-        other => Ty::Class {
-            id: ClassId(Symbol::from(other)),
+        _ => Ty::Class {
+            id: ClassId(Symbol::from(
+                path.iter()
+                    .filter(|part| !part.as_str().is_empty())
+                    .map(Symbol::as_str)
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )),
             args: vec![],
         },
     })
@@ -281,16 +288,35 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
             // Keep only variants compatible with the narrower type.
             let kept: Vec<Ty> = variants
                 .iter()
-                .filter(|v| ty_compatible(v, narrower))
-                .cloned()
+                .filter_map(|variant| intersect_variant(variant, narrower))
                 .collect();
-            match kept.len() {
-                0 => narrower.clone(),
-                1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+            if kept.is_empty() {
+                narrower.clone()
+            } else {
+                super::union_many(kept)
             }
         }
-        _ => narrower.clone(),
+        _ => intersect_variant(current, narrower).unwrap_or_else(|| narrower.clone()),
+    }
+}
+
+/// Preserve known members; only ParamValue supplies a recursive contract.
+fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
+    match (current, narrower) {
+        (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. }) => {
+            Some(current.clone())
+        }
+        (Ty::Class { id, .. }, Ty::Array { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
+            Some(Ty::Array { elem: Box::new(super::send::param_value_ty()) })
+        }
+        (Ty::Class { id, .. }, Ty::Hash { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
+            Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(super::send::param_value_ty()) })
+        }
+        (Ty::Untyped | Ty::Var { .. }, Ty::Array { .. } | Ty::Hash { .. }) => {
+            Some(narrower.clone())
+        }
+        _ if ty_compatible(current, narrower) => Some(current.clone()),
+        _ => None,
     }
 }
 
@@ -318,4 +344,8 @@ fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
 /// when polymorphism lands.
 fn ty_compatible(a: &Ty, b: &Ty) -> bool {
     a == b
+        || matches!(
+            (a, b),
+            (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. })
+        )
 }

@@ -3184,3 +3184,47 @@ fn a_template_only_action_is_fed_by_its_before_action() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+#[test]
+fn array_and_hash_checks_preserve_members() {
+    emit_and_run::real_blog()
+        .write("app/lib/container_narrowing_probe.rb", r##"class ContainerNarrowingProbe
+  def self.array_members
+    value = ["alpha", "beta"]
+    if value.is_a?(Array)
+      value.map { |item| item.upcase }
+    else
+      raise("not an Array")
+    end
+  end
+  def self.hash_members
+    value = {"answer" => 41}
+    if value.is_a?(Hash)
+      value.map { |key, item| "#{key.upcase}=#{item + 1}" }
+    else
+      raise("not a Hash")
+    end
+  end
+  def self.nested_members
+    value = [{"name" => "alpha"}, {"name" => "beta"}]
+    if value.is_a?(Array)
+      value.map do |item|
+        if item.is_a?(Hash)
+          item.fetch("name").upcase
+        else
+          raise("not a Hash")
+        end
+      end
+    else
+      raise("not an Array")
+    end
+  end
+end
+"##)
+        .run_ruby(r#"
+raise "Array members changed" unless ContainerNarrowingProbe.array_members == ["ALPHA", "BETA"]
+raise "Hash members changed" unless ContainerNarrowingProbe.hash_members == ["ANSWER=42"]
+raise "nested members changed" unless ContainerNarrowingProbe.nested_members == ["ALPHA", "BETA"]
+"#)
+        .assert_passes();
+}
