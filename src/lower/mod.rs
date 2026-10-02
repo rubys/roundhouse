@@ -1086,127 +1086,76 @@ pub(crate) fn for_each_test_body(
     }
 }
 
+// Like emit_roots below, keep surveys and rewrites on one root inventory.
+macro_rules! hook_roots {
+    ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
+        for model in & $($mutable)? $app.models {
+            for item in & $($mutable)? model.body {
+                match item {
+                    crate::dialect::ModelBodyItem::Method { method, .. } => {
+                        for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                        $f(& $($mutable)? method.body);
+                    }
+                    crate::dialect::ModelBodyItem::Scope { scope, .. } => {
+                        for default in scope.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                        $f(& $($mutable)? scope.body);
+                    }
+                    crate::dialect::ModelBodyItem::Callback { callback, .. } => {
+                        if let Some(cond) = callback.condition.$option() { $f(cond); }
+                    }
+                    // Unknown class-body expressions emit verbatim.
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => $f(expr),
+                    // Association extension methods become ordinary methods
+                    // during model lowering, so passes must reach them first.
+                    crate::dialect::ModelBodyItem::Association {
+                        assoc: crate::dialect::Association::HasMany { extension, .. },
+                        ..
+                    } => {
+                        for method in extension.$iter() {
+                            for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                            $f(& $($mutable)? method.body);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // config/application.rb emits too, but is not in library_classes.
+        for lc in $app.library_classes.$iter().chain($app.rails_application.$iter()) {
+            for method in & $($mutable)? lc.methods {
+                for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                $f(& $($mutable)? method.body);
+            }
+            for (_, value) in & $($mutable)? lc.constants { $f(value); }
+            for call in & $($mutable)? lc.unknown_calls { $f(call); }
+            for initializer in & $($mutable)? lc.class_ivar_initializers { $f(initializer); }
+        }
+        for controller in & $($mutable)? $app.controllers {
+            for item in & $($mutable)? controller.body {
+                match item {
+                    crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                        for (_, default) in & $($mutable)? action.opt_params { $f(default); }
+                        $f(& $($mutable)? action.body);
+                    }
+                    crate::dialect::ControllerBodyItem::Unknown { expr, .. } => $f(expr),
+                    // Filter conditions are spliced into process_action.
+                    crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                        if let Some(cond) = filter.if_cond_expr.$option() { $f(cond); }
+                        if let Some(cond) = filter.unless_cond_expr.$option() { $f(cond); }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(seeds) = $app.seeds.$option() { $f(seeds); }
+    }
+}
+
 pub(crate) fn for_each_hook_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),
 ) {
-    fn visit_param_defaults(
-        params: &mut [crate::dialect::Param],
-        f: &mut impl FnMut(&mut crate::expr::Expr),
-    ) {
-        for p in params {
-            if let Some(default) = &mut p.default {
-                f(default);
-            }
-        }
-    }
-    for model in &mut app.models {
-        for item in &mut model.body {
-            match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    visit_param_defaults(&mut method.params, f);
-                    f(&mut method.body)
-                }
-                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                    visit_param_defaults(&mut scope.params, f);
-                    f(&mut scope.body)
-                }
-                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
-                    if let Some(cond) = &mut callback.condition {
-                        f(cond);
-                    }
-                }
-                // Unrecognized class-body exprs (constant procs and
-                // friends) round-trip verbatim into the emit — their
-                // sites are just as reachable.
-                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
-                // A has_many extension's methods (`has_many :memberships
-                // do def revise(…) … end end`) are app-authored bodies
-                // that the model lowering turns into ordinary methods;
-                // every pass driven from here has to see them first.
-                // campfire's `revise` reads `granted.present?` and the
-                // blank grounding never reached it.
-                crate::dialect::ModelBodyItem::Association {
-                    assoc: crate::dialect::Association::HasMany { extension, .. },
-                    ..
-                } => {
-                    for m in extension.iter_mut() {
-                        visit_param_defaults(&mut m.params, f);
-                        f(&mut m.body);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    for lc in &mut app.library_classes {
-        for method in &mut lc.methods {
-            visit_param_defaults(&mut method.params, f);
-            f(&mut method.body);
-        }
-        for (_name, value) in &mut lc.constants {
-            f(value);
-        }
-        for call in &mut lc.unknown_calls {
-            f(call);
-        }
-        for initializer in &mut lc.class_ivar_initializers {
-            f(initializer);
-        }
-    }
-    // `config/application.rb`. `App::rails_application` is a
-    // `LibraryClass` that EMITS but is not in `library_classes`, so
-    // every pass driven from here skipped it — and the bodies there are
-    // app-authored Ruby like any other. campfire's
-    // `ENV["APP_VERSION"].presence || …` reached spinel un-grounded and
-    // compiled to `undefined method 'presence' for an instance of
-    // String`: a body that ships has to be walked.
-    if let Some(lc) = &mut app.rails_application {
-        for method in &mut lc.methods {
-            visit_param_defaults(&mut method.params, f);
-            f(&mut method.body);
-        }
-        for (_name, value) in &mut lc.constants {
-            f(value);
-        }
-        for call in &mut lc.unknown_calls {
-            f(call);
-        }
-        for initializer in &mut lc.class_ivar_initializers {
-            f(initializer);
-        }
-    }
-    for controller in &mut app.controllers {
-        for item in &mut controller.body {
-            match item {
-                crate::dialect::ControllerBodyItem::Action { action, .. } => {
-                    for (_name, default) in &mut action.opt_params {
-                        f(default);
-                    }
-                    f(&mut action.body)
-                }
-                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
-                // A filter's `if:` / `unless:` lambda body is spliced into
-                // the dispatcher as written (`process_action`), so it is
-                // an app body like the model callbacks' conditions above.
-                // lobsters' `around_action :track_story_reads, if: -> {
-                // @user.present? }` reached spinel un-grounded and every
-                // story page 500'd on `present?`.
-                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
-                    if let Some(c) = &mut filter.if_cond_expr {
-                        f(c);
-                    }
-                    if let Some(c) = &mut filter.unless_cond_expr {
-                        f(c);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(seeds) = &mut app.seeds {
-        f(seeds);
-    }
+    hook_roots!(app, f, iter_mut, as_mut, mut);
 }
 
 /// Read-only twin of [`for_each_hook_body`], for a pass that needs to
@@ -1218,109 +1167,12 @@ pub(crate) fn for_each_hook_body(
 /// agree; disagreeing would thread a relation at the call site into a
 /// method that never grew the parameter.
 ///
-/// Kept adjacent to the mutable version deliberately: the two must walk
-/// the same set, and the only defence against that drifting is that
-/// they are read together.
+/// Both projections use the same inventory so their root sets cannot drift.
 pub(crate) fn for_each_hook_body_ref(
     app: &crate::app::App,
     f: &mut impl FnMut(&crate::expr::Expr),
 ) {
-    fn visit_param_defaults(
-        params: &[crate::dialect::Param],
-        f: &mut impl FnMut(&crate::expr::Expr),
-    ) {
-        for p in params {
-            if let Some(default) = &p.default {
-                f(default);
-            }
-        }
-    }
-    for model in &app.models {
-        for item in &model.body {
-            match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    visit_param_defaults(&method.params, f);
-                    f(&method.body)
-                }
-                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                    visit_param_defaults(&scope.params, f);
-                    f(&scope.body)
-                }
-                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
-                    if let Some(cond) = &callback.condition {
-                        f(cond);
-                    }
-                }
-                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
-                crate::dialect::ModelBodyItem::Association {
-                    assoc: crate::dialect::Association::HasMany { extension, .. },
-                    ..
-                } => {
-                    for m in extension {
-                        visit_param_defaults(&m.params, f);
-                        f(&m.body);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    for lc in &app.library_classes {
-        for method in &lc.methods {
-            visit_param_defaults(&method.params, f);
-            f(&method.body);
-        }
-        for (_name, value) in &lc.constants {
-            f(value);
-        }
-        for call in &lc.unknown_calls {
-            f(call);
-        }
-        for initializer in &lc.class_ivar_initializers {
-            f(initializer);
-        }
-    }
-    // Same set as the mutable twin — see the note there.
-    if let Some(lc) = &app.rails_application {
-        for method in &lc.methods {
-            visit_param_defaults(&method.params, f);
-            f(&method.body);
-        }
-        for (_name, value) in &lc.constants {
-            f(value);
-        }
-        for call in &lc.unknown_calls {
-            f(call);
-        }
-        for initializer in &lc.class_ivar_initializers {
-            f(initializer);
-        }
-    }
-    for controller in &app.controllers {
-        for item in &controller.body {
-            match item {
-                crate::dialect::ControllerBodyItem::Action { action, .. } => {
-                    for (_name, default) in &action.opt_params {
-                        f(default);
-                    }
-                    f(&action.body)
-                }
-                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
-                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
-                    if let Some(c) = &filter.if_cond_expr {
-                        f(c);
-                    }
-                    if let Some(c) = &filter.unless_cond_expr {
-                        f(c);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(seeds) = &app.seeds {
-        f(seeds);
-    }
+    hook_roots!(app, f, iter, as_ref);
 }
 
 // One inventory for the extra emit-bound roots the hook walker intentionally
@@ -1500,5 +1352,65 @@ mod pass_order_tests {
         for (name, _) in POST_ANALYZE_PASS_ORDER {
             assert!(seen.insert(*name), "duplicate pass name in order table: {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod body_root_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode, Literal, LValue};
+
+    fn trace(expr: &Expr, seen: &mut Vec<String>) {
+        match &*expr.node {
+            ExprNode::Lit { value: Literal::Int { value } } => seen.push(value.to_string()),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with("@@") => seen.push(name.as_str().to_owned()),
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| trace(child, seen));
+    }
+
+    #[test]
+    fn surveys_and_rewrites_visit_each_owned_root_once_in_order() {
+        let files = [
+            ("app/models/widget.rb", "class Widget < ApplicationRecord\n def probe(value=11); 12; end\n scope :slice, ->(value=13) { 14 }\n before_save :probe, if: -> { 15 }\n has_many :items do\n def extra(value=16); 17; end\n end\n dsl(18)\nend"),
+            ("app/controllers/widgets_controller.rb", "class WidgetsController < ApplicationController\n before_action :probe, if: -> { 19 }, unless: -> { 20 }\n def index(value=21); 22; end\n dsl(23)\nend"),
+            ("app/services/probe.rb", "class Probe\n ITEM=24\n dsl(25)\n def probe(value=26); 27; end\nend\nclass Counter\n @@counter=nil\n def probe(value=28); 29; end\nend"),
+            ("config/application.rb", "module Shell\n class Application < Rails::Application\n def probe(value=30); 31; end\n end\nend"),
+            ("db/seeds.rb", "34"),
+            ("app/views/widgets/index.html.erb", "<%= 35 %>"),
+            ("test/models/probe_test.rb", "class ProbeTest < ActiveSupport::TestCase\n def test_probe; assert_equal 36, 37; end\n def helper(value=38); 39; end\n def setup; 40; end\n ITEM=41\n class Nested\n @@nested=nil\n def probe(value=42); 43; end\n end\nend"),
+        ];
+        let mut app = crate::ingest::ingest_app_from_tree(files.into_iter()
+            .map(|(path, code)| (std::path::PathBuf::from(path), code.as_bytes().to_vec()))
+            .collect()).unwrap();
+        // Config ingest filters class-body DSL. The walker still owns every
+        // LibraryClass field, including roots supplied by later passes.
+        let config = app.rails_application.as_mut().unwrap();
+        config.constants.push((crate::ident::Symbol::from("ITEM"),
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 32 } })));
+        config.unknown_calls.push(Expr::new(crate::span::Span::synthetic(),
+            ExprNode::Lit { value: Literal::Int { value: 33 } }));
+        let hooks = ["11", "12", "13", "14", "15", "16", "17", "18",
+            "26", "27", "24", "25", "28", "29", "@@counter",
+            "30", "31", "32", "33", "19", "20", "21", "22", "23", "34"];
+        let extras = ["35", "40", "36", "37", "41", "39", "38", "43", "42", "@@nested"];
+        let mut seen = Vec::new();
+        for_each_hook_body_ref(&app, &mut |root| trace(root, &mut seen));
+        assert_eq!(seen, hooks);
+        seen.clear();
+        for_each_hook_body(&mut app, &mut |root| trace(root, &mut seen));
+        assert_eq!(seen, hooks);
+        let expected: Vec<_> = hooks.into_iter().chain(extras).collect();
+        seen.clear();
+        for_each_emit_body_ref(&app, &mut |root| trace(root, &mut seen));
+        assert_eq!(seen, expected);
+        seen.clear();
+        for_each_emit_body(&mut app, &mut |root| {
+            trace(root, &mut seen);
+            root.span.start = 99;
+        });
+        assert_eq!(seen, expected);
+        for_each_emit_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
     }
 }
