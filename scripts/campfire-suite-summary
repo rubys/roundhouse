@@ -218,7 +218,7 @@ if opts[:emit_log] && File.exist?(opts[:emit_log])
   emit["warnings"] = diags.count { |k, _| k == "warning" }
   emit["by_kind"] = diags.group_by { |_, k| k }.transform_values(&:size)
                          .sort_by { |_, n| -n }.to_h
-  emit["files"] = log[/wrote (\d+) files/, 1]&.to_i
+  emit["files"] = log[/(?:wrote|emitted) (\d+) files/, 1]&.to_i
 end
 
 # ── The stub ledger ──────────────────────────────────────────────────

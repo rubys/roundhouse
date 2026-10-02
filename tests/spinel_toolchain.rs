@@ -159,3 +159,148 @@ fn real_blog_spinel_tests_pass() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+/// Exercise the shipped CLI/spin package, not the pre-spin_shape test overlay.
+#[test]
+#[ignore = "requires spin and spinel on PATH plus SQLite/jemalloc development libraries"]
+fn identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds() {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn snapshot(root: &Path, dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+        let mut files = BTreeMap::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(snapshot(root, &path));
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (
+                        fs::read(&path).unwrap(),
+                        fs::metadata(&path).unwrap().modified().unwrap(),
+                    ),
+                );
+            }
+        }
+        files
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = scratch_dir(&format!("repeat-{}-{unique}", std::process::id()));
+    let fixture = scratch.join("source");
+    let dest = scratch.join("output");
+    copy_tree(roundhouse::fixtures::real_blog(), &fixture);
+    fs::write(fixture.join("public/freshness.bin"), [0xff, 0x00, 0x80]).unwrap();
+    let emit = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", "spinel"])
+            .arg(&fixture)
+            .arg("-o")
+            .arg(&dest)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "strict emit failed: {stderr}");
+        stderr
+    };
+    let build = || {
+        let output = Command::new("spin")
+            .args(["build", "blog"])
+            .current_dir(&dest)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "spin build failed:\n{stdout}\n{stderr}"
+        );
+        eprintln!("{stdout}{stderr}");
+        (stdout, stderr)
+    };
+
+    let first_emit = emit();
+    let generated = snapshot(&dest, &dest);
+    assert!(generated.contains_key(Path::new("spin.toml")));
+    assert!(
+        generated
+            .keys()
+            .any(|p| p.extension().is_some_and(|e| e == "rbs"))
+    );
+    assert_eq!(
+        generated[Path::new("public/freshness.bin")].0,
+        [0xff, 0x00, 0x80]
+    );
+    assert!(
+        first_emit.contains(&format!("emitted {} files", generated.len())),
+        "{first_emit}"
+    );
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog\n"), "{stdout}");
+    assert!(
+        stderr.contains("bin/blog.rb -> "),
+        "compiler invocation missing: {stderr}"
+    );
+    let executable = dest.join("build/bin/blog");
+    let built_at = fs::metadata(&executable).unwrap().modified().unwrap();
+
+    // Spinel compares integer seconds with a strict >. Waiting makes the
+    // old unconditional writer reliably invalidate the already built binary.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(emit(), first_emit);
+    let repeated = snapshot(&dest, &dest);
+    for (path, expected) in &generated {
+        assert_eq!(&repeated[path], expected, "{}", path.display());
+    }
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog (up to date)"), "{stdout}");
+    assert!(
+        !stderr.contains("bin/blog.rb -> "),
+        "unexpected compiler invocation: {stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&executable).unwrap().modified().unwrap(),
+        built_at
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+    let source = fixture.join("app/controllers/articles_controller.rb");
+    let before = fs::read_to_string(&source).unwrap();
+    let after = before.replace(
+        "Article was successfully created.",
+        "Article was successfully changed.",
+    );
+    assert_ne!(
+        before, after,
+        "fixture no longer contains the mutation literal"
+    );
+    fs::write(source, after).unwrap();
+    emit();
+    let ruby = Path::new("app/controllers/articles_controller.rb");
+    let changed = fs::read(dest.join(ruby)).unwrap();
+    assert_ne!(
+        changed, generated[ruby].0,
+        "source change must reach generated Ruby"
+    );
+    assert!(String::from_utf8_lossy(&changed).contains("Article was successfully changed."));
+    assert_eq!(
+        fs::metadata(dest.join("spin.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        generated[Path::new("spin.toml")].1
+    );
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog\n"), "{stdout}");
+    assert!(
+        stderr.contains("bin/blog.rb -> "),
+        "changed Ruby did not invoke compiler: {stderr}"
+    );
+    assert!(fs::metadata(&executable).unwrap().modified().unwrap() > built_at);
+    fs::remove_dir_all(scratch).unwrap();
+}
