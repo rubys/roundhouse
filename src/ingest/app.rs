@@ -79,7 +79,10 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
             format!("{} is not a directory", dir.display()),
         )));
     }
-    ingest_app_with_vfs(&FsVfs::new(), dir)
+    // Absolute lockfile remotes must resolve identically whether the CLI
+    // names this app by a relative path or an absolute one.
+    let dir = dir.canonicalize()?;
+    ingest_app_with_vfs(&FsVfs::new(), &dir)
 }
 
 /// Ingest a Rails app from an in-memory `path → bytes` tree. Path keys
@@ -228,6 +231,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     super::sources::reset();
     super::sources::set_root(dir);
+    let path_gems = path_gem_dirs(vfs, dir);
+    let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
+    let vfs = &source_vfs;
     let additional_test_paths = additional_test_paths(vfs, dir)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();
@@ -328,11 +334,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
-    // App-layer roots: `app`, plus `<pkg>/app` for every Packwerk
-    // package that has one. Every layer walk below loops over these
-    // instead of a single hardwired `app/…` — see `app_roots`'s doc
-    // comment for why a Packwerk app needs more than one.
-    let roots = app_roots(vfs, dir);
+    // Packwerk packages and in-repository engines share the root app's passes.
+    let roots = app_roots(vfs, dir, &path_gems);
     app.app_roots = roots.iter().map(|r| r.display().to_string()).collect();
     // A namespace's `table_name_prefix` has to be known BEFORE the model
     // it prefixes is ingested, and file order does not guarantee that
@@ -388,7 +391,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // package under `lib/`, or in whatever the app adds to its
     // autoload paths. Collected before anything is classified, so a
     // model in either tree resolves against a base in either tree.
-    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
+    for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
         let support_dir = dir.join(sub.as_str());
         if !vfs.is_dir(&support_dir) {
             continue;
@@ -520,7 +523,25 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // files itself, from an initializer — and dropping them lost
     // `String#all_emoji?`, which every message row calls. A subdir some
     // initializer explicitly requires is app code after all.
-    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
+    // Support roots can nest: an engine at `lib/billing` puts
+    // `lib/billing/app` and `lib/billing/lib` under the root `lib`.
+    // A file in a layer of another app root belongs to that root's own
+    // passes (its `models`/`controllers`/… walks, and one support root
+    // per remaining layer), and a file two support roots both reach is
+    // ingested by the first. A file directly in `lib/billing/app`, or
+    // under its `assets`/`javascript`, has no pass of its own there and
+    // stays with the walk that reached it.
+    let in_nested_layer = |entry: &Path, root: &Path| {
+        entry.strip_prefix(root).is_ok_and(|rel| {
+            let mut components = rel.components();
+            let layer = components.next();
+            components.next().is_some()
+                && !layer.is_some_and(|c| c.as_os_str() == "assets" || c.as_os_str() == "javascript")
+        })
+    };
+    let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
+    let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
         let sub = sub.as_str();
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
@@ -529,6 +550,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
         for entry in entries {
             if sub == "lib" && ignored_lib_file(&entry) {
+                continue;
+            }
+            if nested_app_roots
+                .iter()
+                .any(|root| in_nested_layer(&entry, root) && !support_dir.starts_with(root))
+            {
+                continue;
+            }
+            if !support_seen.insert(entry.clone()) {
                 continue;
             }
             let Ok(source) = vfs.read(&entry) else { continue };
@@ -1171,7 +1201,22 @@ end
         }
     }
 
-    for root in &roots {
+    // Host templates take precedence, as in Rails. Other roots are
+    // sorted by path; their relative order is not Rails engine load order.
+    // A template an earlier root has under the same name and format shadows a later
+    // root's: `app/views/layouts/application.html.erb` is what renders,
+    // and an engine's copy of it never does. Keyed on name and format,
+    // not the file, so an `.erb` override shadows a `.haml` original;
+    // another FORMAT of the same name is a different template and stays.
+    // Only across roots — within one, nothing changes.
+    let mut view_owner: HashMap<(Symbol, Symbol), usize> = HashMap::new();
+    for (root_index, root) in roots.iter().enumerate() {
+        let mut keep = |view: &crate::dialect::View| {
+            let owner = *view_owner
+                .entry((view.name.clone(), view.format.clone()))
+                .or_insert(root_index);
+            owner == root_index
+        };
         let views_dir = dir.join(root).join("views");
         if !vfs.is_dir(&views_dir) {
             continue;
@@ -1201,7 +1246,9 @@ end
                 &erb_path.display().to_string(),
                 engine.compile_fn(),
             ))? {
-                app.views.push(view);
+                if keep(&view) {
+                    app.views.push(view);
+                }
             }
         }
 
@@ -1219,7 +1266,9 @@ end
                 rel,
                 &jb_path.display().to_string(),
             ))? {
-                app.views.push(view);
+                if keep(&view) {
+                    app.views.push(view);
+                }
             }
         }
     }
@@ -1593,6 +1642,8 @@ end
     );
     drop(sources);
     splice_concerns_into_controllers(&mut app);
+    // After the splice: an action a concern provides is not implicit.
+    synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
@@ -1974,6 +2025,96 @@ fn splice_concern_class_methods_into_includers(
         }
     }
     app.concern_spliced_class_methods = spliced;
+}
+
+/// A routed action with a template and no method behind it gets the
+/// empty method Rails behaves as if it had.
+///
+/// `before_action :set_api_token, only: %i[show edit]` with only `edit`
+/// written out still serves `api_tokens/show.html.erb`: the router
+/// dispatches `show`, the filters run, and the implicit render finds the
+/// template. Nothing downstream keys on a template, though — the view's
+/// ivar seed, the filter chain and every emitter's dispatch table are
+/// built from the controller's actions — so the template was fed by
+/// nothing (`@api_token has no known type` at each read) and the emitted
+/// app had no `show` to route to. Writing the method here answers all of
+/// them at once, the same way an author adding `def show; end` would.
+///
+/// All three must hold: a route names `controller#action`, a template
+/// exists for it, and neither the controller nor an ancestor defines it.
+/// A template no route reaches stays the unreachable file it is.
+fn synthesize_template_only_actions(app: &mut App) {
+    use crate::dialect::{Action, ControllerBodyItem, RenderTarget};
+    use std::collections::{BTreeSet, HashSet};
+
+    let view_names: HashSet<&str> = app.views.iter().map(|v| v.name.as_str()).collect();
+    let has_template = |prefix: &str, action: &str| {
+        let name = format!("{prefix}/{action}");
+        let variant = format!("{name}.");
+        view_names.iter().any(|v| *v == name || v.starts_with(&variant))
+    };
+    let defines = |controller: &crate::dialect::Controller, action: &Symbol| {
+        // The controller itself, then its ancestors within the app.
+        let mut current = Some(controller);
+        let mut depth = 0;
+        while let Some(c) = current {
+            if c.actions().any(|a| &a.name == action) {
+                return true;
+            }
+            depth += 1;
+            if depth > 32 {
+                break;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        }
+        false
+    };
+
+    let mut missing: BTreeSet<(crate::ident::ClassId, Symbol)> = BTreeSet::new();
+    for route in crate::lower::routes::flatten_routes(app) {
+        let Some(controller) = app.controllers.iter().find(|c| c.name == route.controller) else {
+            continue;
+        };
+        let prefix = crate::analyze::controller_view_prefix(&controller.name);
+        if has_template(&prefix, route.action.as_str()) && !defines(controller, &route.action) {
+            missing.insert((route.controller.clone(), route.action.clone()));
+        }
+    }
+
+    for (controller, action) in missing {
+        let Ok(mut methods) =
+            crate::runtime_src::parse_methods(&format!("def {}\nend\n", action.as_str()))
+        else {
+            continue;
+        };
+        let Some(method) = methods.pop() else { continue };
+        let Some(controller) = app.controllers.iter_mut().find(|c| c.name == controller) else {
+            continue;
+        };
+        let item = ControllerBodyItem::Action {
+            action: Action {
+                name: action,
+                params: crate::ty::Row::default(),
+                opt_params: Vec::new(),
+                kw_params: Vec::new(),
+                kwrest_param: None,
+                block_param: None,
+                name_span: crate::span::Span::synthetic(),
+                body: method.body,
+                renders: RenderTarget::Inferred,
+                effects: crate::effect::EffectSet::pure(),
+            },
+            leading_comments: Vec::new(),
+            leading_blank_line: true,
+        };
+        // Ahead of `private`: an action the router can reach is public.
+        let at = controller
+            .body
+            .iter()
+            .position(|item| matches!(item, ControllerBodyItem::PrivateMarker { .. }))
+            .unwrap_or(controller.body.len());
+        controller.body.insert(at, item);
+    }
 }
 
 /// Splice a controller concern's surface into every controller that
@@ -3812,10 +3953,9 @@ fn nested_under(
 
 /// The support roots to walk for library classes: every `app/*`
 /// subdirectory that has no ingest pass of its own, plus `extras` and
-/// `lib`, plus whatever `config/application.rb` puts on the autoload or
-/// eager-load paths — minus the `autoload_lib(ignore:)` set. Paths are
-/// relative to the app root, deduplicated, and sorted so the walk order
-/// does not depend on directory-entry order.
+/// `lib`, each in-repository path gem's `lib/`, and the autoload or
+/// eager-load paths from `config/application.rb`. The app's ignore
+/// list removes roots. Paths are app-relative, deduplicated, and sorted.
 ///
 /// Rails autoloads *every* `app/*` subdirectory, so a fixed list was a
 /// guess about what an app calls its layers. An app whose use cases live
@@ -3833,6 +3973,7 @@ fn support_roots<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     roots: &[PathBuf],
+    path_gems: &[PathBuf],
     lib_ignores: &[String],
 ) -> Vec<String> {
     // Directories under an app root that another pass already ingests
@@ -3842,6 +3983,12 @@ fn support_roots<V: Vfs + ?Sized>(
         &["models", "controllers", "views", "helpers", "assets", "javascript"];
 
     let mut out: Vec<String> = vec!["extras".to_string(), "lib".to_string()];
+    for gem in path_gems {
+        let lib = gem.join("lib");
+        if vfs.is_dir(&lib) {
+            out.push(lib.strip_prefix(dir).expect("path gems are inside the app").display().to_string());
+        }
+    }
     for root in roots {
         if let Ok(entries) = vfs.read_dir(&dir.join(root)) {
             for entry in entries {
@@ -3882,21 +4029,203 @@ fn support_roots<V: Vfs + ?Sized>(
 }
 
 /// App-layer roots for one Rails app: `app` first, then one
-/// `<pkg>/app` per Packwerk package that has an `app/` directory —
-/// sorted (after `app`) and deduplicated. Every other layer walk in
-/// this file loops over these instead of hardwiring `app/…`, so a
-/// Packwerk app's `packs/*/app/*` (or `components/*/app/*`,
-/// `engines/*/app/*`) gets the same models/controllers/views/helpers
-/// passes the root `app/` does.
+/// `<pkg>/app` per Packwerk package that has an `app/` directory and
+/// one `<engine>/app` per in-repo Rails engine — sorted (after `app`)
+/// and deduplicated. Every other layer walk in this file loops over
+/// these instead of hardwiring `app/…`, so a Packwerk app's
+/// `packs/*/app/*` (or `components/*/app/*`, `engines/*/app/*`) and an
+/// engine's `lib/<name>/app/*` get the same
+/// models/controllers/views/helpers passes the root `app/` does.
 ///
-/// Non-Packwerk apps (no `packwerk.yml` or `packs.yml` at the root)
-/// get exactly `["app"]` — zero behavior change, which the fixtures'
-/// zero-diagnostic gates depend on.
-pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+/// Apps without Packwerk packages or in-repository engines retain the
+/// `["app"]` app-root list. Library-only path gems contribute support
+/// roots instead.
+pub(super) fn app_roots<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    path_gems: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from("app")];
+    packwerk_app_roots(vfs, dir, &mut roots);
+    engine_app_roots(vfs, dir, path_gems, &mut roots);
+    roots[1..].sort();
+    roots.dedup();
+    roots
+}
+
+/// In-repository `PATH` sources, normalized once for app and library discovery.
+fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return Vec::new() };
+    let mut dirs = Vec::new();
+    for remote in crate::gems::lock_path_remotes(&lock) {
+        let remote = Path::new(&remote);
+        let remote = remote.strip_prefix(dir).unwrap_or(remote);
+        let mut relative = PathBuf::new();
+        let mut inside = true;
+        for component in remote.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => relative.push(part),
+                _ => inside = false,
+            }
+        }
+        // The app itself already contributes its app/ and lib/ trees.
+        if !inside || relative.as_os_str().is_empty() {
+            continue;
+        }
+        let gem = dir.join(relative);
+        if !path_has_symlink_component(vfs, dir, &gem) && vfs.is_dir(&gem) {
+            dirs.push(gem);
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// Exclude symbolic links throughout selected path gems, without changing other sources.
+struct PathGemVfs<'a, V: Vfs + ?Sized> {
+    inner: &'a V,
+    root: &'a Path,
+    dirs: &'a [PathBuf],
+}
+
+impl<V: Vfs + ?Sized> PathGemVfs<'_, V> {
+    /// Apply the path-gem boundary to direct reads as well as directory walks.
+    fn linked(&self, path: &Path) -> bool {
+        self.dirs.iter().any(|dir| path.starts_with(dir))
+            && path_has_symlink_component(self.inner, self.root, path)
+    }
+
+    /// Treat excluded paths as absent, as directory discovery does.
+    fn check(&self, path: &Path) -> std::io::Result<()> {
+        if self.linked(path) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "symbolic link excluded from path gem sources",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<V: Vfs + ?Sized> Vfs for PathGemVfs<'_, V> {
+    /// Read source bytes only after the path-gem link check.
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.check(path)?;
+        self.inner.read(path)
+    }
+
+    /// Read source text only after the path-gem link check.
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        self.check(path)?;
+        self.inner.read_to_string(path)
+    }
+
+    /// Omit linked children from directory listings inside selected path gems.
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.check(path)?;
+        let mut entries = self.inner.read_dir(path)?;
+        if self.dirs.iter().any(|dir| path.starts_with(dir)) {
+            entries.retain(|entry| !self.inner.is_symlink(entry));
+        }
+        Ok(entries)
+    }
+
+    /// Report an excluded path-gem path as absent.
+    fn exists(&self, path: &Path) -> bool {
+        !self.linked(path) && self.inner.exists(path)
+    }
+
+    /// Exclude linked path-gem directories from source discovery.
+    fn is_dir(&self, path: &Path) -> bool {
+        !self.linked(path) && self.inner.is_dir(path)
+    }
+
+    /// Inspect link metadata without opening the target.
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.inner.is_symlink(path)
+    }
+}
+
+/// `<engine>/app` for every Rails engine the app carries in its own
+/// tree: a `PATH` source in `Gemfile.lock` (`gem "x", path: "lib/x"`)
+/// whose directory is inside the app, has an `app/` tree, and declares
+/// a `Rails::Engine` subclass under its `lib/`. Rails adds such an
+/// engine's `app/*` to the host's autoload and view paths, so its code
+/// is the app's code. A path gem without an engine class is a plain
+/// library whose `app/` Rails never loads, and one outside the tree
+/// (`path: "../shared"`) is not this app's source — neither is a root.
+fn engine_app_roots<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    path_gems: &[PathBuf],
+    roots: &mut Vec<PathBuf>,
+) {
+    for engine_dir in path_gems {
+        if !vfs.is_dir(&engine_dir.join("app"))
+            || !declares_rails_engine(vfs, &engine_dir.join("lib"))
+        {
+            continue;
+        }
+        let relative = engine_dir.strip_prefix(dir).expect("path gems are inside the app");
+        roots.push(relative.join("app"));
+    }
+}
+
+/// Whether any Ruby file under `lib_dir` subclasses `Rails::Engine`
+/// (`class Engine < ::Rails::Engine`).
+fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
+    if !vfs.is_dir(lib_dir) {
+        return false;
+    }
+    let Ok(files) = read_rb_files(vfs, lib_dir) else { return false };
+    struct EngineVisitor {
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for EngineVisitor {
+        fn visit_class_node(&mut self, class: &ruby_prism::ClassNode<'pr>) {
+            if self.found {
+                return;
+            }
+            self.found = class.superclass()
+                .and_then(|parent| parent.as_constant_path_node())
+                .is_some_and(|parent| {
+                    parent.name().is_some_and(|name| super::util::constant_id_str(&name) == "Engine")
+                        && parent.parent().is_some_and(|namespace| {
+                            if let Some(name) = namespace.as_constant_read_node() {
+                                super::util::constant_id_str(&name.name()) == "Rails"
+                            } else {
+                                namespace.as_constant_path_node().is_some_and(|name| {
+                                    name.parent().is_none()
+                                        && name.name().is_some_and(|id| super::util::constant_id_str(&id) == "Rails")
+                                })
+                            }
+                        })
+                });
+            if !self.found {
+                ruby_prism::visit_class_node(self, class);
+            }
+        }
+    }
+    files.iter().any(|file| {
+        vfs.read(file).is_ok_and(|source| {
+            let parsed = ruby_prism::parse(&source);
+            let mut visitor = EngineVisitor { found: false };
+            ruby_prism::Visit::visit(&mut visitor, &parsed.node());
+            visitor.found
+        })
+    })
+}
+
+/// `<pkg>/app` for every Packwerk package that has an `app/`
+/// directory. Nothing without a `packwerk.yml` or `packs.yml` at the
+/// root.
+fn packwerk_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBuf>) {
     let has_packwerk = vfs.exists(&dir.join("packwerk.yml")) || vfs.exists(&dir.join("packs.yml"));
     if !has_packwerk {
-        return roots;
+        return;
     }
     let package_paths = vfs
         .read(&dir.join("packwerk.yml"))
@@ -3930,9 +4259,6 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
             roots.push(rel.join("app"));
         }
     }
-    roots[1..].sort();
-    roots.dedup();
-    roots
 }
 
 /// `package_paths:` from a `packwerk.yml`'s bytes, as the raw glob
@@ -3962,16 +4288,25 @@ fn parse_package_paths(bytes: &[u8]) -> Option<Vec<String>> {
 
 /// Directories under `dir` matching a `package_paths:` glob that
 /// actually carry a `package.yml` — the candidates for
-/// [`app_roots`]. Supports `*` (one directory level) and `**` (any
-/// depth, capped at 4 levels beyond the match point); a trailing `/`
-/// is insignificant. Not a general glob engine — Packwerk's own
-/// globs are this small.
+/// [`app_roots`]. Supports comma-separated brace alternatives, `*`
+/// (one directory level), and `**` (any depth, capped at 4 levels
+/// beyond the match point); a trailing `/` is insignificant.
 fn expand_package_glob<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     glob: &str,
     out: &mut Vec<PathBuf>,
 ) {
+    if let Some(open) = glob.find('{') {
+        if let Some(close) = glob[open + 1..].find('}').map(|offset| open + 1 + offset) {
+            for alternative in glob[open + 1..close].split(',') {
+                let expanded = format!("{}{}{}", &glob[..open], alternative, &glob[close + 1..]);
+                expand_package_glob(vfs, dir, &expanded, out);
+            }
+            return;
+        }
+    }
+
     let segments: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
     let mut candidates = Vec::new();
     expand_glob_segments(vfs, dir, &segments, 4, &mut candidates);
