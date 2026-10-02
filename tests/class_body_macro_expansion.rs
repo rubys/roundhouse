@@ -689,6 +689,8 @@ fn configuration_refuses_lexically_shadowed_framework_constants() {
         "ActiveSupport::Concern, other = String, 1",
         "Object.new::Concern = String",
         "Object.new::Concern, other = String, 1",
+        "module Object.new::ActiveSupport; end",
+        "module Object.new::Concern; end",
         "if true; ActiveSupport = String; end",
         "unless false; ActiveSupport = String; end",
         "begin; ActiveSupport = String; end",

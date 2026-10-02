@@ -2518,7 +2518,11 @@ fn framework_shadow_scopes(
         }
         fn declaration(&mut self, path: ruby_prism::Node<'_>, body: Option<ruby_prism::Node<'_>>, class: bool) {
             use super::util::constant_path_is_rooted;
-            let Some(names) = Self::literal_path(&path) else { return };
+            let Some(names) = Self::literal_path(&path) else {
+                // A dynamic namespace cannot establish a safe lookup scope.
+                self.out.insert(Vec::new());
+                return;
+            };
             let outer = self.scope.clone();
             if path.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
                 self.scope.clear();
