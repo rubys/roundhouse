@@ -97,12 +97,46 @@ fn build_and_run(test_file: &Path, tag: &str) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
+    let reuse = tag == "inflector"
+        && std::env::var("ROUNDHOUSE_CI_REUSE").as_deref() == Ok("rust-inflector");
+    let mut eligible = false;
+    if reuse {
+        let lock = Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(&scratch)
+            .status()
+            .expect("resolve emitted Cargo dependencies");
+        assert!(lock.success(), "resolve inflector dependencies");
+        let probe = Command::new("python3")
+            .args([
+                "scripts/ci-reuse.py",
+                "probe",
+                "--job",
+                "rust-inflector",
+                "--input",
+            ])
+            .arg(&scratch)
+            .status();
+        if probe.is_ok_and(|status| status.success()) {
+            let outputs = std::fs::read_to_string(std::env::var("GITHUB_OUTPUT").unwrap())
+                .expect("read reuse decision");
+            if outputs.lines().any(|line| line == "hit=true") {
+                eprintln!("inflector: reused original successful emitted-test execution");
+                return;
+            }
+            eligible = outputs.lines().any(|line| line == "eligible=true");
+        }
+    }
+
     // Share the outer build's registry + a per-tag target dir: a cold
     // `cargo test` here would otherwise re-download and re-compile the
     // whole dependency graph for every suite.
-    let output = Command::new("cargo")
-        .arg("test")
-        .arg("--quiet")
+    let mut cargo = Command::new("cargo");
+    cargo.arg("test");
+    if reuse {
+        cargo.arg("--locked");
+    }
+    let output = cargo
         .current_dir(&scratch)
         .env("CARGO_TARGET_DIR", scratch.join("target"))
         .output()
@@ -120,6 +154,33 @@ fn build_and_run(test_file: &Path, tag: &str) {
     );
 
     assert_tests_ran(&stdout, test_file, &scratch);
+    if tag == "inflector" {
+        assert!(
+            inflector_tests_ran(&stdout),
+            "no emitted inflector tests executed:\n{stdout}"
+        );
+    }
+    if eligible {
+        // Recording is ONLY in the actual-execution branch, after the child
+        // passed and proved emitted (not merely hand-written runtime) tests.
+        // Bookkeeping failure must not turn a successful test red.
+        let _ = Command::new("python3")
+            .args([
+                "scripts/ci-reuse.py",
+                "record",
+                "--job",
+                "rust-inflector",
+                "--outcome",
+                "success",
+            ])
+            .status();
+    }
+}
+
+fn inflector_tests_ran(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.starts_with("test tests::inflector::") && line.ends_with(" ... ok"))
 }
 
 /// Defense against issue #4: `cargo test` exits 0 when the emitted crate
@@ -157,9 +218,28 @@ fn parses_the_cargo_summary() {
 }
 
 #[test]
+fn inflector_floor_requires_a_successful_emitted_test_not_other_runtime_tests() {
+    assert!(!inflector_tests_ran(
+        "test db::tests::insert ... ok\ntest result: ok. 14 passed; 0 failed;"
+    ));
+    assert!(!inflector_tests_ran(
+        "test tests::inflector::test_pluralize ... ignored"
+    ));
+    assert!(!inflector_tests_ran(
+        "test tests::inflector::test_pluralize ... FAILED"
+    ));
+    assert!(inflector_tests_ran(
+        "test db::tests::insert ... ok\ntest tests::inflector::test_pluralize ... ok"
+    ));
+}
+
+#[test]
 #[ignore]
 fn inflector_test_passes_under_rust() {
-    build_and_run(Path::new("runtime/ruby/test/inflector_test.rb"), "inflector");
+    build_and_run(
+        Path::new("runtime/ruby/test/inflector_test.rb"),
+        "inflector",
+    );
 }
 
 // ── Deferred: wired, failing, and each on a NAMED rust gap ──────────

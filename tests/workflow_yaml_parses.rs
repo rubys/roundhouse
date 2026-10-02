@@ -17,6 +17,39 @@ use std::fs;
 use std::path::Path;
 
 #[test]
+#[cfg(unix)]
+fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
+    use std::os::unix::fs::PermissionsExt;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("campfire-docker-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let result = std::process::Command::new("bash")
+        .arg("scripts/campfire-docker-files")
+        .arg(&root)
+        .args(["roundhouse-sha", "campfire-sha", "spinel-version"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result);
+    let dockerfile = fs::read_to_string(root.join("Dockerfile")).unwrap();
+    assert!(!dockerfile.lines().any(|line| line.starts_with("# syntax=")));
+    assert!(dockerfile.contains("COPY boot ./boot\n"));
+    assert!(!dockerfile.contains("--chmod="));
+    assert_eq!(
+        fs::metadata(root.join("boot"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
@@ -134,7 +167,9 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
     let jobs = &ci["jobs"];
     assert_eq!(
         jobs["build-site"]["if"].as_str(),
-        Some("${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}")
+        Some(
+            "${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}"
+        )
     );
     assert_eq!(jobs["smoke"]["needs"].as_str(), Some("build-site"));
     let steps = jobs["build-site"]["steps"].as_sequence().unwrap();
@@ -197,7 +232,9 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
     // its explanatory publication, but cancellation or a bad site must.
     assert_eq!(
         jobs["assemble-site"]["if"].as_str(),
-        Some("${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}")
+        Some(
+            "${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}"
+        )
     );
     assert_eq!(
         jobs["deploy"]["if"].as_str(),
@@ -218,7 +255,9 @@ fn draft_transitions_replace_the_previous_pr_run() {
     }
     assert_eq!(
         ci["concurrency"]["group"].as_str(),
-        Some("${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}")
+        Some(
+            "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
+        )
     );
     assert_eq!(
         ci["concurrency"]["cancel-in-progress"].as_str(),
@@ -296,11 +335,21 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
         Some("${{ steps.binary.outputs.artifact-id }}")
     );
     for (artifact_id, expected) in [
-        ("", "No Campfire comparison binary was uploaded. The default, minor-gc and verify-gen comparisons are blocked, not passed; see the producer failure above.\n"),
-        ("12345", "Campfire comparison binary uploaded; default, minor-gc and verify-gen comparisons can run.\n"),
+        (
+            "",
+            "No Campfire comparison binary was uploaded. The default, minor-gc and verify-gen comparisons are blocked, not passed; see the producer failure above.\n",
+        ),
+        (
+            "12345",
+            "Campfire comparison binary uploaded; default, minor-gc and verify-gen comparisons can run.\n",
+        ),
     ] {
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let summary = std::env::temp_dir().join(format!("campfire-ready-{}-{unique}.md", std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let summary =
+            std::env::temp_dir().join(format!("campfire-ready-{}-{unique}.md", std::process::id()));
         let output = Command::new("bash")
             .args(["-e", "-c", report["run"].as_str().unwrap()])
             .env("ARTIFACT_ID", artifact_id)
@@ -420,12 +469,18 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
         )
         .unwrap();
         for (path, body) in [
-            ("bin/cargo", "#!/bin/sh\necho emit-output >&2\nexit \"$EMIT_EXIT\"\n"),
+            (
+                "bin/cargo",
+                "#!/bin/sh\necho emit-output >&2\nexit \"$EMIT_EXIT\"\n",
+            ),
             (
                 "bin/make",
                 "#!/bin/sh\necho build-output >&2\nif [ \"$RETAINED_C\" = true ]; then\n  echo \"spinel: the generated C is kept at $PWD/actual.c\" >&2\nfi\necho \"note: the generated C is kept at $PWD/stale.c\"\nexit \"$BUILD_EXIT\"\n",
             ),
-            ("spinel-dist/spinel", "#!/bin/sh\n[ \"$1\" = --version ] || exit 99\necho compiler-version\n"),
+            (
+                "spinel-dist/spinel",
+                "#!/bin/sh\n[ \"$1\" = --version ] || exit 99\necho compiler-version\n",
+            ),
         ] {
             let path = root.join(path);
             fs::write(&path, body).unwrap();
@@ -568,11 +623,225 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
             ("verify-gen", "--verify-gen")
         ]
     );
-    assert!(
-        gc["steps"]
-            .as_sequence()
-            .unwrap()
+    assert!(gc["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .all(|step| step["run"].as_str() != Some(command)));
+}
+
+#[test]
+fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let jobs = ci["jobs"].as_mapping().unwrap();
+    let mut enabled = Vec::new();
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap();
+        let steps = job["steps"].as_sequence().unwrap();
+        let Some(probe) = steps
             .iter()
-            .all(|step| step["run"].as_str() != Some(command))
+            .find(|step| step["id"].as_str() == Some("reuse"))
+        else {
+            continue;
+        };
+        enabled.push(name);
+        assert_eq!(job["permissions"]["actions"].as_str(), Some("read"));
+        assert!(
+            probe["if"]
+                .as_str()
+                .unwrap()
+                .contains("github.event_name == 'pull_request'"),
+            "main must not even look up old receipts: {name}"
+        );
+        assert_eq!(probe["continue-on-error"].as_bool(), Some(true));
+        assert!(probe["run"]
+            .as_str()
+            .unwrap()
+            .contains("scripts/ci-reuse.py probe"));
+        assert!(job.get("continue-on-error").is_none());
+        let validation_ids: &[&str] = match name {
+            "store-check" => {
+                assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
+                assert_eq!(job["needs"][1].as_str(), Some("unit"));
+                &["build", "check"]
+            }
+            "writebook-inventory" => {
+                assert_eq!(job["needs"].as_str(), Some("unit"));
+                &["inventory", "report"]
+            }
+            "browser-smoke-typescript" => {
+                assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
+                assert_eq!(job["needs"][1].as_str(), Some("unit"));
+                &["browser"]
+            }
+            "smoke" => {
+                assert_eq!(job["needs"].as_str(), Some("build-site"));
+                assert_eq!(
+                    probe["if"].as_str(),
+                    Some("github.event_name == 'pull_request' && matrix.target == 'rust'")
+                );
+                &["smoke"]
+            }
+            _ => panic!("unaudited reuse job: {name}"),
+        };
+        for &id in validation_ids {
+            let step = steps
+                .iter()
+                .find(|step| step["id"].as_str() == Some(id))
+                .unwrap();
+            assert!(step.get("continue-on-error").is_none());
+            let guard = step["if"].as_str().unwrap();
+            assert!(guard
+                .contains("steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'"));
+        }
+        let receipt = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some("execution"))
+            .unwrap();
+        for &id in validation_ids {
+            assert!(receipt["if"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("steps.{id}.outcome == 'success'")));
+        }
+        assert_eq!(receipt["continue-on-error"].as_bool(), Some(true));
+    }
+    enabled.sort();
+    assert_eq!(
+        enabled,
+        [
+            "browser-smoke-typescript",
+            "smoke",
+            "store-check",
+            "writebook-inventory"
+        ]
     );
+    assert!(ci["on"].get("pull_request_target").is_none());
+}
+
+#[test]
+fn downstream_reuse_keeps_producers_fresh_and_other_matrix_checks_running() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let worker = ci["jobs"]["browser-smoke-typescript"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let prepare = worker
+        .iter()
+        .position(|s| s["name"].as_str() == Some("Emit and build current SharedWorker project"))
+        .unwrap();
+    let probe = worker
+        .iter()
+        .position(|s| s["id"].as_str() == Some("reuse"))
+        .unwrap();
+    assert!(prepare < probe);
+    assert!(worker[prepare].get("if").is_none());
+    assert_eq!(worker[prepare]["run"].as_str(), Some("npm run prebuild"));
+    let validate = worker
+        .iter()
+        .find(|s| s["id"].as_str() == Some("browser"))
+        .unwrap();
+    assert_eq!(validate["run"].as_str(), Some("npm run test-only"));
+    let compare = &ci["jobs"]["compare"];
+    assert_eq!(compare["permissions"]["actions"].as_str(), Some("read"));
+    let steps = compare["steps"].as_sequence().unwrap();
+    let inflector = steps
+        .iter()
+        .find(|s| s["id"].as_str() == Some("inflector"))
+        .unwrap();
+    assert!(inflector.get("continue-on-error").is_none());
+    assert_eq!(
+        inflector["env"]["ROUNDHOUSE_CI_REUSE"].as_str(),
+        Some("${{ github.event_name == 'pull_request' && 'rust-inflector' || '' }}")
+    );
+    let upload = steps
+        .iter()
+        .find(|s| {
+            s["with"]["name"].as_str()
+                == Some("ci-executed-rust-inflector-${{ github.run_attempt }}")
+        })
+        .unwrap();
+    assert!(upload["if"]
+        .as_str()
+        .unwrap()
+        .contains("steps.inflector.outputs.recorded == 'true'"));
+    assert_eq!(upload["continue-on-error"].as_bool(), Some(true));
+    let dom = steps
+        .iter()
+        .find(|s| s["name"].as_str() == Some("scripts/compare ${{ matrix.target }}"))
+        .unwrap();
+    assert_eq!(dom["if"].as_str(), Some("${{ !cancelled() }}"));
+    let smoke = ci["jobs"]["smoke"]["steps"].as_sequence().unwrap();
+    let validate = smoke
+        .iter()
+        .find(|s| s["id"].as_str() == Some("smoke"))
+        .unwrap();
+    assert!(validate["if"]
+        .as_str()
+        .unwrap()
+        .starts_with("matrix.target != 'rust' ||"));
+    assert!(validate["run"]
+        .as_str()
+        .unwrap()
+        .contains("--work-dir \"$RUNNER_TEMP/ci-smoke-validation\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
+    let result = std::process::Command::new("python3")
+        .args(["tests/ci_reuse_test.py", "-v"])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        // Exercise the actual generated README, not just a synthetic fixture.
+        .env(
+            "ROUNDHOUSE_TEST_RUST_README",
+            roundhouse::project::target_readme(roundhouse::project::BuildTarget::Rust),
+        )
+        .output()
+        .expect("CI reuse tests require python3 (available on hosted runners)");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receipts() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for (name, expected_cargo_commands) in [("store-check", 1), ("writebook-inventory", 2)] {
+        let steps = ci["jobs"][name]["steps"].as_sequence().unwrap();
+        let commands: Vec<_> = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .flat_map(str::lines)
+            .map(str::trim)
+            .filter(|line| line.starts_with("cargo "))
+            .collect();
+        assert_eq!(commands.len(), expected_cargo_commands);
+        for command in commands {
+            assert!(
+                command.split_whitespace().any(|flag| flag == "--locked"),
+                "{name}: unrecorded dependency resolution invalidates reuse: {command}"
+            );
+        }
+        let uploads: Vec<_> = steps
+            .iter()
+            .filter(|step| {
+                step["with"]["name"]
+                    .as_str()
+                    .is_some_and(|artifact| artifact.starts_with("ci-executed-"))
+            })
+            .collect();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(
+            uploads[0]["if"].as_str(),
+            Some("success() && steps.execution.outcome == 'success'")
+        );
+        assert_eq!(uploads[0]["continue-on-error"].as_bool(), Some(true));
+        assert_eq!(uploads[0]["with"]["retention-days"].as_u64(), Some(7));
+    }
 }
