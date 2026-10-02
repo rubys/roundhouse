@@ -417,6 +417,14 @@ pub enum ExprNode {
     /// argument lists / array literals; standalone Splat is a Ruby
     /// syntax error.
     Splat { value: Expr },
+    /// Full argument forwarding in a call or `super(...)`. Retains
+    /// positional/keyword/block provenance; never a user variable or
+    /// an ordinary positional hash. Requires a forwarding formal.
+    ForwardArgs,
+    /// Source keyword argument group containing `**expression`.
+    /// The one value child is the existing ordered hash merge expression;
+    /// it evaluates once. This is not a positional `{**hash}` literal.
+    KeywordSplat { value: Expr },
     /// Parallel assignment: `a, b = expr` — RHS evaluates once, then
     /// is destructured (Ruby array-like) across the targets. Limited
     /// to the no-rest, no-rights shape; `a, *b = c` is not yet
@@ -511,6 +519,8 @@ impl ExprNode {
             ExprNode::Retry => "Retry",
             ExprNode::Redo => "Redo",
             ExprNode::Splat { .. } => "Splat",
+            ExprNode::ForwardArgs => "ForwardArgs",
+            ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
             ExprNode::While { .. } => "While",
             ExprNode::Range { .. } => "Range",
@@ -557,6 +567,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -661,7 +672,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);
@@ -743,6 +754,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -847,7 +859,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);

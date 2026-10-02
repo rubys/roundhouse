@@ -224,6 +224,7 @@ fn half_variant(m: &MethodDef, half: &str, parts: Vec<InterpPart>) -> MethodDef 
         default: None,
         keyword: false,
         rest: false,
+        forwarding: false,
         from_keyword: false,
         from_kwrest: false,
     }];

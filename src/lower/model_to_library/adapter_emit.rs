@@ -95,6 +95,8 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_find_by_id"),
         receiver: MethodReceiver::Class,
@@ -125,6 +127,8 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_all"),
         receiver: MethodReceiver::Class,
@@ -168,6 +172,8 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_last"),
         receiver: MethodReceiver::Class,
@@ -278,6 +284,8 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     };
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_insert"),
         receiver: MethodReceiver::Instance,
@@ -317,6 +325,8 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_update"),
         receiver: MethodReceiver::Instance,
@@ -341,6 +351,8 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_delete"),
         receiver: MethodReceiver::Instance,
@@ -369,6 +381,8 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_count"),
         receiver: MethodReceiver::Class,
@@ -400,6 +414,8 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_exists_by_id?"),
         receiver: MethodReceiver::Class,
@@ -456,6 +472,8 @@ fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
     );
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("delete_all"),
         receiver: MethodReceiver::Class,
@@ -478,6 +496,8 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
     });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_truncate"),
         receiver: MethodReceiver::Class,
@@ -651,6 +671,8 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: body_exprs });
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_reload"),
         receiver: MethodReceiver::Instance,
@@ -687,6 +709,8 @@ fn synth_columns_sql(owner: &ClassId, table: &Table) -> MethodDef {
         .collect::<Vec<_>>()
         .join(", ");
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_columns_sql"),
         receiver: MethodReceiver::Class,
@@ -773,6 +797,8 @@ fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
     );
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_hydrate_all"),
         receiver: MethodReceiver::Class,

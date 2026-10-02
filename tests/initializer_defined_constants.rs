@@ -83,11 +83,13 @@ fn a_referenced_initializer_module_is_ingested_once() {
         .iter()
         .find(|m| m.name.as_str() == "user")
         .expect("Telebugs.user");
-    // `*args, **kwargs` with an empty body: the `**` slot cannot follow
-    // the rest as a defaulted positional (it would not parse), and a
-    // caller's keywords already land in the rest.
+    // Even unread keyword-rest consumes keywords separately from *args.
+    // Keep it native, rather than flattening it to a positional default
+    // or dropping it and letting keywords leak into the rest array.
     let names: Vec<&str> = user.params.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["args"], "params = {:?}", user.params);
+    assert_eq!(names, ["args", "kwargs"], "params = {:?}", user.params);
+    assert!(user.params[0].rest && !user.params[0].keyword);
+    assert!(user.params[1].rest && user.params[1].keyword);
 }
 
 #[test]

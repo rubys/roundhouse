@@ -281,6 +281,8 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
         ));
         body.push(var_ref(&record));
         lc.methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(BECOMES_FROM),
             receiver: MethodReceiver::Class,

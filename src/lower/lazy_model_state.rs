@@ -96,6 +96,8 @@ fn getter(ivar: &Symbol, name: &Symbol) -> MethodDef {
         },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: getter_name(name),
         receiver: MethodReceiver::Instance,

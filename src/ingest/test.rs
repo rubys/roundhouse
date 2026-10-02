@@ -377,6 +377,7 @@ fn ingest_setup_declaration(
         if std::str::from_utf8(name_bytes).ok() != Some("setup") {
             return Ok(None);
         }
+        super::forwarding::reject_entrypoint(&def, file, "test setup hook")?;
         let body = match def.body() {
             Some(body_node) => ingest_expr(&body_node, file)?,
             None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -414,6 +415,7 @@ fn ingest_test_declaration(
         let Some(stem) = method_name.strip_prefix("test_") else {
             return Ok(None);
         };
+        super::forwarding::reject_entrypoint(&def, file, "test entrypoint")?;
         let name = stem.replace('_', " ");
         let body = match def.body() {
             Some(body_node) => ingest_expr(&body_node, file)?,

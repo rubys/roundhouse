@@ -122,8 +122,10 @@ fn render_def(m: &MethodDef, enclosing: &[&str]) -> String {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
+    // A full forwarder has no named rest binding. Neither its keywords
+    // nor its block can be inferred from the synthetic signature slot.
     let sig = match &m.signature {
-        Some(Ty::Fn { params, block, ret, .. }) => {
+        Some(Ty::Fn { params, block, ret, .. }) if !m.params.iter().any(|p| p.forwarding) => {
             let params_str = render_typed_params(params, enclosing);
             let block_str = match block.as_deref() {
                 Some(b) => format!(" {{ {} }}", render_block_ty(b, enclosing)),
@@ -148,7 +150,9 @@ fn render_untyped_fallback(m: &MethodDef) -> String {
         .map(|p| {
             let name = p.name.as_str();
             let optional = if p.default.is_some() { "?" } else { "" };
-            if p.keyword && p.rest {
+            if p.forwarding {
+                "*untyped, **untyped".to_string()
+            } else if p.keyword && p.rest {
                 format!("**untyped {name}")
             } else if p.keyword {
                 format!("{optional}{name}: untyped")
@@ -159,7 +163,10 @@ fn render_untyped_fallback(m: &MethodDef) -> String {
             }
         })
         .collect();
-    format!("({}) -> untyped", parts.join(", "))
+    let block = if m.params.iter().any(|p| p.forwarding) {
+        " ?{ (*untyped, **untyped) -> untyped }"
+    } else { "" };
+    format!("({}){block} -> untyped", parts.join(", "))
 }
 
 fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {

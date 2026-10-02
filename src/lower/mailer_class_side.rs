@@ -80,6 +80,11 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             {
                 continue;
             }
+            if m.params.iter().any(|p| p.forwarding) {
+                diags.push(Diagnostic::unsupported(m.name_span, None, "full forwarding mailer wrapper",
+                    "the generated mailer wrapper cannot preserve a full forwarding packet"));
+                continue;
+            }
             if m.params.iter().any(|p| p.keyword) {
                 diags.push(residue(m, "keyword parameters do not forward positionally"));
                 continue;

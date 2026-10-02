@@ -453,6 +453,8 @@ fn synth_has_many_reader(
         Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) }
     };
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -541,6 +543,8 @@ fn synth_has_many_id_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
         },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Instance,
@@ -600,6 +604,8 @@ fn synth_assoc_extension_methods(
             let mut body = m.body.clone();
             rewrite_extension_body(&mut body, assoc, &siblings);
             MethodDef {
+                unsupported_formals: m.unsupported_formals,
+                has_anonymous_block: m.has_anonymous_block,
                 name_span: crate::span::Span::synthetic(),
                 name: flat_name(&m.name),
                 receiver: MethodReceiver::Instance,
@@ -791,6 +797,8 @@ fn synth_has_one_reader(
         },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -815,6 +823,8 @@ fn synth_has_one_reader(
 /// typed as the ivar is (see the call site for why these exist).
 fn synth_cache_reader(owner: &ClassId, name: Symbol, ivar: Symbol, ty: Ty) -> MethodDef {
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -903,6 +913,8 @@ fn synth_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> Met
     ]);
 
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("_preload_{}", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -978,6 +990,8 @@ fn synth_belongs_to_reader(
     // belongs_to reader — same reasoning as has_many: body computes
     // (`Article.find_by(...)`), Method not AttributeReader.
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -1071,6 +1085,8 @@ fn synth_polymorphic_reader(
         .collect();
     variants.push(Ty::Nil);
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -1177,6 +1193,8 @@ fn synth_polymorphic_writer(
         .collect();
     variants.push(Ty::Nil);
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1270,6 +1288,8 @@ fn synth_belongs_to_writer(
         variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
     };
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1340,6 +1360,8 @@ fn synth_through_collection_writer(owner: &ClassId, name: &Symbol, target: &Clas
         ivar_assign(format!("{}_stale", name.as_str()), bool_lit(true)),
     ]);
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1508,6 +1530,8 @@ fn synth_through_sync(
         },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("_sync_{}", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1581,6 +1605,8 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
     }
 
     methods.push(MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("before_destroy"),
         receiver: MethodReceiver::Instance,

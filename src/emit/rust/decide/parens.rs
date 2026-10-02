@@ -159,7 +159,7 @@ fn walk_children(e: &mut Expr) {
                 walk(v, false);
             }
         }
-        ExprNode::Splat { value } => walk(value, false),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk(value, false),
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_mut() {
                 for a in arglist {
@@ -214,6 +214,7 @@ fn walk_children(e: &mut Expr) {
                 walk(e, false);
             }
         }
+        ExprNode::ForwardArgs => {}
     }
 }
 

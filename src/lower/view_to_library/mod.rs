@@ -180,6 +180,8 @@ pub fn flatten_lcs_to_functions(
                 module_path: module_path.clone(),
                 name: m.name.clone(),
                 params: m.params.clone(),
+                unsupported_formals: m.unsupported_formals,
+                has_anonymous_block: m.has_anonymous_block,
                 body: m.body.clone(),
                 signature: m.signature.clone(),
                 effects: m.effects.clone(),
@@ -780,6 +782,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // View methods render HTML — they're functions in the spinel
     // sense (return String), so Method is the right kind.
     let mut method = MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Class,
@@ -3654,6 +3658,7 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
@@ -3760,7 +3765,9 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
                 rewrite_defined_to_nil_check(v);
             }
         }
-        ExprNode::Splat { value } => rewrite_defined_to_nil_check(value),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            rewrite_defined_to_nil_check(value)
+        }
         ExprNode::MultiAssign { value, .. } => rewrite_defined_to_nil_check(value),
         ExprNode::While { cond, body, .. } => {
             rewrite_defined_to_nil_check(cond);

@@ -197,6 +197,8 @@ pub(crate) fn attributes_initialize(
     param.default =
         Some(Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false }));
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
@@ -214,6 +216,8 @@ pub(crate) fn attributes_initialize(
 
 fn constant_predicate(owner: &ClassId, name: &str, value: bool) -> MethodDef {
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(name),
         receiver: MethodReceiver::Instance,

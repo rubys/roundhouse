@@ -195,6 +195,8 @@ fn synthesize_module_lc(
     let methods: Vec<crate::dialect::MethodDef> = funcs
         .iter()
         .map(|f| crate::dialect::MethodDef {
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,
@@ -498,6 +500,8 @@ fn collect_imports_for_function(
         includes: Vec::new(),
         nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {
+            unsupported_formals: func.unsupported_formals,
+            has_anonymous_block: func.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: func.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,
@@ -1487,7 +1491,7 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { collect_class_refs(v, out); }
         }
-        ExprNode::Splat { value } => collect_class_refs(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_class_refs(value, out),
         ExprNode::MultiAssign { value, .. } => collect_class_refs(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_class_refs(cond, out);
@@ -1503,6 +1507,7 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         | ExprNode::Ivar { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }
@@ -1700,6 +1705,7 @@ fn rewrite_free(e: &Expr) -> Expr {
             value: value.as_ref().map(rewrite_free),
         },
         ExprNode::Splat { value } => ExprNode::Splat { value: rewrite_free(value) },
+        ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat { value: rewrite_free(value) },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite_free(value),
@@ -1727,6 +1733,7 @@ fn rewrite_free(e: &Expr) -> Expr {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => (*e.node).clone(),
     };
     Expr {
@@ -1966,6 +1973,9 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         ExprNode::Splat { value } => ExprNode::Splat {
             value: rewrite(value, super_method),
         },
+        ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat {
+            value: rewrite(value, super_method),
+        },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite(value, super_method),
@@ -1991,6 +2001,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => (*e.node).clone(),
     };
 

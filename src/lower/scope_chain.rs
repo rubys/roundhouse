@@ -100,6 +100,9 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
                 }
                 ModelBodyItem::Method { method, .. }
                     if method.receiver == crate::dialect::MethodReceiver::Class
+                        // Relation threading cannot append a formal to `...`
+                        // or treat its nameless packet as fixed arity.
+                        && !method.params.iter().any(|p| p.forwarding)
                         && mentions_bare_chain_start(&method.body) =>
                 {
                     // Declared scopes win on a name collision.
@@ -463,6 +466,9 @@ fn assoc_scope_shape(
     owner: &ClassId,
     scopes: &ScopeRegistry,
 ) -> AssocScopeShape {
+    if method_def.params.iter().any(|p| p.forwarding) {
+        return AssocScopeShape::Blocked("full forwarding cannot use the relation-threading argument ABI".into());
+    }
     let mut found = false;
     let mut queries = false;
     let mut blocked: Option<String> = None;

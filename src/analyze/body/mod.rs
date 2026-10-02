@@ -1474,7 +1474,9 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::Splat { value } => {
+            ExprNode::ForwardArgs => Ty::Untyped,
+
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
                 // Splat propagates the inner expression's type
                 // unchanged; the splat itself is a structural marker
                 // for the surrounding Send/Array, not a transform.

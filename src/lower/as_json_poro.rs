@@ -526,6 +526,8 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
         .collect();
     let body = Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false });
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("as_json"),
         receiver: MethodReceiver::Instance,

@@ -92,6 +92,8 @@ pub fn emit_function_module(funcs: &[crate::dialect::LibraryFunction]) -> Option
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,

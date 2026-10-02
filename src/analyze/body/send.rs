@@ -226,20 +226,30 @@ impl<'a> BodyTyper<'a> {
         new_ctx
     }
 
-    /// The class named by a `builder:` keyword, when the call carries one
-    /// and it is a plain constant. `::Foo` and `Foo` name the same class.
-    fn form_builder_id(args: &[Expr]) -> Option<ClassId> {
-        let expr = args.iter().find_map(|a| {
+    /// Form options can still carry source keyword provenance during inference.
+    /// Borrow their value without projecting or consuming the call argument.
+    fn form_option<'e>(args: &'e [Expr], name: &str) -> Option<&'e Expr> {
+        args.iter().find_map(|a| {
+            let a = match &*a.node {
+                ExprNode::KeywordSplat { value } => value,
+                _ => a,
+            };
             let ExprNode::Hash { entries, .. } = &*a.node else { return None };
             entries.iter().find_map(|(k, v)| match &*k.node {
                 ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
-                    if value.as_str() == "builder" =>
+                    if value.as_str() == name =>
                 {
                     Some(v)
                 }
                 _ => None,
             })
-        })?;
+        })
+    }
+
+    /// The class named by a `builder:` keyword, when the call carries one
+    /// and it is a plain constant. `::Foo` and `Foo` name the same class.
+    fn form_builder_id(args: &[Expr]) -> Option<ClassId> {
+        let expr = Self::form_option(args, "builder")?;
         let ExprNode::Const { path } = &*expr.node else { return None };
         let joined = path
             .iter()
@@ -256,17 +266,7 @@ impl<'a> BodyTyper<'a> {
 /// `Product?` still builds a form for a Product. `None` for URL forms.
     fn form_model_ty(method: &Symbol, args: &[Expr]) -> Option<Ty> {
     let model_expr = if method.as_str() == "form_with" {
-        args.iter().find_map(|a| {
-            let ExprNode::Hash { entries, .. } = &*a.node else { return None };
-            entries.iter().find_map(|(k, v)| match &*k.node {
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
-                    if value.as_str() == "model" =>
-                {
-                    Some(v)
-                }
-                _ => None,
-            })
-        })?
+        Self::form_option(args, "model")?
     } else {
         args.first().filter(|a| !matches!(&*a.node, ExprNode::Hash { .. }))?
     };
@@ -532,6 +532,11 @@ impl<'a> BodyTyper<'a> {
     ) {
         use crate::expr::ExprNode;
         use crate::ty::ParamKind;
+        // Producer provenance must survive until the source declaration
+        // selects native forwarding or the ordinary lowering projection.
+        if args.iter().any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. })) {
+            return;
+        }
         let Some(last) = args.last_mut() else { return };
         let ExprNode::Hash { kwargs, .. } = &mut *last.node else { return };
         if !*kwargs {

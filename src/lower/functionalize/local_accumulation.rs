@@ -259,6 +259,8 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -309,6 +311,8 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -362,6 +366,8 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("article"),
             receiver: MethodReceiver::Class,
@@ -412,6 +418,8 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -466,6 +474,8 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
@@ -512,6 +522,8 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
