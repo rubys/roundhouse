@@ -2,8 +2,8 @@
 //! source path and line number. Ingested as literal String/Int values
 //! rather than left as a runtime-only construct: the path and line are
 //! static facts the ingest already has (`file` is the ingest's own
-//! notion of "this file", and `sources::line_at` counts newlines up to
-//! the node's byte offset), and Spinel needs a literal here regardless.
+//! notion of "this file", and the parse's line index covers the node's
+//! byte offset), and Spinel needs a literal here regardless.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -89,4 +89,24 @@ fn file_literals_are_relative_to_the_real_root_without_changing_source_ids() {
         assert!(matches!(&*class.constants[0].1.node, ExprNode::Lit { value: Literal::Str { value } } if value == "app/services/file_probe.rb"));
         assert!(app.sources.iter().any(|f| f.path == path.to_string_lossy()));
     }
+}
+
+#[test]
+fn repeated_standalone_ingest_uses_the_current_parse_for_line_literals() {
+    use roundhouse::ingest::{ingest_library_classes, sources};
+    sources::reset();
+    let first = "class Probe\n LINE = __LINE__\nend\n";
+    for (source, expected) in [
+        (first, 2),
+        ("# é and a long prefix shifts offsets beyond the first source\n\n\nclass Probe\n LINE = __LINE__\nend\n", 5),
+        ("class Probe; LINE = __LINE__; end", 1),
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "probe.rb").unwrap();
+        assert!(matches!(&*classes[0].constants[0].1.node,
+            ExprNode::Lit { value: Literal::Int { value } } if *value == expected), "{source}");
+    }
+    // Preserve the registry's first-text-wins contract for issued spans.
+    let registered = sources::drain();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].text, first);
 }

@@ -59,6 +59,7 @@ struct Registry {
     files: Vec<SourceFile>,
     by_path: HashMap<String, FileId>,
     root: Option<PathBuf>,
+    parsed_lines: HashMap<usize, Vec<usize>>,
 }
 
 /// Clear the registry for a fresh whole-app ingest.
@@ -123,7 +124,7 @@ pub fn file_id(path: &str) -> FileId {
 }
 
 /// 1-based line number for a byte offset into `path`'s registered
-/// source — what `__LINE__` needs at ingest time. `None` when `path`
+/// source, including ERB's translated template offsets. `None` when `path`
 /// was never registered (a bare `roundhouse-ast -e` snippet that
 /// bypassed `ingest_ruby_program`/`register`), so the caller can fall
 /// back rather than mis-report line 1.
@@ -135,6 +136,23 @@ pub fn line_at(path: &str, offset: usize) -> Option<u32> {
         Some(file.text.as_bytes()[..offset.min(file.text.len())].iter()
             .filter(|&&b| b == b'\n').count() as u32 + 1)
     })
+}
+
+/// Track the actual parsed bytes separately from first-text-wins span sources.
+/// Prism locations borrow this input: its address identifies a live version,
+/// even when several versions of the same filename are being ingested.
+pub(super) fn register_parse(source: &[u8]) {
+    let lines = source.iter().enumerate().filter_map(|(offset, &byte)|
+        (byte == b'\n').then_some(offset)).collect();
+    SOURCES.with(|s| { s.borrow_mut().parsed_lines.insert(source.as_ptr() as usize, lines); });
+}
+
+pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> {
+    let offset = location.start_offset();
+    // Recover only the input's identity, never dereference an adjusted pointer.
+    let source = location.as_slice().as_ptr() as usize - offset;
+    SOURCES.with(|s| s.borrow().parsed_lines.get(&source)
+        .map(|lines| lines.partition_point(|&newline| newline < offset) as u32 + 1))
 }
 
 /// The registered path for a `FileId`; `None` for the synthetic
@@ -156,6 +174,7 @@ pub fn drain() -> Vec<SourceFile> {
         let mut reg = s.borrow_mut();
         reg.by_path.clear();
         reg.root = None;
+        reg.parsed_lines.clear();
         std::mem::take(&mut reg.files)
     })
 }
@@ -204,6 +223,21 @@ mod tests {
         assert_eq!(line_at("a.rb", 8), Some(3)); // start of "three"
         assert_eq!(line_at("nope.rb", 0), None);
         drain();
+    }
+
+    #[test]
+    fn parsed_line_indices_follow_live_inputs_and_clear_on_drain() {
+        reset();
+        let first = super::super::prism::parse(b"1\n__LINE__", "probe.rb");
+        let second = super::super::prism::parse(b"\n\n__LINE__", "probe.rb");
+        let a = first.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        let b = second.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        assert_eq!(line_at_parse(&a), Some(2));
+        assert_eq!(line_at_parse(&b), Some(3));
+        assert!(snapshot().is_empty(), "parse metadata must not allocate file identities");
+        drain();
+        assert_eq!(line_at_parse(&a), None);
+        assert_eq!(line_at_parse(&b), None);
     }
 
     #[test]

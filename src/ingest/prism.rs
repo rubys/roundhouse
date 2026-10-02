@@ -86,6 +86,7 @@ fn push(d: Diagnostic) {
 /// (or any unregistered path) to get a message-only diagnostic.
 pub fn parse<'pr>(source: &'pr [u8], file: &str) -> ParseResult<'pr> {
     let result = ruby_prism::parse(source);
+    sources::register_parse(result.source());
     let errors = result.errors();
     // Peek before resolving the file id so the registry lookup is
     // skipped on the common (no-error) path.

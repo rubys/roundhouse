@@ -745,16 +745,12 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_source_file_node().is_some() => {
             ExprNode::Lit { value: Literal::Str { value: super::sources::relative_path(file) } }
         }
-        // `__LINE__` — the current line number. Looked up in the
-        // per-thread source registry (`sources::register` already ran
-        // for every real file by the time its body is walked); a
-        // snippet ingested outside that registry (bare `roundhouse-ast
-        // -e` at a stage that skips `ingest_ruby_program`) has no
-        // source to count newlines against, so it falls back to `1`
-        // rather than failing ingest over a magic constant's exact value.
+        // `__LINE__` uses this parse's bytes, not an older registration of
+        // the same filename. ERB later translates it to the template line.
         n if n.as_source_line_node().is_some() => {
-            let offset = n.location().start_offset();
-            let line = super::sources::line_at(file, offset).unwrap_or(1);
+            let location = n.location();
+            let line = super::sources::line_at_parse(&location)
+                .or_else(|| super::sources::line_at(file, location.start_offset())).unwrap_or(1);
             ExprNode::Lit { value: Literal::Int { value: line as i64 } }
         }
         n if n.as_statements_node().is_some() => {
