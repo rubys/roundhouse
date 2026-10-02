@@ -8,7 +8,7 @@
 #   ENV["PATH_INFO"]        — path portion, e.g. "/articles/42"
 #   ENV["QUERY_STRING"]     — raw query string, e.g. "foo=bar"
 #   ENV["CONTENT_LENGTH"]   — body length (decimal string)
-#   ENV["CONTENT_TYPE"]     — "application/x-www-form-urlencoded" supported
+#   ENV["CONTENT_TYPE"]     — urlencoded, multipart and JSON bodies supported
 #   stdin                   — the request body (for POST/PATCH/PUT)
 #
 # Outputs (the response is plain text on stdout):
@@ -21,6 +21,9 @@
 # Pure Ruby; no `cgi` stdlib dependency (which spinel doesn't ship).
 # Keeps the spinel-subset envelope clean: basic regex, string ops,
 # Hash mutation. No metaprogramming.
+
+require "json"
+
 module CgiIo
   REASON_PHRASES = {
     200 => "OK",
@@ -62,6 +65,18 @@ module CgiIo
         form = ActionDispatch::Http::Multipart.parse(body, ctype)
         form.fields.each { |k, v| assign_form_pair(params, k, v) }
         form.files.each { |k, v| assign_form_pair(params, k, v) }
+      elsif length > 0 && ctype.start_with?("application/json")
+        # `@rails/request.js` with `contentType: "application/json"`
+        # (campfire's link unfurl): Rails parses the object into params,
+        # keeping its nesting and its types. A malformed body leaves the
+        # params as they are, and the action's `require` refuses it.
+        body = stdin.read(length).to_s
+        begin
+          parsed = JSON.parse(body)
+          parsed.each { |k, v| params[k] = v } if parsed.is_a?(Hash)
+        rescue JSON::ParserError
+          nil
+        end
       end
     end
 

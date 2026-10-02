@@ -348,15 +348,20 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // exist — the target's string/builder is whatever it is — so
             // unary `+@` on a string literal is the identity: lower to
             // the literal. The ruby-family trees ship their runtime
-            // sources verbatim (never through this path), so the idiom
-            // survives where it matters.
+            // sources verbatim (never through this path), but an APP's
+            // models and services do come through it, and on spinel a
+            // bare literal is frozen: `buf = ""; buf << x` raises
+            // FrozenError. So the literal carries the hint, and the
+            // ruby emitter writes the `+` back.
             if method == "+@" && args.is_empty() && block.is_none() {
                 if let Some(r) = &recv {
                     if matches!(
                         &*r.node,
                         ExprNode::Lit { value: Literal::Str { .. } }
                     ) {
-                        return Ok(recv.unwrap());
+                        let mut lit = recv.unwrap();
+                        lit.hint = Some(crate::expr::IrHint::MutableStringLiteral);
+                        return Ok(lit);
                     }
                 }
             }
@@ -1959,6 +1964,17 @@ fn ingest_call_block(
     file: &str,
     enclosing_method: &str,
 ) -> IngestResult<Option<Expr>> {
+    if matches!(enclosing_method, "find_or_create_by" | "find_or_create_by!")
+        && node.as_block_argument_node().is_some()
+    {
+        // Inlining only claims a directly attached initialization block.
+        // Forwarded proc/lambda forms can lose their signature before
+        // the ordinary BlockNode admission below sees it.
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "scoped find-or-create cannot be lowered safely: forwarded initialization blocks are outside the directly attached block subset".into(),
+        });
+    }
     // `&:method_name` — symbol-to-proc shorthand. Ruby treats this as
     // `{ |x| x.method_name }`. Lower to an explicit Lambda so downstream
     // emitters see a real closure.
@@ -2138,6 +2154,31 @@ fn ingest_call_block(
             message: format!("unexpected block-position node: {node:?}"),
         });
     };
+    if matches!(enclosing_method, "find_or_create_by" | "find_or_create_by!")
+        && b.parameters().is_some_and(|node| {
+            node.as_block_parameters_node().is_some_and(|params| {
+                params.locals().iter().next().is_some()
+                    || params.parameters().is_some_and(|params| {
+                        params.requireds().iter().any(|node| node.as_required_parameter_node().is_none())
+                            || params.optionals().iter().next().is_some()
+                            || params.posts().iter().next().is_some()
+                            || params.keywords().iter().next().is_some()
+                            || params.keyword_rest().is_some()
+                            || params.block().is_some()
+                            || params.rest().is_some_and(|node| node.as_rest_parameter_node()
+                                .is_none_or(|param| param.name().is_none()))
+                    })
+            })
+        })
+    {
+        // These signature fields are absent from Lambda IR. Decline
+        // before ingest drops them; named rest remains represented and
+        // is rejected by the call-site lowering's existing arity gate.
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "scoped find-or-create cannot be lowered safely: block locals and optional, post, keyword, block or anonymous-rest parameters are not represented in initialization-block IR".into(),
+        });
+    }
     Ok(Some(ingest_block_node_as_lambda(&b, file)?))
 }
 

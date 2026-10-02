@@ -84,8 +84,10 @@ ingest kept, so it shares the current ingest and IR limits.
 `schema.rb` ingest drops `array: true`; an index's `where:`, `using:`
 and `order:`, and expression indexes; precision on `numeric`,
 `datetime` and `time`; a `limit:` on an `integer` column (so no
-`smallint` or `bigint`) or on a key; and schema qualifiers. It rejects
-`id: :serial` and ignores a hash-valued `id:`. And the folds below
+`smallint` or `bigint`); and schema qualifiers. The key forms the
+PostgreSQL dumper writes are read as the keys they name: `id: :serial`
+is an `integer` key, and a hash-valued `id: { type: :string, limit:
+32 }` keeps its type and limit. And the folds below
 apply (`jsonb` and `json` both render `jsonb`, `timestamptz` renders
 `timestamp`).
 Postgres column types map to their SQLite storage at

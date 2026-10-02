@@ -391,6 +391,7 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
 /// tail) and is handled in `emit_expr`.
 fn try_string_builder_stmt(e: &Expr) -> Option<String> {
     match e.hint? {
+        IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
                 return Some(format!("{} = []", super::shared::py_ident(name.as_str())));

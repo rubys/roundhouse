@@ -161,6 +161,24 @@ fn a_partial_reads_a_reserved_word_local_with_local_assigns() {
     assert_parses(&files, "app/views/posts/index.rb");
 }
 
+/// `render partial:, collection:, as: :for` emitted a positional
+/// `for` param in the partial and a `|for|` block param at the call.
+#[test]
+fn a_collection_render_binds_a_reserved_word_as_local() {
+    let files = posts_app(&[
+        (
+            "app/views/posts/_row.html.erb",
+            "<li><%= binding.local_variable_get(:for).title %></li>\n",
+        ),
+        (
+            "app/views/posts/index.html.erb",
+            "<%= render partial: \"row\", collection: @posts, as: :for %>\n",
+        ),
+    ]);
+    assert_parses(&files, "app/views/posts/_row.rb");
+    assert_parses(&files, "app/views/posts/index.rb");
+}
+
 /// A bang method on a reserved-word keyword stays a bang call. The
 /// frozen-literal rewrite (`x.strip!` → `x = x.strip`) needs an
 /// assignable local, and `class = …` does not parse.

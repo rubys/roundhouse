@@ -100,11 +100,11 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             }
             let module_camel = camelize_path(&snake_case(&module_dir));
             let method_sym = base_name.trim_start_matches('_').to_string();
-            let var_name = Symbol::from(
-                as_name
+            let var_name = Symbol::from(crate::naming::safe_local(
+                &as_name
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| base_name.trim_start_matches('_').to_string()),
-            );
+            ));
 
             let mut call_args = vec![var_ref(var_name.clone())];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));

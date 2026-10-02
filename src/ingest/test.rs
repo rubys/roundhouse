@@ -1,8 +1,9 @@
 //! Rails test-file ingestion — `test/models/*_test.rb` and
-//! `test/controllers/*_test.rb`. Expects a single top-level class
+//! `test/controllers/*_test.rb`. Expects one or more test classes
 //! (typically inheriting from `ActiveSupport::TestCase` or
-//! `ActionDispatch::IntegrationTest`) whose body is a sequence of
-//! `test "name" do ... end` declarations.
+//! `ActionDispatch::IntegrationTest`), at the top level or inside a
+//! `module`, whose bodies are sequences of `test "name" do ... end`
+//! declarations.
 
 use ruby_prism::Node;
 
@@ -12,9 +13,11 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
-use super::library_class::{ingest_library_method, library_class_from_node};
+use super::library_class::{
+    ingest_library_method, library_class_from_node, library_class_from_node_with_scope,
+};
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, flatten_statements,
+    class_name_path, constant_id_str, constant_path_of, flatten_statements, module_name_path,
 };
 use super::{IngestError, IngestResult};
 
@@ -56,18 +59,23 @@ pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModu
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let mut top_classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
-    collect_top_level_classes(&root, &mut top_classes);
+    let mut top_classes: Vec<ScopedClass<'_>> = Vec::new();
+    collect_top_level_classes(&root, &[], &mut top_classes);
     if top_classes.is_empty() {
         return Ok(Vec::new());
     }
     let (mut test_nodes, helper_nodes): (Vec<_>, Vec<_>) =
-        top_classes.into_iter().partition(is_test_class_node);
+        top_classes.into_iter().partition(|(_, c)| is_test_class_node(c));
     // No candidate matches: the historical single-class shape, where
-    // the first class is the test whatever it is called.
+    // the first top-level class is the test whatever it is called. A
+    // class inside a module is not a candidate here: a support file
+    // in a test directory often declares one, and it has no tests.
     if test_nodes.is_empty() {
         let mut helper_nodes = helper_nodes;
-        test_nodes.push(helper_nodes.remove(0));
+        let Some(first) = helper_nodes.iter().position(|(scope, _)| scope.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        test_nodes.push(helper_nodes.remove(first));
         return ingest_test_class(&test_nodes[0], &helper_nodes, file).map(|tm| vec![tm]);
     }
     test_nodes
@@ -77,14 +85,15 @@ pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModu
 }
 
 fn ingest_test_class(
-    class: &ruby_prism::ClassNode<'_>,
-    top_level_helper_nodes: &[ruby_prism::ClassNode<'_>],
+    (scope, class): &ScopedClass<'_>,
+    top_level_helper_nodes: &[ScopedClass<'_>],
     file: &str,
 ) -> IngestResult<TestModule> {
-    let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
+    let mut name_path = scope.clone();
+    name_path.extend(class_name_path(class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "test class name must be a simple constant or path".into(),
-    })?;
+    })?);
     let name = ClassId(Symbol::from(name_path.join("::")));
 
     let parent = class.superclass().and_then(|n| {
@@ -218,8 +227,8 @@ fn ingest_test_class(
     // parent rewrite the test class does, so emitting one inline
     // would have Minitest find it under CRuby and run it against the
     // wrong assertion surface.)
-    for helper_node in top_level_helper_nodes {
-        let lc = library_class_from_node(helper_node, file)?;
+    for (helper_scope, helper_node) in top_level_helper_nodes {
+        let lc = library_class_from_node_with_scope(helper_node, helper_scope, file)?;
         inner_classes.push(lc);
     }
 
@@ -236,10 +245,6 @@ fn ingest_test_class(
     })
 }
 
-/// Collect every direct top-level class declaration. Does NOT recurse
-/// into modules — Rails test files declare their `*Test` class at the
-/// file's top scope; helper models live alongside at the same scope.
-/// Nested module declarations are not a shape we encounter for tests.
 /// The app-wide `setup do … end` an app's `test/test_helper.rb` puts on
 /// `ActiveSupport::TestCase` (reopened there, or nested as `module
 /// ActiveSupport; class TestCase`). Rails runs it before every test
@@ -262,19 +267,9 @@ fn ingest_test_class(
 pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<Expr>> {
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let mut classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
-    collect_top_level_classes(&root, &mut classes);
-    // Nested spelling: descend one module level.
-    if let Some(p) = root.as_program_node() {
-        for stmt in p.statements().body().iter() {
-            if let Some(m) = stmt.as_module_node() {
-                if let Some(body) = m.body() {
-                    collect_top_level_classes(&body, &mut classes);
-                }
-            }
-        }
-    }
-    for class in classes {
+    let mut classes: Vec<ScopedClass<'_>> = Vec::new();
+    collect_top_level_classes(&root, &[], &mut classes);
+    for (_, class) in classes {
         let Some(path) = class_name_path(&class) else { continue };
         if path.last().map(String::as_str) != Some("TestCase") {
             continue;
@@ -289,24 +284,40 @@ pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<
     Ok(None)
 }
 
+/// Collect every class the file declares outside another class, each
+/// with the path of the modules that enclose it. `module Models; class
+/// PostTest` gives `(["Models"], PostTest)`, the same class as `class
+/// Models::PostTest`. The walk does not go into class bodies: a class
+/// inside a test class is a helper of that test class.
 fn collect_top_level_classes<'pr>(
     node: &Node<'pr>,
-    out: &mut Vec<ruby_prism::ClassNode<'pr>>,
+    scope: &[String],
+    out: &mut Vec<ScopedClass<'pr>>,
 ) {
     if let Some(c) = node.as_class_node() {
-        out.push(c);
+        out.push((scope.to_vec(), c));
         return;
     }
     if let Some(p) = node.as_program_node() {
-        collect_top_level_classes(&p.statements().as_node(), out);
+        collect_top_level_classes(&p.statements().as_node(), scope, out);
         return;
     }
     if let Some(s) = node.as_statements_node() {
         for stmt in s.body().iter() {
-            collect_top_level_classes(&stmt, out);
+            collect_top_level_classes(&stmt, scope, out);
+        }
+        return;
+    }
+    if let Some(m) = node.as_module_node() {
+        let mut inner = scope.to_vec();
+        inner.extend(module_name_path(&m).unwrap_or_default());
+        if let Some(body) = m.body() {
+            collect_top_level_classes(&body, &inner, out);
         }
     }
 }
+
+type ScopedClass<'pr> = (Vec<String>, ruby_prism::ClassNode<'pr>);
 
 /// Heuristic: a class is "the test class" when its name ends with
 /// `Test` (e.g. `ViewHelpersTest`, `InflectorTest`) OR when its parent
@@ -524,5 +535,68 @@ end
             .expect("ingest")
             .expect("a test class");
         assert_eq!(tm.name.0.as_str(), "RoomMessagesChannelTest");
+    }
+
+    // A test class that a `module` wraps is the same class as
+    // `class Models::PostTest`. Ingest used to read only the file's
+    // top-level classes, so it lost this one and reported nothing.
+    #[test]
+    fn a_test_class_inside_a_module_keeps_its_namespace() {
+        let src = r#"
+module Models
+  class Helper
+  end
+
+  class PostTest < ActiveSupport::TestCase
+    class Inner
+    end
+
+    test "truth" do
+      assert true
+    end
+  end
+end
+"#;
+        let tms = ingest_test_files(src.as_bytes(), "post_test.rb").expect("ingest");
+        let names: Vec<&str> = tms.iter().map(|tm| tm.name.0.as_str()).collect();
+        assert_eq!(names, ["Models::PostTest"]);
+        assert_eq!(tms[0].target.as_ref().map(|t| t.0.as_str()), Some("Post"));
+        assert_eq!(tms[0].tests.len(), 1);
+        let helpers: Vec<&str> =
+            tms[0].inner_classes.iter().map(|lc| lc.name.0.as_str()).collect();
+        assert_eq!(helpers, ["Inner", "Models::Helper"]);
+    }
+
+    // Ingest reads every `.rb` file in the test directories, so a
+    // support class in a module reaches it too. It is not a test.
+    #[test]
+    fn a_support_class_inside_a_module_is_not_a_test() {
+        let src = "module Support\n  class Thing\n    def x\n      1\n    end\n  end\nend\n";
+        let tms = ingest_test_files(src.as_bytes(), "thing.rb").expect("ingest");
+        assert!(tms.is_empty());
+    }
+
+    // When no class looks like a test, the first top-level class is
+    // the test. A class inside a module does not take its place.
+    #[test]
+    fn the_fallback_test_class_is_a_top_level_class() {
+        let src = r#"
+module Fakes
+  class Client
+  end
+end
+
+class ProbeChecks < Minitest::Unit
+  def test_x
+    assert true
+  end
+end
+"#;
+        let tms = ingest_test_files(src.as_bytes(), "probe_checks.rb").expect("ingest");
+        let names: Vec<&str> = tms.iter().map(|tm| tm.name.0.as_str()).collect();
+        assert_eq!(names, ["ProbeChecks"]);
+        let helpers: Vec<&str> =
+            tms[0].inner_classes.iter().map(|lc| lc.name.0.as_str()).collect();
+        assert_eq!(helpers, ["Fakes::Client"]);
     }
 }

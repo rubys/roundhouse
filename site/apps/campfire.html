@@ -35,9 +35,11 @@
       With Docker and nothing else. The archive is the program after Spinel
       has compiled it to C — generated code, the runtime as source, a
       Makefile — with a two-stage Dockerfile that builds the one and ships
-      the other. About 5 MB down, about a minute to compile, and a 160 MB
-      image whose only extras over <code>debian:trixie-slim</code> are the
-      SQLite and jemalloc runtime libraries.
+      the other. About 8 MB down, two or three minutes to compile, and a
+      600 MB image: <code>debian:trixie-slim</code> plus the SQLite,
+      jemalloc and libvips runtime libraries and ffmpeg, which the
+      attachment previews use. Those libraries are most of the size; the
+      binary is 11 MB.
     </p>
     <pre><code>curl -sL https://rubys.github.io/roundhouse/campfire/docker.tgz | tar xz
 cd campfire-docker

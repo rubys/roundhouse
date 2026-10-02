@@ -867,7 +867,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("and_return");
     case_lambda::apply_case_lambda_lowering(app);
     ran!("case_lambda");
-    first_or_create::apply_first_or_create_lowering(app);
+    diags.extend(first_or_create::apply_first_or_create_lowering(app));
     ran!("first_or_create");
     attr_or_assign::apply_attr_or_assign_lowering(app);
     ran!("attr_or_assign");

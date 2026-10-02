@@ -167,6 +167,39 @@ fn rebase_relative(child_stem: &str, parent_name: &str, target: &str, app: &App)
     out.join("/")
 }
 
+/// The lines of a nested class's render between its outer wrapper:
+/// the `depth` header lines that re-open the parent and the `depth`
+/// `end`s that close it. The lines between are already at the
+/// indentation the parent's body wants. `None` when nothing is left
+/// to splice.
+fn unwrapped(body: &[&str], depth: usize) -> Option<String> {
+    let first = body.iter().position(|l| !l.trim().is_empty())?;
+    let open = first + depth;
+    let last = body.iter().rposition(|l| l.trim() == "end")?;
+    let close = (last + 1).checked_sub(depth)?;
+    (open < close).then(|| body[open..close].join("\n"))
+}
+
+/// `content` with `blocks` placed right after the parent's own header
+/// — the `class` line at `header_indent` — or `None` when there is no
+/// such line, since anywhere else would be outside the body.
+fn spliced_after_header(content: &str, header_indent: &str, blocks: &[String]) -> Option<String> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut inserted = false;
+    for line in content.lines() {
+        out.push(line);
+        if !inserted
+            && line
+                .strip_prefix(header_indent)
+                .is_some_and(|rest| rest.starts_with("class "))
+        {
+            out.extend(blocks.iter().map(String::as_str));
+            inserted = true;
+        }
+    }
+    inserted.then(|| out.join("\n"))
+}
+
 /// Put each nested class's block inside its parent's file, before the
 /// parent's own body — the order the source has, and the only one that
 /// works when the parent's class body references them.
@@ -176,6 +209,13 @@ fn rebase_relative(child_stem: &str, parent_name: &str, target: &str, app: &App)
 /// segments, so the child's render opens with exactly D header lines
 /// and closes with exactly D `end`s, and what lies between is already
 /// at the indentation the parent's body wants.
+///
+/// The child's `.rbs` goes into the parent's sidecar the same way. A
+/// child with no file of its own has no sidecar of its own either, and
+/// a sidecar left out is a class declared nowhere: the typed view of
+/// the tree lost every nested class while the `.rb` kept them all.
+/// Spelled nested inside the parent's `class`, which is what the
+/// standalone sidecar's `module Parent` wrapper said too.
 fn splice_nested(
     files: &mut [EmittedFile],
     parent: &LibraryClass,
@@ -219,11 +259,12 @@ fn splice_nested(
     };
     let kids = &kids[..];
     let mut blocks: Vec<String> = Vec::new();
+    let mut sidecar_blocks: Vec<String> = Vec::new();
     let mut hoisted: Vec<String> = Vec::new();
     for kid in kids {
         let stem = crate::naming::underscore(kid.name.0.as_str());
-        let rendered =
-            emit_library_class_decl(kid, app, PathBuf::from(format!("app/models/{stem}.rb")));
+        let rb_path = PathBuf::from(format!("app/models/{stem}.rb"));
+        let rendered = emit_library_class_decl(kid, app, rb_path.clone());
         let lines: Vec<&str> = rendered.content.lines().collect();
         // Requires belong at the top of the file that now holds the
         // class, not buried inside a class body where they would still
@@ -261,42 +302,29 @@ fn splice_nested(
             .copied()
             .filter(|l| !l.starts_with("require"))
             .collect();
-        let first = body.iter().position(|l| !l.trim().is_empty());
-        let Some(first) = first else { continue };
-        let open = first + depth;
-        let close = body
-            .iter()
-            .rposition(|l| l.trim() == "end")
-            .map(|last| last + 1 - depth);
-        let Some(close) = close else { continue };
-        if open >= close {
-            continue;
+        let Some(block) = unwrapped(&body, depth) else { continue };
+        blocks.push(block);
+        // The sidecar `emit_library_class_pair` would have written for
+        // the child's own file, minus the same wrapper. Its type names
+        // were resolved inside the child's enclosing segments, which
+        // are the parent's followed by the child's own — the position
+        // it is spliced into.
+        let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
+        let lines: Vec<&str> = sidecar.content.lines().collect();
+        if let Some(block) = unwrapped(&lines, depth) {
+            sidecar_blocks.push(block);
         }
-        blocks.push(body[open..close].join("
-"));
     }
     if blocks.is_empty() {
         return;
     }
+    let own_header_indent = "  ".repeat(depth - 1);
     let Some(rb) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rb")) else {
         return;
     };
-    let mut out: Vec<String> = Vec::new();
-    let mut inserted = false;
-    let own_header_indent = "  ".repeat(depth - 1);
-    for line in rb.content.lines() {
-        out.push(line.to_string());
-        if !inserted
-            && line.starts_with(&format!("{own_header_indent}class "))
-            && line.trim_start().starts_with("class ")
-        {
-            out.extend(blocks.iter().cloned());
-            inserted = true;
-        }
-    }
-    if !inserted {
+    let Some(spliced) = spliced_after_header(&rb.content, &own_header_indent, &blocks) else {
         return;
-    }
+    };
     let mut content = String::new();
     for r in &hoisted {
         content.push_str(r);
@@ -305,9 +333,20 @@ fn splice_nested(
     if !hoisted.is_empty() {
         content.push('\n');
     }
-    content.push_str(&out.join("\n"));
+    content.push_str(&spliced);
     content.push('\n');
     rb.content = content;
+
+    // Only once the `.rb` took the body: a sidecar must describe the
+    // file beside it, and a child left out of the one stays out of the
+    // other.
+    let Some(rbs) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+    else {
+        return;
+    };
+    if let Some(spliced) = spliced_after_header(&rbs.content, &own_header_indent, &sidecar_blocks) {
+        rbs.content = format!("{spliced}\n");
+    }
 }
 
 use crate::facades::{Facade, EXTRAS_FACADES};
@@ -6434,6 +6473,7 @@ fn owns_a_file(name: &str, app: &App) -> bool {
 
 fn is_app_class(name: &str, app: &App) -> bool {
     app.models.iter().any(|m| m.name.0.as_str() == name)
+        || app.controllers.iter().any(|c| c.name.0.as_str() == name)
         || app
             .library_classes
             .iter()
@@ -6445,6 +6485,9 @@ fn is_app_class(name: &str, app: &App) -> bool {
 fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
     if let Some(m) = app.models.iter().find(|m| m.name.0.as_str() == name) {
         return m.parent.clone();
+    }
+    if let Some(c) = app.controllers.iter().find(|c| c.name.0.as_str() == name) {
+        return c.parent.clone();
     }
     app.library_classes
         .iter()
@@ -6995,19 +7038,20 @@ fn ivar_read(name: &Symbol) -> Expr {
 /// read makes every `user.is_admin?` guard pass for non-admins.
 /// Rewritten body: `@col == true || @col == 1` (handles both a
 /// DB-hydrated Integer and an app-assigned true/false; nil/0/false →
-/// false). Strict targets hydrate native booleans and keep the shared
-/// synthesized shape. Only plain `@col`-read bodies are rewritten
+/// false). An ordinary nullable getter keeps nil; its `?` predicate
+/// still answers false. Strict targets hydrate native booleans and keep
+/// the shared synthesized shape. Only plain `@col`-read bodies are rewritten
 /// (idempotent; custom bodies win).
 pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
     for model in &app.models {
         let Some(table) = app.schema.tables.get(&model.table.0) else {
             continue;
         };
-        let bool_cols: BTreeSet<Symbol> = table
+        let bool_cols: HashMap<Symbol, bool> = table
             .columns
             .iter()
             .filter(|c| matches!(c.col_type, crate::schema::ColumnType::Boolean))
-            .map(|c| c.name.clone())
+            .map(|c| (c.name.clone(), c.nullable && !c.primary_key))
             .collect();
         if bool_cols.is_empty() {
             continue;
@@ -7020,11 +7064,26 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
                 continue;
             }
             let col = Symbol::from(m.name.as_str().trim_end_matches('?'));
-            if !bool_cols.contains(&col) {
+            let Some(nullable) = bool_cols.get(&col) else {
                 continue;
-            }
+            };
             if is_plain_ivar_read(&m.body, &col) {
-                m.body = boolean_cast_body(&col);
+                let cast = boolean_cast_body(&col);
+                m.body = if *nullable && !m.name.as_str().ends_with('?') {
+                    sp_expr(ExprNode::If {
+                        cond: sp_expr(ExprNode::Send {
+                            recv: Some(ivar_read(&col)),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        }),
+                        then_branch: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: cast,
+                    })
+                } else {
+                    cast
+                };
             }
         }
     }
