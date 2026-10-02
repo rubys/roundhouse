@@ -15,7 +15,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
 
-pub(crate) fn expand_model_macros(app: &mut App) {
+pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) {
     if app.concern_spliced_class_methods.is_empty() {
         return;
     }
@@ -118,9 +118,9 @@ pub(crate) fn expand_model_macros(app: &mut App) {
                             MethodReceiver::Class,
                         )
                     })
-                && supported_source_signature(def, &app.sources)
-                && supported_source_call(expr, &app.sources))
-            .then(|| expand(def, args, &app.sources))
+                && supported_source_signature(def, sources)
+                && supported_source_call(expr, sources))
+            .then(|| expand(def, args, sources))
             .flatten();
             candidates.push((index, method.clone(), methods));
         }
@@ -188,7 +188,7 @@ pub(crate) fn expand_model_macros(app: &mut App) {
                     .file
                     .0
                     .checked_sub(1)
-                    .and_then(|i| app.sources.get(i as usize))
+                    .and_then(|i| sources.get(i as usize))
                     .map(|s| s.path.clone())
                     .unwrap_or_else(|| model.name.to_string());
                 super::survey::record(&super::IngestError::Unsupported {

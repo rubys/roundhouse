@@ -166,9 +166,11 @@ fn unsupported_captures_and_headers_decline_the_whole_macro() {
         assert_eq!(unexpanded(&app, "positioned_within"), 1, "{call}");
         assert!(instances(&app, "Leaf").is_empty(), "{call}");
         assert!(
-            gaps.iter().any(|g| g
-                .to_string()
-                .contains("model macro `positioned_within` not expanded")),
+            gaps.iter().any(|g| matches!(g,
+                roundhouse::ingest::IngestError::Unsupported { file, message }
+                if file == "app/models/leaf.rb"
+                    && message.contains("model macro `positioned_within` not expanded")
+            )),
             "{gaps:?}"
         );
     }
