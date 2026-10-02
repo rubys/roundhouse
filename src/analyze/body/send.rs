@@ -371,8 +371,7 @@ impl<'a> BodyTyper<'a> {
             // that as the block-param type. Lets framework stubs
             // declare what their block yields (form_with → FormBuilder,
             // ErrorCollection.each → Str) without hardcoding each one
-            // in this match. Single-param yield only — multi-param
-            // destructure isn't expressible in Ty::Fn::block today.
+            // in this match.
             Ty::Class { id, .. } => {
                 // Walk the class + parent chain (and includes) for a
                 // registered method whose `Ty::Fn` declares a block param,
@@ -405,16 +404,9 @@ impl<'a> BodyTyper<'a> {
                             // as dispatch does.
                             let self_ty = Ty::Class { id: id.clone(), args: Vec::new() };
                             return match sig {
-                                // A block that yields SEVERAL values
-                                // names them in its own `Ty::Fn`
-                                // params — `{ (String, String) -> bool }`
-                                // for an authenticator yielding a
-                                // username and a password. Spread them,
-                                // or the second parameter binds nothing
-                                // and everything read from it is
-                                // untyped.
+                                // RBS blocks yield the inner Fn's parameters at every arity.
                                 Ty::Fn { block: Some(block_ty), .. } => match &**block_ty {
-                                    Ty::Fn { params, .. } if params.len() > 1 => Some(
+                                    Ty::Fn { params, .. } => Some(
                                         params
                                             .iter()
                                             .map(|p| p.ty.subst_self(&self_ty))

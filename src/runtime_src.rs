@@ -857,10 +857,25 @@ pub fn parse_methods_with_rbs_in_ctx(
     // the assignment (e.g. `@cache ||= compute` lowers to a `BoolOp`
     // whose left arm reads the unset ivar).
     //
-    // Runtime code doesn't reference user classes today, so the
-    // dispatch table is empty — the body-typer falls back to its
-    // primitive method tables for everything.
-    let typer = crate::analyze::BodyTyper::new(classes);
+    // Restore this file's block contracts in a private typing table.
+    let mut typing_classes = classes.clone();
+    for m in &methods {
+        let (Some(enclosing), Some(sig @ Ty::Fn { block: Some(_), .. })) =
+            (&m.enclosing_class, &m.signature)
+        else { continue };
+        let info = typing_classes
+            .entry(crate::ident::ClassId(enclosing.clone()))
+            .or_default();
+        match m.receiver {
+            MethodReceiver::Instance => {
+                info.instance_methods.insert(m.name.clone(), sig.clone());
+            }
+            MethodReceiver::Class => {
+                info.class_methods.insert(m.name.clone(), sig.clone());
+            }
+        }
+    }
+    let typer = crate::analyze::BodyTyper::new(&typing_classes);
 
     // Extract module-level constants from the .rb so dispatch on
     // `STATUS_CODES.fetch(...)` etc. resolves through the constant's

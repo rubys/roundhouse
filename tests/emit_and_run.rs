@@ -9,6 +9,8 @@
 mod emit_and_run;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/runtime_block_signature.rs"]
+mod runtime_block_signature;
 
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
@@ -3182,5 +3184,14 @@ fn a_template_only_action_is_fed_by_its_before_action() {
             "",
         )
         .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn an_rbs_array_block_runs_after_app_emission() {
+    emit_and_run::real_blog()
+        .write("app/lib/batch.rb", runtime_block_signature::RUBY)
+        .write("sig/batch.rbs", runtime_block_signature::RBS)
+        .run_ruby("raise 'wrong sum' unless Batch.new.consume == 3")
         .assert_passes();
 }
