@@ -3828,6 +3828,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
+    // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
+    // runtime/http_authentication.rb (ruby family only). It types the
+    // block parameters the helpers yield, which the app's blocks compare.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/http_authentication.rbs")
+            .map_err(|e| format!("read runtime/spinel/http_authentication.rbs: {e}"))?;
+        files.push(("sig/runtime/http_authentication.rbs".to_string(), rbs));
+    }
+
     // Secret sidecar — `LocalSecret.resolve` in runtime/local_secret.rb,
     // the generated-and-kept key both boots park when SECRET_KEY_BASE is
     // unset (ruby family only).

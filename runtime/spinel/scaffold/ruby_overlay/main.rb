@@ -397,6 +397,8 @@ if __FILE__ == $PROGRAM_NAME
     # The forgery check's two headers (runtime/request_forgery_protection.rb).
     "HTTP_X_CSRF_TOKEN" => ENV["HTTP_X_CSRF_TOKEN"],
     "HTTP_ORIGIN"       => ENV["HTTP_ORIGIN"],
+    # The HTTP Token/Basic helpers' credentials (runtime/http_authentication.rb).
+    "HTTP_AUTHORIZATION" => ENV["HTTP_AUTHORIZATION"],
     "HTTP_HOST"         => ENV["HTTP_HOST"],
   }
   Main.run(env, $stdin, $stdout)

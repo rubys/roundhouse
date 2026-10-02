@@ -1,0 +1,22 @@
+# Typing for runtime/spinel/http_authentication.rb. The helpers answer
+# whatever the app's block answers, so their returns are untyped.
+module ActionController
+  class Base
+    def authenticate_with_http_token: () { (String token, Hash[String, String] options) -> untyped } -> untyped
+    def authenticate_or_request_with_http_token: (?String realm, ?String? message) { (String token, Hash[String, String] options) -> untyped } -> untyped
+    def request_http_token_authentication: (?String realm, ?String? message) -> void
+    def authenticate_with_http_basic: () { (String username, String password) -> untyped } -> untyped
+    def authenticate_or_request_with_http_basic: (?String realm, ?String? message) { (String username, String password) -> untyped } -> untyped
+    def request_http_basic_authentication: (?String realm, ?String? message) -> void
+  end
+
+  module HttpAuthentication
+    def self.authorization: (ActionController::Base controller) -> String
+    def self.token_pairs: (String header) -> Array[Array[String]]
+    def self.token_from: (String header) -> String
+    def self.token_options: (String header) -> Hash[String, String]
+    def self.unquote: (String value) -> String
+    def self.basic?: (String header) -> bool
+    def self.basic_credentials: (String header) -> Array[String]
+  end
+end

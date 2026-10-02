@@ -113,6 +113,9 @@ require_relative "runtime/redirect_back"
 # The real forgery check behind the shared `verify_authenticity_token`
 # — a reopen of ActionController::Base, ruby-family only (see the file).
 require_relative "runtime/request_forgery_protection"
+# Rails' HTTP Token and Basic auth helpers — another reopen of
+# ActionController::Base, ruby-family only (see the file).
+require_relative "runtime/http_authentication"
 # The signatures on the session and flash cookies — the helpers the two
 # dispatchers restore and persist those cookies through (see the file).
 require_relative "runtime/signed_cookies"

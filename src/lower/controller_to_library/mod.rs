@@ -2031,7 +2031,8 @@ fn can_respond_within(
             if matches!(
                 method.as_str(),
                 "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
-            ) {
+            ) || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            {
                 *found = true;
                 return;
             }
