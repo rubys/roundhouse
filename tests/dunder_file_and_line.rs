@@ -127,3 +127,28 @@ fn failed_app_ingest_does_not_relocate_a_later_standalone_file_literal() {
         ExprNode::Lit { value: Literal::Str { value } } if value == file.as_ref()));
     sources::drain();
 }
+
+#[test]
+fn roda_file_literals_keep_the_registered_root_during_route_ingest() {
+    use roundhouse::ingest::ingest_app_with_vfs;
+    use roundhouse::vfs::MapVfs;
+    let root = PathBuf::from("/tmp/roda");
+    let vfs = MapVfs::new([
+        (root.join("config.ru"), b"run App.app".to_vec()),
+        (root.join("app.rb"), b"class App < Roda\n route do |r|\n r.root { __FILE__ }\n end\nend\n".to_vec()),
+    ].into());
+    let app = ingest_app_with_vfs(&vfs, &root).expect("detected Roda app ingests");
+    fn collect(expr: &roundhouse::expr::Expr, paths: &mut Vec<String>) {
+        if let ExprNode::Lit { value: Literal::Str { value } } = &*expr.node
+            && value.ends_with("app.rb") {
+            paths.push(value.clone());
+        }
+        expr.node.for_each_child(&mut |child| collect(child, paths));
+    }
+    let mut paths = Vec::new();
+    for controller in &app.controllers {
+        for action in controller.actions() { collect(&action.body, &mut paths); }
+    }
+    assert_eq!(paths, ["app.rb"]);
+    assert!(app.sources.iter().any(|source| source.path == "/tmp/roda/app.rb"));
+}

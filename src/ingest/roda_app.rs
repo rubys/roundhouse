@@ -69,7 +69,7 @@ pub fn is_roda_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
 /// `views/`, `app.rb`, `seeds.rb`.
 pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
     super::sources::reset();
-    super::sources::set_root(dir);
+    let _source_root = super::sources::set_root(dir);
     let mut app = App::new();
 
     // Schema — Sequel apps have no schema.rb; fold migrations in
