@@ -25,6 +25,34 @@
 
 use crate::expr::{Expr, ExprNode, Literal};
 
+/// Numeric and formatted counts keep their label, not `count.to_i`:
+/// a delimited count must keep its commas. Ground ERB and app helpers
+/// to the String entry point before expression types are available.
+/// Rails' nil/false fallback remains outside this numeric/String seam;
+/// do not synthesize Ruby `||` into targets with different truthiness.
+pub(crate) fn pluralize_helper_call(count: Expr, word: Expr) -> Expr {
+    let span = count.span;
+    let mut label = Expr::new(span, ExprNode::Send {
+        recv: Some(count),
+        method: crate::ident::Symbol::from("to_s"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    label.ty = Some(crate::ty::Ty::Str);
+    let mut call = Expr::new(span, ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Const {
+            path: vec![crate::ident::Symbol::from("Inflector")],
+        })),
+        method: crate::ident::Symbol::from("pluralize_formatted"),
+        args: vec![label, word],
+        block: None,
+        parenthesized: true,
+    });
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
 /// A recognized Rails view helper, keyed by Ruby method name. The
 /// variant names mirror the surface method (snake_case),
 /// regardless of target naming conventions. Each variant carries

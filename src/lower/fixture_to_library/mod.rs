@@ -22,8 +22,10 @@ use crate::lower::fixtures::{
     LoweredFixture, LoweredFixtureRecord, LoweredFixtureSet, LoweredFixtureValue,
 };
 use crate::lower::controller_to_library::util::map_expr;
+use crate::lower::model_to_library::schema::{enum_storage_writer, schema_storage_default};
 use crate::lower::typing::{fn_sig, lit_int, lit_str, with_ty};
 use crate::naming::camelize;
+use crate::schema::Column;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::App;
@@ -42,7 +44,15 @@ pub fn lower_fixtures_to_library_classes(app: &App) -> Vec<LibraryClass> {
     let dynamic = fixtures_reached_by_variable(app);
     load_order(&lowered)
         .into_iter()
-        .map(|f| build_fixture_class(f, &lowered, dynamic.contains(&f.name)))
+        .map(|f| {
+            let defaults: Vec<&Column> = app.models.iter()
+                .find(|m| m.name == f.class)
+                .and_then(|m| app.schema.tables.get(&m.table.0)
+                    .map(|t| t.columns.iter()
+                        .filter(|c| m.enum_defaults.contains_key(&c.name)).collect()))
+                .unwrap_or_default();
+            build_fixture_class(f, &lowered, dynamic.contains(&f.name), &defaults)
+        })
         .collect()
 }
 
@@ -162,6 +172,7 @@ fn build_fixture_class(
     f: &LoweredFixture,
     all: &LoweredFixtureSet,
     wants_by_label: bool,
+    defaults: &[&Column],
 ) -> LibraryClass {
     let owner_name = format!("{}Fixtures", camelize(f.name.as_str()));
     let owner_id = ClassId(Symbol::from(owner_name.clone()));
@@ -241,7 +252,7 @@ fn build_fixture_class(
     // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
     // 1-indexed file order so the autoincrement column matches the
     // ids the label methods look up. Body is a Seq of Sends.
-    let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all);
+    let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all, defaults);
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         name_span: crate::span::Span::synthetic(),
@@ -380,6 +391,7 @@ fn build_load_method_body(
     records: &[LoweredFixtureRecord],
     preamble: &[Expr],
     all: &LoweredFixtureSet,
+    defaults: &[&Column],
 ) -> Expr {
     let class_ty = Ty::Class { id: cls.clone(), args: vec![] };
     let instance_sym = Symbol::from("instance");
@@ -436,6 +448,21 @@ fn build_load_method_body(
             ),
             class_ty.clone(),
         );
+        // Omitted enum fields are schema row data, not the DSL defaults
+        // ordinary `new` applies. Populate them without assignment validation.
+        // Preserve the existing constructor-before-fixture-fields lifecycle:
+        // after_initialize still sees model defaults, and fixture data (implicit
+        // or explicit) wins over its writes. Rails' callback-free fixture loading
+        // remains a separate gap, as documented at save_after_validation below.
+        for col in defaults.iter().filter(|c| !r.fields.iter().any(|f| f.column == c.name)) {
+            exprs.push(Expr::new(Span::synthetic(), ExprNode::Send {
+                recv: Some(instance_var.clone()),
+                method: enum_storage_writer(col),
+                args: vec![schema_storage_default(col)],
+                block: None,
+                parenthesized: false,
+            }));
+        }
         exprs.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -697,4 +724,3 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
         ))
     })
 }
-

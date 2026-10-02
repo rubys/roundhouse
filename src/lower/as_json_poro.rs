@@ -357,10 +357,12 @@ fn declared_as_json_writer(
             PairValue::Reader(name) => {
                 let column = table.and_then(|t| t.columns.iter().find(|c| &c.name == name));
                 if let Some(c) = column {
+                    if c.col_type == crate::schema::ColumnType::Date {
+                        return Ok(PairEncoding::DateColumn);
+                    }
                     if matches!(
                         c.col_type,
                         crate::schema::ColumnType::DateTime
-                            | crate::schema::ColumnType::Date
                             | crate::schema::ColumnType::Time
                     ) {
                         return Ok(PairEncoding::ZonedTime);

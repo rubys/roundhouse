@@ -126,6 +126,31 @@ fn real_blog_mix_test_passes() {
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
+    // The native runtime must execute the shared helper, not merely compile
+    // an unsupported-loop sentinel. Expected labels follow Rails' lexical
+    // /^1(\.0+)?$/ rule, not numeric parsing or our implementation.
+    std::fs::write(
+        scratch.join("test/formatted_pluralize_test.exs"),
+        r#"
+defmodule FormattedPluralizeTest do
+  use ExUnit.Case, async: true
+
+  test "formatted count labels" do
+    for {count, expected} <- [
+      {"1", "1 word"}, {"1.0", "1.0 word"}, {"1.00", "1.00 word"},
+      {"01", "01 words"}, {"1.", "1. words"}, {"10.", "10. words"},
+      {"10.0", "10.0 words"}, {"1.01", "1.01 words"},
+      {"1.0002", "1.0002 words"}, {"1,001", "1,001 words"}, {"", " words"},
+      {"2\n1.0\n", "2\n1.0\n word"}, {"1\r\n", "1\r\n words"},
+      {"1.٠", "1.٠ words"}
+    ] do
+      assert Inflector.pluralize_formatted(count, "word") == expected
+    end
+  end
+end
+"#,
+    )
+    .expect("write formatted-count test");
     mix_deps_get(&scratch);
 
     let output = Command::new("mix")
@@ -143,5 +168,9 @@ fn real_blog_mix_test_passes() {
         scratch.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    eprintln!(
+        "elixir real-blog suite:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }

@@ -566,7 +566,6 @@ module ActiveRecord
       cached = @records
       return cached.dup unless cached.nil?
       records = load_records
-      @model.preload_associations(records, @includes) if @includes.length > 0
       @records = records
       records.dup
     end
@@ -577,12 +576,14 @@ module ActiveRecord
     # fixed at compile time, so no String-keyed Hash per row. An
     # explicit `select` can project anything, and keeps the Hash path.
     def load_records
-      if @select_sql.nil?
+      records = if @select_sql.nil?
         @model._hydrate_all(select_sql_with(@model._columns_sql))
       else
         rows = ActiveRecord.adapter.select_rows(to_sql)
         rows.map { |row| @model.instantiate(row) }
       end
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
     end
 
     # Implicit array conversion — Rails delegates `to_ary` to the
@@ -1179,13 +1180,68 @@ module ActiveRecord
     # raise for the same reason — an exception a caller rescues must not
     # leave the relation altered.
     def find(id)
-      @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      record = first
-      @wheres.pop
+      return find_ids(id) if id.is_a?(Array)
+      key = @model._cast_primary_key(id)
+      prior_limit = @limit
+      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(key)}"
+      begin
+        @limit = 1
+        rows = load_records
+        record = rows.length == 0 ? nil : rows[0]
+      ensure
+        @limit = prior_limit
+        @wheres.pop
+      end
       if record.nil?
         raise RecordNotFound, "Couldn't find record in #{@model.table_name} with id=#{id}"
       end
       record
+    end
+
+    # Array form: deduplicate BEFORE the column cast, as Rails does.
+    # Unordered relations follow the requested IDs (after slicing by
+    # offset/limit); explicitly ordered relations follow their SQL order.
+    # Read directly rather than through to_a: its loaded cache belongs to
+    # the original relation and must neither mask nor remember this filter.
+    def find_ids(ids)
+      ids = ids.uniq
+      return [] if ids.empty?
+      return [find(ids[0])] if ids.length == 1
+      prior_limit = @limit
+      prior_offset = @offset
+      prior_select = @select_sql
+      expected = ids.length
+      if @orders.empty?
+        ids = ids[prior_offset || 0, prior_limit || ids.length] || []
+        expected = ids.length
+      else
+        expected = prior_limit if !prior_limit.nil? && expected > prior_limit
+        expected = ids.length - prior_offset if !prior_offset.nil? && ids.length - prior_offset < expected
+      end
+      keys = ids.map { |id| @model._cast_primary_key(id) }
+      sql_ids = keys.map { |key| ActiveRecord.adapter.escape_value(key) }.join(", ")
+      @wheres << (keys.empty? ? "1=0" : "#{@table}.#{@model.primary_key} IN (#{sql_ids})")
+      begin
+        if @orders.empty?
+          @limit = nil
+          @offset = nil
+        end
+        @select_sql = "#{prior_select}, #{@table}.#{@model.primary_key}" unless prior_select.nil?
+        rows = load_records
+      ensure
+        @limit = prior_limit
+        @offset = prior_offset
+        @select_sql = prior_select
+        @wheres.pop
+      end
+      if rows.length != expected
+        raise RecordNotFound, "Couldn't find all records in #{@table} with ids=#{ids}"
+      end
+      if @orders.empty?
+        keys.map { |key| rows.find { |row| row.id == key } }
+      else
+        rows
+      end
     end
 
     # A TERMINAL, so its predicate is POPPED — the same rule `find`
@@ -1286,7 +1342,12 @@ module ActiveRecord
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
       sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
       sql = "#{sql} ORDER BY #{@orders.join(", ")}" if @orders.length > 0
-      sql = "#{sql} LIMIT #{@limit}" unless @limit.nil?
+      if !@limit.nil?
+        sql = "#{sql} LIMIT #{@limit}"
+      elsif !@offset.nil?
+        # SQLite needs LIMIT even for offset-only pagination.
+        sql = "#{sql} LIMIT -1"
+      end
       sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
       sql
     end

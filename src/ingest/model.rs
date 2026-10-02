@@ -2052,7 +2052,8 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
+        ColumnType::Date => Ty::Date,
+        ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
         // Rails exposes a schema-less JSON value here: it may be an
         // Array, Hash, scalar, or nil, so neither String nor one fixed

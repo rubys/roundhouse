@@ -107,6 +107,15 @@ from them.
 ingester does not recognize yet are recorded and skipped rather than
 aborting, and a deduplicated list of them is printed at the end.
 
+Some declaration limits can only be established after type inference.
+Rejected Alba source-property serializers also appear in this ledger,
+with an `analysis:` prefix and their source location. A resolved direct
+`alba` dependency adds gem attribution; without that evidence the entry
+names only the Alba-shaped subset. These admission failures remain
+`error[unsupported]` and exit 1: a coverage entry is not executable
+serializer support. Alba declarations rejected during ingest still
+exit 2, but `--continue` prints their partial survey ledger.
+
 Without it (the default, also spelled `--strict`), ingest stops at the
 first unrecognized construct and exits 2. That is the right mode for an
 app you expect roundhouse to cover completely — a CI gate that should

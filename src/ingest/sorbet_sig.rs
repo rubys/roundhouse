@@ -595,7 +595,8 @@ fn named_ty(name: &str) -> Ty {
         "Symbol" => Ty::Sym,
         "TrueClass" | "FalseClass" => Ty::Bool,
         "NilClass" => Ty::Nil,
-        "Time" | "Date" | "DateTime" | "ActiveSupport::TimeWithZone" => Ty::Time,
+        "Date" => Ty::Date,
+        "Time" | "DateTime" | "ActiveSupport::TimeWithZone" => Ty::Time,
         _ => Ty::Class { id: ClassId(Symbol::new(name)), args: Vec::new() },
     }
 }

@@ -8,8 +8,8 @@
 #
 # Rails' serializable_hash subset: string keys, `only:` narrows the
 # attribute list; without `only:` every column attribute serializes
-# (recovered from the model's @-ivars — the synthesized column readers
-# store straight into same-named ivars). Values stay raw here; the
+# (public names from the schema, not internal `_raw` storage ivars).
+# Date values become ISO date text; other values stay raw here; the
 # JsonRender walk (or a custom as_json caller) primitivizes them.
 #
 # CRuby-only by nature (send/instance_variables reflection) — exactly
@@ -21,7 +21,7 @@ module ActiveRecord
         if options && options[:only]
           options[:only].map { |n| n.to_s }
         else
-          instance_variables.map { |iv| iv.to_s.delete_prefix("@") }
+          self.class.schema_columns.map { |n| n.to_s }
         end
       h = {}
       names.each do |n|
@@ -36,7 +36,30 @@ module ActiveRecord
         # renames storage to.
         next unless instance_variable_defined?("@#{n}") ||
                     instance_variable_defined?("@#{n}_raw")
-        h[n] = send(n) if respond_to?(n)
+        if respond_to?(n)
+          value = send(n)
+          # Date-only JSON is YYYY-MM-DD. DateTime is a distinct
+          # timestamp domain despite being a Ruby subclass of Date.
+          h[n] = value.instance_of?(Date) ? value.iso8601 : value
+        end
+      end
+      h
+    end
+
+    # The shared runtime's super(only:) seam reads raw storage and
+    # already handles timestamp JSON. Native Date must instead follow
+    # its public reader, including empty-as-absent nonnullable storage.
+    alias_method :_as_json_only_without_dates, :_as_json_only
+    private :_as_json_only_without_dates
+
+    def _as_json_only(only)
+      h = _as_json_only_without_dates(only)
+      only.each do |key|
+        name = key.to_s
+        next unless h.key?(name) && respond_to?(name)
+        value = send(name)
+        h[name] = value.iso8601 if value.instance_of?(Date)
+        h[name] = nil if value.nil?
       end
       h
     end
