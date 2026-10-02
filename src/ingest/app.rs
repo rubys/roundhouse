@@ -9,7 +9,7 @@
 //! convenience wrapper for the disk case.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ruby_prism::Node;
 
@@ -227,6 +227,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    let additional_test_paths = additional_test_paths(vfs, dir)?;
+    validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
@@ -1249,41 +1251,45 @@ end
         }
     };
 
-    // Test files — every `test/<dir>/**/*_test.rb` that runs in
-    // process. System tests under `test/system/` need a browser
-    // driver and stay out of scope; `test/performance/` is a
-    // benchmark, not a suite.
-    //
-    // This list was `models` and `controllers` for a long time, and
-    // that was the whole reason campfire's `test/lib`, `test/channels`
-    // and `test/helpers` — twelve files, ninety-seven tests — were
-    // never in any tally: not a gap in what they exercise, just never
-    // read. The subjects those dirs test (the private-network guard,
-    // the channels, the content filters) were already emitted.
-    // `test/mailers` (the store fixture has one, against
-    // `ActionMailer::TestCase`) and `test/jobs` are the next two, and
-    // each is a harness the runtime does not have yet.
-    // `test/unit` and `test/utils` are plain `ActiveSupport::TestCase`
-    // lanes in larger apps (Shopify core keeps most unit tests there).
-    for subdir in [
-        "test/models", "test/controllers", "test/helpers", "test/channels", "test/lib", "test/unit",
+    // Test files under the Rails defaults and the additional roots from
+    // `roundhouse.yml`. Select every Ruby file recursively.
+    let mut test_roots: Vec<PathBuf> = [
+        "test/models",
+        "test/controllers",
+        "test/helpers",
+        "test/channels",
+        "test/lib",
+        "test/unit",
         "test/utils",
-    ] {
-        let tests_dir = dir.join(subdir);
-        if vfs.is_dir(&tests_dir) {
-            for entry in read_rb_files(vfs, &tests_dir)? {
-                let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
-                if let Some(tms) =
-                    unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
-                {
-                    for mut tm in tms {
-                        splice_test_helpers(&mut tm, &shared_test_helpers);
-                        if let Some(case_setup) = &test_case_setup {
-                            splice_test_case_setup(&mut tm, case_setup);
-                        }
-                        app.test_modules.push(tm);
-                    }
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    test_roots.extend(additional_test_paths);
+    test_roots.sort();
+    test_roots.dedup();
+
+    let mut test_files = Vec::new();
+    for root in test_roots {
+        let tests_dir = dir.join(root);
+        if !path_has_symlink_component(vfs, dir, &tests_dir) && vfs.is_dir(&tests_dir) {
+            test_files.extend(read_test_rb_files(vfs, dir, &tests_dir)?);
+        }
+    }
+    test_files.sort();
+    test_files.dedup();
+
+    for entry in test_files {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        if let Some(tms) =
+            unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
+        {
+            for mut tm in tms {
+                splice_test_helpers(&mut tm, &shared_test_helpers);
+                if let Some(case_setup) = &test_case_setup {
+                    splice_test_case_setup(&mut tm, case_setup);
                 }
+                app.test_modules.push(tm);
             }
         }
     }
@@ -3603,6 +3609,149 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
     collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+/// Check configured roots before directory checks, which follow symbolic links.
+fn validate_additional_test_paths<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    paths: &[PathBuf],
+) -> IngestResult<()> {
+    let config_path = dir.join("roundhouse.yml");
+    for path in paths {
+        let tests_dir = dir.join(path);
+        if path_has_symlink_component(vfs, dir, &tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!(
+                    "test_paths entries must not contain symbolic links: {path:?}"
+                ),
+            });
+        }
+        if vfs.exists(&tests_dir) && !vfs.is_dir(&tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!("test_paths entries must name directories: {path:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Return true when a path component below `root` is a symbolic link.
+fn path_has_symlink_component<V: Vfs + ?Sized>(vfs: &V, root: &Path, path: &Path) -> bool {
+    let relative = if root.as_os_str().is_empty() {
+        path
+    } else if let Ok(relative) = path.strip_prefix(root) {
+        relative
+    } else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => {
+                current.push(segment);
+                if vfs.is_symlink(&current) {
+                    return true;
+                }
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
+}
+
+/// Collect Ruby test files without following symbolic links.
+fn read_test_rb_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    app_root: &Path,
+    test_root: &Path,
+) -> IngestResult<Vec<PathBuf>> {
+    fn collect<V: Vfs + ?Sized>(
+        vfs: &V,
+        app_root: &Path,
+        dir: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> IngestResult<()> {
+        if path_has_symlink_component(vfs, app_root, dir) {
+            return Ok(());
+        }
+        for entry in vfs.read_dir(dir)? {
+            if path_has_symlink_component(vfs, app_root, &entry) {
+                continue;
+            }
+            if vfs.is_dir(&entry) {
+                collect(vfs, app_root, &entry, out)?;
+            } else if entry.extension().and_then(|extension| extension.to_str()) == Some("rb") {
+                out.push(entry);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(vfs, app_root, test_root, &mut files)?;
+    Ok(files)
+}
+
+/// Additional test roots from the app's `roundhouse.yml`.
+fn additional_test_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct RoundhouseConfig {
+        test_paths: Vec<PathBuf>,
+    }
+
+    let config_path = dir.join("roundhouse.yml");
+    let text = match vfs.read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(IngestError::Io(std::io::Error::new(
+                error.kind(),
+                format!("{}: {error}", config_path.display()),
+            )));
+        }
+    };
+    let config: Option<RoundhouseConfig> = serde_yaml_ng::from_str(&text).map_err(|error| {
+        IngestError::Parse {
+            file: config_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+
+    let mut paths = Vec::new();
+    for path in config.into_iter().flat_map(|config| config.test_paths) {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(segment) => normalized.push(segment),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(IngestError::Parse {
+                        file: config_path.display().to_string(),
+                        message: format!(
+                            "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
+                        ),
+                    });
+                }
+            }
+        }
+        if normalized.as_os_str().is_empty() {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!(
+                    "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
+                ),
+            });
+        }
+        paths.push(normalized);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// The classes from `classes` that are NESTED under `outer` — the ones
