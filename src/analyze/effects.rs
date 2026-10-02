@@ -238,39 +238,7 @@ impl super::Analyzer {
         ctx: &Ctx,
         out: &mut BTreeSet<Effect>,
     ) {
-        use crate::expr::MatchPattern;
-        match pattern {
-            MatchPattern::Nil | MatchPattern::Bind { .. } => {}
-            MatchPattern::Value { expr } => self.visit_effects(expr, ctx, out),
-            MatchPattern::Capture { pattern, .. } => {
-                self.visit_match_pattern_effects(pattern, ctx, out);
-            }
-            MatchPattern::Alt { alternatives } => {
-                for a in alternatives {
-                    self.visit_match_pattern_effects(a, ctx, out);
-                }
-            }
-            MatchPattern::Array { constant, pre, post, .. } => {
-                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
-                for p in pre.iter_mut().chain(post.iter_mut()) {
-                    self.visit_match_pattern_effects(p, ctx, out);
-                }
-            }
-            MatchPattern::Find { constant, middle, .. } => {
-                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
-                for p in middle {
-                    self.visit_match_pattern_effects(p, ctx, out);
-                }
-            }
-            MatchPattern::Hash { constant, pairs, .. } => {
-                if let Some(c) = constant { self.visit_effects(c, ctx, out); }
-                for (_, p) in pairs {
-                    if let Some(p) = p {
-                        self.visit_match_pattern_effects(p, ctx, out);
-                    }
-                }
-            }
-        }
+        pattern.for_each_expr_mut(&mut |expr| self.visit_effects(expr, ctx, out));
     }
 
     fn contribute_send_effect(&self, recv_ty: &Ty, method: &Symbol, out: &mut BTreeSet<Effect>) {

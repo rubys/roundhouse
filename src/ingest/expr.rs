@@ -1928,6 +1928,12 @@ fn ingest_pattern_with_guard(
 fn ingest_pattern(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::MatchPattern> {
     use crate::expr::MatchPattern;
 
+    if let Some(p) = node.as_parentheses_node() {
+        let inner = p.body().ok_or_else(|| IngestError::Unsupported {
+            file: file.into(), message: "empty parenthesized pattern".into(),
+        })?;
+        return ingest_pattern(&inner, file);
+    }
     if node.as_nil_node().is_some() {
         return Ok(MatchPattern::Nil);
     }
@@ -1951,8 +1957,7 @@ fn ingest_pattern(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::Matc
         return Ok(MatchPattern::Value { expr });
     }
     // `in p1 | p2 | ... | pn` — Prism's left-associative binary tree
-    // flattens into one `Vec`. CRuby rejects a binding inside `|` at
-    // parse time, so no alternative here needs guard/capture handling.
+    // flattens into one `Vec`; only `_`-prefixed bindings are legal.
     if node.as_alternation_pattern_node().is_some() {
         let mut alternatives = Vec::new();
         flatten_alternation(node, file, &mut alternatives)?;
@@ -2117,10 +2122,7 @@ fn ingest_hash_rest(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::Ha
         return Ok(HashRest::Nil);
     }
     if let Some(splat) = node.as_assoc_splat_node() {
-        let value = splat.value().ok_or_else(|| IngestError::Unsupported {
-            file: file.into(),
-            message: "bare **-rest (no binding) in hash pattern".to_string(),
-        })?;
+        let Some(value) = splat.value() else { return Ok(HashRest::Ignore); };
         let lvt = value.as_local_variable_target_node().ok_or_else(|| {
             IngestError::Unsupported {
                 file: file.into(),

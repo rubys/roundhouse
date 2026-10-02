@@ -583,36 +583,10 @@ fn emit_node(n: &ExprNode) -> String {
             s.push_str("end");
             s
         }
-        // Crystal has no destructuring pattern-match construct — only
-        // the `Nil`/`Bind`/literal-`Value`/`Alt` subset lowers to its
-        // native `case/when` (see `simplify_case_match`); anything
-        // needing real deconstruction (a `Success(...)`-shaped
-        // `Array`/`Hash` pattern, a `Capture`) degrades to the
-        // unsupported stub rather than a `when` that would only test
-        // equality where the source meant to destructure.
-        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
-            arms,
-            else_body,
-            crate::span::Span::synthetic(),
-            "NoMatchingPatternError (roundhouse-lowered case/in)",
-        ) {
-            Some(case_arms) => emit_node(&ExprNode::Case {
-                scrutinee: scrutinee.clone(),
-                arms: case_arms,
-            }),
-            None => crate::emit::diagnostics::report_unsupported(
-                crate::span::Span::synthetic(),
-                "crystal",
-                "CaseMatch",
-                "pattern needs destructuring or a guard Crystal's case/when can't express",
-            ),
-        },
-        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => {
+        ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. } => {
             crate::emit::diagnostics::report_unsupported(
-                crate::span::Span::synthetic(),
-                "crystal",
-                n.kind_str(),
-                format!("pattern kind not lowered to Crystal: {pattern:?}"),
+                crate::span::Span::synthetic(), "crystal", n.kind_str(),
+                "structural pattern matching requires a native Ruby target",
             )
         }
         ExprNode::Seq { exprs } => {

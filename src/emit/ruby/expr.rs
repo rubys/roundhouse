@@ -90,6 +90,17 @@ fn contains_assign(e: &Expr) -> bool {
     ) {
         return true;
     }
+    let mut names = Vec::new();
+    match &*e.node {
+        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => {
+            pattern.bound_names(&mut names);
+        }
+        ExprNode::CaseMatch { arms, .. } => {
+            for arm in arms { arm.pattern.bound_names(&mut names); }
+        }
+        _ => {}
+    }
+    if !names.is_empty() { return true; }
     let mut found = false;
     e.node.for_each_child(&mut |c| {
         if !found && contains_assign(c) {
@@ -214,10 +225,12 @@ fn emit_node(n: &ExprNode) -> String {
             s
         }
         ExprNode::MatchPredicate { value, pattern } => {
-            format!("{} in {}", emit_expr(value), emit_match_pattern(pattern))
+            // `in` binds below assignment and boolean operators. Protect
+            // both the subject and the match when embedded in another expression.
+            format!("(({}) in {})", emit_expr(value), emit_match_pattern(pattern))
         }
         ExprNode::MatchRequired { value, pattern } => {
-            format!("{} => {}", emit_expr(value), emit_match_pattern(pattern))
+            format!("(({}) => {})", emit_expr(value), emit_match_pattern(pattern))
         }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
@@ -1536,6 +1549,9 @@ fn emit_match_pattern(p: &crate::expr::MatchPattern) -> String {
         MatchPattern::Nil => "nil".to_string(),
         MatchPattern::Bind { name } => name.to_string(),
         MatchPattern::Value { expr } => match &*expr.node {
+            // A bare `nil` ingests as MatchPattern::Nil, so this shape
+            // can only have come from a pinned expression.
+            ExprNode::Lit { value: Literal::Nil } => "^(nil)".to_string(),
             ExprNode::Lit { .. } | ExprNode::Const { .. } | ExprNode::Range { .. } => {
                 emit_expr(expr)
             }
@@ -1544,10 +1560,10 @@ fn emit_match_pattern(p: &crate::expr::MatchPattern) -> String {
             _ => format!("^({})", emit_expr(expr)),
         },
         MatchPattern::Capture { pattern, name } => {
-            format!("{} => {name}", emit_match_pattern(pattern))
+            format!("({} => {name})", emit_match_pattern(pattern))
         }
         MatchPattern::Alt { alternatives } => {
-            alternatives.iter().map(emit_match_pattern).collect::<Vec<_>>().join(" | ")
+            format!("({})", alternatives.iter().map(emit_match_pattern).collect::<Vec<_>>().join(" | "))
         }
         MatchPattern::Array { constant, pre, rest, post } => {
             let mut parts: Vec<String> = pre.iter().map(emit_match_pattern).collect();
@@ -1583,13 +1599,21 @@ fn emit_match_pattern(p: &crate::expr::MatchPattern) -> String {
         MatchPattern::Hash { constant, pairs, rest } => {
             let mut parts: Vec<String> = pairs
                 .iter()
-                .map(|(key, sub)| match sub {
-                    Some(p) => format!("{key}: {}", emit_match_pattern(p)),
-                    None => format!("{key}:"),
+                .map(|(key, sub)| {
+                    let key = if is_simple_ident(key.as_str()) {
+                        key.to_string()
+                    } else {
+                        ruby_str_literal(key.as_str())
+                    };
+                    match sub {
+                        Some(p) => format!("{key}: {}", emit_match_pattern(p)),
+                        None => format!("{key}:"),
+                    }
                 })
                 .collect();
             if let Some(r) = rest {
                 parts.push(match r {
+                    HashRest::Ignore => "**".to_string(),
                     HashRest::Collect { name } => format!("**{name}"),
                     HashRest::Nil => "**nil".to_string(),
                 });

@@ -257,60 +257,10 @@ impl<'a> BodyTyper<'a> {
         ty
     }
 
-    /// Type every `Expr` embedded in a `MatchPattern` — a `Value`'s
-    /// test expression, or an `Array`/`Find`/`Hash` pattern's narrowing
-    /// `constant` — the pattern-side mirror of `compute`'s own child
-    /// recursion. Constants resolve the same way a bare `Const` read
-    /// always does (see `ExprNode::Const` above): an app class the
-    /// registry knows types as itself, and one it doesn't — every
-    /// `dry-monads` `Success`/`Failure`, or any other gem's
-    /// `deconstruct`/`deconstruct_keys` provider — still resolves
-    /// (`Const` never errors), just to a `Ty::Class` the registry has
-    /// no entry for. That's the gem-vs-syntax distinction `match_pattern_bindings`
-    /// downstream relies on: an unregistered class is a legitimate
-    /// gradual-typing opt-out, not an ingest gap, so it costs no
-    /// diagnostic here.
+    /// Pattern-side expressions use ordinary expression/constant resolution;
+    /// recognizing pattern syntax does not grant unknown classes new support.
     fn analyze_match_pattern_constants(&self, pattern: &mut MatchPattern, ctx: &Ctx) {
-        match pattern {
-            MatchPattern::Nil | MatchPattern::Bind { .. } => {}
-            MatchPattern::Value { expr } => {
-                self.analyze_expr(expr, ctx);
-            }
-            MatchPattern::Capture { pattern, .. } => {
-                self.analyze_match_pattern_constants(pattern, ctx);
-            }
-            MatchPattern::Alt { alternatives } => {
-                for a in alternatives {
-                    self.analyze_match_pattern_constants(a, ctx);
-                }
-            }
-            MatchPattern::Array { constant, pre, post, .. } => {
-                if let Some(c) = constant {
-                    self.analyze_expr(c, ctx);
-                }
-                for p in pre.iter_mut().chain(post.iter_mut()) {
-                    self.analyze_match_pattern_constants(p, ctx);
-                }
-            }
-            MatchPattern::Find { constant, middle, .. } => {
-                if let Some(c) = constant {
-                    self.analyze_expr(c, ctx);
-                }
-                for p in middle {
-                    self.analyze_match_pattern_constants(p, ctx);
-                }
-            }
-            MatchPattern::Hash { constant, pairs, .. } => {
-                if let Some(c) = constant {
-                    self.analyze_expr(c, ctx);
-                }
-                for (_, p) in pairs {
-                    if let Some(p) = p {
-                        self.analyze_match_pattern_constants(p, ctx);
-                    }
-                }
-            }
-        }
+        pattern.for_each_expr_mut(&mut |expr| { self.analyze_expr(expr, ctx); });
     }
 
     /// The locals a `MatchPattern` binds when it matches, typed against
@@ -348,9 +298,11 @@ impl<'a> BodyTyper<'a> {
                 out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped)));
                 out
             }
-            // CRuby rejects a binding inside `|` at parse time, so no
-            // alternative here ever contributes a name.
-            MatchPattern::Alt { .. } => Vec::new(),
+            // Ruby permits `_`-prefixed bindings in alternatives. A
+            // different alternative can succeed without that binding.
+            MatchPattern::Alt { alternatives } => alternatives.iter()
+                .flat_map(|p| self.match_pattern_bindings(p, subject_ty))
+                .map(|(name, ty)| (name, union_of(ty, Ty::Nil))).collect(),
             MatchPattern::Array { pre, rest, post, .. } => {
                 let mut out = Vec::new();
                 for p in pre.iter().chain(post.iter()) {
@@ -398,6 +350,33 @@ impl<'a> BodyTyper<'a> {
                 out
             }
         }
+    }
+
+    /// Matches nested in expressions can bind locals too. Conditional
+    /// matches may keep a prior/nil value; a required-match statement
+    /// definitely binds on the continuing path.
+    fn propagate_match_bindings(&self, expr: &Expr, ctx: &mut Ctx, definite: bool) {
+        if matches!(&*expr.node, ExprNode::Lambda { .. } | ExprNode::Let { .. }) { return; }
+        let mut bind = |pattern: &MatchPattern, subject_ty: Option<&Ty>| {
+            for (name, ty) in self.match_pattern_bindings(pattern, subject_ty) {
+                let ty = if definite && matches!(&*expr.node, ExprNode::MatchRequired { .. }) {
+                    ty
+                } else {
+                    union_of(ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil), ty)
+                };
+                ctx.local_bindings.insert(name, ty);
+            }
+        };
+        match &*expr.node {
+            ExprNode::CaseMatch { scrutinee, arms, .. } => {
+                for arm in arms { bind(&arm.pattern, scrutinee.ty.as_ref()); }
+            }
+            ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+                bind(pattern, value.ty.as_ref());
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| self.propagate_match_bindings(child, ctx, false));
     }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
@@ -687,6 +666,7 @@ impl<'a> BodyTyper<'a> {
                 // `||`).
                 let mut seeded = ctx.clone();
                 collect_var_assignments_into(left, &mut seeded.local_bindings);
+                self.propagate_match_bindings(left, &mut seeded, true);
                 let pred = narrowing::extract_narrowing(left);
                 let right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
@@ -1083,6 +1063,7 @@ impl<'a> BodyTyper<'a> {
                 for (k, v) in &cond_assigns {
                     base.local_bindings.insert(k.clone(), v.clone());
                 }
+                self.propagate_match_bindings(cond, &mut base, true);
                 let then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
@@ -1106,47 +1087,39 @@ impl<'a> BodyTyper<'a> {
                 union_many(branch_tys)
             }
 
-            // `case scrutinee; in pattern [guard]; body; ... [else …] end`.
-            // Each arm gets its own scope: the pattern's bindings (see
-            // `match_pattern_bindings`) are visible in both the guard
-            // and the body, but never leak to a sibling arm or past the
-            // `CaseMatch` — same isolation `BeginRescue`'s `rescue E =>
-            // name` gives its binding. An absent `else_body` still
-            // contributes nothing to the union: CRuby raises
-            // `NoMatchingPatternError` on that path rather than
-            // producing a value, so it must not pull the result type
-            // toward `Nil` the way a value-less `when`/`else` does.
+            // Pattern bindings are lexical locals. Failed guards do not
+            // roll them back, and failed patterns can bind a prefix.
+            // Sibling arms see possible earlier bindings joined with
+            // their old value (nil for a newly introduced local).
             ExprNode::CaseMatch { scrutinee, arms, else_body } => {
                 let scrutinee_ty = self.analyze_expr(scrutinee, ctx);
                 let mut branch_tys = Vec::new();
+                let mut fallthrough = ctx.clone();
                 for arm in arms.iter_mut() {
-                    self.analyze_match_pattern_constants(&mut arm.pattern, ctx);
                     let bindings =
                         self.match_pattern_bindings(&arm.pattern, Some(&scrutinee_ty));
-                    let mut inner = ctx.clone();
-                    for (name, ty) in bindings {
-                        inner.local_bindings.insert(name, ty);
+                    let mut inner = fallthrough.clone();
+                    for (name, ty) in &bindings {
+                        inner.local_bindings.insert(name.clone(), ty.clone());
                     }
+                    self.analyze_match_pattern_constants(&mut arm.pattern, &inner);
                     if let Some((_, g)) = &mut arm.guard {
                         self.analyze_expr(g, &inner);
                     }
                     branch_tys.push(self.analyze_expr(&mut arm.body, &inner));
+                    for (name, ty) in bindings {
+                        let old = fallthrough.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil);
+                        fallthrough.local_bindings.insert(name, union_of(old, ty));
+                    }
                 }
                 if let Some(eb) = else_body {
-                    branch_tys.push(self.analyze_expr(eb, ctx));
+                    branch_tys.push(self.analyze_expr(eb, &fallthrough));
                 }
                 union_many(branch_tys)
             }
 
-            // `value in pattern` — always a `bool`, never raises. A
-            // successful match's bindings escape to the ENCLOSING scope
-            // in real Ruby (unlike `CaseMatch`'s per-arm isolation), but
-            // that leak is conditional on which branch of a boolean this
-            // becomes, which the analyzer's forward-only `Seq` walk has
-            // no slot for — the same simplification already applies to
-            // `defined?`-guarded reads. A body that goes on to read a
-            // name this predicate would have bound sees it through the
-            // ordinary unresolved-local path, not a hard type error.
+            // The predicate returns Bool; user deconstruction/pin methods
+            // can still raise. Bindings escape, including partial matches.
             ExprNode::MatchPredicate { value, pattern } => {
                 self.analyze_expr(value, ctx);
                 self.analyze_match_pattern_constants(pattern, ctx);
@@ -1365,19 +1338,7 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
-                    // `value => pattern` at statement position: unlike
-                    // `CaseMatch`'s per-arm-isolated bindings, a
-                    // successful `=>` match's bindings DO escape to the
-                    // rest of this scope (it either raises or falls
-                    // through with them bound) — thread them forward
-                    // the same way `Assign`/`MultiAssign` do above, typed
-                    // against the already-analyzed subject's `.ty`.
-                    if let ExprNode::MatchRequired { value, pattern } = &*e.node {
-                        let subject_ty = value.ty.clone();
-                        for (name, ty) in self.match_pattern_bindings(pattern, subject_ty.as_ref()) {
-                            local_ctx.local_bindings.insert(name, ty);
-                        }
-                    }
+                    self.propagate_match_bindings(e, &mut local_ctx, true);
                     // Container element write — `hash[k] ||= []` /
                     // `hash[k] = v`. Widen the container's value type so
                     // a following `hash[k].push x` / `.join` in the same

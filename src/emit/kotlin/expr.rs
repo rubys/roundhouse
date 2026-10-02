@@ -907,31 +907,6 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_if(cond, then_branch, else_branch)
         }
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
-        // Kotlin's `when` has no destructuring, so only the
-        // `Nil`/`Bind`/literal-`Value`/`Alt` subset lowers (see
-        // `simplify_case_match`, reusing `emit_case`'s own wildcard-arm
-        // handling for free); real deconstruction degrades to the
-        // unsupported stub.
-        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
-            arms,
-            else_body,
-            e.span,
-            "NoMatchingPatternError (roundhouse-lowered case/in)",
-        ) {
-            Some(case_arms) => emit_case(scrutinee, &case_arms),
-            None => crate::emit::diagnostics::report_unsupported(
-                e.span,
-                "kotlin",
-                "CaseMatch",
-                "pattern needs destructuring or a guard Kotlin's when can't express",
-            ),
-        },
-        ExprNode::MatchPredicate { .. } => {
-            crate::emit::diagnostics::report_unsupported(e.span, "kotlin", "MatchPredicate", "")
-        }
-        ExprNode::MatchRequired { .. } => {
-            crate::emit::diagnostics::report_unsupported(e.span, "kotlin", "MatchRequired", "")
-        }
         ExprNode::Seq { exprs } => exprs
             .iter()
             .map(emit_expr)

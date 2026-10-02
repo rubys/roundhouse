@@ -363,11 +363,10 @@ pub enum ExprNode {
     /// can never legally take. `else_body` absent means an unmatched
     /// scrutinee raises at runtime, exactly as CRuby's case/in does.
     CaseMatch { scrutinee: Expr, arms: Vec<MatchArm>, else_body: Option<Expr> },
-    /// `value in pattern` — one-line pattern *predicate*: never raises,
-    /// evaluates to `true`/`false`. Any binding a matching pattern
-    /// performs escapes to the enclosing scope on success (Ruby leaves
-    /// the local `nil`-seeded and unbound on failure), mirroring
-    /// `CaseMatch`'s per-arm bindings.
+    /// `value in pattern` — one-line pattern predicate, returning Bool
+    /// rather than raising on mismatch. User pattern methods can raise.
+    /// Bindings escape to the enclosing lexical scope, including partial
+    /// bindings on failure; a newly introduced local otherwise holds nil.
     MatchPredicate { value: Expr, pattern: MatchPattern },
     /// `value => pattern` — one-line pattern *assertion*: binds on
     /// match, raises `NoMatchingPatternError` on mismatch. Evaluates to
@@ -586,44 +585,6 @@ impl ExprNode {
                 Pattern::Expr { expr } => f(expr),
             }
         }
-        fn match_pattern_children(p: &mut MatchPattern, f: &mut impl FnMut(&mut Expr)) {
-            match p {
-                MatchPattern::Nil | MatchPattern::Bind { .. } => {}
-                MatchPattern::Value { expr } => f(expr),
-                MatchPattern::Capture { pattern, .. } => match_pattern_children(pattern, f),
-                MatchPattern::Alt { alternatives } => {
-                    for a in alternatives {
-                        match_pattern_children(a, f);
-                    }
-                }
-                MatchPattern::Array { constant, pre, post, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for p in pre.iter_mut().chain(post.iter_mut()) {
-                        match_pattern_children(p, f);
-                    }
-                }
-                MatchPattern::Find { constant, middle, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for p in middle {
-                        match_pattern_children(p, f);
-                    }
-                }
-                MatchPattern::Hash { constant, pairs, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for (_, p) in pairs {
-                        if let Some(p) = p {
-                            match_pattern_children(p, f);
-                        }
-                    }
-                }
-            }
-        }
         match self {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
@@ -703,7 +664,7 @@ impl ExprNode {
             ExprNode::CaseMatch { scrutinee, arms, else_body } => {
                 f(scrutinee);
                 for arm in arms {
-                    match_pattern_children(&mut arm.pattern, f);
+                    arm.pattern.for_each_expr_mut(f);
                     if let Some((_, g)) = arm.guard.as_mut() {
                         f(g);
                     }
@@ -715,7 +676,7 @@ impl ExprNode {
             }
             ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
                 f(value);
-                match_pattern_children(pattern, f);
+                pattern.for_each_expr_mut(f);
             }
             ExprNode::Seq { exprs } => {
                 for e in exprs {
@@ -828,44 +789,6 @@ impl ExprNode {
                 Pattern::Expr { expr } => f(expr),
             }
         }
-        fn match_pattern_children<'a>(p: &'a MatchPattern, f: &mut dyn FnMut(&'a Expr)) {
-            match p {
-                MatchPattern::Nil | MatchPattern::Bind { .. } => {}
-                MatchPattern::Value { expr } => f(expr),
-                MatchPattern::Capture { pattern, .. } => match_pattern_children(pattern, f),
-                MatchPattern::Alt { alternatives } => {
-                    for a in alternatives {
-                        match_pattern_children(a, f);
-                    }
-                }
-                MatchPattern::Array { constant, pre, post, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for p in pre.iter().chain(post.iter()) {
-                        match_pattern_children(p, f);
-                    }
-                }
-                MatchPattern::Find { constant, middle, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for p in middle {
-                        match_pattern_children(p, f);
-                    }
-                }
-                MatchPattern::Hash { constant, pairs, .. } => {
-                    if let Some(c) = constant {
-                        f(c);
-                    }
-                    for (_, p) in pairs {
-                        if let Some(p) = p {
-                            match_pattern_children(p, f);
-                        }
-                    }
-                }
-            }
-        }
         match self {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
@@ -945,7 +868,7 @@ impl ExprNode {
             ExprNode::CaseMatch { scrutinee, arms, else_body } => {
                 f(scrutinee);
                 for arm in arms {
-                    match_pattern_children(&arm.pattern, f);
+                    arm.pattern.for_each_expr(f);
                     if let Some((_, g)) = arm.guard.as_ref() {
                         f(g);
                     }
@@ -957,7 +880,7 @@ impl ExprNode {
             }
             ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
                 f(value);
-                match_pattern_children(pattern, f);
+                pattern.for_each_expr(f);
             }
             ExprNode::Seq { exprs } => {
                 for e in exprs {
@@ -1124,12 +1047,7 @@ pub enum MatchPattern {
     /// expression on the pattern side of `===`, so IR keeps them as one
     /// verbatim `Expr` rather than a family of near-duplicate variants.
     Value { expr: Expr },
-    /// `in nil` — kept distinct from `Value` (rather than
-    /// `Value { expr: Lit::Nil }`) because it is by far the most common
-    /// bare pattern in the Procore survey and every non-Ruby emitter's
-    /// lowering needs to special-case it identically to `when nil`
-    /// (`scrutinee.nil?`), a check worth naming rather than inferring
-    /// from a literal's payload.
+    /// Bare `in nil`, distinct from a pinned `Value { expr: Lit::Nil }`.
     Nil,
     /// A bare identifier: `in company`. Always binds (Ruby pattern
     /// syntax has no plain "read this local and test equality" form —
@@ -1141,8 +1059,7 @@ pub enum MatchPattern {
     Capture { pattern: Box<MatchPattern>, name: Symbol },
     /// `p1 | p2 | ... | pn`, flattened at ingest from Prism's
     /// left-associative binary `AlternationPatternNode` tree. A pattern
-    /// alternative may not bind (CRuby rejects a binding inside `|` at
-    /// parse time), so no arm here carries a capture.
+    /// alternative may only bind names beginning with `_`.
     Alt { alternatives: Vec<MatchPattern> },
     /// `in [a, b, *rest, c]`, optionally class-narrowed (`in
     /// Success(page)`, `in Success[entities, errors]` — Prism represents
@@ -1178,13 +1095,13 @@ pub enum MatchPattern {
 }
 
 /// The `**` tail of a `MatchPattern::Hash`, when the source wrote one at
-/// all (a hash pattern with no `**` clause still matches a scrutinee
-/// with additional keys — it just doesn't collect or forbid them, which
-/// is why the absence of a clause is `None` on the field rather than a
-/// third variant here).
+/// all. Nonempty hash patterns allow additional keys by default; an
+/// empty `{}` requires an empty hash, whereas `{**}` accepts any hash.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HashRest {
+    /// Bare `**` — allow unmatched keys without binding them.
+    Ignore,
     /// `**rest` — collect every unmatched key into a Hash bound to
     /// `rest`.
     Collect { name: Symbol },
@@ -1199,9 +1116,7 @@ impl MatchPattern {
     /// narrowing `constant`. Shallow like `ExprNode::for_each_child`:
     /// callers recurse themselves. Shared here so the many plain
     /// tree-walkers across `analyze`/`lower`/`emit` that need to reach
-    /// into a `CaseMatch` arm's pattern don't each re-derive this
-    /// recursion (it's the same shape as `for_each_child`'s private
-    /// `match_pattern_children`, exposed for callers outside `expr.rs`).
+    /// into a `CaseMatch` arm's pattern don't each re-derive this recursion.
     pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         match self {
             MatchPattern::Nil | MatchPattern::Bind { .. } => {}
@@ -1285,11 +1200,13 @@ impl MatchPattern {
     /// they'd bind — a plain structural listing with no type
     /// information (see the body-typer's `match_pattern_bindings` for
     /// the typed version used by `analyze`). Used where only the NAMES
-    /// matter: emit-time "is this pattern simple enough to lower"
-    /// checks, and the Ruby emitter's round-trip.
+    /// matter, such as lexical binding inventories.
     pub fn bound_names(&self, out: &mut Vec<Symbol>) {
         match self {
-            MatchPattern::Nil | MatchPattern::Value { .. } | MatchPattern::Alt { .. } => {}
+            MatchPattern::Nil | MatchPattern::Value { .. } => {}
+            MatchPattern::Alt { alternatives } => {
+                for pattern in alternatives { pattern.bound_names(out); }
+            }
             MatchPattern::Bind { name } => out.push(name.clone()),
             MatchPattern::Capture { pattern, name } => {
                 pattern.bound_names(out);
@@ -1327,94 +1244,6 @@ impl MatchPattern {
             }
         }
     }
-
-    /// Downgrade to `case/when`'s simpler `Pattern`, when possible
-    /// without loss: `Nil`, `Bind`, and a `Value` whose expr is a
-    /// `Lit` map directly; any other `Value` payload (a bare
-    /// class/const read, a range, a pin — anything CRuby's pattern
-    /// grammar accepts unpinned besides a literal, plus anything a pin
-    /// smuggled in) falls to `Pattern::Expr`, the same "test via `===`"
-    /// escape hatch `when` already uses for a lambda/range/class arm.
-    /// Returns `None` for `Capture`/`Array`/`Find`/`Hash`/`Alt` —
-    /// destructuring and alternation have no `Pattern` equivalent, and
-    /// callers must degrade honestly rather than drop the bindings a
-    /// `None` here would silently lose.
-    pub fn as_when_pattern(&self) -> Option<Pattern> {
-        match self {
-            MatchPattern::Nil => Some(Pattern::Lit { value: Literal::Nil }),
-            MatchPattern::Bind { name } => Some(Pattern::Bind { name: name.clone() }),
-            MatchPattern::Value { expr } => Some(match &*expr.node {
-                ExprNode::Lit { value } => Pattern::Lit { value: value.clone() },
-                _ => Pattern::Expr { expr: expr.clone() },
-            }),
-            MatchPattern::Capture { .. }
-            | MatchPattern::Alt { .. }
-            | MatchPattern::Array { .. }
-            | MatchPattern::Find { .. }
-            | MatchPattern::Hash { .. } => None,
-        }
-    }
-}
-
-/// Try to express a `CaseMatch` as the plain `case/when` `Arm` list
-/// every target already knows how to render — the shared home
-/// invariant 2 asks for, so this logic lives once instead of once per
-/// emitter. Succeeds only when every arm is guard-free (no
-/// `MatchGuardKind` support here: the arms that need one in the
-/// Procore survey are exactly the `Capture`/destructuring ones this
-/// already can't lower, so admitting a guard would buy coverage this
-/// function can't reach) and every pattern is `Nil`/`Bind`/`Value`, or
-/// an `Alt` made only of those (expanded to one `Arm` per alternative,
-/// the same trick `case/when`'s own multi-value `when a, b` ingest
-/// uses). Anything else — a guard, or a `Capture`/`Array`/`Find`/`Hash`
-/// pattern on any arm — fails the WHOLE conversion: a `case/in` with
-/// nine simple arms and one destructuring arm gets no partial credit,
-/// because there is no `Pattern` shape for the tenth arm that doesn't
-/// either drop its bindings or silently mis-test it.
-///
-/// An absent `else_body` becomes a synthetic wildcard arm that raises
-/// `raise_message` via a plain `ExprNode::Raise` — every target's
-/// existing `Raise` emit already renders a bare string message
-/// correctly, so this preserves CRuby's own `NoMatchingPatternError`
-/// behavior on an unmatched scrutinee instead of silently falling
-/// through to whatever `case/when`'s no-match nil/undefined answer is
-/// on that target.
-pub fn simplify_case_match(
-    arms: &[MatchArm],
-    else_body: &Option<Expr>,
-    no_match_span: Span,
-    raise_message: &str,
-) -> Option<Vec<Arm>> {
-    let mut out = Vec::new();
-    for arm in arms {
-        if arm.guard.is_some() {
-            return None;
-        }
-        match &arm.pattern {
-            MatchPattern::Alt { alternatives } => {
-                for a in alternatives {
-                    out.push(Arm { pattern: a.as_when_pattern()?, guard: None, body: arm.body.clone() });
-                }
-            }
-            other => {
-                out.push(Arm { pattern: other.as_when_pattern()?, guard: None, body: arm.body.clone() });
-            }
-        }
-    }
-    let else_arm_body = match else_body {
-        Some(eb) => eb.clone(),
-        None => Expr::new(
-            no_match_span,
-            ExprNode::Raise {
-                value: Expr::new(
-                    no_match_span,
-                    ExprNode::Lit { value: Literal::Str { value: raise_message.to_string() } },
-                ),
-            },
-        ),
-    };
-    out.push(Arm { pattern: Pattern::Wildcard, guard: None, body: else_arm_body });
-    Some(out)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

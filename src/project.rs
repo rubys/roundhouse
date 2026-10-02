@@ -928,11 +928,39 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// `case/in` is not equivalent to the targets' existing `case/when`
+/// renderers, even for nil or a plain binding. Refuse before file emission
+/// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
+fn reject_unsupported_pattern_matches(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return Ok(());
+    }
+    fn visit(e: &crate::expr::Expr, target: &str, found: &mut bool) {
+        use crate::expr::ExprNode;
+        if matches!(&*e.node, ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. }
+            | ExprNode::MatchRequired { .. }) {
+            *found = true;
+            emit::diagnostics::report_unsupported(e.span, target, e.node.kind_str(),
+                "structural pattern matching requires a native Ruby target");
+        }
+        e.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    let mut found = false;
+    let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
+    crate::lower::for_each_emit_body_ref(app, &mut f);
+    if found {
+        return Err(format!("{}: structural pattern matching requires a native Ruby target", target.as_str()));
+    }
+    Ok(())
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    reject_unsupported_pattern_matches(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);

@@ -37,6 +37,25 @@ along with Campfire's own test suite and its cable broadcasts. What
 Campfire uses beyond the blog is supported on those two lanes, and
 reaches the others as their emitters and runtimes catch up.
 
+## Structural pattern matching
+
+Ruby 3 `case/in`, predicate matches (`value in pattern`) and required
+matches (`value => pattern`) are ingested separately from `case/when`.
+The Ruby-family emitter preserves native patterns, guards, pins, captures,
+array/find/hash destructuring and rest bindings, including bare `**` and
+`**nil`. CRuby emit-and-run tests cover dispatch, escaping bindings,
+partial bindings after failed guards, and mismatch exceptions; expression
+tests also check syntax round-trips and once-only pin evaluation.
+
+Other language targets reject these constructs before emitting a project,
+including apparently simple literal/nil/binding patterns. Their existing
+`case/when` renderers do not consistently preserve Ruby `===`, bindings,
+or `NoMatchingPatternError`; no portable subset is claimed yet. The
+Ruby-shaped Spinel output uses native syntax, not a separately implemented
+matching runtime. Compile/runtime support still depends on the pinned
+Spinel compiler. Deconstructed element types remain gradual where the
+analyzer cannot determine the protocol's result shape.
+
 ## Local method visibility
 
 Model and library/concern ingest preserve statically known `public`,

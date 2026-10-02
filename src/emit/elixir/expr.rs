@@ -781,33 +781,6 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::Cast { value, .. } => emit_expr(value),
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
-        // Elixir has genuine structural `case/->` pattern matching, but
-        // wiring destructuring against roundhouse's own class model
-        // (which class narrows a `deconstruct`/`deconstruct_keys`
-        // pattern to) is future work — only the `Nil`/`Bind`/literal-
-        // `Value`/`Alt` subset lowers today, reusing `emit_case`'s own
-        // `Pattern::Wildcard`/`Bind`/`Lit` rendering for free via
-        // `simplify_case_match`.
-        ExprNode::CaseMatch { scrutinee, arms, else_body } => match crate::expr::simplify_case_match(
-            arms,
-            else_body,
-            e.span,
-            "NoMatchingPatternError (roundhouse-lowered case/in)",
-        ) {
-            Some(case_arms) => emit_case(scrutinee, &case_arms),
-            None => crate::emit::diagnostics::report_unsupported(
-                e.span,
-                "elixir2",
-                "CaseMatch",
-                "pattern needs destructuring or a guard this lowering can't express",
-            ),
-        },
-        ExprNode::MatchPredicate { .. } => {
-            crate::emit::diagnostics::report_unsupported(e.span, "elixir2", "MatchPredicate", "")
-        }
-        ExprNode::MatchRequired { .. } => {
-            crate::emit::diagnostics::report_unsupported(e.span, "elixir2", "MatchRequired", "")
-        }
         other => crate::emit::diagnostics::report_unsupported(e.span, "elixir2", other.kind_str(), ""),
     }
 }

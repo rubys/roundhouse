@@ -703,27 +703,9 @@ fn _pattern_marker(_p: &Pattern) {}
 /// so this walker recurses for real rather than short-circuiting on
 /// "bound-name only" like `_pattern_marker` does above.
 fn walk_match_pattern<F: FnMut(&Expr) -> bool>(p: &crate::expr::MatchPattern, pred: &mut F) -> bool {
-    use crate::expr::MatchPattern;
-    match p {
-        MatchPattern::Nil | MatchPattern::Bind { .. } => false,
-        MatchPattern::Value { expr } => walk_expr(expr, pred),
-        MatchPattern::Capture { pattern, .. } => walk_match_pattern(pattern, pred),
-        MatchPattern::Alt { alternatives } => {
-            alternatives.iter().any(|a| walk_match_pattern(a, pred))
-        }
-        MatchPattern::Array { constant, pre, post, .. } => {
-            constant.as_ref().map_or(false, |c| walk_expr(c, pred))
-                || pre.iter().chain(post.iter()).any(|p| walk_match_pattern(p, pred))
-        }
-        MatchPattern::Find { constant, middle, .. } => {
-            constant.as_ref().map_or(false, |c| walk_expr(c, pred))
-                || middle.iter().any(|p| walk_match_pattern(p, pred))
-        }
-        MatchPattern::Hash { constant, pairs, .. } => {
-            constant.as_ref().map_or(false, |c| walk_expr(c, pred))
-                || pairs.iter().any(|(_, p)| p.as_ref().map_or(false, |p| walk_match_pattern(p, pred)))
-        }
-    }
+    let mut found = false;
+    p.for_each_expr(&mut |expr| { found = found || walk_expr(expr, pred); });
+    found
 }
 
 #[cfg(test)]

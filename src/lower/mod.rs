@@ -1346,6 +1346,39 @@ pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(
     forwarding_roots!(app, f, iter, as_ref);
 }
 
+/// Survey every emit-bound expression root, including defaults and fixture
+/// expressions outside the forwarding pass's narrower inventory. Callers walk
+/// children themselves, so each root is visited exactly once.
+pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+    for_each_forwarding_body_ref(app, f);
+    for action in app.controllers.iter().flat_map(|c| c.actions()) {
+        for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) { f(default); }
+    }
+    for view in &app.views {
+        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) { f(default); }
+    }
+    for fixture in &app.fixtures {
+        for e in &fixture.preamble { f(e); }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &app.routes.direct_helpers { f(&helper.body); }
+    for function in &app.sql_functions {
+        let mut visit_method = |method: &crate::dialect::MethodDef| {
+            f(&method.body);
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) { f(default); }
+        };
+        match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step);
+                visit_method(finalize);
+            }
+        }
+    }
+}
+
 pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };
