@@ -531,14 +531,28 @@ fn report_unclaimed_unknowns(model: &Model) {
         if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
             continue;
         }
-        let ExprNode::Send { recv: None, method, block, .. } = &*expr.node else {
-            // Receiver-bearing or non-Send statements at class scope are
-            // rare and usually inert; reporting them produced no signal
-            // on the corpus, so only DSL-shaped (receiver-less) calls
-            // report today.
+        let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else {
             continue;
         };
         let name = method.as_str();
+        if let Some(recv) = recv {
+            // Class-body writes are sends too, and dropping an unclaimed
+            // setting must report just like dropping a receiver-less DSL.
+            if !matches!(&*recv.node, ExprNode::SelfRef)
+                || !name.ends_with('=')
+                || matches!(name, "==" | "!=" | "<=" | ">=" | "===")
+            {
+                continue;
+            }
+            // Literal table names are consumed by ingest::model; other
+            // class settings remain unsupported unless a recognizer claims them.
+            if name == "table_name="
+                && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            {
+                continue;
+            }
+        }
         // A bare visibility keyword is a marker for the `def`s after
         // it (the method walk reads it as one); it is not a DSL call.
         if matches!(name, "private" | "protected" | "public") {

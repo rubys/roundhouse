@@ -77,7 +77,10 @@ fn line_containing(src: &str, needle: &str) -> String {
 fn the_enum_columns_writers_map_the_label() {
     let src = user_src();
     for (site, needle) in [
-        ("update", "self.role = ActiveRecord.enum_int((attrs[:role]).to_s,"),
+        (
+            "update",
+            "self.role = ActiveRecord.enum_int((attrs[:role]).to_s,",
+        ),
         ("[]=", "@role = ActiveRecord.enum_int((value).to_s,"),
     ] {
         assert!(
@@ -91,15 +94,23 @@ fn the_enum_columns_writers_map_the_label() {
     );
 }
 
-/// `initialize` wraps the DEFAULTED value, so an absent key still takes
-/// the column default rather than being read as a label.
+/// Schema defaults are raw storage, not user assignments. Only the supplied
+/// key is mapped; an unmapped schema default must not raise in a child writer.
 #[test]
-fn initialize_maps_outside_the_default() {
+fn initialize_validates_only_supplied_enum_values() {
     let src = user_src();
-    let line = line_containing(&src, "self.role = ActiveRecord.enum_int");
+    let constructor = src
+        .split("  def initialize(")
+        .nth(1)
+        .expect("constructor")
+        .split("\n  def ")
+        .next()
+        .unwrap();
     assert!(
-        line.contains("(attrs[:role] || 0).to_s"),
-        "the || default must stay INSIDE the mapping:\n{line}"
+        constructor.contains("@role = if attrs.key? :role")
+            && constructor.contains("ActiveRecord.enum_int((attrs[:role]).to_s,")
+            && !constructor.contains("(attrs[:role] || 0).to_s"),
+        "only explicit input must pass enum validation:\n{constructor}"
     );
 }
 

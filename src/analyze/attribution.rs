@@ -52,6 +52,47 @@ mod gem_ancestry;
 mod generated_methods;
 use gem_ancestry::{GemAncestry, GemClaim};
 
+/// Add post-inference admission failures to the survey ledger. Alba's source
+/// declarations can ingest successfully while their inferred property types
+/// are outside its executable subset. Unlike placeholder-shadow attribution,
+/// these failures remain errors: coverage classification is not support.
+/// Call after ingest-gap attribution so analysis entries do not taint files.
+pub fn attribute_analysis_gaps(diags: &mut [Diagnostic], app: &App, gaps: &mut Vec<IngestError>) {
+    let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
+    // Synthesized Alba admission failures have an exact provider, not a
+    // namespace-prefix guess (alba-inertia alone is not evidence for alba).
+    let provider = census.as_ref()
+        .and_then(|c| c.unknown().find(|g| g.name == "alba" && g.version.is_some()));
+    for d in diags {
+        let DiagnosticKind::Unsupported { construct, .. } = &d.kind else { continue };
+        if construct.as_str() != "alba_serialization" {
+            continue;
+        }
+        if let Some(gem) = provider {
+            let attribution = format!(
+                " — roundhouse coverage of the `{}` gem; executable serialization remains unsupported",
+                gem.name
+            );
+            if !d.message.ends_with(&attribution) {
+                d.message.push_str(&attribution);
+            }
+        }
+        let Some(source) = d.span.file.0.checked_sub(1)
+            .and_then(|i| app.sources.get(i as usize)) else { continue };
+        let (line, column) = source.line_col(d.span.start);
+        // Put ownership before the diagnostic's parentheses: survey buckets
+        // truncate their suffix, so appended attribution alone is invisible.
+        let owner = provider.map(|gem| format!("the `{}` gem: ", gem.name)).unwrap_or_default();
+        let message = format!("analysis: {line}:{column}: {owner}{}", d.message);
+        if !gaps.iter().any(|gap| matches!(gap,
+            IngestError::Unsupported { file, message: prior }
+                if file == &source.path && prior == &message))
+        {
+            gaps.push(IngestError::Unsupported { file: source.path.clone(), message });
+        }
+    }
+}
+
 /// Downgrade diagnostics attributable to `gaps` (see module docs).
 /// No-op when `gaps` is empty — strict-mode callers can pass through
 /// unconditionally.
@@ -316,13 +357,22 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
             DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
                 crate::gems::gem_claiming_method(lock, n.as_str()).map(|gem| (gem, None))
             }
+            DiagnosticKind::Unsupported { construct, detail, .. }
+                if construct.as_str() == "constant" =>
+            {
+                crate::gems::gem_owning_constant(&census, detail).map(|gem| (gem, None))
+            }
             _ => None,
         }
     };
     let mut sites: Vec<(FileId, u32, String)> = Vec::new();
     for d in diags.iter_mut() {
         // Already a coverage note (an ingest gap claimed it first).
-        if !eligible(&d.kind) || d.severity == Severity::Info {
+        let unknown_constant = matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "constant"
+        );
+        if (!eligible(&d.kind) && !unknown_constant) || d.severity == Severity::Info {
             continue;
         }
         if let Some((gem, evidence)) = gem_for(d) {
@@ -536,6 +586,22 @@ mod tests {
         )];
         attribute_ingest_gaps(&mut diags, &app, &gaps);
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn unknown_gem_constant_is_a_coverage_note_not_a_user_error() {
+        let mut app = App::new();
+        app.gem_lock = Some(crate::gems::Lockfile::parse(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    acme-core (1.0.0)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  acme-core\n",
+        ));
+        let mut diags = vec![
+            Diagnostic::unsupported(Span::synthetic(), None, "constant", "AcmeCore::Client"),
+            Diagnostic::unsupported(Span::synthetic(), None, "other construct", "AcmeCore::Client"),
+        ];
+        attribute_unknown_gems(&mut diags, &app);
+        assert_eq!(diags[0].severity, Severity::Info);
+        assert!(diags[0].message.contains("acme-core"));
+        assert_eq!(diags[1].severity, Severity::Error);
     }
 
     #[test]

@@ -4,9 +4,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use roundhouse::analyze::{Analyzer, attribution::attribute_unknown_gems, diagnose};
+use roundhouse::analyze::{
+    Analyzer,
+    attribution::{attribute_analysis_gaps, attribute_ingest_gaps, attribute_unknown_gems},
+    diagnose,
+};
 use roundhouse::diagnostic::{Diagnostic, DiagnosticKind, Severity};
-use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::ingest::{IngestError, ingest_app_from_tree};
 use roundhouse::span::{FileId, Span};
 use roundhouse::ty::Ty;
 use roundhouse::{App, ClassId, Symbol};
@@ -103,6 +107,60 @@ fn inherited_alba_call_is_attributed_without_claiming_typed_support() {
     let once = attributed.clone();
     attribute_unknown_gems(&mut attributed, &app);
     assert_eq!(attributed, once, "attribution is idempotent");
+}
+
+#[test]
+fn alba_admission_gaps_preserve_errors_and_require_a_resolved_direct_provider() {
+    for (lock, attributed) in [
+        (Some(ALBA_LOCK), true),
+        (None, false),
+        (Some("DEPENDENCIES\n  alba\n"), false),
+        (Some("GEM\n  specs:\n    alba (4.0.0)\n\nDEPENDENCIES\n  unrelated\n"), false),
+        (Some("GEM\n  specs:\n    alba-inertia (0.1.4)\n\nDEPENDENCIES\n  alba-inertia\n"), false),
+    ] {
+        let mut app = app(
+            "class ApplicationResource\n  include Alba::Resource\nend\nclass ArticleResource < ApplicationResource\n  attributes :id, :title\nend\n",
+            lock,
+        );
+        Analyzer::new(&app).analyze(&mut app);
+        let before = app.clone();
+        let raw = diagnose(&app);
+        assert_eq!(raw.len(), 1, "{raw:#?}");
+        assert!(matches!(&raw[0].kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "alba_serialization"));
+        let mut diags = raw.clone();
+        // An unrelated unsupported construct and an unresolved call in the
+        // same file must not be suppressed by an analysis-only ledger entry.
+        let unrelated = Diagnostic::unsupported(raw[0].span, None, "other_construct", "unmodeled");
+        let mut unresolved = failed_call(class("Plain"), "titel");
+        unresolved.span = raw[0].span;
+        diags.extend([unrelated.clone(), unresolved.clone()]);
+        let mut gaps = Vec::new();
+        attribute_ingest_gaps(&mut diags, &app, &gaps);
+        attribute_analysis_gaps(&mut diags, &app, &mut gaps);
+        attribute_unknown_gems(&mut diags, &app);
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].kind, raw[0].kind);
+        assert_eq!(diags[0].span, raw[0].span);
+        assert_eq!(diags[0].message.contains("the `alba` gem"), attributed);
+        assert!(!diags[0].message.contains("the `alba-inertia` gem"));
+        assert_eq!(diags[1], unrelated);
+        assert_eq!(diags[2], unresolved);
+        assert_eq!(gaps.len(), 1);
+        let IngestError::Unsupported { file, message } = &gaps[0] else { panic!("not a coverage gap") };
+        assert_eq!(file, "app/resources/resources.rb");
+        assert!(message.starts_with("analysis: 4:1:"), "{message}");
+        assert!(message.contains("alba_serialization"), "{message}");
+        assert_eq!(message.contains("the `alba` gem"), attributed);
+        let once = diags.clone();
+        let report = roundhouse::ingest::survey::render_report(&gaps);
+        assert_eq!(report.contains("the `alba` gem"), attributed, "{report}");
+        attribute_analysis_gaps(&mut diags, &app, &mut gaps);
+        assert_eq!(diags, once, "attribution must be idempotent");
+        assert_eq!(roundhouse::ingest::survey::render_report(&gaps), report);
+        assert_eq!(app, before, "ledger must not change types or IR");
+        assert_eq!(diagnose(&app), raw, "raw analysis remains unsupported");
+    }
 }
 
 #[test]

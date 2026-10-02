@@ -22,6 +22,7 @@ pub fn rust_ty(ty: &Ty) -> String {
         // via an explicit parsing getter (`crate::rh_datetime::
         // parse_db_time`); `Union{Time, Nil}` renders `Option<...>`.
         Ty::Time => "chrono::DateTime<chrono::Utc>".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("rust"),
         Ty::Nil => "()".to_string(),
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching

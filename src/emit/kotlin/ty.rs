@@ -28,6 +28,7 @@ pub fn kotlin_ty(t: &Ty) -> String {
         // kotlin/library.rs and `RhDateTime.parse`. Rendered fully-
         // qualified so emitted files need no `import` line.
         Ty::Time => "java.time.OffsetDateTime".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("kotlin"),
         // No symbol type in Kotlin — route symbols to string keys, as
         // the TS/Crystal renderers do.
         Ty::Sym => "String".to_string(),

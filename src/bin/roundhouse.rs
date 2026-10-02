@@ -267,7 +267,7 @@ fn run_transpile(
     // are collected and routed through the same report as emit gaps.
     let (app_result, parse_diags) =
         roundhouse::ingest::prism::scope(|| ingest_app(input));
-    let survey_gaps =
+    let mut survey_gaps =
         if survey { roundhouse::ingest::survey::drain() } else { Vec::new() };
     let mut app = match app_result {
         Ok(app) => app,
@@ -349,6 +349,13 @@ fn run_transpile(
         &app,
         &survey_gaps,
     );
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut analyze_diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
 
     // Emit inside a diagnostic scope so unsupported-construct gaps in
     // any lowerer/emitter are collected rather than lost (issue #28).

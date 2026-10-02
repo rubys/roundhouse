@@ -391,6 +391,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
+    // An app override owns pluralize, including nested ERB calls.
+    // Qualify it before the framework classifier consumes bare Sends.
+    if let Some(owner) = app.helper_method_index.get(&Symbol::from("pluralize")) {
+        fn qualify_pluralize(e: &mut Expr, owner: &ClassId) {
+            e.node.for_each_child_mut(&mut |c| qualify_pluralize(c, owner));
+            if let ExprNode::Send { recv, method, .. } = &mut *e.node {
+                if recv.is_none() && method.as_str() == "pluralize" {
+                    *recv = Some(Expr::new(e.span, ExprNode::Const {
+                        path: owner.0.as_str().split("::").map(Symbol::from).collect(),
+                    }));
+                }
+            }
+        }
+        qualify_pluralize(&mut rewritten, owner);
+    }
     rewrite_defined_to_nil_check(&mut rewritten);
     // `local_assigns[:x]` → the bare local `x`. Same place and the same
     // reason as the line above: `collect_extra_params` has already
@@ -1345,6 +1360,13 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("pluralize"),
         fn_sig(
             vec![(Symbol::from("count"), Ty::Int), (Symbol::from("word"), Ty::Str)],
+            Ty::Str,
+        ),
+    );
+    inf.class_methods.insert(
+        Symbol::from("pluralize_formatted"),
+        fn_sig(
+            vec![(Symbol::from("count"), Ty::Str), (Symbol::from("word"), Ty::Str)],
             Ty::Str,
         ),
     );
@@ -4300,7 +4322,7 @@ pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     }
     let recv = Expr::new(
         Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
+        ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
     );
     // Trailing-kwargs vs explicit-Hash decision happens in the body
     // typer's `normalize_trailing_kwargs` — it consults the receiver
@@ -4375,14 +4397,6 @@ pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
 pub(super) fn member_path_call(ctx: &ViewCtx, name: &str, member: Expr) -> Expr {
     let takes_member = ctx.route_helper_arity.get(name).is_none_or(|n| *n > 0);
     route_helpers_call(name, if takes_member { vec![member] } else { Vec::new() })
-}
-
-pub(super) fn inflector_call(method: &str, args: Vec<Expr>) -> Expr {
-    let recv = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("Inflector")] },
-    );
-    send(Some(recv), method, args, None, true)
 }
 
 /// A `Send` constructor that makes the parenthesized flag explicit on

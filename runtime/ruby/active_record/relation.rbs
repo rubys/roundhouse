@@ -171,7 +171,8 @@ module ActiveRecord
     def pluck: (untyped col) -> Array[untyped]
     def pick: (untyped col) -> untyped
     def ids: () -> Array[Integer]
-    def find: (Integer id) -> untyped
+    def find: (Integer | String | Array[Integer | String] id) -> untyped
+    def find_ids: (Array[Integer | String] ids) -> Array[untyped]
     def find_by: (untyped conditions) -> untyped
     def find_by!: (untyped conditions) -> untyped
     def first_or_initialize: () -> untyped

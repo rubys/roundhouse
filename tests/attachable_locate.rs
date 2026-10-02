@@ -85,7 +85,7 @@ fn an_instance_extend_stubs_the_test_that_reaches_for_it() {
     // written against the object it produced — and the test beside
     // it is untouched.
     assert!(
-        test.contains("  def test_dynamic\n    raise \"roundhouse: Object#extend not supported (all targets)\"\n  end\n"),
+        test.contains("  def test_dynamic\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
         "the dynamic test should be the raise:\n{test}"
     );
     assert!(!test.contains(".extend"), "no extend survives into the emit:\n{test}");

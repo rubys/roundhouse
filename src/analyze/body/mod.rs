@@ -15,23 +15,26 @@
 //! the primitive method tables).
 
 use std::collections::HashMap;
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::{DeclarationId, declaration_id_from_lookup_name};
 
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::{Row, Ty};
 
 mod diagnostic;
+mod const_resolution;
+pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
+pub use const_resolution::PreparedConstResolver;
+use const_resolution::ResolvedConstant;
 mod narrowing;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::string_answers;
 
-/// Recursion context — what `self` is, what locals/ivars are in scope.
-/// The constants a context sees: its class's own layered over the
-/// app-wide registry, both shared. An own constant shadows a global one
-/// of the same name. Layered rather than merged: merging copied the whole
-/// registry once per class, which on Shopify core (tens of thousands of
-/// constants and classes) was most of a typing pass.
+/// Typed constants for generated expressions without Ruby source spans.
+/// The class's constants shadow the shared app registry. Source-backed
+/// expressions use Rubydex declaration IDs instead of this scope.
 #[derive(Clone, Default)]
 pub struct ConstScope {
     own: std::sync::Arc<HashMap<Symbol, Ty>>,
@@ -55,6 +58,7 @@ impl ConstScope {
     }
 }
 
+/// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,
 /// block body, Seq walk with new ivar/local bindings).
 #[derive(Clone, Default)]
@@ -68,11 +72,9 @@ pub struct Ctx {
     /// assignments accumulated through a `Seq`, and block parameters
     /// seeded from a receiver-aware dispatch.
     pub local_bindings: HashMap<Symbol, Ty>,
-    /// Module/class-level constants: `STATUS_CODES = { ok: 200, ... }.freeze`.
-    /// Populated by the registry-builder from parsed module bodies; read
-    /// by the `ExprNode::Const` arm so subsequent dispatch on the constant
-    /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
-    /// table instead of falling through to the user-class registry.
+    /// Module/class-level typed constants such as
+    /// `STATUS_CODES = { ok: 200, ... }.freeze`. Rubydex IDs resolve
+    /// source-backed reads; this scope types generated expressions.
     ///
     /// SHARED, not owned: written once when a context is built and only
     /// read after, while `Ctx` is cloned for every block, branch and
@@ -106,19 +108,6 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
-    /// The class's own constants, by name, typed from their value
-    /// expressions — `Vote::COMMENT_REASONS`, and every `T::Enum`
-    /// member.
-    ///
-    /// Beside the global by-bare-name registry rather than replacing
-    /// it: a QUALIFIED read (`Types::Completeness::Done`) names the
-    /// class that owns the constant, so it can be answered exactly,
-    /// while the global map is what a bare read in lexical scope
-    /// needs. The global map also has to give up on a name two classes
-    /// both define; a per-class one never faces that question, which
-    /// is what an app with fifty enums (`Success` in three of them)
-    /// runs into.
-    pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
     /// Instance-state shape (columns + attr_accessor).
@@ -204,128 +193,14 @@ pub struct ClassInfo {
     pub includes: Vec<crate::ident::ClassId>,
 }
 
-/// Resolve a single-segment Const ref (like `Const { path:
-/// ["HashWithIndifferentAccess"] }` from app source) to a fully-
-/// qualified ClassId by walking the class registry. Returns the
-/// fully-qualified `Symbol` when exactly one registry key matches —
-/// "matches" meaning the key has `::` separator(s) AND the last
-/// segment equals `name`. App-class single-segment keys (`Article`,
-/// `Comment`) don't match (no `::`), so they stay bare. Multiple
-/// matches (rare — would be e.g. `ActiveRecord::Base` and
-/// `ActionController::Base`) leave the ref bare too — body-typer
-/// can't disambiguate without lexical scope, and the bare form
-/// still types via the registry's last-segment alias entry.
-/// The class a written owner path names, resolved the way Ruby
-/// resolves a constant: the enclosing scopes from the inside out, then
-/// the top level.
-///
-/// `DEFAULT_MODE = Mode::Fill` inside `UI::Selector` means
-/// `UI::Selector::Mode`, and nothing else does — which matters in an
-/// app where a dozen components each declare their own `Mode`. Walking
-/// the nesting is what tells them apart; a suffix match over the class
-/// registry cannot, and gives up on the ambiguity instead.
-fn resolve_owner_path(
-    written: &str,
-    ctx: &Ctx,
-    classes: &HashMap<ClassId, ClassInfo>,
-    index: &ConstIndex,
-) -> Option<ClassId> {
-    if let Some(absolute) = written.strip_prefix("::") {
-        let id = ClassId(Symbol::from(absolute));
-        return classes.contains_key(&id).then_some(id);
-    }
-    if let Some(Ty::Class { id, .. }) = &ctx.self_ty {
-        let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
-        while !scope.is_empty() {
-            let candidate = ClassId(Symbol::from(
-                format!("{}::{written}", scope.join("::")).as_str(),
-            ));
-            if classes.contains_key(&candidate) {
-                return Some(candidate);
-            }
-            scope.pop();
-        }
-    }
-    let written_id = ClassId(Symbol::from(written));
-    if classes.contains_key(&written_id) {
-        return Some(written_id);
-    }
-    index.unique_suffix(written).map(ClassId)
-}
-
-/// The registry's qualified class names (those with a `::`), keyed by
-/// their last segment: the lookup behind `expand_bare_const` and the
-/// owner-path expansion. Both used to scan every registered class per
-/// constant read, which is quadratic in app size — on Shopify core
-/// (~30k classes) that scan was most of a typing pass.
-#[derive(Default)]
-pub struct ConstIndex {
-    by_last: HashMap<String, Vec<Symbol>>,
-}
-
-impl ConstIndex {
-    pub fn build(classes: &HashMap<ClassId, ClassInfo>) -> Self {
-        let mut by_last: HashMap<String, Vec<Symbol>> = HashMap::new();
-        for key in classes.keys() {
-            if let Some((_, last)) = key.0.as_str().rsplit_once("::") {
-                by_last.entry(last.to_string()).or_default().push(key.0.clone());
-            }
-        }
-        Self { by_last }
-    }
-
-    /// The one qualified class whose name ends in `::written`, when
-    /// exactly one does. More than one match is not a guess worth
-    /// making.
-    fn unique_suffix(&self, written: &str) -> Option<Symbol> {
-        let last = written.rsplit("::").next()?;
-        let suffix = format!("::{written}");
-        let mut found: Option<&Symbol> = None;
-        for full in self.by_last.get(last)? {
-            if full.as_str().ends_with(&suffix) {
-                if found.is_some() {
-                    return None; // ambiguous
-                }
-                found = Some(full);
-            }
-        }
-        found.cloned()
-    }
-}
-
-
-fn expand_bare_const(
-    name: &Symbol,
-    classes: &HashMap<ClassId, ClassInfo>,
-    index: &ConstIndex,
-) -> Option<Symbol> {
-    let target = name.as_str();
-    // A class registered under exactly this bare name wins outright —
-    // `Account` in app code means the Account model, not the nested
-    // `Mastodon::CLI::Maintenance::Account` stub a lib/ script happens
-    // to declare. (Ruby resolves toward the outer scope too.) Before
-    // the recursive app walk, nested same-named classes were rarely
-    // ingested, so this case never fired; now it's the common one.
-    if classes.contains_key(&ClassId(name.clone())) {
-        return None;
-    }
-    // Ruby's own top-level constants are never app classes, so an app's
-    // `ActiveModel::Serializers::JSON` must not capture a bare `JSON.parse`
-    // (shopify core; it then typed a stdlib call as the app module's).
-    if RUBY_TOP_LEVEL.contains(&target) {
-        return None;
-    }
-    index.unique_suffix(target)
-}
 
 /// Reusable body-type walker. Holds a borrow of the dispatch table so
 /// repeated `analyze_expr` calls reuse the same lookup structures
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
-    /// Suffix lookup over `classes`, built on first use unless the
-    /// caller hands in one it keeps current (the analyzer does).
-    const_index: std::sync::OnceLock<std::sync::Arc<ConstIndex>>,
+    const_resolver: Option<std::sync::Arc<ConstResolver>>,
+    typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
@@ -339,19 +214,22 @@ impl<'a> BodyTyper<'a> {
         self.classes
     }
 
-    pub(super) fn const_index(&self) -> &ConstIndex {
-        self.const_index.get_or_init(|| std::sync::Arc::new(ConstIndex::build(self.classes)))
-    }
-}
-
-impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_index: std::sync::OnceLock::new(), inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, inquirers: None }
     }
 
-    /// Share an index the caller keeps in step with `classes`.
-    pub fn with_const_index(self, index: std::sync::Arc<ConstIndex>) -> Self {
-        let _ = self.const_index.set(index);
+    /// Share the analyzer's immutable source index across typing passes.
+    pub(crate) fn with_const_resolver(mut self, resolver: std::sync::Arc<ConstResolver>) -> Self {
+        self.const_resolver = Some(resolver);
+        self
+    }
+
+    /// Roundhouse infers values; Rubydex supplies their declaration IDs.
+    pub(super) fn with_typed_constants(
+        mut self,
+        values: &'a IdentityHashMap<DeclarationId, Ty>,
+    ) -> Self {
+        self.typed_constants = Some(values);
         self
     }
 
@@ -379,42 +257,6 @@ impl<'a> BodyTyper<'a> {
         ty
     }
 
-    /// The type of a bare constant read resolved from where it is
-    /// read: each enclosing lexical scope of `self` (`A::B::C`, then
-    /// `A::B`, then `A`) by its own table, then the ancestors of the
-    /// innermost one — its includes, then the parent chain. The
-    /// per-class tables the registry builder fills are what make a
-    /// same-named constant in two classes answerable at all; the
-    /// global by-name map has to drop it.
-    fn lexical_constant(&self, name: &Symbol, ctx: &Ctx) -> Option<Ty> {
-        let Some(Ty::Class { id, .. }) = &ctx.self_ty else {
-            return None;
-        };
-        let own = |id: &ClassId| self.classes.get(id).and_then(|c| c.constants.get(name).cloned());
-        let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
-        while !scope.is_empty() {
-            if let Some(ty) = own(&ClassId(Symbol::from(scope.join("::").as_str()))) {
-                return Some(ty);
-            }
-            scope.pop();
-        }
-        let mut cursor = Some(id.clone());
-        // Bounded: a parent link that cycles must not hang the typer.
-        for _ in 0..16 {
-            let Some(cur) = cursor else { break };
-            let Some(info) = self.classes.get(&cur) else { break };
-            if let Some(ty) = info.includes.iter().find_map(own) {
-                return Some(ty);
-            }
-            cursor = info.parent.clone();
-            if let Some(next) = &cursor {
-                if let Some(ty) = own(next) {
-                    return Some(ty);
-                }
-            }
-        }
-        None
-    }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let expr_span = expr.span;
@@ -422,100 +264,79 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Lit { value } => lit_ty(value),
 
             ExprNode::Const { path } => {
-                let last = path.last().cloned().unwrap_or_else(|| Symbol::from("?"));
-                // A qualified read names its owner, so ask the owner
-                // first: the global map below is keyed by bare name and
-                // gives up on one two classes both define.
-                if path.len() > 1 {
-                    let written = path[..path.len() - 1]
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    // As written, then expanded: an app writes the
-                    // owner relative to its own nesting
-                    // (`Mode::Fill` inside the class that declares
-                    // `Mode`), the same reason `expand_bare_const`
-                    // exists for single-segment reads.
-                    let owner = resolve_owner_path(&written, ctx, self.classes(), self.const_index());
-                    if let Some(ty) = owner
-                        .and_then(|owner| self.classes().get(&owner).cloned())
-                        .and_then(|c| c.constants.get(&last).cloned())
-                    {
-                        return ty;
+                // A later typing pass may resolve a value constant whose
+                // owner was unknown in an earlier constant fixpoint round.
+                expr.diagnostic = None;
+                // Never search by suffix or borrow another scope's
+                // same-named declaration: only the exact written class.
+                let exact_modeled_class = |path: &[Symbol]| {
+                    let id = written_class_id(path);
+                    if self.classes().contains_key(&id) {
+                        Ty::Class { id, args: vec![] }
+                    } else {
+                        unknown()
                     }
-                }
-                // A bare read is answered the way Ruby answers it:
-                // the lexical scope first, outward, then the ancestors
-                // of the innermost class. `PREFIX` inside the class
-                // that declares `PREFIX = "main"` is that String even
-                // when three other classes declare their own `PREFIX`
-                // — which is exactly the case the global map below
-                // has to give up on, and the common one (a
-                // per-component DOM-id prefix, a default), so without
-                // this hop the read fell to the `Class { PREFIX }`
-                // fallback and reached the emitted RBS as a return
-                // type nothing can satisfy (#130).
-                if path.len() == 1 {
-                    if let Some(ty) = self.lexical_constant(&last, ctx) {
-                        return ty;
+                };
+                let indexed_source = !expr_span.is_synthetic()
+                    && self
+                        .const_resolver
+                        .as_ref()
+                        .is_some_and(|resolver| resolver.has_source_file(expr_span.file));
+                let source_reference = self
+                    .const_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.reference(expr_span, path));
+                let ty = match source_reference {
+                    Some(Some(ResolvedConstant::Namespace { class, runtime })) => {
+                        let id = class.as_ref().clone();
+                        if self.classes().contains_key(&id) || *runtime {
+                            expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                            qualify_resolved_path(path, &id);
+                            Ty::Class { id, args: vec![] }
+                        } else {
+                            unknown()
+                        }
                     }
-                }
-                // Module/class-level constants seeded by the registry
-                // builder. `STATUS_CODES = { ok: 200, ... }` lands here
-                // typed `Hash[Sym, Int]` (not `Class { STATUS_CODES }`),
-                // so subsequent dispatch on `STATUS_CODES.fetch(...)`
-                // resolves through hash_method.
-                // Bare reads only. `A::B::Name` names its own
-                // namespace, and Ruby resolves it there — consulting a
-                // global by-bare-name map for it lets one constant
-                // capture every qualified read that ends in its name,
-                // including the class of that name.
-                if path.len() == 1 {
-                    if let Some(ty) = ctx.constants.get(&last) {
-                        return ty.clone();
-                    }
-                }
-                // Build a Ty::Class ClassId from the path. For multi-
-                // segment writes (`ActiveSupport::HashWithIndifferentAccess`)
-                // use the joined path verbatim. For single-segment app-
-                // source refs (`Parameters.new(...)`, `HashWithIndifferentAccess.new`),
-                // try to expand bare → fully-qualified by walking the
-                // class registry: if exactly one fully-qualified entry
-                // (key contains `::`) ends with `::<name>`, swap in the
-                // full path AND REWRITE THE IR PATH so per-target emit
-                // sees the canonical form (Crystal's `Const` arm reads
-                // the path field, not the type annotation; rewriting
-                // makes a single emit pass produce `::ActionView::
-                // ViewHelpers.dom_id(...)` from a source-bare Const).
-                // App classes (`Article`, `Comment` — single-segment
-                // registry keys) stay bare. Mirrors Ruby's lexical
-                // lookup walking up to top-level — but driven by the
-                // registry rather than the AST scope chain.
-                if path.len() == 1 {
-                    if let Some(qualified) = expand_bare_const(&last, self.classes(), self.const_index()) {
-                        let segments: Vec<Symbol> = qualified
-                            .as_str()
-                            .split("::")
-                            .map(Symbol::from)
-                            .collect();
-                        *path = segments;
-                        return Ty::Class {
-                            id: ClassId(qualified),
-                            args: vec![],
+                    Some(Some(ResolvedConstant::Value { declaration, runtime })) => self.typed_constants
+                        .and_then(|values| values.get(declaration))
+                        .cloned()
+                        .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
+                        .unwrap_or_else(unknown),
+                    // An unresolved source reference may still name an
+                    // exact modeled external class (for example Time).
+                    Some(None) => exact_modeled_class(path),
+                    // No reference in an indexed file: a lowering pass
+                    // generated this node with a borrowed source span
+                    // (Alba's serializers).
+                    None if indexed_source => exact_modeled_class(path),
+                    // Views and generated IR have no Rubydex answer. A
+                    // bare name can use the app's bare-name values. A
+                    // qualified name `A::B` names its owner, so only the
+                    // value declared at that full name answers it.
+                    None => {
+                        let value = if let [name] = path.as_slice() {
+                            ctx.constants.get(name).cloned()
+                        } else {
+                            let name = written_class_id(path);
+                            self.typed_constants
+                                .and_then(|values| {
+                                    values.get(&declaration_id_from_lookup_name(name.0.as_str()))
+                                })
+                                .cloned()
                         };
+                        // Otherwise retain the written class path, but
+                        // never guess another class by its suffix.
+                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
                     }
+                };
+                if indexed_source && matches!(ty, Ty::Var { .. }) {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("constant"),
+                        detail: written_class_id(path).0.as_str().to_string(),
+                    });
                 }
-                let joined_path = path
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                Ty::Class {
-                    // Rooting changes lookup, not the registry's class identity.
-                    id: ClassId(Symbol::from(joined_path.trim_start_matches("::"))),
-                    args: vec![],
-                }
+                ty
             }
 
             ExprNode::Var { name, .. } => ctx
@@ -771,7 +592,15 @@ impl<'a> BodyTyper<'a> {
                     }
                     narrowing::remove_nil(&lt)
                 } else {
-                    lt
+                    // `a && b` answers `a` only when `a` was falsy, so only
+                    // the arms of `a` that CAN be falsy belong to the result:
+                    // `params[:id] && params[:id].to_i` (which is how `&.`
+                    // reads) is `Integer | nil`, not `String | Integer | nil`
+                    // -- a String is never the falsy value that stopped it.
+                    match falsy_part(&lt) {
+                        Some(f) => f,
+                        None => return rt,
+                    }
                 };
                 union_of(lt_peeled, rt)
             }
@@ -1080,7 +909,16 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
-                self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
+                let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
+                // Kernel.Array is a container even for scalar params.
+                // App methods (including inherited/included overrides)
+                // have already dispatched above and must win.
+                if recv.is_none() && method.as_str() == "Array" && args.len() == 1
+                    && block.is_none() && matches!(dispatched, Ty::Var { .. })
+                {
+                    return Ty::Array { elem: Box::new(unknown()) };
+                }
+                dispatched
             }
 
             ExprNode::If { cond, then_branch, else_branch } => {
@@ -1724,6 +1562,47 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
     }
 }
 
+/// The class path as written, joined with `::`.
+fn written_class_id(path: &[Symbol]) -> ClassId {
+    if let [name] = path {
+        return ClassId(name.clone());
+    }
+    let mut name = String::new();
+    for part in path {
+        if !name.is_empty() {
+            name.push_str("::");
+        }
+        name.push_str(part.as_str());
+    }
+    ClassId(Symbol::from(name))
+}
+
+/// Rubydex can resolve a relative path to a name with a lexical prefix:
+/// `RateCalculator` inside `module PriceSupport` is
+/// `PriceSupport::RateCalculator`. Ingest copies a concern's methods
+/// into each class that includes it, and an emitter can nest a
+/// declaration in another way. Thus the IR keeps the qualified path,
+/// which names the same class from every lexical scope. A rooted path
+/// (`::A`) already names its class. A path that the resolved name does
+/// not end with (a constant alias) stays as written.
+fn qualify_resolved_path(path: &mut Vec<Symbol>, resolved: &ClassId) {
+    if path.first().is_none_or(|head| head.as_str().starts_with("::")) {
+        return;
+    }
+    let mut prefix = resolved.0.as_str();
+    for segment in path.iter().rev() {
+        let Some(rest) = prefix
+            .strip_suffix(segment.as_str())
+            .and_then(|rest| rest.strip_suffix("::"))
+        else {
+            return;
+        };
+        prefix = rest;
+    }
+    if !prefix.is_empty() {
+        *path = resolved.0.as_str().split("::").map(Symbol::from).collect();
+    }
+}
 
 pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
@@ -2113,6 +1992,30 @@ mod tests {
     fn optional_str() -> Ty {
         Ty::Union {
             variants: vec![Ty::Str, Ty::Nil],
+        }
+    }
+
+
+    #[test]
+    fn kernel_array_does_not_capture_inherited_or_included_app_methods() {
+        let owner = ClassId(Symbol::from("Owner"));
+        let child = ClassId(Symbol::from("Child"));
+        for included in [false, true] {
+            let mut classes = empty_classes();
+            let mut info = ClassInfo::default();
+            info.instance_methods.insert(Symbol::from("Array"), Ty::Str);
+            classes.insert(owner.clone(), info);
+            let mut info = ClassInfo::default();
+            if included {
+                info.includes.push(owner.clone());
+            } else {
+                info.parent = Some(owner.clone());
+            }
+            classes.insert(child.clone(), info);
+            let mut ctx = Ctx::default();
+            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
+            let mut expr = send(None, "Array", vec![nil_lit()]);
+            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Str);
         }
     }
 
@@ -3188,6 +3091,57 @@ mod tests {
         };
         assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
     }
+
+    #[test]
+    fn concrete_value_shapes_are_truthy_for_boolean_operators() {
+        let values = [
+            Ty::Date,
+            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Record { row: Row::default() },
+            Ty::Fn {
+                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                effects: crate::effect::EffectSet::pure(),
+            },
+        ];
+        for left in values {
+            assert!(never_falsy(&left), "{left:?} must short-circuit `||`");
+            assert_eq!(falsy_part(&left), None, "{left:?} must yield the right arm of `&&`");
+        }
+    }
+
+    #[test]
+    fn nil_arms_of_concrete_value_unions_remain_falsy() {
+        for truthy in [
+            Ty::Date,
+            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Record { row: Row::default() },
+            Ty::Fn {
+                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                effects: crate::effect::EffectSet::pure(),
+            },
+        ] {
+            let left = Ty::Union { variants: vec![truthy, Ty::Nil] };
+            assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
+            assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
+        }
+    }
+}
+
+/// The arms of `ty` a falsy value can come from -- `nil`, `false`, and
+/// anything not known to be truthy. `None` when there are none.
+fn falsy_part(ty: &Ty) -> Option<Ty> {
+    match ty {
+        Ty::Union { variants } => {
+            let kept: Vec<Ty> = variants.iter().filter_map(falsy_part).collect();
+            match kept.len() {
+                0 => None,
+                1 => kept.into_iter().next(),
+                _ => Some(Ty::Union { variants: kept }),
+            }
+        }
+        t if never_falsy(t) => None,
+        t => Some(t.clone()),
+    }
 }
 
 /// Can this type NEVER be Ruby-falsy?
@@ -3206,11 +3160,15 @@ fn never_falsy(ty: &Ty) -> bool {
         | Ty::Float
         | Ty::Str
         | Ty::Sym
+        | Ty::Date
         | Ty::Time
         | Ty::Array { .. }
         | Ty::Hash { .. }
+        | Ty::Tuple { .. }
+        | Ty::Record { .. }
         | Ty::Relation { .. }
-        | Ty::Class { .. } => true,
+        | Ty::Class { .. }
+        | Ty::Fn { .. } => true,
         // `Bool` is the whole point of the exclusion — it is the one
         // scalar that carries `false`.
         Ty::Union { variants } => variants.iter().all(never_falsy),
@@ -3347,16 +3305,3 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
         _ => is_param_local(e, locals),
     }
 }
-/// Top-level constants Ruby and its default/bundled gems define. A bare
-/// reference to one of these means the stdlib constant; see
-/// `expand_bare_const`.
-const RUBY_TOP_LEVEL: &[&str] = &[
-    "Base64", "Benchmark", "BigDecimal", "CGI", "CSV", "Comparable", "Complex", "Coverage",
-    "Date", "DateTime", "Digest", "Dir", "ERB", "Encoding", "Enumerable", "Errno", "Etc",
-    "Fiber", "File", "FileUtils", "Find", "Forwardable", "GC", "IO", "IPAddr", "JSON",
-    "Kernel", "Logger", "Marshal", "Math", "Monitor", "Mutex", "Net", "ObjectSpace", "Open3",
-    "OpenSSL", "OpenStruct", "PP", "Pathname", "Prism", "Process", "Psych", "Random",
-    "Rational", "Ripper", "SecureRandom", "Set", "Shellwords", "Signal", "Singleton",
-    "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
-    "Zlib",
-];

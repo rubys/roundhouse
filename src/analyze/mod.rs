@@ -27,12 +27,15 @@ mod alba;
 mod body;
 mod class_configuration;
 pub(crate) use body::string_answers;
+pub(crate) use body::ConstResolverTask;
+pub use body::PreparedConstResolver;
 pub mod async_color;
 pub mod attribution;
 pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 mod registry;
+mod test_module;
 mod render;
 mod effects;
 mod diagnostics;
@@ -53,6 +56,8 @@ pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
 use std::collections::{BTreeSet, HashMap};
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
@@ -63,7 +68,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Row, Ty};
+use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -108,12 +113,11 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
-    /// `body::ConstIndex` over `classes`, with the class count it was
-    /// built at. The registry only grows, so a count change is exactly
-    /// when it goes stale.
-    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
+    /// Resolved once from the source snapshot supplied to `Analyzer::new`.
+    const_resolver: std::sync::Arc<body::ConstResolver>,
+    /// Inferred values keyed by Rubydex declaration IDs, not by names.
+    typed_constants: IdentityHashMap<DeclarationId, Ty>,
 }
-
 
 impl Analyzer {
     /// Build an analyzer with the default database adapter
@@ -769,14 +773,21 @@ impl Analyzer {
             }
         }
 
+        // Test helpers are source methods, not a surface invented by test
+        // emission. Register their real identities and declarations before
+        // source typing; inferred returns converge in the same registry as
+        // ordinary application methods.
+        test_module::register(&mut classes, app);
+
         Self {
             classes,
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
-            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
+            const_resolver: app.const_resolver.for_sources(&app.sources),
+            typed_constants: IdentityHashMap::default(),
         }
     }
 
@@ -785,19 +796,8 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
-            .with_const_index(self.const_index())
-    }
-
-    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
-        let mut slot = self.const_index.lock().unwrap();
-        if let Some((count, index)) = &*slot {
-            if *count == self.classes.len() {
-                return index.clone();
-            }
-        }
-        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
-        *slot = Some((self.classes.len(), index.clone()));
-        index
+            .with_const_resolver(self.const_resolver.clone())
+            .with_typed_constants(&self.typed_constants)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -847,8 +847,8 @@ impl Analyzer {
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
         for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
-            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -857,7 +857,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
+            crate::timings::phase(format_args!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -923,7 +923,7 @@ impl Analyzer {
         self.type_direct_helper_bodies(app);
         self.type_rails_application_body(app);
 
-        self.stamp_inferred_library_signatures(app);
+        self.stamp_inferred_method_signatures(app);
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -1087,7 +1087,7 @@ impl Analyzer {
     }
 
     /// Post-fixpoint: write what inference discovered into the
-    /// `MethodDef.signature` of every library-class method, so the
+    /// `MethodDef.signature` of library methods and source test helpers, so the
     /// emitted RBS carries it (`errors_for: (Comment | Story | …) ->
     /// String?` instead of `(untyped) -> untyped`) and AOT targets can
     /// dispatch inside the body. Self-describing IR: the body typer
@@ -1116,17 +1116,18 @@ impl Analyzer {
     ///   `Var`/`Untyped`/absent return render exactly what the untyped
     ///   fallback renders, so skipping keeps the output byte-identical
     ///   rather than routing it through a second code path.
-    fn stamp_inferred_library_signatures(&self, app: &mut App) {
-        for lc in &mut app.library_classes {
-            let registered = self.classes.get(&lc.name);
-            for method in &mut lc.methods {
+    fn stamp_inferred_method_signatures(&self, app: &mut App) {
+        for (owner, methods) in app.library_classes.iter_mut().map(|lc| (&lc.name, &mut lc.methods))
+            .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
+            let registered = self.classes.get(owner);
+            for method in methods {
                 if method.signature.is_some() {
                     continue;
                 }
                 if method.name.as_str() == "initialize" {
                     continue;
                 }
-                let key = (lc.name.clone(), method.name.clone());
+                let key = (owner.clone(), method.name.clone());
                 let inferred = self.inferred_params.get(&key);
                 let has_params = inferred
                     .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
@@ -1190,32 +1191,30 @@ impl Analyzer {
         }
     }
 
-    /// Collect every app-level constant (`CONST = <value>`) declared in a
-    /// model or controller body, type its value, and build a global
-    /// name→type registry keyed by the constant's last path segment — the
-    /// shape `ExprNode::Const` dispatch consults (`Vote::COMMENT_REASONS`
-    /// looks up `COMMENT_REASONS`). This is the cross-class channel: a
-    /// constant declared in `Vote` resolves when referenced from a
-    /// controller, a view, another model, or seeds — none of which the
-    /// per-class `extract_*_const_assignments` tables reach.
-    ///
-    /// Typed as a small fixpoint so a constant defined in terms of another
-    /// (`ALL_COMMENT_REASONS = COMMENT_REASONS.merge(...).freeze`) resolves
-    /// once its dependency does. A name declared in two classes with
-    /// conflicting types is dropped as ambiguous: a bare reference can't
-    /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
-    /// `Ty::Var` results are skipped — uninformative, and registering them
-    /// would only mask the `Const` fallback without adding signal.
+    /// Type each app constant value. Rubydex already owns the constant
+    /// names and their lexical resolution, so source reads use its
+    /// `DeclarationId` to find these inferred types. The bare-name map
+    /// remains only for generated expressions without Ruby source.
+    /// The rounds continue until no value changes, so `B = A` can use
+    /// the value of `A` from the round before.
     fn build_constant_registry(
         &self,
         app: &App,
-    ) -> (HashMap<Symbol, Ty>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
-        // (defining class's self_ty, last-segment name, cloned value expr).
-        let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
+    ) -> (HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>) {
+        // Ingest can move a constant to another IR owner: a file-level
+        // constant goes to the first class of its file. The declaration
+        // ID comes from the source position, not from the owner.
+        let declaration_id = |name: &Symbol, value: &Expr| {
+            self.const_resolver.constant_declaration(value.span, name.as_str())
+        };
+        // (defining class, last-segment name, Rubydex ID, value,
+        // eligible for the production generated-expression fallback).
+        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr, bool)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
             if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
                 if let Some(last) = path.last() {
-                    entries.push((self_ty, last.clone(), value.clone()));
+                    let id = declaration_id(last, value);
+                    entries.push((self_ty, last.clone(), id, value.clone(), true));
                 }
             }
         };
@@ -1246,25 +1245,41 @@ impl Analyzer {
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
-                entries.push((
-                    Ty::Class { id: lc.name.clone(), args: vec![] },
-                    name.clone(),
-                    value.clone(),
-                ));
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
+            }
+        }
+        // Original source tests use the same DeclarationId contract.
+        // Their constants participate in the value fixpoint, but must
+        // not change the bare-name fallback used by production views.
+        for module in &app.test_modules {
+            for (owner, constants) in std::iter::once((&module.name, &module.constants))
+                .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
+            {
+                for (name, value) in constants {
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+                }
             }
         }
 
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-        // Cap matches the outer analyze fixpoint; one level of constant
-        // dependency needs two passes, the cap leaves slack.
-        for _ in 0..4 {
+        let mut resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+        // Each round can type one more link of a `B = A` chain, so n
+        // values need at most n + 1 rounds when no value changes after
+        // it is typed. A cycle (`A = B`, `B = A`) never types and stays
+        // unknown, and the read reports it. The bound also stops values
+        // that change on each round.
+        for _ in 0..=entries.len() {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
+            let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
             let shared = body::ConstScope::global(map.clone());
-            for (self_ty, name, value) in entries.iter_mut() {
-                if ambiguous.contains(name) {
-                    continue;
-                }
+            let typer = BodyTyper::new(&self.classes)
+                .with_inquirers(&self.inquirers)
+                .with_const_resolver(self.const_resolver.clone())
+                .with_typed_constants(&resolved);
+            for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
@@ -1273,8 +1288,14 @@ impl Analyzer {
                     annotate_self_dispatch: false,
                     in_view: false,
                 };
-                let ty = self.body_typer().analyze_expr(value, &ctx);
+                let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                if let Some(id) = id {
+                    next_resolved.insert(*id, ty.clone());
+                }
+                if !*production || ambiguous.contains(name) {
                     continue;
                 }
                 match next.get(name) {
@@ -1286,39 +1307,16 @@ impl Analyzer {
                     }
                 }
             }
-            for a in &ambiguous {
-                next.remove(a);
+            for name in &ambiguous {
+                next.remove(name);
             }
-            if next == map {
+            if next == map && next_resolved == resolved {
                 break;
             }
             map = next;
+            resolved = next_resolved;
         }
-        // The same types, kept per owning class as well: a qualified
-        // read can then be answered exactly, including for a name two
-        // classes both define — which the map above has to drop.
-        let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = body::ConstScope::global(map.clone());
-        for (self_ty, name, value) in entries.iter_mut() {
-            let owner = match &self_ty {
-                Ty::Class { id, .. } => id.clone(),
-                _ => continue,
-            };
-            let ctx = Ctx {
-                self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
-                constants: shared.clone(),
-                annotate_self_dispatch: false,
-                in_view: false,
-            };
-            let ty = self.body_typer().analyze_expr(value, &ctx);
-            if matches!(ty, Ty::Var { .. }) {
-                continue;
-            }
-            per_class.entry(owner).or_default().insert(name.clone(), ty);
-        }
-        (map, per_class)
+        (map, resolved)
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -1328,18 +1326,12 @@ impl Analyzer {
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
     fn run_typing_passes(&mut self, app: &mut App) {
-        // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
-        // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
-        // and seeds so cross-class constant references resolve to the
-        // value's type instead of the `Ty::Class { id: ConstName }`
-        // fallback. Seeded under each class's own constants (own shadows
-        // global on a name clash).
-        let (global_constants, class_constants) = self.build_constant_registry(app);
-        // Shared by every context below — see `Ctx::constants`.
-        let global_constants = body::ConstScope::global(global_constants);
-        for (id, constants) in class_constants {
-            self.classes.entry(id).or_default().constants.extend(constants);
-        }
+        // Source-backed constant reads use Rubydex declaration IDs.
+        // A bare-name fallback remains for generated expressions without
+        // a Ruby source reference.
+        let (fallback, resolved_values) = self.build_constant_registry(app);
+        self.typed_constants = resolved_values;
+        let global_constants = body::ConstScope::global(fallback);
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
@@ -3105,6 +3097,11 @@ impl Analyzer {
             .map(|(view, locals)| (view.clone(), locals.clone()))
             .collect();
 
+        // Type the ORIGINAL test scopes, before source contracts inspect
+        // them. Emission later clones/rewrites these bodies; it is too late
+        // for that typing to establish a source admission fact.
+        self.type_test_modules(app, &global_constants);
+
         // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
         // ivars, no before-action scaffolding. Just an expression
         // that references model classes. Types so that Send effects
@@ -3393,6 +3390,17 @@ impl Analyzer {
                 // unregistered class, this doesn't mask a typo — the method
                 // has to be defined in the file to land here.
                 Self::register_method_return(target, &method.name, ret.as_ref());
+            }
+        }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                let ret = self.method_return_ty(&module.name, method);
+                let class = self.classes.entry(module.name.clone()).or_default();
+                let table = match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &mut class.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &mut class.class_methods,
+                };
+                Self::register_method_return(table, &method.name, ret.as_ref());
             }
         }
         // Controllers: harvest each action/helper method's return type so a
@@ -3800,6 +3808,23 @@ impl Analyzer {
                 self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
             }
         }
+        let mut test_sites = Vec::new();
+        for module in &app.test_modules {
+            if let Some(setup) = &module.setup {
+                self.collect_send_sites(setup, Some(&module.name), helpers, &mut test_sites);
+            }
+            for body in module.helpers.iter().flat_map(|method| {
+                method.params.iter().filter_map(|param| param.default.as_ref())
+                    .chain(std::iter::once(&method.body))
+            })
+                .chain(module.tests.iter().map(|test| &test.body)) {
+                self.collect_send_sites(body, Some(&module.name), helpers, &mut test_sites);
+            }
+        }
+        let test_sites = test_sites.into_iter().filter_map(|(class, method, args, kwargs)| {
+            self.test_helper_owner(app, &class, &method)
+                .map(|owner| (owner, method, args, kwargs))
+        }).collect();
         for controller in &app.controllers {
             for action in controller.actions() {
                 self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
@@ -3815,31 +3840,37 @@ impl Analyzer {
             self.collect_send_sites(seeds, None, helpers, &mut sites);
         }
 
-        for (class_id, method, arg_tys, kw_tys) in sites {
-            let arg_tys = Self::place_keyword_args(
-                params_by_method.get(&(class_id.clone(), method.clone())),
-                arg_tys,
-                kw_tys,
-            );
-            // Cross-reference against MethodDef.params to know the
-            // arity. If the called method's params can't be located,
-            // still accumulate up to arg count under the same key —
-            // RBS-only methods don't have a MethodDef but do have an
-            // Fn signature, and inferred_params can extend either way.
-            let arity = arg_tys.len();
-            let entry = self
-                .inferred_params
-                .entry((class_id.clone(), method.clone()))
-                .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
-            if entry.len() < arity {
-                entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+        for (phase, sites) in [sites, test_sites].into_iter().enumerate() {
+            if phase == 1 {
+                // Production signatures keep their production callers' shape.
+                // Fold before adding test-owned observations: a same-named test
+                // helper must not feed an included production concern either.
+                self.fold_concern_param_sites(app);
             }
-            for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                *slot = unify_param_ty(slot.clone(), observed);
+            for (class_id, method, arg_tys, kw_tys) in sites {
+                let arg_tys = Self::place_keyword_args(
+                    params_by_method.get(&(class_id.clone(), method.clone())),
+                    arg_tys,
+                    kw_tys,
+                );
+                // Cross-reference against MethodDef.params to know the
+                // arity. If the called method's params can't be located,
+                // still accumulate up to arg count under the same key —
+                // RBS-only methods don't have a MethodDef but do have an
+                // Fn signature, and inferred_params can extend either way.
+                let arity = arg_tys.len();
+                let entry = self
+                    .inferred_params
+                    .entry((class_id.clone(), method.clone()))
+                    .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
+                if entry.len() < arity {
+                    entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+                }
+                for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
+                    *slot = unify_param_ty(slot.clone(), observed);
+                }
             }
         }
-
-        self.fold_concern_param_sites(app);
     }
 
     /// The param-table twin of `fold_concern_surfaces`.
@@ -3959,8 +3990,8 @@ impl Analyzer {
         }
     }
 
-    /// Every (class, method) pair's parameter NAMES and whether each
-    /// binds by keyword — the shape `place_keyword_args` needs to put a
+    /// Every (class, method) pair's parameter names and canonical kinds
+    /// — the shape `place_keyword_args` needs to put a
     /// call's kwargs on the right slots.
     ///
     /// Keyed the way `inferred_params` is, by (class, method) with no
@@ -3969,11 +4000,11 @@ impl Analyzer {
     /// POISONED rather than picked: placing keywords from the wrong
     /// `def` is worse than leaving the hash where it sits, which is the
     /// behaviour that stood before this table existed.
-    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, bool)>> {
-        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, bool)>>> = HashMap::new();
+    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, ParamKind)>> {
+        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, ParamKind)>>> = HashMap::new();
         let mut record = |class: &ClassId, m: &crate::dialect::MethodDef| {
-            let shape: Vec<(Symbol, bool)> =
-                m.params.iter().map(|p| (p.name.clone(), p.keyword)).collect();
+            let shape: Vec<(Symbol, ParamKind)> =
+                m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect();
             out.entry((class.clone(), m.name.clone()))
                 .and_modify(|slot| {
                     if slot.as_ref() != Some(&shape) {
@@ -3990,6 +4021,11 @@ impl Analyzer {
         for lc in &app.library_classes {
             for m in &lc.methods {
                 record(&lc.name, m);
+            }
+        }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                record(&module.name, method);
             }
         }
         out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
@@ -4017,17 +4053,29 @@ impl Analyzer {
     /// not pass an optional keyword is no evidence about its type, and
     /// `unify_param_ty` reads `Var` as exactly that.
     fn place_keyword_args(
-        shape: Option<&Vec<(Symbol, bool)>>,
+        shape: Option<&Vec<(Symbol, ParamKind)>>,
         mut arg_tys: Vec<Ty>,
         kw_tys: Vec<(Symbol, Ty)>,
     ) -> Vec<Ty> {
         if kw_tys.is_empty() {
+            // Ingest erases ** forwarding to the Hash expression itself.
+            // A whole bundle cannot prove an individual named keyword's
+            // value. Mask only those slots, without moving observations:
+            // keyword-rest DOES bind the Hash, and positional/default/rest
+            // parameters keep their existing inference contract.
+            if let Some(params) = shape {
+                for (observed, (_, kind)) in arg_tys.iter_mut().zip(params) {
+                    if matches!(kind, ParamKind::Keyword { .. }) {
+                        *observed = Ty::Var { var: crate::ident::TyVar(0) };
+                    }
+                }
+            }
             return arg_tys;
         }
         let Some(params) = shape else {
             return arg_tys;
         };
-        let slot_of = |key: &Symbol| params.iter().position(|(n, _kw)| n == key);
+        let slot_of = |key: &Symbol| params.iter().position(|(n, _kind)| n == key);
         if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
             return arg_tys;
         }

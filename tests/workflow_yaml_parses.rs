@@ -16,6 +16,216 @@
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+        let steps = job["steps"].as_sequence().unwrap();
+        let setup = steps
+            .iter()
+            .position(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"));
+        for (i, step) in steps.iter().enumerate() {
+            let uses = step["uses"].as_str().unwrap_or("");
+            assert!(
+                !uses.starts_with("dtolnay/rust-toolchain@"),
+                "{name:?}: Rust must come from the repository pin"
+            );
+            if uses.starts_with("Swatinem/rust-cache@") {
+                assert!(
+                    setup.is_some_and(|setup| setup < i),
+                    "{name:?}: select pinned Rust before caching"
+                );
+            }
+        }
+    }
+    let wasm_setup = workflow["jobs"]["build-wasm"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"))
+        .unwrap();
+    assert_eq!(
+        wasm_setup["with"]["targets"].as_str(),
+        Some("wasm32-wasip1")
+    );
+    let smoke_setup = workflow["jobs"]["smoke"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust"))
+        .unwrap();
+    assert_eq!(smoke_setup["if"].as_str(), Some("matrix.target == 'rust'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_setup_exports_the_selected_toolchain_for_generated_projects() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let action: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/actions/setup-rust/action.yml").unwrap(),
+    )
+    .unwrap();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("rust-setup-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let rustup = root.join("rustup");
+    // A different version catches hard-coded exports, and the trailing
+    // explanation catches exporting the whole active-toolchain output.
+    fs::write(
+        &rustup,
+        "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then\n  echo '1.97.3-x86_64-unknown-linux-gnu (overridden by rust-toolchain.toml)'\nelif [ \"$*\" != show ]; then\n  exit 99\nfi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+    let env_file = root.join("github-env");
+    let output = Command::new("bash")
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            action["runs"]["steps"][0]["run"].as_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("GITHUB_ENV", &env_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(env_file).unwrap(),
+        "RUSTUP_TOOLCHAIN=1.97.3-x86_64-unknown-linux-gnu\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn release_runs_only_for_version_tag_pushes() {
+    let release: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/release.yml").unwrap())
+            .unwrap();
+    let events = release["on"].as_mapping().unwrap();
+    assert_eq!(events.len(), 1, "no PR or manual publishing trigger");
+    assert_eq!(
+        release["on"]["push"]["tags"][0].as_str(),
+        Some("**[0-9]+.[0-9]+.[0-9]+*")
+    );
+    assert!(release["on"]["push"].get("branches").is_none());
+    let config = fs::read_to_string("dist-workspace.toml").unwrap();
+    assert!(
+        config.lines().any(|line| line == "pr-run-mode = \"skip\""),
+        "regeneration must not restore the PR trigger"
+    );
+}
+
+#[test]
+fn pr_archives_remain_tested_without_pages_publication_work() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let jobs = &ci["jobs"];
+    assert_eq!(
+        jobs["build-site"]["if"].as_str(),
+        Some("${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}")
+    );
+    assert_eq!(jobs["smoke"]["needs"].as_str(), Some("build-site"));
+    let steps = jobs["build-site"]["steps"].as_sequence().unwrap();
+    for (id, output, renderer) in [
+        ("fetch-bench", "bench_data", "Render bench page"),
+        (
+            "fetch-lobsters-bench",
+            "lobsters_bench_data",
+            "Render lobsters bench page",
+        ),
+        (
+            "fetch-lobsters-specs",
+            "specs_data",
+            "Render lobsters conformance page",
+        ),
+        (
+            "fetch-campfire-bench",
+            "campfire_bench",
+            "Render campfire bench page",
+        ),
+        (
+            "fetch-campfire-suite-spinel",
+            "compiled_data",
+            "Render compiled campfire conformance page",
+        ),
+    ] {
+        let fetch = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some(id))
+            .unwrap();
+        assert_eq!(
+            fetch["if"].as_str(),
+            Some("github.ref == 'refs/heads/main'")
+        );
+        let render = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(renderer))
+            .unwrap();
+        // A skipped fetch has no 'present' output, so its renderer must skip too.
+        assert_eq!(
+            render["if"].as_str(),
+            Some(format!("steps.{id}.outputs.{output} == 'present'").as_str())
+        );
+    }
+    let archives = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Upload browse archives"))
+        .unwrap();
+    assert!(archives.get("if").is_none(), "PR smoke needs the archives");
+    assert_eq!(archives["with"]["name"].as_str(), Some("browse-archives"));
+    let pages = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Upload Pages artifact"))
+        .unwrap();
+    assert_eq!(
+        pages["if"].as_str(),
+        Some("github.ref == 'refs/heads/main'")
+    );
+    // Keep the status function: a failed Campfire floor must not suppress
+    // its explanatory publication, but cancellation or a bad site must.
+    assert_eq!(
+        jobs["assemble-site"]["if"].as_str(),
+        Some("${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}")
+    );
+    assert_eq!(
+        jobs["deploy"]["if"].as_str(),
+        Some("github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'")
+    );
+    assert!(jobs["deploy"].get("continue-on-error").is_none(), "production deployment failures must remain visible");
+    assert_eq!(jobs["deploy"]["needs"][0].as_str(), Some("assemble-site"));
+    assert_eq!(jobs["deploy"]["needs"][1].as_str(), Some("unit"));
+}
+
+#[test]
+fn draft_transitions_replace_the_previous_pr_run() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let events = ci["on"]["pull_request"]["types"].as_sequence().unwrap();
+    for event in ["ready_for_review", "converted_to_draft"] {
+        assert!(events.iter().any(|value| value.as_str() == Some(event)));
+    }
+    assert_eq!(
+        ci["concurrency"]["group"].as_str(),
+        Some("${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}")
+    );
+    assert_eq!(
+        ci["concurrency"]["cancel-in-progress"].as_str(),
+        Some("${{ github.event_name == 'pull_request' }}")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {

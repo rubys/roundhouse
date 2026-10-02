@@ -1,0 +1,6 @@
+[toolchain]
+# Last known-good compiler before the Rust 1.99 / LLVM 23 WASM stack regression.
+# Upgrade deliberately, with the native suite and browser WASM gates.
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

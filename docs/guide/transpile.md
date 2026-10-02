@@ -33,10 +33,43 @@ roundhouse --target LANG [-o OUT] [INPUT] [--survey] [--allow-unsupported]
   a clean directory when the app has lost files.
 
 Transpilation is the analysis from [`check.md`](check.md) followed by
-lowering and emit, so it accepts an app in exactly the state `check`
-reports as clean: zero errors, and every construct recognized. On such
-an app the command prints nothing and exits 0. On any other app it
+lowering and emit. It requires zero analysis errors and a runtime for
+the modeled constructs on the selected target. A clean target-independent
+`check` does not imply availability on every target (see Date below).
+On a covered app the command prints nothing and exits 0. Otherwise it
 stops, and the two flags decide how.
+
+### Date-only values
+
+`t.date` is modeled as `Date` (nullable as `Date?`), not `Time`.
+The `ruby` target hydrates a native Date from YYYY-MM-DD storage text,
+normalizes Date or ISO date text writes, and preserves SQL NULL as nil.
+`Date#>>` uses Ruby's calendar arithmetic, including end-of-month clamping;
+Date JSON is an ISO date without a clock or zone. DateTime/time columns
+retain their timestamp type and runtime.
+
+Date-only emission is currently supported and executed only on `ruby`.
+`jruby`, `spinel`, `roda` and the non-Ruby targets (including
+`typescript-worker`) reject Date at the project boundary before emitting
+files, even with `--allow-unsupported`. This is an observable support
+boundary, replacing silent timestamp treatment, not evidence that these
+languages cannot represent dates. JRuby's date-only adapter path remains
+unverified. The `blog` source archive is not a transpilation target.
+
+This is a bounded Date surface, not all of ActiveSupport's Date extensions:
+unmodeled methods still diagnose, and nonliteral strict-local defaults
+remain an existing ingestion gap.
+
+### Forwarding a computed Proc
+
+Ruby emission preserves `items.map(&@callback)` and
+`items.map(&factory())`, including evaluating `factory()` once before
+the call. Arbitrary `&expr` forwarding is not implemented for `rust`,
+`crystal`, `go`, `python`, `kotlin`, `swift` or `elixir`: these targets
+reject it at the project boundary, even with `--allow-unsupported`,
+rather than dropping the callback or evaluating its producer per item.
+Existing literal blocks, local block variables and bound-method
+references retain their target-specific support and limitations.
 
 ## Apps that aren't fully covered yet
 

@@ -25,7 +25,13 @@
 #
 # All of them are nil-safe: an absent column reads as nil / "" and the
 # synthesized accessors call them unguarded.
+# Date-only parse/format are provided only by the native overlay;
+# the target boundary rejects Date on the other emitted trees.
 module ActiveSupport
+  def self.parse_db_date: (String? str) -> Date?
+
+  def self.format_db_date: (Date | String | nil value) -> String?
+
   def self.parse_db_time: (String? str) -> Time?
 
   def self.json_time: (String? str) -> String?

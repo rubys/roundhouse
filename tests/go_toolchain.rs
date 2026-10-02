@@ -19,6 +19,30 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::emit::go;
 use roundhouse::ingest::ingest_app;
 
+#[test]
+fn real_blog_runtime_calls_use_qualified_class_names() {
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = go::emit(&app);
+    for (path, calls) in [
+        ("app/v2/flash.go", vec!["NewActionDispatchFlashNow(self)", "NewActionDispatchFlash()"]),
+        ("app/v2/router.go", vec!["return NewActionDispatchRouterMatchResult("]),
+        ("app/v2/session.go", vec![
+            "NewActionDispatchSession(self.ToH())",
+            "NewActionDispatchSession()",
+            "ActionDispatchSession_cookie_decode(fmt.Sprintf(\"%v\", parts[0]))",
+            "ActionDispatchSession_cookie_decode(fmt.Sprintf(\"%v\", parts[1]))",
+            "ActionDispatchSession_cookie_encode(k)",
+            "ActionDispatchSession_cookie_encode(fmt.Sprintf(\"%v\", self.OpGet(k)))",
+        ]),
+    ] {
+        let file = files.iter().find(|file| file.path == Path::new(path)).expect("runtime file");
+        for call in calls {
+            assert!(file.content.contains(call), "{path} must call {call}");
+        }
+    }
+}
+
 fn scratch_dir(fixture: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-go-check-{fixture}"))
 }

@@ -819,7 +819,7 @@ pub(super) fn expand_enum_decl(
                     args: vec![Expr::new(
                         span,
                         ExprNode::Lit {
-                            value: if reads_label { Literal::Str { value: label.clone() } } else { value },
+                            value: if reads_label { Literal::Str { value: all_labels.iter().find(|(_, stored)| stored == &value).map(|(canonical, _)| canonical.clone()).unwrap_or_else(|| label.clone()) } } else { value },
                         },
                     )],
                     block: None,
@@ -2053,7 +2053,8 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
+        ColumnType::Date => Ty::Date,
+        ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
         // Rails exposes a schema-less JSON value here: it may be an
         // Array, Hash, scalar, or nil, so neither String nor one fixed

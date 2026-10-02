@@ -296,7 +296,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // is itself unresolved is reported on the receiver node when we
     // recurse, so the outer send is skipped here to avoid double-counting
     // the same root cause.
-    if is_unknown_ty(expr.ty.as_ref()) {
+    if is_unknown_ty(expr.ty.as_ref())
+        && !matches!(expr.diagnostic, Some(DiagnosticKind::Unsupported { .. }))
+    {
         let report = matches!(
             &*expr.node,
             ExprNode::Send { recv: None, .. }

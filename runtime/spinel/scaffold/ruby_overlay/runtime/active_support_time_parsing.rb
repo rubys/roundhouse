@@ -1,6 +1,7 @@
-# CRuby-only UTC-safe datetime-column parsing + storage-form stamping.
+# Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
-# Rails' sqlite3 adapter stores Date/DateTime/Time columns as bare
+# Dates store as YYYY-MM-DD, with no time or zone. Separately,
+# Rails' sqlite3 adapter stores DateTime/Time columns as bare
 # `YYYY-MM-DD HH:MM:SS[.ffffff]` TEXT with no zone marker — always
 # implicitly UTC. Ruby's stdlib `Time.parse`, when a string carries no
 # zone marker, defaults to the *system's local zone* instead (a
@@ -21,8 +22,26 @@
 # and requiring it locally keeps every bootstrap that chains this file
 # (main.rb, or test_helper via runtime/db.rb) self-sufficient.
 require "time"
+require "date"
 
 module ActiveSupport
+  # Date-only storage has no clock or zone. Native Date is the authority
+  # for parsing and calendar arithmetic (including >>'s one-shot clamp).
+  def self.parse_db_date(str)
+    return nil if str.nil? || str.empty?
+    Date.iso8601(str)
+  end
+
+  def self.format_db_date(value)
+    return nil if value.nil?
+    date = case value
+    when Date then value.to_date
+    when String then Date.iso8601(value)
+    else raise TypeError, "expected Date or ISO date text"
+    end
+    date.iso8601
+  end
+
   # Rails zone name → IANA identifier (the ActiveSupport::TimeZone::
   # MAPPING subset corpora have needed; extend as apps demand). Names
   # not listed pass through unchanged — a valid IANA string works

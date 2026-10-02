@@ -236,6 +236,7 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         Ty::Bool => "bool".into(),
         Ty::Str => "String".into(),
         Ty::Sym => "Symbol".into(),
+        Ty::Date => "Date".into(),
         // Ruby has a native `Time`; datetime columns hydrate to it via
         // apply_datetime_lowering.
         Ty::Time => "Time".into(),

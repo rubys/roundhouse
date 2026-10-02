@@ -21,6 +21,7 @@ pub fn ts_ty(ty: &Ty) -> String {
         // separate: it's for hand-written-rbs Time in the shared
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "Date".into(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("typescript"),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),
         // A self type the analyzer should have substituted with
@@ -40,7 +41,7 @@ pub fn ts_ty(ty: &Ty) -> String {
         // Time-containing unions are rendered here (the datetime Stage-2
         // reader return type); other unions still fall through to `any`
         // (no general union rendering wired for TS yet).
-        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Time)) => {
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Time | Ty::Date)) => {
             let mut parts: Vec<String> = variants.iter().map(ts_ty).collect();
             parts.dedup();
             parts.join(" | ")

@@ -1646,6 +1646,36 @@ pub struct Fixture {
     pub model_class: Option<Symbol>,
 }
 
+impl Fixture {
+    /// The loader and fixture-accessor typing must name the same model.
+    pub(crate) fn class_id(&self) -> ClassId {
+        let name = match &self.model_class {
+            Some(class) => class.as_str().trim_start_matches("::").to_string(),
+            None => crate::naming::classify_path(self.path.as_str()),
+        };
+        ClassId(Symbol::from(name.as_str()))
+    }
+
+    /// Fixture accessors and row loading share this model identity. Unknown
+    /// models stay gradual instead of claiming a nonexistent class.
+    pub(crate) fn accessor_signature(&self, models: &[Model]) -> Ty {
+        let class = self.class_id();
+        let ret = models.iter().find(|model| model.name == class)
+            .map(|model| Ty::Class { id: model.name.clone(), args: vec![] })
+            .unwrap_or(Ty::Untyped);
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("name"),
+                ty: Ty::Sym,
+                kind: crate::ty::ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::pure(),
+        }
+    }
+}
+
 /// An enum whose every stored value is an integer: its reader answers the label.
 pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
     model.enums.get(column).is_some_and(|m| enum_mapping_reads_label(m))

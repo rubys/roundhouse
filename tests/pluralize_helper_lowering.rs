@@ -1,5 +1,5 @@
 //! Bare `pluralize(count, word)` in a helper body grounds to
-//! `Inflector.pluralize` — the same count-labeling home the view
+//! `Inflector.pluralize_formatted` — the same count-labeling home the view
 //! pipeline's classifier uses (spinel-blog convention), via
 //! `apply_helper_lowering`'s framework-call rewrite. Two-arg form
 //! only; the optional plural-word/locale variants stay verbatim
@@ -36,7 +36,7 @@ end
 "##,
     );
     assert!(
-        out.contains("Inflector.pluralize("),
+        out.contains("Inflector.pluralize_formatted(errors.count.to_s, \"error\")"),
         "bare 2-arg pluralize must ground to Inflector:\n{out}"
     );
 }
@@ -52,7 +52,7 @@ end
 "#,
     );
     assert!(
-        !out.contains("Inflector.pluralize("),
+        !out.contains("Inflector.pluralize_formatted("),
         "3-arg pluralize is outside the runtime's surface and must stay verbatim:\n{out}"
     );
 }

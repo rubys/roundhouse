@@ -718,6 +718,177 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
+/// The executed Date-only runtime is native Ruby, not the timestamp seam
+/// shared by the other targets (including the unverified JRuby adapter).
+/// Reject before entering their emitters:
+/// dynamic backends may never render a type, so a type-position check
+/// alone would silently emit a String/Time or call an absent intrinsic.
+fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
+        return Ok(());
+    }
+    fn expr_has_date(e: &crate::expr::Expr) -> bool {
+        if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
+            || matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
+                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+        {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |child| found |= expr_has_date(child));
+        found
+    }
+    fn method_has_date(m: &crate::dialect::MethodDef) -> bool {
+        m.signature.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || expr_has_date(&m.body)
+            || m.params.iter().filter_map(|p| p.default.as_ref()).any(expr_has_date)
+    }
+    fn class_has_date(lc: &crate::dialect::LibraryClass) -> bool {
+        lc.methods.iter().any(method_has_date)
+            || lc.constants.iter().any(|(_, e)| expr_has_date(e))
+            || lc.unknown_calls.iter().any(expr_has_date)
+    }
+    let mut has_date = app.schema.tables.values().any(|table|
+        table.columns.iter().any(|c| c.col_type == crate::schema::ColumnType::Date));
+    crate::lower::for_each_hook_body_ref(app, &mut |e| has_date |= expr_has_date(e));
+    for view in &app.views {
+        has_date |= expr_has_date(&view.body);
+        has_date |= view.strict_locals.iter().flatten()
+            .filter_map(|p| p.default.as_ref()).any(expr_has_date);
+    }
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                has_date |= method_has_date(method);
+            }
+        }
+    }
+    for lc in app.library_classes.iter().chain(app.rails_application.iter()) {
+        has_date |= class_has_date(lc);
+    }
+    // Hook bodies already include controller bodies/positional defaults
+    // and seeds. Keyword defaults, tests and fixtures are emitted roots
+    // too, even when they have not been analyzed at this boundary.
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                has_date |= action.params.fields.values().any(crate::ty::Ty::contains_date);
+                has_date |= action.kw_params.iter().filter_map(|(_, e)| e.as_ref()).any(expr_has_date);
+            }
+        }
+    }
+    for tm in &app.test_modules {
+        has_date |= tm.setup.as_ref().is_some_and(expr_has_date)
+            || tm.tests.iter().any(|t| expr_has_date(&t.body))
+            || tm.helpers.iter().any(method_has_date)
+            || tm.inner_classes.iter().any(class_has_date)
+            || tm.constants.iter().any(|(_, e)| expr_has_date(e));
+    }
+    for fixture in &app.fixtures {
+        has_date |= fixture.preamble.iter().any(expr_has_date)
+            || fixture.records.values().flat_map(|r| r.values()).any(|value|
+                matches!(value, crate::dialect::FixtureValue::Ruby(e) if expr_has_date(e)));
+    }
+    has_date |= app.routes.direct_helpers.iter().any(|h| expr_has_date(&h.body));
+    for function in &app.sql_functions {
+        has_date |= match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => method_has_date(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } =>
+                method_has_date(step) || method_has_date(finalize),
+        };
+    }
+    has_date |= app.rbs_signatures.values().flat_map(|methods| methods.values())
+        .any(crate::ty::Ty::contains_date);
+    if has_date {
+        emit::diagnostics::unsupported_date_ty(target.as_str());
+        return Err(format!("{}: Date-only values are not supported; use the native Ruby target", target.as_str()));
+    }
+    Ok(())
+}
+
+/// Arbitrary `&expr` operands need a real forwarding convention, not
+/// a lambda that returns the operand (or a dropped block). Keep the
+/// unsupported native paths out of emit, even in survey mode.
+fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<(), String> {
+    if !matches!(target, BuildTarget::Rust | BuildTarget::Crystal | BuildTarget::Go
+        | BuildTarget::Python | BuildTarget::Kotlin | BuildTarget::Swift | BuildTarget::Elixir) {
+        return Ok(());
+    }
+    fn visit(e: &crate::expr::Expr, target: &str, found: &mut bool) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { block: Some(block), .. }
+            | ExprNode::Apply { block: Some(block), .. } = &*e.node
+        {
+            // These shapes predate the arbitrary-expression fallback;
+            // their existing target-specific paths remain unchanged.
+            if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }
+                | ExprNode::MethodRef { .. }) {
+                *found = true;
+                crate::emit::diagnostics::report_unsupported(
+                    block.span, target, "forwarded_proc",
+                    "arbitrary &expr forwarding is not implemented on this target; use Ruby instead",
+                );
+            }
+        }
+        e.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    fn visit_method(method: &crate::dialect::MethodDef, f: &mut impl FnMut(&crate::expr::Expr)) {
+        f(&method.body);
+        for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    let mut found = false;
+    let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
+    crate::lower::for_each_hook_body_ref(app, &mut f);
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) {
+                f(default);
+            }
+        }
+    }
+    for view in &app.views {
+        f(&view.body);
+        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup { f(setup); }
+        for test in &tm.tests { f(&test.body); }
+        for method in &tm.helpers { visit_method(method, &mut f); }
+        for class in &tm.inner_classes {
+            for method in &class.methods { visit_method(method, &mut f); }
+            for (_, value) in &class.constants { f(value); }
+            for call in &class.unknown_calls { f(call); }
+        }
+        for (_, value) in &tm.constants { f(value); }
+    }
+    for fixture in &app.fixtures {
+        for e in &fixture.preamble { f(e); }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &app.routes.direct_helpers { f(&helper.body); }
+    for function in &app.sql_functions {
+        match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method, &mut f),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step, &mut f);
+                visit_method(finalize, &mut f);
+            }
+        }
+    }
+    if found {
+        return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
+    }
+    Ok(())
+}
+
 /// A unique index whose `where:` SQLite can't be trusted to run as
 /// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
 /// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
@@ -762,7 +933,10 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    reject_unsupported_dates(app, target)?;
+    reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
     // A keyword parameter is carried by the ruby family and by nothing
     // else yet. No other emitter reads `Param::keyword`, so a `def`
@@ -3272,6 +3446,158 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
+/// These class objects are supplied by Ruby/Spinel's bundled libraries,
+/// not by the transpiled runtimes. Recognizing them during inference
+/// must not turn a missing target implementation into a clean emit.
+fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
+            if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+                if matches!(id.0.as_str(),
+                    "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+                    | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+                    | "Rails::HTML5::SafeListSanitizer" | "JSON")
+                    // Nokogiri does not supply HTML5 on JRuby. The
+                    // other bundled values remain available there.
+                    && (target != "jruby" || id.0.as_str() == "Rails::HTML5::SafeListSanitizer")
+                    && !app.library_classes.iter().any(|class| class.name == *id)
+                    && !app.models.iter().any(|model| model.name == *id)
+                    && !app.controllers.iter().any(|controller| controller.name == *id)
+                    && !app.rails_application.as_ref().is_some_and(|class| class.name == *id)
+                    && !app.test_modules.iter().any(|module| module.inner_classes.iter().any(|class| class.name == *id))
+                {
+                    emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target,
+                        "bundled_constant",
+                        format!("{} is not available as a bundled class/module value on {target}", id.0.as_str()),
+                    );
+                }
+            }
+        }
+        // A mapped JSON call does not emit a Ruby module object. Skip
+        // only that exact receiver, not its arguments (which can still
+        // contain unsupported class values) or unmapped method calls.
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
+            if matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JSON")
+                && args.len() == 1
+                && (method.as_str() == "generate"
+                    || method.as_str() == "parse" && matches!(target, "typescript" | "typescript-worker" | "python" | "crystal")
+                    || method.as_str() == "dump" && matches!(target, "rust" | "elixir")
+                    || matches!(method.as_str(), "fast_generate" | "pretty_generate") && target == "rust")
+            {
+                expr.node.for_each_child(&mut |child| {
+                    if !std::ptr::eq(child, recv) {
+                        visit(child, app, target);
+                    }
+                });
+                return;
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    let mut visit = |expr: &crate::expr::Expr| visit(expr, app, target.as_str());
+    crate::lower::for_each_hook_body_ref(app, &mut visit);
+    // Like the Date gate, include roots outside the app-body survey.
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for (_, default) in &action.kw_params {
+                if let Some(default) = default {
+                    visit(default);
+                }
+            }
+        }
+    }
+    for fixture in &app.fixtures {
+        for expr in &fixture.preamble {
+            visit(expr);
+        }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(expr) = value {
+                visit(expr);
+            }
+        }
+    }
+    for helper in &app.routes.direct_helpers {
+        visit(&helper.body);
+    }
+    for function in &app.sql_functions {
+        let methods = match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => [Some(method), None],
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => [Some(step), Some(finalize)],
+        };
+        for method in methods.into_iter().flatten() {
+            visit(&method.body);
+            for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                visit(default);
+            }
+        }
+    }
+    for view in &app.views {
+        visit(&view.body);
+        for param in view.strict_locals.iter().flatten() {
+            if let Some(default) = &param.default {
+                visit(default);
+            }
+        }
+    }
+    for module in &app.test_modules {
+        if let Some(setup) = &module.setup {
+            visit(setup);
+        }
+        for test in &module.tests {
+            visit(&test.body);
+        }
+        for helper in &module.helpers {
+            visit(&helper.body);
+            for param in &helper.params {
+                if let Some(default) = &param.default {
+                    visit(default);
+                }
+            }
+        }
+        for (_, value) in &module.constants {
+            visit(value);
+        }
+        for class in &module.inner_classes {
+            for method in &class.methods {
+                visit(&method.body);
+                for param in &method.params {
+                    if let Some(default) = &param.default {
+                        visit(default);
+                    }
+                }
+            }
+            for (_, value) in &class.constants {
+                visit(value);
+            }
+            for call in &class.unknown_calls {
+                visit(call);
+            }
+        }
+    }
+    // The immutable app-body survey also excludes association extensions.
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Association {
+                assoc: crate::dialect::Association::HasMany { extension, .. }, ..
+            } = item {
+                for method in extension {
+                    visit(&method.body);
+                    for param in &method.params {
+                        if let Some(default) = &param.default {
+                            visit(default);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
@@ -5147,7 +5473,7 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 13] = [
+const BUNDLED: [(&str, &str); 14] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -5173,6 +5499,7 @@ const BUNDLED: [(&str, &str); 13] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
     // stdlib and spinel to `packages/net`, which speaks the same
@@ -6397,6 +6724,94 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_constant_gate_covers_auxiliary_emitted_roots() {
+        use crate::app::{SqlFunction, SqlFunctionKind};
+        use crate::dialect::{ControllerBodyItem, DirectHelper, Fixture, FixtureValue, Param};
+        use crate::expr::{Expr, ExprNode};
+        use crate::ident::{ClassId, Symbol};
+        use crate::span::{FileId, Span};
+        use crate::ty::Ty;
+
+        let tree = [
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index(value: nil); nil; end\nend\n"),
+            ("app/services/probe.rb", "class Probe\n  def value; nil; end\nend\n"),
+        ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+        let mut base = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let method = base.library_classes.iter().find(|class| class.name.0.as_str() == "Probe")
+            .unwrap().methods[0].clone();
+        base.library_classes.clear();
+
+        for root in 0..8 {
+            let mut app = base.clone();
+            let span = Span { file: FileId(1), start: root, end: root + 1 };
+            let mut constant = Expr::new(span, ExprNode::Const {
+                path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
+            });
+            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![] });
+            match root {
+                0 | 1 => app.fixtures.push(Fixture {
+                    name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
+                    preamble: if root == 0 { vec![constant.clone()] } else { vec![] },
+                    records: if root == 1 {
+                        [(Symbol::new("one"), [(Symbol::new("value"), FixtureValue::Ruby(constant))].into_iter().collect())].into_iter().collect()
+                    } else { Default::default() },
+                }),
+                2 => {
+                    let ControllerBodyItem::Action { action, .. } = &mut app.controllers[0].body[0] else {
+                        panic!("expected the controller action");
+                    };
+                    action.kw_params[0].1 = Some(constant);
+                }
+                3 => app.routes.direct_helpers.push(DirectHelper {
+                    name: Symbol::new("probe"), params: vec![], body: constant,
+                }),
+                _ => {
+                    let mut changed = method.clone();
+                    if root == 4 || root == 6 {
+                        changed.body = constant;
+                    } else {
+                        changed.params = vec![Param::with_default(Symbol::new("value"), constant)];
+                    }
+                    let kind = if root < 6 {
+                        SqlFunctionKind::Scalar { method: changed }
+                    } else if root == 6 {
+                        SqlFunctionKind::Aggregate { step: changed, finalize: method.clone() }
+                    } else {
+                        SqlFunctionKind::Aggregate { step: method.clone(), finalize: changed }
+                    };
+                    app.sql_functions.push(SqlFunction { name: "probe".into(), arity: 1, kind });
+                }
+            }
+            for target in [BuildTarget::Kotlin, BuildTarget::Ruby, BuildTarget::Jruby] {
+                let (_, diags) = emit::diagnostics::scope(|| report_unsupported_bundled_constants(&app, target));
+                assert_eq!(diags.len(), usize::from(target == BuildTarget::Kotlin), "root {root}, {target:?}: {diags:?}");
+                if let Some(diag) = diags.first() {
+                    assert_eq!(diag.span, span);
+                    assert_eq!(diag.severity, crate::diagnostic::Severity::Error);
+                    assert!(matches!(&diag.kind, crate::diagnostic::DiagnosticKind::Unsupported { construct, target: Some(name), .. }
+                        if construct.as_str() == "bundled_constant" && name.as_str() == "kotlin"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forwarded_proc_boundary_preserves_existing_block_shapes() {
+        for source in ["[1, 2].map { |x| x + 1 }", "callback = ->(x) { x + 1 }; [1, 2].map(&callback)",
+            "[1, 2].map(&method(:normalize))"] {
+            let tree = [("db/seeds.rb", source)].into_iter()
+                .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+            for &target in BuildTarget::ALL {
+                let (result, diagnostics) = crate::emit::diagnostics::scope(||
+                    reject_unsupported_forwarded_procs(&app, target));
+                assert!(result.is_ok(), "{target:?}: {source}: {result:?}");
+                assert!(diagnostics.is_empty(), "{target:?}: {source}: {diagnostics:?}");
+            }
+        }
+    }
 
     #[test]
     fn archive_playwright_matches_the_prewarmed_version() {

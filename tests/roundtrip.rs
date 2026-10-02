@@ -159,6 +159,8 @@ fn tiny_blog_round_trips() {
         view_feeders: std::collections::HashMap::new(),
         controller_resolutions: std::collections::HashMap::new(),
         sources: vec![],
+        // Derived from `sources` and `serde(skip)`, like `binary_assets`.
+        const_resolver: Default::default(),
         root: String::new(),
         app_roots: vec!["app".to_string()],
     };

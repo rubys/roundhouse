@@ -5,8 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `ready_for_review`: a draft runs `unit` alone, so leaving draft has to start the full run.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # Drafts run fixture + unit only. Leaving draft starts the full run;
+    # returning to draft cancels the superseded full run via concurrency.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # Not on `push`: every commit on main keeps a full run.
     paths-ignore: ['**.md', 'docs/**']
 
@@ -44,7 +45,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Fetch pinned Writebook source
         run: |
@@ -143,7 +144,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       # generate-fixture already builds the store and runs the guide's
       # Rails tests before uploading it; analyze that same source tree.
@@ -184,7 +185,7 @@ jobs:
       WASI_SDK_VERSION: "33.0"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
@@ -338,7 +339,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -366,6 +367,10 @@ jobs:
           ruby-version: '3.4'
       - name: Install the gem the overlay escape surface uses
         run: gem install rails-html-sanitizer --no-document
+      # The native Date reference uses ActiveRecord against in-memory
+      # SQLite. Fixture generation ships source, not its installed gems.
+      - name: Install ActiveRecord for the native Date reference
+        run: gem install activerecord -v '~> 8.1.0' --no-document
       # `tests/emit_and_run.rs` and `tests/relation_runtime_cruby.rs`
       # run the emitted Ruby tree, whose database layer is the sqlite3
       # gem. The second skipped without it and passed: before this step
@@ -428,7 +433,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -624,7 +629,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -718,7 +723,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -799,7 +804,7 @@ jobs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -945,7 +950,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1006,7 +1011,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1044,7 +1049,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1491,7 +1496,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1590,7 +1595,7 @@ jobs:
         target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1720,7 +1725,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1766,7 +1771,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1811,7 +1816,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1898,7 +1903,7 @@ jobs:
           path: browse
       - name: Install Rust
         if: matrix.target == 'rust'
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
       - name: Refresh apt index
         if: matrix.target == 'crystal'
         run: sudo apt-get update -qq
@@ -2058,7 +2063,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -2213,7 +2218,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -2445,8 +2450,11 @@ jobs:
       # render step degrades gracefully: if Hetzner is unreachable, the
       # `_site/bench/` directory simply isn't created and the landing
       # page's link 404s until the next CI cycle picks up fresh data.
+      # These historical reports have no PR test consumer. Fetch them only
+      # for publication; PRs still build the demos and all smoke archives.
       - name: Fetch latest bench data
         id: fetch-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party
         run: |
@@ -2477,6 +2485,7 @@ jobs:
       # the bench box doesn't blank the page.
       - name: Fetch latest lobsters bench data
         id: fetch-lobsters-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/lobsters
         run: |
@@ -2548,6 +2557,7 @@ jobs:
       # having one.
       - name: Fetch latest lobsters conformance data
         id: fetch-lobsters-specs
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/lobsters-specs
         run: |
@@ -2572,6 +2582,7 @@ jobs:
       # comparison rather than two unrelated measurements.
       - name: Fetch latest campfire bench data
         id: fetch-campfire-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/campfire
         run: |
@@ -2627,6 +2638,7 @@ jobs:
       # roundbench.showcase.party/campfire-suite/.
       - name: Fetch latest compiled campfire conformance data
         id: fetch-campfire-suite-spinel
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/campfire-suite
         run: |
@@ -2652,11 +2664,13 @@ jobs:
           path: _site/browse/*.tgz
 
       - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5
         with:
           name: site-base
           path: _site
 
+  # Publication only: PR smoke jobs consume browse-archives, not Pages.
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
   assemble-site:
     # campfire-conformance is here for ORDERING ONLY — its summary.json is
@@ -2668,7 +2682,7 @@ jobs:
     # artifact degrades to a skipped render and a warning, not a broken
     # site build.
     needs: [build-site, campfire-conformance, build-campfire-archive]
-    if: ${{ !cancelled() && needs.build-site.result == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2752,7 +2766,9 @@ jobs:
     needs:
       - assemble-site
       - unit
-    if: github.ref == 'refs/heads/main'
+    # Forks run the full build/test matrix but need no Pages configuration.
+    # Only the canonical repository publishes the project website.
+    if: github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'
     # Only one Pages deployment at a time. Scoped to this job, not the
     # workflow: at the workflow level the same group serialised every
     # run — a pull request queued behind a push to main and the next
