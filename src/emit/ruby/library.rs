@@ -5798,6 +5798,7 @@ fn synthesize_module_lc(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -6218,6 +6219,15 @@ fn emit_library_class_decl_inner(
     } else {
         for call in &lc.unknown_calls {
             report_dropped_class_body_call(lc, call);
+        }
+    }
+
+    // Finite class-side initialization is lowered IR, not replay of a
+    // framework DSL. Each assignment runs once on this class object;
+    // unset subclasses deliberately keep their ivar absent.
+    for init in &lc.class_ivar_initializers {
+        for line in super::emit_expr(init).lines() {
+            writeln!(s, "{body_pad}{line}").unwrap();
         }
     }
 

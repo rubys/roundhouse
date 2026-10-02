@@ -145,6 +145,7 @@ fn module_singleton_shape() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit module singleton");
@@ -272,6 +273,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit plain class");
@@ -399,6 +401,7 @@ fn raise_panic_peephole() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit crasher class");
@@ -504,6 +507,7 @@ fn time_now_utc_iso8601_peephole() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit clock class");
@@ -589,6 +593,7 @@ fn include_array_recv_routes_to_slices_contains() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit colcheck class");
@@ -668,6 +673,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit tailer class");
@@ -836,6 +842,7 @@ fn class_reflection_rewrites() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit reflect class");
@@ -927,6 +934,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit widget class");
@@ -1076,6 +1084,7 @@ fn implicit_self_method_call_resolution() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit worker class");
@@ -1171,6 +1180,7 @@ fn each_array_block_shape() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit each-block class");
@@ -1256,6 +1266,7 @@ fn each_hash_block_shape() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit each hash-block class");
@@ -1338,6 +1349,7 @@ fn map_array_block_shape() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit map-block class");
@@ -1442,6 +1454,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit empty-body class");
@@ -1555,6 +1568,7 @@ fn typed_empty_literals_back_propagate() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let emitted = go::emit_library_class(&class).expect("emit typed-literal class");
@@ -1843,6 +1857,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);
@@ -1935,6 +1950,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);

@@ -77,3 +77,56 @@ fn pure_helper_methods_register_and_clone_class_side() {
         "ivar-reading helper_method stays instance-only"
     );
 }
+
+#[test]
+fn helper_class_clone_is_typed_and_rewrites_permitted_fields() {
+    use roundhouse::expr::ExprNode;
+    use roundhouse::lower::controller_to_library::{
+        LowerControllerOptions, lower_controllers_with_arel_views_assocs_and_routes,
+    };
+    use roundhouse::ty::Ty;
+
+    let tree = [(
+        "app/controllers/articles_controller.rb",
+        r#"class ArticlesController < ApplicationController
+  helper_method :caption
+  def caption(permitted)
+    permitted[:title]
+  end
+  private
+  def article_params
+    params.require(:article).permit(:title, :body)
+  end
+end
+"#,
+    )].into_iter()
+        .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).unwrap();
+    let params_ty = Ty::Class { id: ClassId(Symbol::from("ArticleParams")), args: vec![] };
+    let inferred = [((ClassId(Symbol::from("ArticlesController")), Symbol::from("caption")), vec![params_ty.clone()])]
+        .into_iter().collect();
+    let routed = std::collections::HashMap::new();
+    let classes = lower_controllers_with_arel_views_assocs_and_routes(
+        &app.controllers,
+        Vec::new(),
+        LowerControllerOptions {
+            inferred_params: Some(&inferred),
+            routed_by_controller: Some(&routed),
+            ..Default::default()
+        },
+    );
+    let controller = classes.iter().find(|lc| lc.name.0.as_str() == "ArticlesController").unwrap();
+    for receiver in [MethodReceiver::Instance, MethodReceiver::Class] {
+        let method = controller.methods.iter()
+            .find(|m| m.name.as_str() == "caption" && m.receiver == receiver).unwrap();
+        let tail = match &*method.body.node {
+            ExprNode::Seq { exprs } => exprs.last().unwrap(),
+            _ => &method.body,
+        };
+        assert!(matches!(&*tail.node, ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "title" && args.is_empty() && recv.ty.as_ref() == Some(&params_ty)),
+            "{receiver:?} helper missed typing or bracket rewriting: {tail:?}");
+        assert_eq!(tail.ty, Some(Ty::Str), "{receiver:?} accessor return type");
+    }
+}

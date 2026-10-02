@@ -124,7 +124,7 @@ impl Overlay {
     }
 
     fn run_test_with(self, flags: &[&str], test_path: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let output = ruby()
             .args(flags)
             .args(["-Itest", "-I."])
@@ -141,7 +141,7 @@ impl Overlay {
     /// required and the default adapter configured on an in-memory
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let script = format!(
             "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
         );
@@ -155,9 +155,28 @@ impl Overlay {
         Run::new("ruby -e <script>".into(), emitted, errors, output)
     }
 
+    /// Compile the unchanged Spinel output and run its native binary.
+    /// The consumer boots libraries, not the HTTP server or a database.
+    pub fn run_spinel(self, script: &str) -> Run {
+        let (emitted, errors) = self.emit(BuildTarget::Spinel);
+        std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
+            .expect("write native consumer");
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let compiled = Command::new(&compiler).args(["contract.rb", "-o", "contract"])
+            .current_dir(&emitted).output().expect("spawn spinel");
+        std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
+        std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
+        if !compiled.status.success() {
+            return Run::new(format!("{compiler} contract.rb -o contract"), emitted, errors, compiled);
+        }
+        let output = Command::new(emitted.join("contract")).current_dir(&emitted)
+            .output().expect("run native consumer");
+        Run::new(format!("{compiler} contract.rb -o contract && ./contract"), emitted, errors, output)
+    }
+
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
     /// target. Returns the emitted tree and `check`'s error diagnostics.
-    fn emit(self) -> (PathBuf, Vec<String>) {
+    fn emit(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
         let scratch = scratch_dir();
         let source = scratch.join("app");
         copy_tree(&self.base, &source);
@@ -189,7 +208,7 @@ impl Overlay {
 
         let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
         let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
-        let errors = diagnose(&app)
+        let mut errors: Vec<_> = diagnose(&app)
             .into_iter()
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
@@ -197,8 +216,13 @@ impl Overlay {
             .collect();
 
         let emitted = scratch.join("emitted");
-        let files = roundhouse::project::target_files(&app, &source, BuildTarget::Ruby)
-            .expect("ruby target files");
+        let (files, emit_diags) = roundhouse::emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&app, &source, target)
+        });
+        errors.extend(emit_diags.into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message)));
+        let files = files.expect("target files");
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
         (emitted, errors)
     }
@@ -208,7 +232,7 @@ impl Overlay {
 pub struct Run {
     command: String,
     pub emitted: PathBuf,
-    /// `check`'s error diagnostics for the overlaid app.
+    /// Analysis, lowering and emission error diagnostics for the overlaid app.
     pub errors: Vec<String>,
     pub success: bool,
     pub stdout: String,
@@ -227,17 +251,17 @@ impl Run {
         }
     }
 
-    /// The whole claim: `check` reports no errors AND the emitted
+    /// The whole claim: analysis and emit report no errors AND the emitted
     /// program ran clean. Either half alone is not support.
     pub fn assert_passes(&self) {
         assert!(
             self.errors.is_empty(),
-            "check reports errors, so the construct is not supported yet:\n{}",
+            "analysis or emit reports errors, so the construct is not supported yet:\n{}",
             self.errors.join("\n")
         );
         assert!(
             self.success,
-            "check is clean but the emitted program failed: `{}` in {}\n\
+            "analysis and emit are clean but the emitted program failed: `{}` in {}\n\
              \n=== stdout ===\n{}\n=== stderr ===\n{}",
             self.command,
             self.emitted.display(),

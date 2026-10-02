@@ -31,6 +31,24 @@ use roundhouse::analyze::Analyzer;
 
 use roundhouse::ingest::ingest_app;
 
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+#[path = "support/class_configuration.rs"]
+mod class_configuration;
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn finite_concern_class_configuration_runs_natively() {
+    for (overlay, assertions) in [
+        (class_configuration::overlay(), class_configuration::ASSERTIONS),
+        (class_configuration::empty_overlay(), class_configuration::EMPTY_ASSERTIONS),
+    ] {
+        let run = overlay.run_spinel(assertions);
+        run.assert_passes();
+        assert!(run.stdout.contains("finite class configuration contract passed"));
+    }
+}
+
 fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
 }

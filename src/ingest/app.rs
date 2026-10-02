@@ -989,6 +989,7 @@ end
                 origin: None,
                 constants,
                 unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
             });
         }
     }
@@ -1535,10 +1536,13 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
-    let concern_class_method_spans: Vec<_> = sources.iter()
-        .filter(|source| source.path.ends_with(".rb"))
-        .flat_map(|source| ingest_concern_class_method_spans(source.text.as_bytes(), &source.path))
-        .collect();
+    let mut concern_class_method_spans = Vec::new();
+    let mut framework_shadow_scopes = std::collections::HashSet::new();
+    for source in sources.iter().filter(|source| source.path.ends_with(".rb")) {
+        let (carriers, shadows) = ingest_concern_class_method_spans(source.text.as_bytes(), &source.path);
+        concern_class_method_spans.extend(carriers);
+        framework_shadow_scopes.extend(shadows);
+    }
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
@@ -1590,6 +1594,7 @@ end
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
+    super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     expand_class_body_macros(&mut app);
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
@@ -1796,6 +1801,36 @@ fn rehome_default_fk(
     out
 }
 
+/// Canonical carrier definitions and lexical constants. Reopenings replace
+/// only the same method; a same-named module singleton is not a carrier.
+/// Both receiver-identity splicing and finite configuration use this table.
+pub(super) fn concern_class_method_catalog(
+    classes: &[LibraryClass],
+    carriers: &[ConcernClassMethodSpans],
+) -> HashMap<crate::ident::ClassId, (Vec<crate::dialect::MethodDef>, std::collections::HashSet<Symbol>)> {
+    use std::collections::HashSet;
+    let mut carried: HashMap<&crate::ident::ClassId, HashSet<&crate::span::Span>> = HashMap::new();
+    for carrier in carriers {
+        carried.entry(&carrier.owner).or_default().extend(&carrier.methods);
+    }
+    let mut class_side: HashMap<_, (Vec<crate::dialect::MethodDef>, HashSet<Symbol>)> = HashMap::new();
+    for lc in classes {
+        let Some(spans) = carried.get(&lc.name) else { continue };
+        let (methods, consts) = class_side.entry(lc.name.clone()).or_default();
+        consts.extend(lc.constants.iter().map(|(n, _)| n.clone()));
+        for method in lc.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && spans.contains(&m.name_span))
+        {
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method.clone();
+            } else {
+                methods.push(method.clone());
+            }
+        }
+    }
+    class_side
+}
+
 /// Copy a concern's CLASS-side methods onto every model or library class
 /// that includes it, before analysis so receiver-relative bodies are
 /// typed against each concrete includer.
@@ -1833,47 +1868,22 @@ fn splice_concern_class_methods_into_includers(
     app: &mut App,
     carriers: &[ConcernClassMethodSpans],
 ) {
-    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::dialect::ModelBodyItem;
     use crate::ident::{ClassId, Symbol};
     use std::collections::{HashMap, HashSet};
 
-    // Class side + own constant names, per module. The constants come
-    // along because a lifted body's bare `THUMBNAIL_MAX_WIDTH` resolves
-    // against the module it was written in and would resolve against the
-    // MODEL once moved — the same lexical trap the controller splice
-    // hit with lobsters' `TIME_INTERVALS`.
-    let mut carried: HashMap<&ClassId, HashSet<&crate::span::Span>> = HashMap::new();
     let nested_carriers: HashSet<&ClassId> = carriers.iter()
         .filter(|c| c.has_nested_carrier).map(|c| &c.owner).collect();
     let mut bridges: HashMap<&ClassId, HashSet<&crate::span::Span>> = HashMap::new();
     for carrier in carriers {
-        carried.entry(&carrier.owner).or_default().extend(&carrier.methods);
         if nested_carriers.contains(&carrier.owner) {
             bridges.entry(&carrier.owner).or_default().extend(&carrier.bridges);
         }
     }
-    if carried.is_empty() {
-        return;
-    }
-    let mut class_side: HashMap<ClassId, (Vec<crate::dialect::MethodDef>, HashSet<Symbol>)> =
-        HashMap::new();
+    let class_side = concern_class_method_catalog(&app.library_classes, carriers);
     let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
     for lc in &app.library_classes {
         module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.clone());
-        let Some(spans) = carried.get(&lc.name) else { continue };
-        // Reopened modules contribute to one carrier. Later definitions
-        // replace the same method, but cannot erase unrelated earlier defs.
-        let (methods, consts) = class_side.entry(lc.name.clone()).or_default();
-        consts.extend(lc.constants.iter().map(|(n, _)| n.clone()));
-        for method in lc.methods.iter()
-            .filter(|m| m.receiver == MethodReceiver::Class && spans.contains(&m.name_span))
-        {
-            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
-                *prior = method.clone();
-            } else {
-                methods.push(method.clone());
-            }
-        }
     }
     if class_side.is_empty() {
         return;
@@ -2216,7 +2226,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
 /// The dependency list is a module's `includes` as ingested — a flat
 /// list, so a multi-argument `include` INSIDE a concern is walked as
 /// written rather than reversed; the grouping isn't kept at that level.
-fn filter_registration_order(
+pub(super) fn filter_registration_order(
     include_groups: &[Vec<crate::ident::ClassId>],
     module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
 ) -> Vec<crate::ident::ClassId> {
@@ -2242,6 +2252,58 @@ fn filter_registration_order(
         }
     }
     out
+}
+
+/// One ancestry snapshot for both class-body expansion paths. Direct include
+/// order is retained for the existing filter-macro lookup contract; transitive
+/// membership and inherited instance names serve finite class configuration.
+pub(super) struct ControllerConcernSurface {
+    pub direct_includes: Vec<crate::ident::ClassId>,
+    pub includes: Vec<crate::ident::ClassId>,
+    pub inherited_includes: Vec<crate::ident::ClassId>,
+    pub instance_methods: std::collections::HashSet<Symbol>,
+}
+
+pub(super) struct ControllerConcernSurfaces {
+    pub module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+    pub controllers: HashMap<crate::ident::ClassId, ControllerConcernSurface>,
+}
+
+pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurfaces {
+    let mut module_includes: HashMap<_, Vec<_>> = HashMap::new();
+    for lc in &app.library_classes {
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.clone());
+    }
+    let mut controllers = HashMap::new();
+    for controller in &app.controllers {
+        let mut direct_includes = Vec::new();
+        let mut inherited = Vec::new();
+        let mut instance_methods = std::collections::HashSet::new();
+        let mut cur = Some(controller);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = cur {
+            if !seen.insert(&c.name) {
+                break;
+            }
+            for inc in crate::analyze::controller_includes(c) {
+                if c.name != controller.name && !inherited.contains(&inc) {
+                    inherited.push(inc.clone());
+                }
+                if !direct_includes.contains(&inc) {
+                    direct_includes.push(inc);
+                }
+            }
+            instance_methods.extend(c.actions().map(|a| a.name.clone()));
+            cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        }
+        controllers.insert(controller.name.clone(), ControllerConcernSurface {
+            includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
+            inherited_includes: filter_registration_order(&[inherited], &module_includes),
+            direct_includes,
+            instance_methods,
+        });
+    }
+    ControllerConcernSurfaces { module_includes, controllers }
 }
 
 /// Rails' `remove_duplicates`: declaring `before_action :set_room` a
@@ -2596,44 +2658,23 @@ fn expand_class_body_macros(app: &mut App) {
             .filter(|m| matches!(m.receiver, MethodReceiver::Class))
             .cloned()
             .collect();
-        if !class_side.is_empty() {
-            macros.insert(lc.name.clone(), class_side);
+        for method in class_side {
+            let methods = macros.entry(lc.name.clone()).or_default();
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method;
+            } else {
+                methods.push(method);
+            }
         }
     }
     if macros.is_empty() {
         return;
     }
 
-    // Includes reachable from each controller, ITS ANCESTORS INCLUDED:
-    // campfire's SessionsController includes nothing itself and calls a
-    // macro its parent's Authentication concern exports, which is the
-    // normal arrangement — the base controller mixes the concern in and
-    // the subclasses use what it gave them.
-    let mut reachable: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = HashMap::new();
-    for controller in &app.controllers {
-        let mut acc: Vec<crate::ident::ClassId> = Vec::new();
-        let mut cur = Some(controller);
-        let mut seen: std::collections::BTreeSet<crate::ident::ClassId> =
-            std::collections::BTreeSet::new();
-        while let Some(c) = cur {
-            if !seen.insert(c.name.clone()) {
-                break;
-            }
-            for inc in crate::analyze::controller_includes(c) {
-                if !acc.contains(&inc) {
-                    acc.push(inc);
-                }
-            }
-            cur = c
-                .parent
-                .as_ref()
-                .and_then(|p| app.controllers.iter().find(|o| &o.name == p));
-        }
-        reachable.insert(controller.name.clone(), acc);
-    }
+    let surfaces = controller_concern_surfaces(app);
 
     for controller in &mut app.controllers {
-        let includes = reachable.get(&controller.name).cloned().unwrap_or_default();
+        let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
             continue;
         }
@@ -2762,7 +2803,7 @@ fn substitute_params(
 /// Every filter the macro body declares, or None if any statement in it
 /// is something else. The IR twin of `parse_filter_call`, which reads
 /// prism nodes — by this point the concern's body is already lowered.
-fn filters_from_macro_body(
+pub(super) fn filters_from_macro_body(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
 ) -> Option<Vec<crate::dialect::Filter>> {

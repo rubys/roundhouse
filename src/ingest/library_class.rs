@@ -20,8 +20,8 @@ use super::expr::ingest_expr;
 use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
-    find_all_modules_with_scope, find_first_class, flatten_statements, module_name_path,
-    symbol_value,
+    find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
+    flatten_statements, module_name_path, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -299,6 +299,7 @@ pub(super) fn library_class_and_struct_base(
             origin: None,
             constants,
             unknown_calls,
+            class_ivar_initializers: Vec::new(),
         },
         base,
     ))
@@ -1028,6 +1029,7 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         }),
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -1062,6 +1064,7 @@ fn library_class_from_module_node_with_scope(
         origin: None,
         constants,
         unknown_calls,
+        class_ivar_initializers: Vec::new(),
     })
 }
 
@@ -2367,14 +2370,26 @@ pub struct ConcernClassMethodSpans {
     pub methods: Vec<Span>,
     pub bridges: Vec<Span>,
     pub has_nested_carrier: bool,
+    /// Literal framework identity and calls that require it to be installed.
+    /// Finite configuration uses these; factory bridge splicing is unchanged.
+    pub concern_extensions: Vec<Span>,
+    pub concern_calls: Vec<Span>,
+    pub has_other_extensions: bool,
 }
 
-pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
+pub fn ingest_concern_class_method_spans(
+    source: &[u8],
+    file: &str,
+) -> (Vec<ConcernClassMethodSpans>, HashSet<ClassId>) {
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
             if let Some(def) = visibility::definition(&stmt) {
-                out.push(super::util::def_name_span(&def, file));
+                // The carrier's instance definitions become includer
+                // class methods. Its own singletons do not cross.
+                if def.receiver().is_none() {
+                    out.push(super::util::def_name_span(&def, file));
+                }
             }
         }
     }
@@ -2382,7 +2397,7 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();
-    for (scope, module) in find_all_modules_with_scope(&root) {
+    for (scope, module) in find_all_module_declarations_with_scope(&root) {
         let Some(name_path) = module_name_path(&module) else { continue };
         // A nested `ClassMethods` is reported under its PARENT, which is
         // the module an app actually includes.
@@ -2397,6 +2412,9 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
         let mut spans: Vec<Span> = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
+        let mut concern_extensions = Vec::new();
+        let mut concern_calls = Vec::new();
+        let mut has_other_extensions = false;
         for stmt in flatten_statements(body) {
             if let Some(m) = stmt.as_module_node() {
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
@@ -2406,6 +2424,29 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 continue;
             }
             if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none() {
+                    let loc = call.location();
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: loc.start_offset() as u32,
+                        end: loc.end_offset() as u32,
+                    };
+                    match constant_id_str(&call.name()) {
+                        "extend" => {
+                            if call.block().is_none() && call.arguments().is_some_and(|args| {
+                                args.arguments().len() == 1 && args.arguments().iter().any(|arg| {
+                                    constant_path_of(&arg).is_some_and(|p| p.join("::") == "ActiveSupport::Concern")
+                                })
+                            }) {
+                                concern_extensions.push(span);
+                            } else {
+                                has_other_extensions = true;
+                            }
+                        }
+                        "class_methods" | "include" | "prepend" => concern_calls.push(span),
+                        _ => {}
+                    }
+                }
                 if call.receiver().is_none()
                     && constant_id_str(&call.name()) == "class_methods"
                 {
@@ -2431,16 +2472,136 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 }
             }
         }
-        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier {
+        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier
+            || !concern_extensions.is_empty() || has_other_extensions
+        {
             out.push(ConcernClassMethodSpans {
                 owner: id,
                 methods: spans,
                 bridges,
                 has_nested_carrier,
+                concern_extensions,
+                concern_calls,
+                has_other_extensions,
             });
         }
     }
-    out
+    // Framework identity must not depend on which declarations survive
+    // library-shape ingestion. This walk records binding barriers only;
+    // it neither evaluates constants nor executes class bodies.
+    let mut shadows = HashSet::new();
+    framework_shadow_scopes(&root, &mut shadows);
+    (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
+}
+
+fn framework_shadow_scopes(
+    node: &ruby_prism::Node<'_>,
+    out: &mut HashSet<Vec<String>>,
+) {
+    struct Shadows<'a> {
+        scope: Vec<String>,
+        out: &'a mut HashSet<Vec<String>>,
+    }
+    impl Shadows<'_> {
+        fn literal_path(node: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+            if let Some(read) = node.as_constant_read_node() {
+                return Some(vec![constant_id_str(&read.name()).to_string()]);
+            }
+            let path = node.as_constant_path_node()?;
+            let mut names = path.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p))?;
+            names.push(constant_id_str(&path.name()?).to_string());
+            Some(names)
+        }
+        fn binding(&mut self, node: &ruby_prism::Node<'_>) {
+            let name = node.as_constant_write_node().map(|n| n.name())
+                .or_else(|| node.as_constant_or_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_and_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_operator_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_target_node().map(|n| n.name()));
+            if let Some(name) = name {
+                if constant_id_str(&name) == "ActiveSupport" {
+                    self.out.insert(self.scope.clone());
+                }
+                if self.scope == ["ActiveSupport"] && constant_id_str(&name) == "Concern" {
+                    self.out.insert(Vec::new());
+                }
+            }
+            let target = node.as_constant_path_write_node().map(|n| n.target().as_node())
+                .or_else(|| node.as_constant_path_or_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_and_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_operator_write_node().map(|n| n.target().as_node()));
+            let (path, name) = if let Some(target) = target {
+                (Self::literal_path(&target), target.as_constant_path_node().and_then(|n| n.name()))
+            } else if let Some(target) = node.as_constant_path_target_node() {
+                let mut path = target.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p));
+                if let (Some(path), Some(name)) = (&mut path, target.name()) {
+                    path.push(constant_id_str(&name).to_string());
+                }
+                (path, target.name())
+            } else {
+                return;
+            };
+            let Some(path) = path else {
+                if name.is_some_and(|n| matches!(constant_id_str(&n), "ActiveSupport" | "Concern")) {
+                    self.out.insert(Vec::new());
+                }
+                return;
+            };
+            let parent = match path.as_slice() {
+                [parent @ .., name] if name == "ActiveSupport" => Some(parent),
+                [parent @ .., namespace, name] if namespace == "ActiveSupport" && name == "Concern" => Some(parent),
+                _ => None,
+            };
+            if let Some(parent) = parent {
+                self.out.insert(parent.to_vec());
+                let mut relative = self.scope.clone();
+                relative.extend_from_slice(parent);
+                self.out.insert(relative);
+            }
+        }
+        fn declaration(&mut self, path: ruby_prism::Node<'_>, body: Option<ruby_prism::Node<'_>>, class: bool) {
+            use super::util::constant_path_is_rooted;
+            let Some(names) = Self::literal_path(&path) else {
+                // A dynamic namespace cannot establish a safe lookup scope.
+                self.out.insert(Vec::new());
+                return;
+            };
+            let outer = self.scope.clone();
+            if path.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+                self.scope.clear();
+            }
+            self.scope.extend(names);
+            // Only a root module reopening preserves the framework identity;
+            // nested declarations and class declarations remain barriers.
+            if self.scope.last().is_some_and(|name| name == "ActiveSupport")
+                && (self.scope.len() > 1 || class)
+            {
+                self.out.insert(self.scope[..self.scope.len() - 1].to_vec());
+            }
+            if self.scope.as_slice() == ["ActiveSupport", "Concern"] {
+                self.out.insert(Vec::new());
+            }
+            if let Some(body) = body {
+                ruby_prism::Visit::visit(self, &body);
+            }
+            self.scope = outer;
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Shadows<'_> {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.declaration(node.constant_path(), node.body(), false);
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(superclass) = node.superclass() { self.visit(&superclass); }
+            self.declaration(node.constant_path(), node.body(), true);
+        }
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if let Some(receiver) = node.receiver() { self.visit(&receiver); }
+        }
+    }
+    ruby_prism::Visit::visit(&mut Shadows { scope: Vec::new(), out }, node);
 }
 
 pub fn ingest_concern_filters(

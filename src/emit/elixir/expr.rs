@@ -2478,6 +2478,7 @@ mod tests {
                 origin: None,
                 constants: Vec::new(),
                 unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
             }
         }
         fn const_ref(path: &[&str]) -> Expr {
@@ -2602,6 +2603,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
@@ -2838,6 +2840,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         clear_modules();
         register_modules(std::iter::once(&vh));
