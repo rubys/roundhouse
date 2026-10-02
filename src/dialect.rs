@@ -81,6 +81,11 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enums: IndexMap<Symbol, Vec<(String, crate::expr::Literal)>>,
 
+    /// `enum :status, …, default: :active` — the stored value an unset
+    /// attribute starts at, which Rails prefers over the column default.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub enum_defaults: IndexMap<Symbol, crate::expr::Literal>,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns
@@ -508,6 +513,7 @@ pub enum CallbackHook {
 /// future gap (see `project_lowered_ir_gaps_for_runnability`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Param {
+    /// Empty for nameless `**` or `...`; neither introduces a local binding.
     pub name: Symbol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Expr>,
@@ -524,6 +530,11 @@ pub struct Param {
     /// correct only while no transpiled call site passes extra args).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rest: bool,
+    /// Anonymous full forwarding (`...`), not a named rest binding.
+    /// Paired with ExprNode::ForwardArgs; preserves keyword and block
+    /// identity without introducing locals that can capture user names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forwarding: bool,
     /// Ingest flattened a source OPTIONAL KEYWORD (`style: :time`) into
     /// this positional-with-default. See `keeps_keywords` in
     /// `ingest::library_class` for when it does and does not.
@@ -559,7 +570,11 @@ impl Param {
     /// binaries from one sentence being said twice.
     pub fn ty_kind(&self) -> crate::ty::ParamKind {
         use crate::ty::ParamKind;
-        if self.keyword && self.rest {
+        if self.forwarding {
+            // Gradual inference fallback, not a named Array binding.
+            // Only the native Ruby carrier is supported by emission.
+            ParamKind::Rest
+        } else if self.keyword && self.rest {
             ParamKind::KeywordRest
         } else if self.rest {
             ParamKind::Rest
@@ -573,19 +588,25 @@ impl Param {
     }
 
     pub fn positional(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default: None, keyword: false, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn with_default(name: Symbol, default: Expr) -> Self {
-        Self { name, default: Some(default), keyword: false, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default: Some(default), keyword: false, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn keyword(name: Symbol, default: Option<Expr>) -> Self {
-        Self { name, default, keyword: true, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default, keyword: true, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn rest(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: true, from_keyword: false, from_kwrest: false }
+        Self { name, default: None, keyword: false, rest: true, forwarding: false, from_keyword: false, from_kwrest: false }
+    }
+
+    pub fn forwarding() -> Self {
+        let mut param = Self::positional(Symbol::from(""));
+        param.forwarding = true;
+        param
     }
 
     pub fn as_str(&self) -> &str {
@@ -599,11 +620,51 @@ impl std::fmt::Display for Param {
     }
 }
 
+/// Statically resolved Ruby visibility. Strict targets do not yet enforce
+/// Ruby's reflective dispatch contract (`send`, `public_send`, `respond_to?`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MethodVisibility {
+    #[default]
+    Public,
+    Protected,
+    Private,
+}
+
+/// Source formal shapes whose binding/arity contract is not retained yet.
+/// This belongs to the declaration, independent of body rewrites or typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsupportedFormal {
+    Destructured,
+    AnonymousRest,
+    NoKeywords,
+}
+
+impl UnsupportedFormal {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Destructured => "destructured positional parameters are not retained",
+            Self::AnonymousRest => "anonymous positional rest is not retained",
+            Self::NoKeywords => "the no-keywords constraint is not retained",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MethodDef {
     pub name: Symbol,
     pub receiver: MethodReceiver,
+    /// Defaults to public when reading older serialized IR. Source ingest
+    /// resolves lexical markers before model/concern bodies are flattened.
+    #[serde(default)]
+    pub visibility: MethodVisibility,
     pub params: Vec<Param>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_formals: Option<UnsupportedFormal>,
+    /// Reject-only source fact for full-forwarding destination admission.
+    /// Legacy anonymous `&` ingestion remains separate and unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_anonymous_block: bool,
     /// Block parameter declared at the `def` site (`def foo(x, &block)`).
     /// Distinct from `params` because it occupies the call-site `block:`
     /// slot, never `args:`. Present only when the method binds an
@@ -726,6 +787,11 @@ pub struct LibraryClass {
     /// — surface form is sacrificed for downstream uniformity per the
     /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
+    /// Ordered, statically resolved class-instance-variable writes.
+    /// Unlike instance fields these belong to the receiving class object:
+    /// methods inherit, but their initialized values do not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_ivar_initializers: Vec<Expr>,
     /// Schema columns this class stores that the DB declares NULLABLE.
     /// The slot types already say `Union{[T, Nil]}`, but that shape is
     /// not by itself a column: a framework slot like Flash's `@notice`
@@ -788,6 +854,12 @@ pub struct LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Validated Alba source declarations expanded to ordinary methods before
+    /// inference. Analysis checks each constructor site, not a joined type
+    /// alone. This remains a source library class, not a model/params sibling.
+    AlbaResource {
+        declaration_span: Span,
+    },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
     /// model name (e.g. `:article`); `fields` is the permitted column
@@ -845,6 +917,11 @@ pub struct LibraryFunction {
     /// (`Views::Articles.article`).
     pub name: crate::ident::Symbol,
     pub params: Vec<Param>,
+    /// Preserve declaration facts when adapting a source MethodDef.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_formals: Option<UnsupportedFormal>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_anonymous_block: bool,
     pub body: Expr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<crate::ty::Ty>,
@@ -966,6 +1043,21 @@ impl Controller {
             _ => None,
         })
     }
+
+    pub fn class_methods(&self) -> impl Iterator<Item = &MethodDef> {
+        self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::ClassMethod { method, .. } => Some(method),
+            _ => None,
+        })
+    }
+}
+
+/// The two method forms admitted by finite class configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassConfigurationRole {
+    Writer,
+    Reader,
 }
 
 /// One statement inside a controller class body, in source order.
@@ -992,6 +1084,28 @@ pub enum ControllerBodyItem {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
     },
+    /// A finite Concern configuration method, never a routed action.
+    ClassMethod {
+        method: MethodDef,
+        /// Finite macro carrier and storage slot.
+        /// Used to infer a shared method contract without sharing values.
+        configuration_slot: (ClassId, Symbol),
+        configuration_role: ClassConfigurationRole,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    /// A finite configuration macro's class-instance-variable write.
+    /// Kept separate from instance state and from unrecognized DSL calls.
+    ClassIvarInit {
+        expr: Expr,
+        carrier: ClassId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
     PrivateMarker {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         leading_comments: Vec<Comment>,
@@ -1012,6 +1126,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_comments, .. }
             | Self::Action { leading_comments, .. }
+            | Self::ClassMethod { leading_comments, .. }
+            | Self::ClassIvarInit { leading_comments, .. }
             | Self::PrivateMarker { leading_comments, .. }
             | Self::Unknown { leading_comments, .. } => leading_comments,
         }
@@ -1021,6 +1137,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_comments, .. }
             | Self::Action { leading_comments, .. }
+            | Self::ClassMethod { leading_comments, .. }
+            | Self::ClassIvarInit { leading_comments, .. }
             | Self::PrivateMarker { leading_comments, .. }
             | Self::Unknown { leading_comments, .. } => leading_comments,
         }
@@ -1030,6 +1148,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_blank_line, .. }
             | Self::Action { leading_blank_line, .. }
+            | Self::ClassMethod { leading_blank_line, .. }
+            | Self::ClassIvarInit { leading_blank_line, .. }
             | Self::PrivateMarker { leading_blank_line, .. }
             | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
         }
@@ -1039,6 +1159,8 @@ impl ControllerBodyItem {
         match self {
             Self::Filter { leading_blank_line, .. }
             | Self::Action { leading_blank_line, .. }
+            | Self::ClassMethod { leading_blank_line, .. }
+            | Self::ClassIvarInit { leading_blank_line, .. }
             | Self::PrivateMarker { leading_blank_line, .. }
             | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
         }
@@ -1100,11 +1222,23 @@ pub struct Filter {
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set
     /// on a body item: block-form filters stay `Unknown` in controller
-    /// bodies (lowered by `block_form_filter`); this rides only on the
-    /// entries `build_sourced_filter_chain` synthesizes from them and on
-    /// the concern-side capture the splice turns back into `Unknown`s.
+    /// bodies (lowered by `ingest::controller::lambda_filter_target`);
+    /// this rides only on the entries `build_sourced_filter_chain`
+    /// synthesizes from them and on the concern-side capture the splice
+    /// turns back into `Unknown`s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<Expr>,
+    /// `prepend_before_action` rather than `before_action` — Rails
+    /// moves the callback to the HEAD of the whole chain, ahead of
+    /// every inherited filter too, not just this controller's own
+    /// (`ActiveSupport::Callbacks::CallbackChain#insert` unshifts a
+    /// `prepend: true` entry). `recent_documents_filters.rb` reaches
+    /// for it for exactly that reason: "so it happens ahead of the
+    /// inherited validation callback." `false` for the ordinary
+    /// `before_action` most filters are; only meaningful on a `Before`
+    /// filter — `build_filter_preamble` is where the hoist happens.
+    #[serde(default)]
+    pub prepend: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1568,4 +1702,51 @@ pub struct Fixture {
     pub path: Symbol,
     pub records: IndexMap<Symbol, IndexMap<Symbol, FixtureValue>>,
     pub preamble: Vec<Expr>,
+    /// `_fixture: model_class:` — the class the rows load, for a set
+    /// whose path doesn't name it. `None` derives it from `path`.
+    pub model_class: Option<Symbol>,
+}
+
+impl Fixture {
+    /// The loader and fixture-accessor typing must name the same model.
+    pub(crate) fn class_id(&self) -> ClassId {
+        let name = match &self.model_class {
+            Some(class) => class.as_str().trim_start_matches("::").to_string(),
+            None => crate::naming::classify_path(self.path.as_str()),
+        };
+        ClassId(Symbol::from(name.as_str()))
+    }
+
+    /// Fixture accessors and row loading share this model identity. Unknown
+    /// models stay gradual instead of claiming a nonexistent class.
+    pub(crate) fn accessor_signature(&self, models: &[Model]) -> Ty {
+        let class = self.class_id();
+        let ret = models.iter().find(|model| model.name == class)
+            .map(|model| Ty::Class { id: model.name.clone(), args: vec![] })
+            .unwrap_or(Ty::Untyped);
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("name"),
+                ty: Ty::Sym,
+                kind: crate::ty::ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::pure(),
+        }
+    }
+}
+
+/// An enum whose every stored value is an integer: its reader answers the label.
+pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
+    model.enums.get(column).is_some_and(|m| enum_mapping_reads_label(m))
+}
+
+// Not every string mapping: one whose labels are its values (`%w[…].index_by(&:itself)`) reads the column as it is.
+pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
+    use crate::expr::Literal;
+    !m.is_empty()
+        && (m.iter().all(|(_, v)| matches!(v, Literal::Int { .. }))
+            || (m.iter().all(|(_, v)| matches!(v, Literal::Str { .. }))
+                && m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l))))
 }

@@ -156,6 +156,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::Const { .. }
         | N::Retry
         | N::Redo
+        | N::ForwardArgs
         | N::SelfRef => {}
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
@@ -188,6 +189,11 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
             count_gradual_recurse(body, total);
         }
         N::Lambda { body, .. } => count_gradual_recurse(body, total),
+        N::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                count_gradual_recurse(r, total);
+            }
+        }
         N::Apply { fun, args, block } => {
             count_gradual_recurse(fun, total);
             for a in args { count_gradual_recurse(a, total); }
@@ -226,7 +232,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         N::Next { value } | N::Break { value } => {
             if let Some(v) = value { count_gradual_recurse(v, total); }
         }
-        N::Splat { value } => count_gradual_recurse(value, total),
+        N::Splat { value } | N::KeywordSplat { value } => count_gradual_recurse(value, total),
         N::MultiAssign { value, .. } => count_gradual_recurse(value, total),
         N::While { cond, body, .. } => {
             count_gradual_recurse(cond, total);
@@ -252,6 +258,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
@@ -295,6 +302,11 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         }
         ExprNode::Lambda { body, .. } => {
             collect_untyped(body, &format!("{path}/lambda.body"), out)
+        }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_untyped(r, &format!("{path}/method_ref.recv"), out);
+            }
         }
         ExprNode::Apply { fun, args, block } => {
             collect_untyped(fun, &format!("{path}/apply.fun"), out);
@@ -366,7 +378,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(v, &format!("{path}/next.value"), out);
             }
         }
-        ExprNode::Splat { value } => {
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
             collect_untyped(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
@@ -1454,7 +1466,29 @@ fn every_runtime_method_body_concretely_typed() {
     // swapping `ENV["TZ"]` for the block would have changed every
     // thread's clock. Taking the zone as `untyped` cost 8; `String?` is
     // what the corpus passes (`company.timezone_name`).
-    const CEILING: usize = 504;
+    //
+    // 504 -> 507: `ActiveSupport.cast_boolean(value)` reads its untyped
+    // parameter twice (`nil?`, `to_s`) and `stringify_keys` passes each
+    // untyped value through once (active_support_ext.rb, MEASURED). The
+    // parameter is untyped because `ActiveModel::Type::Boolean#cast`
+    // takes whatever a param or a setting holds, the same trade as
+    // `blank?`. What it bought: `ActiveModel::Type::Boolean.new.cast(…)`
+    // in five corpus apps (discourse, chatwoot, mastodon, lobsters,
+    // forem), which had no method to reach on spinel.
+    // SQL identifier metadata: 507 -> 510, Relation 226 -> 229,
+    // MEASURED against unchanged upstream; other files are unchanged.
+    // first!, find and find_by! read raw @model.table_name for their
+    // error messages once @table holds the SQL spelling. These are
+    // three additional gradual sites through the existing untyped
+    // model contract, not new untyped signatures or relaxed Bar A.
+    //
+    // 510 -> 519: Relation's array finder, NINE sites net (relation.rb
+    // 229 -> 238; original baseline 226 -> 235, MEASURED).
+    // Inputs are concrete Integer/String scalars
+    // or arrays, NOT untyped. The residual is the model-dependent keys
+    // and hydrated records read from the existing dynamic model seam,
+    // as in the set operators above. No parameter contract was erased.
+    const CEILING: usize = 519;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

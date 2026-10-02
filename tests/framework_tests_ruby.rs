@@ -24,7 +24,7 @@ use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::ruby;
-use roundhouse::ingest::ingest_test_file;
+use roundhouse::ingest::ingest_test_files;
 use roundhouse::App;
 
 fn scratch_dir(tag: &str) -> PathBuf {
@@ -139,12 +139,15 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // (real-blog-shaped) test_helper that we'll overwrite below.
     let source = std::fs::read(test_file)
         .unwrap_or_else(|e| panic!("read {}: {e}", test_file.display()));
-    let test_module = ingest_test_file(&source, &test_file.display().to_string())
-        .expect("ingest framework test file")
-        .expect("framework test file should contain a test class");
+    // EVERY test class in the file (`ingest_test_files`): the one-class
+    // `ingest_test_file` kept the first, so action_text_test.rb's
+    // ActionTextFragmentTest and ActionTextLexxyTest never ran here.
+    let test_modules = ingest_test_files(&source, &test_file.display().to_string())
+        .expect("ingest framework test file");
+    assert!(!test_modules.is_empty(), "framework test file should contain a test class");
 
     let mut app = App::new();
-    app.test_modules.push(test_module);
+    app.test_modules.extend(test_modules);
     Analyzer::new(&app).analyze(&mut app);
 
     for file in ruby::emit_spinel(&app) {
@@ -162,23 +165,22 @@ fn build_and_run(test_file: &Path, tag: &str) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
-    // Locate the emitted test file. emit_spinel writes it under
-    // test/models/<stem>_test.rb or test/controllers/<stem>_test.rb
-    // depending on the class-name suffix. Framework tests don't
-    // follow the *ControllerTest naming convention, so they'll land
-    // under test/models/ regardless. Find whichever file got written.
+    // Every emitted test file. emit_spinel writes one file per test
+    // CLASS, under test/models/<stem>_test.rb (framework tests don't
+    // follow the *ControllerTest naming convention). This used to run
+    // the FIRST file it found, so a source file with several classes ran
+    // one of them: action_text_test.rb's ActionTextFragmentTest and
+    // ActionTextLexxyTest (42 of its 78 tests) and errors_test.rb's
+    // second class never ran here.
     let test_dir = scratch.join("test/models");
-    let emitted_test = std::fs::read_dir(&test_dir)
+    let mut emitted_tests: Vec<PathBuf> = std::fs::read_dir(&test_dir)
         .unwrap_or_else(|e| panic!("readdir {}: {e}", test_dir.display()))
         .filter_map(|e| e.ok())
-        .find(|e| e.path().extension().is_some_and(|x| x == "rb"))
-        .expect("find emitted test file");
-    let test_rel = emitted_test
-        .path()
-        .strip_prefix(&scratch)
-        .expect("emitted path under scratch")
-        .to_string_lossy()
-        .into_owned();
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rb"))
+        .collect();
+    emitted_tests.sort();
+    assert!(!emitted_tests.is_empty(), "no emitted test file under {}", test_dir.display());
 
     // Run via bundle exec ruby. Reuse the spinel scaffold's Gemfile
     // (it has minitest + sqlite3 + rake; only minitest is actually
@@ -186,31 +188,38 @@ fn build_and_run(test_file: &Path, tag: &str) {
     let gemfile = std::fs::canonicalize("runtime/spinel/scaffold/Gemfile")
         .expect("canonicalize scaffold Gemfile");
 
-    let output = Command::new("bundle")
-        .env("BUNDLE_GEMFILE", &gemfile)
-        .arg("exec")
-        .arg("ruby")
-        .arg("-Itest")
-        .arg("-I.")
-        .arg(&test_rel)
-        .current_dir(&scratch)
-        .output()
-        .expect("spawn ruby");
+    for emitted_test in &emitted_tests {
+        let test_rel = emitted_test
+            .strip_prefix(&scratch)
+            .expect("emitted path under scratch")
+            .to_string_lossy()
+            .into_owned();
+        let output = Command::new("bundle")
+            .env("BUNDLE_GEMFILE", &gemfile)
+            .arg("exec")
+            .arg("ruby")
+            .arg("-Itest")
+            .arg("-I.")
+            .arg(&test_rel)
+            .current_dir(&scratch)
+            .output()
+            .expect("spawn ruby");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "framework test failed: {} (emitted to {})\n\
-         === stdout ===\n{}\n\
-         === stderr ===\n{}",
-        test_file.display(),
-        emitted_test.path().display(),
-        stdout,
-        stderr,
-    );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "framework test failed: {} (emitted to {})\n\
+             === stdout ===\n{}\n\
+             === stderr ===\n{}",
+            test_file.display(),
+            emitted_test.display(),
+            stdout,
+            stderr,
+        );
 
-    assert_tests_ran(&stdout, test_file, &emitted_test.path());
+        assert_tests_ran(&stdout, test_file, emitted_test);
+    }
 }
 
 /// Defense against issue #4: `output.status.success()` alone counts

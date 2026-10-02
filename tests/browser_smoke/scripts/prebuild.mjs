@@ -24,6 +24,10 @@ const HARNESS_DIR = resolve(__dirname, "..");
 const EMIT_DIR = resolve(HARNESS_DIR, ".emitted");
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
 
+if (process.env.CI && process.env.SKIP_EMIT === "1") {
+  throw new Error("CI must emit the current project before checking reuse");
+}
+
 if (process.env.SKIP_EMIT === "1" && existsSync(resolve(EMIT_DIR, "dist"))) {
   console.log(`[smoke] SKIP_EMIT=1 + existing dist/ — reusing ${EMIT_DIR}`);
   process.exit(0);

@@ -16,6 +16,7 @@
 
 use roundhouse::app::App;
 use roundhouse::dialect::FixtureValue;
+use roundhouse::expr::ExprNode;
 use roundhouse::Symbol;
 
 /// A campfire-shaped app: one model whose columns cover each ERB value
@@ -142,25 +143,26 @@ fn a_fixture_without_erb_is_untouched() {
 }
 
 #[test]
-fn a_tag_interpolated_into_a_larger_scalar_is_reported_not_guessed() {
+fn a_tag_interpolated_into_a_larger_scalar_builds_the_string() {
     // `name: "hi <%= 1 %> there"` is a string BUILT at runtime, not the
-    // tag's own result. Reachable Rails; nothing we ingest writes it.
-    // Name the field rather than inventing a concatenation — under a
-    // survey (`--allow-unsupported`) this is a ledger line and the file
-    // drops; without one it is an ingest error, which is how every other
-    // unsupported fixture shape already behaves.
+    // tag's own result: ERB writes the tag's `to_s` into the text, which
+    // is exactly a Ruby string interpolating the tag. Shopify core writes
+    // this in 25 rows.
     let tree = vec![(
         std::path::PathBuf::from("test/fixtures/users.yml"),
         b"one:\n  name: \"hi <%= 1 %> there\"\n".to_vec(),
     )]
     .into_iter()
     .collect();
-    let err = roundhouse::ingest::ingest_app_from_tree(tree)
-        .expect_err("an embedded tag is not silently mangled");
-    assert!(
-        err.to_string().contains("interpolated into a larger scalar"),
-        "expected the field named in: {err}",
-    );
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let name = &app.fixtures[0].records[&Symbol::from("one")][&Symbol::from("name")];
+    let FixtureValue::Ruby(expr) = name else {
+        panic!("expected a Ruby value, got {name:?}");
+    };
+    let ExprNode::StringInterp { parts } = &*expr.node else {
+        panic!("expected an interpolated string, got {:?}", expr.node);
+    };
+    assert_eq!(parts.len(), 3, "{parts:?}");
 }
 
 // ── emit (ruby) ─────────────────────────────────────────────────────

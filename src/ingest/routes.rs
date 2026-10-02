@@ -20,8 +20,8 @@ use crate::naming::camelize;
 use crate::{ClassId, Symbol};
 
 use super::util::{
-    constant_id_str, find_call_named, flatten_statements, string_value, symbol_list_value,
-    symbol_or_string_value, symbol_value,
+    constant_id_str, constant_path_of, find_call_named, flatten_statements, string_value,
+    symbol_list_value, symbol_or_string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -42,32 +42,53 @@ pub fn ingest_routes_with_draws(
     let result = super::prism::parse(source, file);
     let root = result.node();
 
-    // Find the outer `Rails.application.routes.draw do ... end` call.
-    let Some(draw_call) = find_call_named(&root, "draw") else {
+    // Every top-level `X.routes.draw do ... end` call — usually exactly
+    // one (`Rails.application.routes.draw` or `Procore::Application
+    // .routes.draw`), but an app can carry a second top-level block
+    // (legacy + Rails-native routing split across two calls in the same
+    // file). `find_call_named` on the whole root would find only the
+    // first (it returns on the first match), so each top-level
+    // statement is searched independently and every hit kept — a
+    // second block silently dropped would violate the "loud by design"
+    // discipline this module documents at the top.
+    let draw_calls = top_level_draw_calls(&root);
+    if draw_calls.is_empty() {
         return Ok(RouteTable::default());
-    };
-    let Some(block_node) = draw_call.block() else {
-        return Ok(RouteTable::default());
-    };
-    let Some(block) = block_node.as_block_node() else {
-        return Ok(RouteTable::default());
-    };
+    }
 
-    let entries = match block.body() {
-        Some(body) => ingest_route_body(body, file, None, draws)?,
-        None => Vec::new(),
-    };
+    let mut entries = Vec::new();
     // Collected by a second walk rather than threaded through the
     // recursive entry ingest: a `direct` is not a RouteSpec (it adds no
     // path), so it has nowhere to ride in the `entries` return, and
     // every recursive arm would otherwise need a mutable accumulator
     // for a construct that appears a handful of times per app.
-    let direct_helpers = match block.body() {
-        Some(body) => collect_direct_helpers(&body, file)?,
-        None => Vec::new(),
-    };
+    let mut direct_helpers = Vec::new();
+    for draw_call in &draw_calls {
+        let Some(block_node) = draw_call.block() else { continue };
+        let Some(block) = block_node.as_block_node() else { continue };
+        let Some(body) = block.body() else { continue };
+        direct_helpers.extend(collect_direct_helpers(&body, file)?);
+        entries.extend(ingest_route_body(body, file, None, draws)?);
+    }
 
     Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain() })
+}
+
+/// Every top-level `draw` call in `root` — one per `X.routes.draw do
+/// ... end` block. Each top-level statement is itself the outer call
+/// (its own name is `draw`, so `find_call_named` matches immediately
+/// without descending into siblings), so searching statement-by-
+/// statement rather than the whole tree at once is what makes a SECOND
+/// top-level block visible instead of only the first.
+fn top_level_draw_calls<'pr>(root: &Node<'pr>) -> Vec<ruby_prism::CallNode<'pr>> {
+    let stmts: Vec<Node<'pr>> = if let Some(p) = root.as_program_node() {
+        p.statements().body().iter().collect()
+    } else if let Some(s) = root.as_statements_node() {
+        s.body().iter().collect()
+    } else {
+        return find_call_named(root, "draw").into_iter().collect();
+    };
+    stmts.iter().filter_map(|stmt| find_call_named(stmt, "draw")).collect()
 }
 
 /// Every `direct :name do |…| … end` in the draw block, at any nesting
@@ -181,6 +202,29 @@ fn ingest_route_stmts<'pr>(
     let mut entries = Vec::new();
     for stmt in stmts {
         let Some(call) = stmt.as_call_node() else { continue };
+
+        // `Dir.glob('rest_routes/**/*.rb', base: 'config/routes').each
+        // do |r| draw(r.sub(/\.rb$/, '')) end` (and `Dir[...]`) — the
+        // idiom a Mastodon-class app uses to mass-`draw` a whole
+        // directory instead of one call per file (Procore draws 1,561
+        // files this way). Checked BEFORE the receiver-skip below: that
+        // skip exists to avoid re-finding the outer `Rails.application
+        // .routes.draw` as a nested call, but `Dir.glob(...).each`
+        // legitimately has a receiver (`Dir.glob(...)`) and would
+        // otherwise fall through it and vanish with no ledger entry.
+        if constant_id_str(&call.name()) == "each" {
+            if let Some(recv) = call.receiver() {
+                if let Some(pattern) = dir_glob_routes_pattern(&recv) {
+                    match ingest_glob_draw_each(&call, &pattern, file, draws) {
+                        Ok(new_entries) => entries.extend(new_entries),
+                        Err(err) if super::survey::is_active() => super::survey::record(&err),
+                        Err(err) => return Err(err),
+                    }
+                    continue;
+                }
+            }
+        }
+
         if call.receiver().is_some() {
             // `Rails.application.routes.draw` gets re-found as a nested
             // call when we walk a weird input; skip anything with an
@@ -577,23 +621,13 @@ fn ingest_draw_route(
             message: "draw without a route-file name".into(),
         });
     };
-    let Some((source, path)) = draws.get(&name) else {
+    let Some((source, path)) = resolve_draw_name(&name, draws) else {
         return Err(IngestError::Unsupported {
             file: file.into(),
             message: format!("draw(:{name}) — config/routes/{name}.rb not found"),
         });
     };
-    super::sources::register(path, &String::from_utf8_lossy(source));
-    let result = super::prism::parse(source, path);
-    let root = result.node();
-    let Some(program) = root.as_program_node() else {
-        return Err(IngestError::Parse {
-            file: path.clone(),
-            message: "route file is not a program".into(),
-        });
-    };
-    let entries =
-        ingest_route_stmts(program.statements().body().iter(), path, None, draws)?;
+    let entries = ingest_routes_file_entries(source, path, draws)?;
     Ok(Some(RouteSpec::Scope {
         path: None,
         module: None,
@@ -602,6 +636,205 @@ fn ingest_draw_route(
         nest: false,
         entries,
     }))
+}
+
+/// Resolve a `draw(:name)` argument against the `config/routes/` file
+/// map. `draws` is keyed by the path RELATIVE TO `config/routes/`
+/// (without `.rb`), so a subdirectory-nested file's full relative name
+/// (`draw('financials/financials_erp_routes')`) matches directly.
+/// Falls back to a bare-stem match (the last path segment) when exactly
+/// one file under `config/routes/` carries that stem, for backwards
+/// compatibility with a `draw(:name)` call that predates any
+/// subdirectory nesting; an ambiguous stem (two files share it in
+/// different subdirectories) reports not-found rather than guessing.
+fn resolve_draw_name<'a>(
+    name: &str,
+    draws: &'a HashMap<String, (Vec<u8>, String)>,
+) -> Option<&'a (Vec<u8>, String)> {
+    if let Some(entry) = draws.get(name) {
+        return Some(entry);
+    }
+    let mut matches = draws.iter().filter(|(key, _)| key.rsplit('/').next() == Some(name));
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first.1)
+}
+
+/// Parse and ingest one `config/routes/<name>.rb` split file's
+/// top-level statements as route DSL (no `routes.draw` wrapper — Rails
+/// loads it straight into the calling `draw` block's context). Shared
+/// by a single named `draw(:name)` (`ingest_draw_route`) and by every
+/// file a `Dir.glob(...).each { draw(...) }` mass-draw matches
+/// (`ingest_glob_draw_each`) — both hand the same (source, path) pair
+/// from the `draws` map to the same parse-and-walk.
+fn ingest_routes_file_entries(
+    source: &[u8],
+    path: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<Vec<RouteSpec>> {
+    super::sources::register(path, &String::from_utf8_lossy(source));
+    let result = super::prism::parse(source, path);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else {
+        return Err(IngestError::Parse {
+            file: path.to_string(),
+            message: "route file is not a program".into(),
+        });
+    };
+    ingest_route_stmts(program.statements().body().iter(), path, None, draws)
+}
+
+/// Recognize the receiver of a top-level `<recv>.each do |v| draw(...)
+/// end` as `Dir.glob(PATTERN[, base: 'config/routes'])` or
+/// `Dir[PATTERN]`, and return PATTERN made relative to
+/// `config/routes/` — the same coordinate space `draws`' keys live in.
+/// `None` for any other receiver shape, or for a `base:`/prefix that
+/// doesn't target `config/routes/` (a glob over some other directory is
+/// not this idiom; let it fail loud downstream rather than guess).
+fn dir_glob_routes_pattern(recv: &Node<'_>) -> Option<String> {
+    let call = recv.as_call_node()?;
+    let dir_receiver = call.receiver()?;
+    let dir_path = constant_path_of(&dir_receiver)?;
+    if dir_path.len() != 1 || dir_path[0] != "Dir" {
+        return None;
+    }
+    let method = constant_id_str(&call.name());
+    let args = call.arguments()?;
+    if method == "glob" {
+        let mut pattern: Option<String> = None;
+        let mut base: Option<String> = None;
+        for arg in args.arguments().iter() {
+            if pattern.is_none() {
+                if let Some(s) = string_value(&arg) {
+                    pattern = Some(s);
+                    continue;
+                }
+            }
+            if let Some(kh) = arg.as_keyword_hash_node() {
+                for el in kh.elements().iter() {
+                    let Some(assoc) = el.as_assoc_node() else { continue };
+                    if symbol_value(&assoc.key()).as_deref() == Some("base") {
+                        base = string_value(&assoc.value());
+                    }
+                }
+            }
+        }
+        let pattern = pattern?;
+        return match base {
+            Some(b) if b.trim_end_matches('/') == "config/routes" => Some(pattern),
+            Some(_) => None,
+            None => pattern.strip_prefix("config/routes/").map(|s| s.to_string()),
+        };
+    }
+    if method == "[]" {
+        let pattern = args.arguments().iter().next().and_then(|a| string_value(&a))?;
+        return pattern.strip_prefix("config/routes/").map(|s| s.to_string());
+    }
+    None
+}
+
+/// `Dir.glob(PATTERN, base: 'config/routes').each do |v| draw(...) end`
+/// — draw every `config/routes/` file the glob matches, sorted, each
+/// riding its own facet-less Scope exactly like a single named
+/// `draw(:name)` does. The block's own argument expression (typically
+/// `v.sub(/\.rb$/, '')`, stripping the extension `Dir.glob` includes) is
+/// NOT evaluated — the glob match against the VFS already gives the
+/// exact file set and their `.rb`-stripped names, which is what that
+/// expression is written to reproduce. Only the block SHAPE is
+/// checked: a single bare `draw(...)` statement, so a block that does
+/// anything else is ledgered by name rather than silently trusted to
+/// mean the same thing.
+fn ingest_glob_draw_each(
+    call: &ruby_prism::CallNode<'_>,
+    pattern: &str,
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<Vec<RouteSpec>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "unsupported routes DSL: `Dir.glob(...).each` without a block".into(),
+        });
+    };
+    let is_bare_draw = block.body().is_some_and(|body| {
+        let stmts = flatten_statements(body);
+        stmts.len() == 1
+            && stmts[0]
+                .as_call_node()
+                .is_some_and(|c| c.receiver().is_none() && constant_id_str(&c.name()) == "draw")
+    });
+    if !is_bare_draw {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "unsupported routes DSL: `Dir.glob(...).each` block body is not a bare `draw(...)` call".into(),
+        });
+    }
+
+    let mut matched: Vec<&String> =
+        draws.keys().filter(|key| glob_matches(pattern, &format!("{key}.rb"))).collect();
+    matched.sort();
+
+    let mut entries = Vec::with_capacity(matched.len());
+    for key in matched {
+        let (source, path) = &draws[key];
+        entries.push(RouteSpec::Scope {
+            path: None,
+            module: None,
+            as_prefix: None,
+            defaults: IndexMap::new(),
+            nest: false,
+            entries: ingest_routes_file_entries(source, path, draws)?,
+        });
+    }
+    Ok(entries)
+}
+
+/// Match `candidate` (a `/`-separated relative path) against a glob
+/// `pattern` supporting only `*` (any run of non-`/` characters, within
+/// one path segment) and `**` (zero or more whole path segments) — the
+/// two segment kinds `Dir.glob` actually uses in this idiom. No other
+/// glob metacharacter (`?`, `{a,b}`, character classes, …) is
+/// recognized.
+fn glob_matches(pattern: &str, candidate: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').collect();
+    let cand: Vec<&str> = candidate.split('/').collect();
+    glob_match_segments(&pat, &cand)
+}
+
+fn glob_match_segments(pat: &[&str], cand: &[&str]) -> bool {
+    match pat.first() {
+        None => cand.is_empty(),
+        Some(&"**") => {
+            glob_match_segments(&pat[1..], cand)
+                || matches!(cand.split_first(), Some((_, rest)) if glob_match_segments(pat, rest))
+        }
+        Some(seg) => match cand.split_first() {
+            Some((first, rest)) => segment_matches(seg, first) && glob_match_segments(&pat[1..], rest),
+            None => false,
+        },
+    }
+}
+
+/// Match one path segment against a single-segment glob pattern whose
+/// only metacharacter is `*` (any run of characters — segments are
+/// already split on `/`, so it cannot cross a segment boundary).
+fn segment_matches(pattern: &str, s: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == s;
+    }
+    let Some(rest) = s.strip_prefix(parts[0]) else { return false };
+    let mut rest = rest;
+    for mid in &parts[1..parts.len() - 1] {
+        match rest.find(mid) {
+            Some(idx) => rest = &rest[idx + mid.len()..],
+            None => return false,
+        }
+    }
+    let last = parts[parts.len() - 1];
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 /// Raw regex-pattern source of a `/.../ ` literal value node — the text
@@ -937,6 +1170,7 @@ fn ingest_resources_route(
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
     let mut param: Option<Symbol> = None;
+    let mut only_none = false;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -951,6 +1185,23 @@ fn ingest_resources_route(
                 // opposite of what a restriction means (#85).
                 "only" | "except" => {
                     let list = symbol_list_value(&value);
+                    let empty_literal =
+                        value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
+                    // `resources :users, only: [] do … end` is how an app
+                    // nests routes under a parent with no routes of its
+                    // own. The expander reads an empty `only` as "all
+                    // seven", so an empty literal becomes an `except:` of
+                    // every action. `except: []` restricts nothing. Ruby
+                    // keeps the last of duplicate keys, so each `only:` or
+                    // `except:` replaces the earlier value of the same key.
+                    if empty_literal {
+                        if key.as_str() == "only" {
+                            only_none = true;
+                        } else {
+                            except.clear();
+                        }
+                        continue;
+                    }
                     if list.is_empty() {
                         return Err(IngestError::Unsupported {
                             file: file.into(),
@@ -961,6 +1212,7 @@ fn ingest_resources_route(
                     }
                     if key.as_str() == "only" {
                         only = list;
+                        only_none = false;
                     } else {
                         except = list;
                     }
@@ -988,6 +1240,14 @@ fn ingest_resources_route(
                 _ => {}
             }
         }
+    }
+
+    if only_none {
+        only.clear();
+        except = ["index", "new", "create", "show", "edit", "update", "destroy"]
+            .into_iter()
+            .map(Symbol::from)
+            .collect();
     }
 
     let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;

@@ -485,10 +485,14 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // Explicit / Resources produce. Inside a namespace, `root`
             // maps the scope's own prefix (`GET /admin` →
             // `admin_root`).
+            // `camelize_path`: a namespaced target (`root to:
+            // "rails/health#show"`, the Rails 7.1+ health check) names
+            // `Rails::HealthController`; `camelize` kept the slash and
+            // the dispatch read `Rails/healthController.new`.
             let controller_class = format!(
                 "{}{}Controller",
                 ctx.module_prefix,
-                naming::camelize(&controller_name)
+                naming::camelize_path(&controller_name)
             );
             let path =
                 if ctx.ns_path.is_empty() { "/".to_string() } else { ctx.ns_path.clone() };
@@ -572,6 +576,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 standard_resource_actions()
             };
 
+            // Rails evaluates the resource block before adding its defaults.
+            // Register children in source order first: otherwise `/:id` swallows
+            // a collection action such as `/transactions/bulk_update`, and a
+            // default member route wins over an explicit override of that path.
+            let child_ctx = Ctx {
+                parents: {
+                    let mut p = ctx.parents.clone();
+                    p.push(Nesting {
+                        singular: singular_low.clone(),
+                        plural: name.as_str().to_string(),
+                        has_id: !*singular,
+                        param: id_param.to_string(),
+                    });
+                    p
+                },
+                ..ctx.clone()
+            };
+            for child in nested {
+                collect_flat_routes(child, out, &child_ctx);
+            }
+
             for (action, method, suffix) in actions {
                 let action_name: &str = action;
                 let suffix: &str = suffix;
@@ -649,22 +674,6 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         constraints: vec![],
                     });
                 }
-            }
-            let child_ctx = Ctx {
-                parents: {
-                    let mut p = ctx.parents.clone();
-                    p.push(Nesting {
-                        singular: singular_low.clone(),
-                        plural: name.as_str().to_string(),
-                        has_id: !*singular,
-                        param: id_param.to_string(),
-                    });
-                    p
-                },
-                ..ctx.clone()
-            };
-            for child in nested {
-                collect_flat_routes(child, out, &child_ctx);
             }
         }
         RouteSpec::Scope { path, module, as_prefix, defaults, nest, entries } => {

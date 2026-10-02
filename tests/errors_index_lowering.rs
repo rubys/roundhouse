@@ -143,3 +143,78 @@ end
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
+
+#[test]
+fn messages_key_asks_the_accumulator_for_the_field() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def url_bad?
+    errors.messages.key?(:url)
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains(r#"ActiveSupport.errors_for(errors, "Url ").any?"#),
+        "expected `key?` as a non-empty field projection:\n{out}"
+    );
+    assert!(!out.contains("messages"), "no `messages` should survive:\n{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn messages_index_reads_like_errors_index() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def report(record)
+    record.errors.messages[:url]
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains(r#"ActiveSupport.errors_for(record.errors, "Url ")"#),
+        "expected the foreign receiver's projection:\n{out}"
+    );
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn messages_emptiness_is_the_accumulator_emptiness() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def clean?
+    errors.messages.blank?
+  end
+
+  def dirty?
+    errors.messages.present?
+  end
+end
+"#,
+    );
+    assert!(out.contains("errors || \"\").empty?"), "`blank?` → `empty?`:\n{out}");
+    assert!(out.contains("errors.any?"), "`present?` → `any?`:\n{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn whole_messages_hash_declines_with_residue() {
+    // The accumulator keeps no attribute column, so a use of the whole
+    // Hash has nothing to be rebuilt from.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    errors.messages.compact_blank
+  end
+end
+"#,
+    );
+    assert!(out.contains("errors.messages"), "left alone:\n{out}");
+    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
+    assert!(diags[0].contains("errors.messages"), "{diags:?}");
+}

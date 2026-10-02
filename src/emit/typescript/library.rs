@@ -195,6 +195,9 @@ fn synthesize_module_lc(
     let methods: Vec<crate::dialect::MethodDef> = funcs
         .iter()
         .map(|f| crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,
@@ -219,6 +222,7 @@ fn synthesize_module_lc(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -497,6 +501,9 @@ fn collect_imports_for_function(
         includes: Vec::new(),
         nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: func.unsupported_formals,
+            has_anonymous_block: func.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: func.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,
@@ -519,6 +526,7 @@ fn collect_imports_for_function(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     };
     collect_imports(&synthetic_lc, app, out_path)
 }
@@ -1417,6 +1425,11 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
             collect_class_refs(body, out);
         }
         ExprNode::Lambda { body, .. } => collect_class_refs(body, out),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_class_refs(r, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_class_refs(cond, out);
             collect_class_refs(then_branch, out);
@@ -1480,7 +1493,7 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { collect_class_refs(v, out); }
         }
-        ExprNode::Splat { value } => collect_class_refs(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_class_refs(value, out),
         ExprNode::MultiAssign { value, .. } => collect_class_refs(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_class_refs(cond, out);
@@ -1496,6 +1509,7 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         | ExprNode::Ivar { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }
@@ -1636,6 +1650,10 @@ fn rewrite_free(e: &Expr) -> Expr {
             body: rewrite_free(body),
             block_style: *block_style,
         },
+        ExprNode::MethodRef { recv, name } => ExprNode::MethodRef {
+            recv: recv.as_ref().map(rewrite_free),
+            name: name.clone(),
+        },
         ExprNode::Assign { target, value } => {
             let new_target = rewrite_lvalue_free(target);
             ExprNode::Assign { target: new_target, value: rewrite_free(value) }
@@ -1689,6 +1707,7 @@ fn rewrite_free(e: &Expr) -> Expr {
             value: value.as_ref().map(rewrite_free),
         },
         ExprNode::Splat { value } => ExprNode::Splat { value: rewrite_free(value) },
+        ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat { value: rewrite_free(value) },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite_free(value),
@@ -1716,6 +1735,7 @@ fn rewrite_free(e: &Expr) -> Expr {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => (*e.node).clone(),
     };
     Expr {
@@ -1866,6 +1886,20 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
             body: rewrite(body, super_method),
             block_style: *block_style,
         },
+        // Mirrors the `Send { recv: None, .. }` case above: materialize
+        // the implicit self so a later pass sees an explicit `this.`
+        // receiver rather than having to special-case `None` again.
+        // (TS emit itself does not support `MethodRef` yet — see
+        // `emit/typescript/expr.rs`'s `report_unsupported` fallback —
+        // but this pass runs on the whole tree regardless.)
+        ExprNode::MethodRef { recv: None, name } => ExprNode::MethodRef {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            name: name.clone(),
+        },
+        ExprNode::MethodRef { recv: Some(r), name } => ExprNode::MethodRef {
+            recv: Some(rewrite(r, super_method)),
+            name: name.clone(),
+        },
         ExprNode::Apply { fun, args, block } => ExprNode::Apply {
             fun: rewrite(fun, super_method),
             args: args.iter().map(|a| rewrite(a, super_method)).collect(),
@@ -1941,6 +1975,9 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         ExprNode::Splat { value } => ExprNode::Splat {
             value: rewrite(value, super_method),
         },
+        ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat {
+            value: rewrite(value, super_method),
+        },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite(value, super_method),
@@ -1966,6 +2003,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => (*e.node).clone(),
     };
 

@@ -51,7 +51,12 @@ module ActiveRecord
 
   # Enum column assigned by LABEL — see `base.rb`. `labels`/`values`
   # are the declaration's parallel arrays.
-  def self.enum_int: (String text, Array[String] labels, Array[Integer] values) -> Integer
+  def self.enum_int: (String text, Array[String] labels, Array[Integer] values, Array[String] texts, String attr) -> Integer
+  def self.enum_int_or_nil: (String text, Array[String] labels, Array[Integer] values, Array[String] texts, String attr) -> Integer?
+  def self.enum_str: (String text, Array[String] labels, Array[String] values, String attr) -> String
+  def self.enum_str_or_nil: (String text, Array[String] labels, Array[String] values, String attr) -> String?
+  def self.enum_label_str: (String value, Array[String] labels, Array[String] values) -> String?
+  def self.enum_label: (Integer value, Array[String] labels, Array[Integer] values) -> String?
 
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
@@ -100,7 +105,10 @@ module ActiveRecord
     # one. The body-typer treats `raise` as divergent; it doesn't
     # contradict the declared return type.
     def self.table_name: () -> String
+    def self._table_sql: () -> String
     def self.primary_key: () -> String
+    def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
+    def self._string_primary_key: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
@@ -151,7 +159,7 @@ module ActiveRecord
     # field's `@model[field]`) compile under static targets like
     # Crystal — the static type needs the method to exist.
     def []: (Symbol name) -> untyped
-    def []=: (Symbol name, untyped value) -> untyped
+    def []=: ((Symbol | String) name, untyped value) -> untyped
     def has_attribute?: (Symbol name) -> bool
     def _note_unloaded: (Hash[String, untyped] _row) -> void
 

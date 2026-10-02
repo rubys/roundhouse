@@ -510,6 +510,7 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             f(cond); visit_subexprs(cond, f);
@@ -544,6 +545,12 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             f(body); visit_subexprs(body, f);
         }
         ExprNode::Lambda { body, .. } => { f(body); visit_subexprs(body, f); }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                f(r);
+                visit_subexprs(r, f);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             f(fun); visit_subexprs(fun, f);
             for a in args { f(a); visit_subexprs(a, f); }
@@ -590,7 +597,9 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { f(v); visit_subexprs(v, f); }
         }
-        ExprNode::Splat { value } => { f(value); visit_subexprs(value, f); }
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            f(value); visit_subexprs(value, f);
+        }
         ExprNode::MultiAssign { value, .. } => { f(value); visit_subexprs(value, f); }
         ExprNode::While { cond, body, .. } => {
             f(cond); visit_subexprs(cond, f);

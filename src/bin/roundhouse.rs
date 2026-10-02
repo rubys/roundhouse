@@ -37,6 +37,7 @@ fn usage() -> &'static str {
     "\
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
+       roundhouse --archives LANG,LANG [INPUT] [-o OUT]
        roundhouse check [--continue] [APP]
        roundhouse lsp
        roundhouse mcp [APP]
@@ -60,6 +61,8 @@ Options:
                        Default INPUT=.  Default OUT=./out/<lang>/
       --site           Build all targets + landing-page assets.
                        Default INPUT=fixtures/real-blog  Default OUT=./_site/
+      --archives LIST  Build only comma-separated targets' browse archives.
+                       Same defaults as --site; no website or browser demos.
   -o, --output PATH    Output directory.
       --allow-unsupported
                        Don't fail on unsupported-construct gaps: emit a
@@ -127,6 +130,13 @@ fn cli() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(Action::Archives { targets, input, out }) => match project::build_archives(&input, &out, &targets) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("roundhouse: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Err(e) => {
             eprintln!("roundhouse: {e}");
             eprintln!();
@@ -150,11 +160,17 @@ enum Action {
         input: PathBuf,
         out: PathBuf,
     },
+    Archives {
+        targets: Vec<BuildTarget>,
+        input: PathBuf,
+        out: PathBuf,
+    },
 }
 
 fn parse_args(args: Vec<String>) -> Result<Action, String> {
     let mut target: Option<BuildTarget> = None;
     let mut site = false;
+    let mut archives = None;
     let mut out: Option<PathBuf> = None;
     let mut allow_unsupported = false;
     let mut survey = false;
@@ -166,6 +182,15 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "--site" => site = true,
+            "--archives" => {
+                let value = iter.next().ok_or("--archives requires a target list")?;
+                let targets = value.split(',').map(|name| {
+                    BuildTarget::from_str(name)
+                        .filter(|t| BuildTarget::ALL.contains(t))
+                        .ok_or_else(|| format!("unknown archive target '{name}'"))
+                }).collect::<Result<Vec<_>, _>>()?;
+                archives = Some(targets);
+            }
             "--allow-unsupported" => allow_unsupported = true,
             "--survey" => survey = true,
             "-t" | "--target" => {
@@ -201,6 +226,16 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
         ));
     }
 
+    if let Some(targets) = archives {
+        if target.is_some() || site || allow_unsupported || survey {
+            return Err("--archives cannot be combined with --target, --site, --survey or --allow-unsupported".into());
+        }
+        return Ok(Action::Archives {
+            targets,
+            input: positional.pop().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("fixtures/real-blog")),
+            out: out.unwrap_or_else(|| PathBuf::from("_site")),
+        });
+    }
     match (target, site) {
         (Some(_), true) => Err("--target and --site are mutually exclusive".into()),
         (None, false) => Err("one of --target LANG or --site is required".into()),
@@ -267,7 +302,7 @@ fn run_transpile(
     // are collected and routed through the same report as emit gaps.
     let (app_result, parse_diags) =
         roundhouse::ingest::prism::scope(|| ingest_app(input));
-    let survey_gaps =
+    let mut survey_gaps =
         if survey { roundhouse::ingest::survey::drain() } else { Vec::new() };
     let mut app = match app_result {
         Ok(app) => app,
@@ -337,6 +372,7 @@ fn run_transpile(
         &mut analyze_diags,
         target,
     );
+    roundhouse::lower::params_residue::elevate_nested_params_for_target(&mut analyze_diags, target);
 
     // A diagnostic whose root cause is a recorded ingest gap is OUR
     // coverage problem, not the app's: the nil placeholder survey mode
@@ -348,6 +384,13 @@ fn run_transpile(
         &app,
         &survey_gaps,
     );
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut analyze_diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
 
     // Emit inside a diagnostic scope so unsupported-construct gaps in
     // any lowerer/emitter are collected rather than lost (issue #28).

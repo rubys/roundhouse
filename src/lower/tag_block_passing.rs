@@ -224,28 +224,36 @@ fn half_variant(m: &MethodDef, half: &str, parts: Vec<InterpPart>) -> MethodDef 
         default: None,
         keyword: false,
         rest: false,
+        forwarding: false,
         from_keyword: false,
         from_kwrest: false,
     }];
     params.extend(m.params.iter().cloned());
     // `io` declared `String` for the by-reference ABI, the rest
     // `untyped` — the same reasoning as `view_buffer_passing::split`.
-    let signature = match &m.signature {
+    // A helper with no signature yet (one taking only the block,
+    // `def search_results_tag(&)`) still gets one: left unsigned, its
+    // sidecar said `untyped io`, spinel made the parameter POLY, and a
+    // POLY parameter the callee appends to pulls every caller's buffer
+    // into a shared handle — which reached campfire's page wrappers as
+    // a copy, and /rooms/1 served an empty body (matz/spinel#6065).
+    let (names, block, effects): (Vec<Symbol>, _, _) = match &m.signature {
         Some(Ty::Fn { params: ps, block, effects, .. }) => {
-            let mut out = vec![crate::ty::Param {
-                name: Symbol::from(ACC),
-                ty: Ty::Str,
-                kind: ParamKind::Required,
-            }];
-            out.extend(ps.iter().map(|p| crate::ty::Param {
-                name: p.name.clone(),
-                ty: Ty::Untyped,
-                kind: ParamKind::Required,
-            }));
-            Some(Ty::Fn { params: out, block: block.clone(), ret: Box::new(Ty::Nil), effects: effects.clone() })
+            (ps.iter().map(|p| p.name.clone()).collect(), block.clone(), effects.clone())
         }
-        _ => None,
+        _ => (m.params.iter().map(|p| p.name.clone()).collect(), None, Default::default()),
     };
+    let mut out = vec![crate::ty::Param {
+        name: Symbol::from(ACC),
+        ty: Ty::Str,
+        kind: ParamKind::Required,
+    }];
+    out.extend(names.into_iter().map(|name| crate::ty::Param {
+        name,
+        ty: Ty::Untyped,
+        kind: ParamKind::Required,
+    }));
+    let signature = Some(Ty::Fn { params: out, block, ret: Box::new(Ty::Nil), effects });
     let mut v = m.clone();
     v.name = Symbol::from(half_name(m.name.as_str(), half).as_str());
     v.params = params;

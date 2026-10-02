@@ -30,6 +30,7 @@ module ActiveRecord
     def self.transaction: () { () -> untyped } -> untyped
     def self.update_counters: (untyped id, Hash[Symbol, untyped] counters) -> Integer
     def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
+    def self._conflict_predicate: (String columns) -> String
     def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
     def self.record_timestamps=: (untyped value) -> untyped
     def self.record_timestamps: () -> bool
@@ -46,6 +47,7 @@ module ActiveRecord
     def self.first: () -> untyped
     def self.take: () -> untyped
     def self._hydrate_all: (String sql) -> Array[Base]
+    def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void

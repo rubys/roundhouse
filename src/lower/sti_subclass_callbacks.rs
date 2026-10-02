@@ -194,6 +194,9 @@ fn stamp_inheritance_column(lc: &mut crate::dialect::LibraryClass) {
     lc.methods.insert(
         0,
         crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Private,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("initialize"),
             receiver: crate::dialect::MethodReceiver::Instance,
@@ -202,6 +205,7 @@ fn stamp_inheritance_column(lc: &mut crate::dialect::LibraryClass) {
                 default: Some(syn(ExprNode::Hash { entries: Vec::new(), kwargs: false })),
                 keyword: false,
                 rest: false,
+                forwarding: false,
             from_keyword: false,
             from_kwrest: false,
             }],
@@ -245,6 +249,9 @@ fn fold(lc: &mut crate::dialect::LibraryClass, hook: &str, target: &Symbol) {
         return;
     }
     lc.methods.push(crate::dialect::MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: hook,
         receiver: crate::dialect::MethodReceiver::Instance,

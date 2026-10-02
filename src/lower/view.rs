@@ -25,6 +25,34 @@
 
 use crate::expr::{Expr, ExprNode, Literal};
 
+/// Numeric and formatted counts keep their label, not `count.to_i`:
+/// a delimited count must keep its commas. Ground ERB and app helpers
+/// to the String entry point before expression types are available.
+/// Rails' nil/false fallback remains outside this numeric/String seam;
+/// do not synthesize Ruby `||` into targets with different truthiness.
+pub(crate) fn pluralize_helper_call(count: Expr, word: Expr) -> Expr {
+    let span = count.span;
+    let mut label = Expr::new(span, ExprNode::Send {
+        recv: Some(count),
+        method: crate::ident::Symbol::from("to_s"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    label.ty = Some(crate::ty::Ty::Str);
+    let mut call = Expr::new(span, ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Const {
+            path: vec![crate::ident::Symbol::from("Inflector")],
+        })),
+        method: crate::ident::Symbol::from("pluralize_formatted"),
+        args: vec![label, word],
+        block: None,
+        parenthesized: true,
+    });
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
 /// A recognized Rails view helper, keyed by Ruby method name. The
 /// variant names mirror the surface method (snake_case),
 /// regardless of target naming conventions. Each variant carries
@@ -629,12 +657,24 @@ pub fn renders_through_view_path(format: &str) -> bool {
     // EMITTED, and a format listed in only one of them is silently
     // dropped somewhere in between.
     // `rss` / `atom` / `xml`: feed templates (lobsters' `home/stories
-    // .rss.builder`), `<action>_rss` beside the html view.
+    // .rss.builder`), `<action>_rss` beside the html view. `xls` joins
+    // them: same Builder XML markup, an `.xls` extension so Excel opens
+    // the SpreadsheetML it produces.
     // `json` / `js`: TEXT templates in those formats — campfire's PWA
     // `manifest.json.erb` and its raw `service_worker.js` — as
     // `<action>_json` / `<action>_js`. A jbuilder template is json too,
     // but it is DSL, not text: `lowers_through_view_path` keeps it out.
-    matches!(format, "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "json" | "js")
+    // `pdf` / `csv` / `txt`: also TEXT templates in those formats — a
+    // PDF-renderer's HTML input, a `CSV.generate` body, a mailer's
+    // plaintext part — as `<action>_pdf` / `<action>_csv` /
+    // `<action>_txt`. Paired with the ingest gate in `ingest::app`'s
+    // `walk_erb` the same way `svg`/`json` are: a format admitted only
+    // here or only there is silently dropped in between.
+    matches!(
+        format,
+        "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "xls" | "json" | "js" | "pdf"
+            | "csv" | "txt"
+    )
 }
 
 /// Does this view lower to a view-path class? The one filter every
@@ -672,10 +712,12 @@ pub fn view_method_name_for(stem: &str, format: &str) -> crate::ident::Symbol {
 }
 
 pub fn view_method_name(stem: &str) -> crate::ident::Symbol {
+    // A template file name need not be an identifier (`shop-404.html.erb`).
+    let stem = &stem.replace(|c: char| !(c.is_alphanumeric() || c == '_'), "_");
     if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) || stem == "new" {
         crate::ident::Symbol::from(format!("_{stem}"))
     } else {
-        crate::ident::Symbol::from(stem)
+        crate::ident::Symbol::from(stem.as_str())
     }
 }
 

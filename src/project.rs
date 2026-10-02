@@ -718,12 +718,263 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
+/// The executed Date-only runtime is native Ruby, not the timestamp seam
+/// shared by the other targets (including the unverified JRuby adapter).
+/// Reject before entering their emitters:
+/// dynamic backends may never render a type, so a type-position check
+/// alone would silently emit a String/Time or call an absent intrinsic.
+fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
+        return Ok(());
+    }
+    fn expr_has_date(e: &crate::expr::Expr) -> bool {
+        if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
+            || matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
+                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+        {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |child| found |= expr_has_date(child));
+        found
+    }
+    fn method_has_date(m: &crate::dialect::MethodDef) -> bool {
+        m.signature.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || expr_has_date(&m.body)
+            || m.params.iter().filter_map(|p| p.default.as_ref()).any(expr_has_date)
+    }
+    fn class_has_date(lc: &crate::dialect::LibraryClass) -> bool {
+        lc.methods.iter().any(method_has_date)
+            || lc.constants.iter().any(|(_, e)| expr_has_date(e))
+            || lc.unknown_calls.iter().any(expr_has_date)
+    }
+    let mut has_date = app.schema.tables.values().any(|table|
+        table.columns.iter().any(|c| c.col_type == crate::schema::ColumnType::Date));
+    crate::lower::for_each_hook_body_ref(app, &mut |e| has_date |= expr_has_date(e));
+    for view in &app.views {
+        has_date |= expr_has_date(&view.body);
+        has_date |= view.strict_locals.iter().flatten()
+            .filter_map(|p| p.default.as_ref()).any(expr_has_date);
+    }
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                has_date |= method_has_date(method);
+            }
+        }
+    }
+    for lc in app.library_classes.iter().chain(app.rails_application.iter()) {
+        has_date |= class_has_date(lc);
+    }
+    // Hook bodies already include controller bodies/positional defaults
+    // and seeds. Keyword defaults, tests and fixtures are emitted roots
+    // too, even when they have not been analyzed at this boundary.
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                has_date |= action.params.fields.values().any(crate::ty::Ty::contains_date);
+                has_date |= action.kw_params.iter().filter_map(|(_, e)| e.as_ref()).any(expr_has_date);
+            }
+        }
+    }
+    for tm in &app.test_modules {
+        has_date |= tm.setup.as_ref().is_some_and(expr_has_date)
+            || tm.tests.iter().any(|t| expr_has_date(&t.body))
+            || tm.helpers.iter().any(method_has_date)
+            || tm.inner_classes.iter().any(class_has_date)
+            || tm.constants.iter().any(|(_, e)| expr_has_date(e));
+    }
+    for fixture in &app.fixtures {
+        has_date |= fixture.preamble.iter().any(expr_has_date)
+            || fixture.records.values().flat_map(|r| r.values()).any(|value|
+                matches!(value, crate::dialect::FixtureValue::Ruby(e) if expr_has_date(e)));
+    }
+    has_date |= app.routes.direct_helpers.iter().any(|h| expr_has_date(&h.body));
+    for function in &app.sql_functions {
+        has_date |= match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => method_has_date(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } =>
+                method_has_date(step) || method_has_date(finalize),
+        };
+    }
+    has_date |= app.rbs_signatures.values().flat_map(|methods| methods.values())
+        .any(crate::ty::Ty::contains_date);
+    if has_date {
+        emit::diagnostics::unsupported_date_ty(target.as_str());
+        return Err(format!("{}: Date-only values are not supported; use the native Ruby target", target.as_str()));
+    }
+    Ok(())
+}
+
+/// Arbitrary `&expr` operands need a real forwarding convention, not
+/// a lambda that returns the operand (or a dropped block). Keep the
+/// unsupported native paths out of emit, even in survey mode.
+fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<(), String> {
+    if !matches!(target, BuildTarget::Rust | BuildTarget::Crystal | BuildTarget::Go
+        | BuildTarget::Python | BuildTarget::Kotlin | BuildTarget::Swift | BuildTarget::Elixir) {
+        return Ok(());
+    }
+    fn visit(e: &crate::expr::Expr, target: &str, found: &mut bool) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { block: Some(block), .. }
+            | ExprNode::Apply { block: Some(block), .. } = &*e.node
+        {
+            // These shapes predate the arbitrary-expression fallback;
+            // their existing target-specific paths remain unchanged.
+            if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }
+                | ExprNode::MethodRef { .. }) {
+                *found = true;
+                crate::emit::diagnostics::report_unsupported(
+                    block.span, target, "forwarded_proc",
+                    "arbitrary &expr forwarding is not implemented on this target; use Ruby instead",
+                );
+            }
+        }
+        e.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    fn visit_method(method: &crate::dialect::MethodDef, f: &mut impl FnMut(&crate::expr::Expr)) {
+        f(&method.body);
+        for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    let mut found = false;
+    let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
+    crate::lower::for_each_hook_body_ref(app, &mut f);
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) {
+                f(default);
+            }
+        }
+    }
+    for view in &app.views {
+        f(&view.body);
+        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup { f(setup); }
+        for test in &tm.tests { f(&test.body); }
+        for method in &tm.helpers { visit_method(method, &mut f); }
+        for class in &tm.inner_classes {
+            for method in &class.methods { visit_method(method, &mut f); }
+            for (_, value) in &class.constants { f(value); }
+            for call in &class.unknown_calls { f(call); }
+        }
+        for (_, value) in &tm.constants { f(value); }
+    }
+    for fixture in &app.fixtures {
+        for e in &fixture.preamble { f(e); }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &app.routes.direct_helpers { f(&helper.body); }
+    for function in &app.sql_functions {
+        match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method, &mut f),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step, &mut f);
+                visit_method(finalize, &mut f);
+            }
+        }
+    }
+    if found {
+        return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
+    }
+    Ok(())
+}
+
+/// A unique index whose `where:` SQLite can't be trusted to run as
+/// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
+/// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
+/// it was before predicates were kept (`Dialect::index_predicate`). It
+/// rejects rows Rails accepts, so each one is named. A warning, not an
+/// error: the tree still runs, with a stricter index than the app's.
+fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
+    // The Roda conversion writes Sequel migrations, which carry no
+    // predicate at all.
+    if target == BuildTarget::Roda {
+        return;
+    }
+    for table in app.schema.tables.values() {
+        for index in &table.indexes {
+            let Some(predicate) = index.predicate.as_deref() else { continue };
+            if !index.unique
+                || crate::emit::shared::schema_sql::Dialect::Sqlite
+                    .index_predicate(table, index)
+                    .is_some()
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
+                None,
+                "partial_unique_index",
+                format!(
+                    "table {}: `{predicate}`, the `where:` of unique index `{}`, is not \
+                     one SQLite reads alike, so its SQLite index is unique over every row",
+                    table.name.as_str(),
+                    index.name.as_str()
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+        }
+    }
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    reject_unsupported_dates(app, target)?;
+    reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_unsupported_bundled_constants(app, target);
+    report_sqlite_index_predicates(app, target);
+    // Full forwarding currently has a native Ruby contract only. A
+    // declaration must be gated even when its body never forwards.
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+            if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
+                let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
+                    ("keyword splat in ordinary super",
+                     "super destination's native or lowered argument ABI cannot be verified")
+                } else {
+                    ("keyword splat into full argument forwarding",
+                     "native Ruby keyword provenance has no verified carrier on this target")
+                };
+                crate::emit::diagnostics::report_unsupported(span, target.as_str(),
+                    construct, detail);
+            }
+        }
+    }
+    for (_, method) in crate::analyze::forwarding::methods(app) {
+        if target != BuildTarget::Blog && let Some(formal) = method.unsupported_formals {
+            crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
+        }
+        if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+            let construct = if method.params.iter().any(|p| p.forwarding) {
+                "full argument forwarding"
+            } else if method.params.iter().any(|p| p.keyword && p.rest) {
+                "keyword rest declaration"
+            } else {
+                continue;
+            };
+            crate::emit::diagnostics::report_unsupported(
+                method.name_span,
+                target.as_str(),
+                construct,
+                "native Ruby forwarding is preserved; this target's argument/block carrier is not verified",
+            );
+        }
+    }
     // A keyword parameter is carried by the ruby family and by nothing
     // else yet. No other emitter reads `Param::keyword`, so a `def`
     // that declares one renders POSITIONALLY while its call site
@@ -739,6 +990,16 @@ pub fn target_files(
         BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda
     ) {
         report_keyword_params(app, target.as_str());
+    }
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        for controller in &app.controllers {
+            if controller.class_methods().next().is_some() {
+                return Err(format!("finite class-side configuration is not supported ({})", target.as_str()));
+            }
+        }
+        if app.library_classes.iter().any(|lc| !lc.class_ivar_initializers.is_empty()) {
+            return Err(format!("class-instance-variable initialization is not supported ({})", target.as_str()));
+        }
     }
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
@@ -924,16 +1185,27 @@ fn ensure_e2e(
     for (path, content) in E2E_SPECS {
         files.push((path.to_string(), content.to_string()));
     }
+    // CI prewarms Chromium from this lockfile. Pin archives to the same
+    // Playwright version so their standalone install reuses that browser.
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../e2e/package-lock.json")).expect("parse e2e lockfile");
+    let playwright_version = lock["packages"]["node_modules/@playwright/test"]["version"]
+        .as_str()
+        .expect("locked Playwright version");
     // "type": "module" matters: global-setup.js is written as ESM, and
     // without it Node loads the file as CommonJS ("exports is not
     // defined in ES module scope").
     files.push((
         "e2e/package.json".to_string(),
-        "{\n  \"name\": \"app-e2e\",\n  \"private\": true,\n  \"type\": \"module\",\n  \
-         \"description\": \"Playwright end-to-end smoke tests for this archive — see ../README.md\",\n  \
-         \"scripts\": {\n    \"test\": \"playwright test\"\n  },\n  \
-         \"devDependencies\": {\n    \"@playwright/test\": \"^1.49.0\"\n  }\n}\n"
-            .to_string(),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": "app-e2e",
+            "private": true,
+            "type": "module",
+            "description": "Playwright end-to-end smoke tests for this archive — see ../README.md",
+            "scripts": { "test": "playwright test" },
+            "devDependencies": { "@playwright/test": playwright_version }
+        }))
+        .expect("serialize e2e manifest"),
     ));
     files.push((
         "e2e/playwright.config.js".to_string(),
@@ -2023,6 +2295,7 @@ fn ruby_family_runtime_files(
     // base's eagerly-rewritten one at dedupe) and strips routes.rb's eager
     // controller-require header.
     apply_controller_dispatch(&mut files, app, true);
+    apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
     apply_runtime_gem_wiring(&mut files);
@@ -2678,7 +2951,9 @@ fn strip_cable_from_config_ru(content: &str) -> Result<String, String> {
 /// list partials (`_name`) before templates and otherwise sort, purely for
 /// a stable, legible file. For the blog the emitted view set matches the
 /// scaffold's, so the generated aggregator loads the same modules the
-/// hand-written one did.
+/// hand-written one did. An app with no views at all (an API app that
+/// only renders JSON) gets an aggregator that requires nothing: keeping
+/// the scaffold's copy would require blog views the tree does not have.
 fn apply_views_aggregator(files: &mut [(String, String)]) {
     use std::fmt::Write;
 
@@ -2687,9 +2962,6 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
         .map(|(p, _)| p.as_str())
         .filter(|p| p.starts_with("app/views/") && p.ends_with(".rb"))
         .collect();
-    if views.is_empty() {
-        return;
-    }
     // Partials (`_foo.rb`) first, then alphabetical — deterministic.
     views.sort_by_key(|p| {
         let is_partial = Path::new(p)
@@ -3124,6 +3396,37 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     }
 }
 
+/// Leave `RouteTable.root` out of the dispatch table when the app
+/// declares no root.
+///
+/// `main.rb` and the test harness compose the table as
+/// `[RouteTable.root] + RouteTable.table + …`, but the routes emit
+/// defines `RouteTable.root` only for a route at `/` (`root "c#a"`).
+/// An API app often has none, and then the spinel build refused the
+/// call (`unsupported call … CallNode root`) and the ruby tree raised
+/// NoMethodError on its first request (#165). Without a root the table
+/// starts at `RouteTable.table`, which is what the Crystal, TypeScript
+/// and Python mains already do on the same test.
+///
+/// Runs wherever `apply_controller_dispatch` does, for the same reason:
+/// the CRuby/JRuby trees replace the base's main.rb with the
+/// ruby_overlay one at dedupe, so the second pass rewrites that one.
+/// The harness it already rewrote has nothing left to match. Exact
+/// paths, not `ends_with`: an app's own `app/models/domain.rb` ends in
+/// `main.rb` too.
+fn apply_route_table_root(files: &mut [(String, String)], app: &App) {
+    const WITH_ROOT: &str = "[RouteTable.root] + RouteTable.table";
+    let has_root = crate::lower::flatten_routes(app).iter().any(|r| r.path == "/");
+    if has_root {
+        return;
+    }
+    for (path, content) in files.iter_mut() {
+        if path == "main.rb" || path == "test/test_helper.rb" {
+            *content = content.replace(WITH_ROOT, "RouteTable.table");
+        }
+    }
+}
+
 /// The scaffold targets (spinel/ruby/jruby) ship the scaffold's
 /// comprehensive README as `SPECIMEN.md`, freeing `README.md` for the
 /// generated machine-runnable quick-start (`target_readme` via
@@ -3212,6 +3515,158 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
+/// These class objects are supplied by Ruby/Spinel's bundled libraries,
+/// not by the transpiled runtimes. Recognizing them during inference
+/// must not turn a missing target implementation into a clean emit.
+fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
+            if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+                if matches!(id.0.as_str(),
+                    "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+                    | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+                    | "Rails::HTML5::SafeListSanitizer" | "JSON")
+                    // Nokogiri does not supply HTML5 on JRuby. The
+                    // other bundled values remain available there.
+                    && (target != "jruby" || id.0.as_str() == "Rails::HTML5::SafeListSanitizer")
+                    && !app.library_classes.iter().any(|class| class.name == *id)
+                    && !app.models.iter().any(|model| model.name == *id)
+                    && !app.controllers.iter().any(|controller| controller.name == *id)
+                    && !app.rails_application.as_ref().is_some_and(|class| class.name == *id)
+                    && !app.test_modules.iter().any(|module| module.inner_classes.iter().any(|class| class.name == *id))
+                {
+                    emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target,
+                        "bundled_constant",
+                        format!("{} is not available as a bundled class/module value on {target}", id.0.as_str()),
+                    );
+                }
+            }
+        }
+        // A mapped JSON call does not emit a Ruby module object. Skip
+        // only that exact receiver, not its arguments (which can still
+        // contain unsupported class values) or unmapped method calls.
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
+            if matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JSON")
+                && args.len() == 1
+                && (method.as_str() == "generate"
+                    || method.as_str() == "parse" && matches!(target, "typescript" | "typescript-worker" | "python" | "crystal")
+                    || method.as_str() == "dump" && matches!(target, "rust" | "elixir")
+                    || matches!(method.as_str(), "fast_generate" | "pretty_generate") && target == "rust")
+            {
+                expr.node.for_each_child(&mut |child| {
+                    if !std::ptr::eq(child, recv) {
+                        visit(child, app, target);
+                    }
+                });
+                return;
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    let mut visit = |expr: &crate::expr::Expr| visit(expr, app, target.as_str());
+    crate::lower::for_each_hook_body_ref(app, &mut visit);
+    // Like the Date gate, include roots outside the app-body survey.
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for (_, default) in &action.kw_params {
+                if let Some(default) = default {
+                    visit(default);
+                }
+            }
+        }
+    }
+    for fixture in &app.fixtures {
+        for expr in &fixture.preamble {
+            visit(expr);
+        }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(expr) = value {
+                visit(expr);
+            }
+        }
+    }
+    for helper in &app.routes.direct_helpers {
+        visit(&helper.body);
+    }
+    for function in &app.sql_functions {
+        let methods = match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => [Some(method), None],
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => [Some(step), Some(finalize)],
+        };
+        for method in methods.into_iter().flatten() {
+            visit(&method.body);
+            for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                visit(default);
+            }
+        }
+    }
+    for view in &app.views {
+        visit(&view.body);
+        for param in view.strict_locals.iter().flatten() {
+            if let Some(default) = &param.default {
+                visit(default);
+            }
+        }
+    }
+    for module in &app.test_modules {
+        if let Some(setup) = &module.setup {
+            visit(setup);
+        }
+        for test in &module.tests {
+            visit(&test.body);
+        }
+        for helper in &module.helpers {
+            visit(&helper.body);
+            for param in &helper.params {
+                if let Some(default) = &param.default {
+                    visit(default);
+                }
+            }
+        }
+        for (_, value) in &module.constants {
+            visit(value);
+        }
+        for class in &module.inner_classes {
+            for method in &class.methods {
+                visit(&method.body);
+                for param in &method.params {
+                    if let Some(default) = &param.default {
+                        visit(default);
+                    }
+                }
+            }
+            for (_, value) in &class.constants {
+                visit(value);
+            }
+            for call in &class.unknown_calls {
+                visit(call);
+            }
+        }
+    }
+    // The immutable app-body survey also excludes association extensions.
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Association {
+                assoc: crate::dialect::Association::HasMany { extension, .. }, ..
+            } = item {
+                for method in extension {
+                    visit(&method.body);
+                    for param in &method.params {
+                        if let Some(default) = &param.default {
+                            visit(default);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
@@ -3235,6 +3690,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
         ));
+    }
+
+    // Schema-less json/jsonb column seam. The flat walk emits the Ruby
+    // implementation; this sidecar preserves its gradual logical value
+    // while keeping the database slot String-typed.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/json_column.rbs")
+            .map_err(|e| format!("read runtime/spinel/json_column.rbs: {e}"))?;
+        files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
 
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
@@ -3643,6 +4107,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // CRuby/JRuby trees re-apply the dispatch in lazy flavor to the
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
+    apply_route_table_root(&mut files, app);
     // Identity for the `/cable` handshake, in the shared base like the
     // dispatch above. Only the SPINEL tree runs the result: the
     // CRuby/JRuby trees carry this `runtime/cable.rb` too but never
@@ -4952,7 +5417,8 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 ///    `ActionDispatch::IntegrationTest` — flatten from
 ///    `test/{models,controllers}/` to `test/<name>.rb`: spin treats
 ///    exactly the top-level `test/*.rb` files as test programs, no
-///    recursion.
+///    recursion. A lane test with no `def test_` leaves the tree, and
+///    a warning names it.
 /// 3. Top-level tests *outside* the lane (Minitest::Test shapes the
 ///    archive's TestBase helper never autoruns — compiled, they are
 ///    do-nothing binaries whose empty output vacuously matches an
@@ -5077,7 +5543,7 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 13] = [
+const BUNDLED: [(&str, &str); 14] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -5103,6 +5569,7 @@ const BUNDLED: [(&str, &str); 13] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
     // stdlib and spinel to `packages/net`, which speaks the same
@@ -5269,7 +5736,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // 2./3./4. Relocate test programs; rewrite requires of anything moved.
     let mut lane: Vec<(String, String, usize)> = Vec::new(); // (path, class, n)
     let mut renames: Vec<(String, String)> = Vec::new(); // old .rb → new .rb
-    let mut orphaned: Vec<String> = Vec::new(); // requires a file this app has no
+    let mut dropped: Vec<String> = Vec::new();
     for entry in files.iter_mut() {
         if !entry.0.starts_with("test/") || !entry.0.ends_with("_test.rb") {
             continue;
@@ -5295,7 +5762,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         // fixtures it just emitted — so what this drops is always a
         // framework test that does not belong in this app's tree.
         if unresolvable_require(&entry.1, &entry.0, &rb_paths).is_some() {
-            orphaned.push(entry.0.clone());
+            dropped.push(entry.0.clone());
             continue;
         }
         // A Minitest-shaped file is CRuby-only whatever else it holds;
@@ -5304,6 +5771,46 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         // disagree. See `lane_test_class` for what this replaced.
         let in_lane = !entry.1.lines().any(declares_minitest_class)
             && entry.1.lines().any(|l| lane_test_class(l).is_some());
+        // The class and the count come from one call, so the drop and
+        // the snapshot cannot disagree. The require rewrite below
+        // changes neither.
+        let counted = if in_lane {
+            match test_class_and_count(&entry.1, &entry.0) {
+                Ok(counted) => Some(counted),
+                // A test program the snapshot runner cannot shape is
+                // dropped with a note rather than failing the project:
+                // a large app's suite has files outside the lane shape.
+                Err(e) => {
+                    eprintln!("roundhouse: {e}; dropped");
+                    dropped.push(entry.0.clone());
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        // An emitted lane test with no `def test_` compiles to a program
+        // that tests nothing, so the spin tree omits it. `rails generate
+        // model` writes such a class. The same shape also comes from
+        // tests that the emit did not model (an `include`d module, a
+        // `define_method` loop), so the warning names what the emit
+        // wrote, not what the source holds.
+        if counted.as_ref().is_some_and(|(_, n)| *n == 0) {
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
+                Some(crate::ident::Symbol::from("spinel")),
+                "test_class_without_emitted_tests",
+                format!(
+                    "{}: the emitted test class has no `def test_` methods, so the spin \
+                     tree omits it; tests that the emit did not model are lost too",
+                    entry.0
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+            dropped.push(entry.0.clone());
+            continue;
+        }
         let new_path = if in_lane {
             format!("test/{base}")
         } else if top_level {
@@ -5319,18 +5826,18 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             entry.0 = new_path.clone();
             entry.1 = rewritten;
         }
-        if in_lane {
-            let (class, n) = test_class_and_count(&entry.1, &new_path)?;
+        if let Some((class, n)) = counted {
             lane.push((new_path, class, n));
         }
     }
 
-    // An orphaned framework test leaves with its sidecar and its
-    // `.expected` snapshot — a snapshot for a program that is not in
-    // the tree is what the next reader would have to explain away.
-    if !orphaned.is_empty() {
+    // An orphaned framework test or a test class without emitted tests
+    // (see above) leaves with its sidecar and its `.expected` snapshot —
+    // a snapshot for a program that is not in the tree is what the next
+    // reader would have to explain away.
+    if !dropped.is_empty() {
         files.retain(|(p, _)| {
-            !orphaned.iter().any(|o| {
+            !dropped.iter().any(|o| {
                 p == o
                     || *p == format!("{}.rbs", o.trim_end_matches(".rb"))
                     || *p == format!("{o}.expected")
@@ -5781,6 +6288,8 @@ fn declares_minitest_class(line: &str) -> bool {
 /// line (exactly one per lane test) plus the `def test_*` count —
 /// enough to synthesize the runner's `<Class>: <N> tests passed`
 /// footer (src/emit/ruby.rs prints it with no singular special-case).
+/// A zero count is not an error here: `spin_shape` drops that test
+/// with a warning.
 fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), String> {
     let mut class: Option<String> = None;
     for line in content.lines() {
@@ -5794,13 +6303,7 @@ fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), St
         }
     }
     let class = class.ok_or_else(|| format!("spin_shape: {path}: no test class found"))?;
-    let n = content.matches("def test_").count();
-    if n == 0 {
-        return Err(format!(
-            "spin_shape: {path}: no test methods — would be a vacuous test program"
-        ));
-    }
-    Ok((class, n))
+    Ok((class, content.matches("def test_").count()))
 }
 
 /// Rewrite the requires of a file moving `old_dir` → `new_dir` inside
@@ -6120,10 +6623,23 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     fs::create_dir_all(out.join("browse"))
         .map_err(|e| format!("mkdir {}: {e}", out.display()))?;
 
+    // Archive generation cleans browse/, so copy its viewer assets afterwards.
+    build_archives(fixture, out, BuildTarget::ALL)?;
     copy_site_assets(out)?;
     copy_create_blog(out)?;
     crate::guide::render_site(out)?;
 
+    Ok(())
+}
+
+/// Build selected browse archives without website assets or WASM demos.
+/// The file sets and archive writers are shared with `build_site`.
+pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Result<(), String> {
+    let browse = out.join("browse");
+    if browse.exists() {
+        fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;
+    }
+    fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
     // Analyze + the same post-analyze shared lowerings as the
@@ -6131,7 +6647,7 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     // so the residue is dropped.
     let _ = crate::session::analyze_and_lower(&mut app);
 
-    for target in BuildTarget::ALL {
+    for target in targets {
         let files = target_files(&app, fixture, *target)?;
         let name = target.as_str();
 
@@ -6291,6 +6807,118 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_constant_gate_covers_auxiliary_emitted_roots() {
+        use crate::app::{SqlFunction, SqlFunctionKind};
+        use crate::dialect::{ControllerBodyItem, DirectHelper, Fixture, FixtureValue, Param};
+        use crate::expr::{Expr, ExprNode};
+        use crate::ident::{ClassId, Symbol};
+        use crate::span::{FileId, Span};
+        use crate::ty::Ty;
+
+        let tree = [
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index(value: nil); nil; end\nend\n"),
+            ("app/services/probe.rb", "class Probe\n  def value; nil; end\nend\n"),
+        ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+        let mut base = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let method = base.library_classes.iter().find(|class| class.name.0.as_str() == "Probe")
+            .unwrap().methods[0].clone();
+        base.library_classes.clear();
+
+        for root in 0..8 {
+            let mut app = base.clone();
+            let span = Span { file: FileId(1), start: root, end: root + 1 };
+            let mut constant = Expr::new(span, ExprNode::Const {
+                path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
+            });
+            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![] });
+            match root {
+                0 | 1 => app.fixtures.push(Fixture {
+                    name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
+                    preamble: if root == 0 { vec![constant.clone()] } else { vec![] },
+                    records: if root == 1 {
+                        [(Symbol::new("one"), [(Symbol::new("value"), FixtureValue::Ruby(constant))].into_iter().collect())].into_iter().collect()
+                    } else { Default::default() },
+                }),
+                2 => {
+                    let ControllerBodyItem::Action { action, .. } = &mut app.controllers[0].body[0] else {
+                        panic!("expected the controller action");
+                    };
+                    action.kw_params[0].1 = Some(constant);
+                }
+                3 => app.routes.direct_helpers.push(DirectHelper {
+                    name: Symbol::new("probe"), params: vec![], body: constant,
+                }),
+                _ => {
+                    let mut changed = method.clone();
+                    if root == 4 || root == 6 {
+                        changed.body = constant;
+                    } else {
+                        changed.params = vec![Param::with_default(Symbol::new("value"), constant)];
+                    }
+                    let kind = if root < 6 {
+                        SqlFunctionKind::Scalar { method: changed }
+                    } else if root == 6 {
+                        SqlFunctionKind::Aggregate { step: changed, finalize: method.clone() }
+                    } else {
+                        SqlFunctionKind::Aggregate { step: method.clone(), finalize: changed }
+                    };
+                    app.sql_functions.push(SqlFunction { name: "probe".into(), arity: 1, kind });
+                }
+            }
+            for target in [BuildTarget::Kotlin, BuildTarget::Ruby, BuildTarget::Jruby] {
+                let (_, diags) = emit::diagnostics::scope(|| report_unsupported_bundled_constants(&app, target));
+                assert_eq!(diags.len(), usize::from(target == BuildTarget::Kotlin), "root {root}, {target:?}: {diags:?}");
+                if let Some(diag) = diags.first() {
+                    assert_eq!(diag.span, span);
+                    assert_eq!(diag.severity, crate::diagnostic::Severity::Error);
+                    assert!(matches!(&diag.kind, crate::diagnostic::DiagnosticKind::Unsupported { construct, target: Some(name), .. }
+                        if construct.as_str() == "bundled_constant" && name.as_str() == "kotlin"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forwarded_proc_boundary_preserves_existing_block_shapes() {
+        for source in ["[1, 2].map { |x| x + 1 }", "callback = ->(x) { x + 1 }; [1, 2].map(&callback)",
+            "[1, 2].map(&method(:normalize))"] {
+            let tree = [("db/seeds.rb", source)].into_iter()
+                .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+            for &target in BuildTarget::ALL {
+                let (result, diagnostics) = crate::emit::diagnostics::scope(||
+                    reject_unsupported_forwarded_procs(&app, target));
+                assert!(result.is_ok(), "{target:?}: {source}: {result:?}");
+                assert!(diagnostics.is_empty(), "{target:?}: {source}: {diagnostics:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn archive_playwright_matches_the_prewarmed_version() {
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../e2e/package-lock.json")).unwrap();
+        let version = lock["packages"]["node_modules/@playwright/test"]["version"]
+            .as_str()
+            .unwrap();
+        for &target in BuildTarget::ALL {
+            let files = ensure_e2e(Vec::new(), target);
+            if matches!(target, BuildTarget::Blog | BuildTarget::TypescriptWorker) {
+                assert!(files.is_empty(), "{} has no server e2e suite", target.as_str());
+                continue;
+            }
+            let manifest = &files.iter().find(|(p, _)| p == "e2e/package.json").unwrap().1;
+            let manifest: serde_json::Value = serde_json::from_str(manifest).unwrap();
+            assert_eq!(
+                manifest["devDependencies"]["@playwright/test"].as_str(),
+                Some(version),
+                "{} must reuse the prewarmed browser, not resolve a newer version",
+                target.as_str()
+            );
+        }
+    }
 
     /// The three test-case parents campfire's `test/channels` and
     /// `test/helpers` write against are lane tests, the way an
@@ -6523,6 +7151,56 @@ mod tests {
         )];
         apply_controller_dispatch(&mut plain, &app, false);
         assert!(!plain[0].1.contains("Current.reset"));
+    }
+
+    /// Reads the REAL scaffold files, so a reworded `route_table` in
+    /// any of the three fails here rather than leaving a `RouteTable.root`
+    /// call in a root-less app's tree.
+    #[test]
+    fn a_route_table_without_a_root_route_leaves_route_table_root_out() {
+        let scaffold = || {
+            [
+                "runtime/spinel/scaffold/main.rb",
+                "runtime/spinel/scaffold/ruby_overlay/main.rb",
+                "runtime/spinel/test/test_helper.rb",
+            ]
+            .iter()
+            .map(|p| {
+                let path = if p.ends_with("test_helper.rb") { "test/test_helper.rb" } else { "main.rb" };
+                (path.to_string(), crate::runtime_files::read_to_string(p).unwrap())
+            })
+            .collect::<Vec<_>>()
+        };
+        let mut app = App::new();
+        app.routes.entries.push(crate::dialect::RouteSpec::Explicit {
+            method: crate::dialect::HttpMethod::Get,
+            path: "/widgets".to_string(),
+            controller: crate::ident::ClassId(crate::ident::Symbol::from("WidgetsController")),
+            action: crate::ident::Symbol::from("index"),
+            as_name: None,
+            constraints: Default::default(),
+            scope: Default::default(),
+        });
+
+        // An app file whose name merely ends in `main.rb` is the app's.
+        let domain = ("app/models/domain.rb".to_string(), "ROUTES = \"[RouteTable.root] + RouteTable.table\"\n".to_string());
+        let mut files = scaffold();
+        files.push(domain.clone());
+        apply_route_table_root(&mut files, &app);
+        let domain_after = files.pop().unwrap();
+        assert_eq!(domain_after, domain, "an app file is not the dispatcher");
+        for (path, content) in &files {
+            assert!(!content.contains("RouteTable.root"), "{path} still calls RouteTable.root");
+            assert!(content.contains("RouteTable.table + ActiveStorage::Routes.table"), "{path}");
+        }
+
+        // With a root the table keeps it, first.
+        app.routes.entries.push(crate::dialect::RouteSpec::Root { target: "widgets#index".to_string() });
+        let mut files = scaffold();
+        apply_route_table_root(&mut files, &app);
+        for (path, content) in &files {
+            assert!(content.contains("[RouteTable.root] + RouteTable.table"), "{path}");
+        }
     }
 
     #[test]
@@ -7012,6 +7690,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
 
         // The app declares one: the arm names it.
@@ -7183,6 +7862,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         });
         let mut files = vec![("boot.rb".to_string(), "# boot\n".to_string())];
         apply_module_mixins(&mut files, &modapp, MixinForm::Reopen);

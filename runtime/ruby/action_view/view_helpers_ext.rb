@@ -1012,14 +1012,19 @@ module ActionView
     end
 
     # Does a tag start at `i` (where `s[i]` is "<")? HTML5 opens an
-    # element on `<` + letter and closes one on `</` + letter; anything
-    # else — `<3`, `< b`, `<>` — is text. `<!` and `<?` are the bogus
-    # comment / markup declaration forms (`<!DOCTYPE html>`, `<?php ?>`),
-    # which end at the next `>` and vanish like a tag.
+    # element on `<` + letter; anything else after a bare `<` — `<3`,
+    # `< b`, `<>` — is text. `<!` and `<?` are the bogus comment / markup
+    # declaration forms (`<!DOCTYPE html>`, `<?php ?>`), which end at the
+    # next `>` and vanish like a tag. So does `</` before ANYTHING but the
+    # end of the input: an end tag before a letter, and otherwise (`</ >`,
+    # `</3>`, `</>`) a bogus comment the tokenizer drops — this used to
+    # read those as text, which the rich-text corpus's "malformed bogus
+    # comment" (`c</ >d`) showed once Action Text's scanners began asking
+    # this predicate too.
     def self.tag_open_at?(s, i)
       c = s[i + 1, 1].to_s
       return true if c == "!" || c == "?"
-      c = s[i + 2, 1].to_s if c == "/"
+      return s[i + 2, 1].to_s != "" if c == "/"
       # Inline literal, not a module const: a module-const receiver
       # reads as an unresolved class in the strict typer (same reason
       # `sanitize_to_id` above spells its alphabet out).

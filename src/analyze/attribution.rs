@@ -48,6 +48,51 @@ use crate::ingest::{survey, IngestError};
 use crate::span::FileId;
 use crate::ty::Ty;
 
+mod gem_ancestry;
+mod generated_methods;
+use gem_ancestry::{GemAncestry, GemClaim};
+
+/// Add post-inference admission failures to the survey ledger. Alba's source
+/// declarations can ingest successfully while their inferred property types
+/// are outside its executable subset. Unlike placeholder-shadow attribution,
+/// these failures remain errors: coverage classification is not support.
+/// Call after ingest-gap attribution so analysis entries do not taint files.
+pub fn attribute_analysis_gaps(diags: &mut [Diagnostic], app: &App, gaps: &mut Vec<IngestError>) {
+    let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
+    // Synthesized Alba admission failures have an exact provider, not a
+    // namespace-prefix guess (alba-inertia alone is not evidence for alba).
+    let provider = census.as_ref()
+        .and_then(|c| c.unknown().find(|g| g.name == "alba" && g.version.is_some()));
+    for d in diags {
+        let DiagnosticKind::Unsupported { construct, .. } = &d.kind else { continue };
+        if construct.as_str() != "alba_serialization" {
+            continue;
+        }
+        if let Some(gem) = provider {
+            let attribution = format!(
+                " — roundhouse coverage of the `{}` gem; executable serialization remains unsupported",
+                gem.name
+            );
+            if !d.message.ends_with(&attribution) {
+                d.message.push_str(&attribution);
+            }
+        }
+        let Some(source) = d.span.file.0.checked_sub(1)
+            .and_then(|i| app.sources.get(i as usize)) else { continue };
+        let (line, column) = source.line_col(d.span.start);
+        // Put ownership before the diagnostic's parentheses: survey buckets
+        // truncate their suffix, so appended attribution alone is invisible.
+        let owner = provider.map(|gem| format!("the `{}` gem: ", gem.name)).unwrap_or_default();
+        let message = format!("analysis: {line}:{column}: {owner}{}", d.message);
+        if !gaps.iter().any(|gap| matches!(gap,
+            IngestError::Unsupported { file, message: prior }
+                if file == &source.path && prior == &message))
+        {
+            gaps.push(IngestError::Unsupported { file: source.path.clone(), message });
+        }
+    }
+}
+
 /// Downgrade diagnostics attributable to `gaps` (see module docs).
 /// No-op when `gaps` is empty — strict-mode callers can pass through
 /// unconditionally.
@@ -276,28 +321,46 @@ impl<'a> AttributionCtx<'a> {
 /// Downgrade diagnostics attributable to an unknown gem in the app's
 /// `Gemfile.lock` (see the section comment). No-op when the app carries
 /// no lockfile or the census has no unknown gem.
+///
+/// Recorded ancestry is evidence of missing coverage, NOT method ownership:
+/// even a typo on a gem-dependent receiver can be a note. Types and emitted
+/// methods remain unchanged; ambiguous ancestry does not claim a diagnostic.
 pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
     let Some(lock) = &app.gem_lock else { return };
     let census = crate::gems::GemCensus::of(lock);
     if census.unknown().next().is_none() || diags.is_empty() {
         return;
     }
+    let ancestry = diags.iter().any(|d| d.severity != Severity::Info
+        && matches!(d.kind, DiagnosticKind::SendDispatchFailed { .. }))
+        .then(|| GemAncestry::new(app));
 
-    // Pass 1: sites on a gem's surface — a dispatch on the gem's
-    // constant namespace (`Redcarpet::Markdown#render`) or on a DSL /
-    // helper name the gem is known to add (`policy_scope`).
-    let gem_for = |d: &Diagnostic| -> Option<&str> {
+    // Pass 1: a declared generated surface is the most specific
+    // evidence, ahead of ancestry and fixed DSL/helper names.
+    let gem_for = |d: &Diagnostic| -> Option<(&str, Option<String>)> {
         match &d.kind {
             DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
-                if let Some(path) = recv_root_path(recv_ty) {
-                    if let Some(g) = crate::gems::gem_owning_constant(&census, &path) {
-                        return Some(g);
+                if let Some((dsl, owner)) = ancestry.as_ref()?.generating_dsl(recv_ty, method.as_str(), lock) {
+                    if let Some(gem) = crate::gems::gem_providing_dsl(lock, dsl) {
+                        return Some((gem, Some(format!("matches the declared `{dsl}` surface in {}; runtime method availability is unverified", owner.0))));
                     }
                 }
-                crate::gems::gem_claiming_method(lock, method.as_str())
+                match ancestry.as_ref()?.receiver_gem(recv_ty, &census) {
+                    GemClaim::Known { gem, constant } => Some((gem, Some(format!(
+                        "receiver ancestry reaches `{constant}`; method ownership is unverified"
+                    )))),
+                    GemClaim::Uncertain => None,
+                    GemClaim::Absent => crate::gems::gem_claiming_method(lock, method.as_str())
+                        .map(|gem| (gem, None)),
+                }
             }
             DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
-                crate::gems::gem_claiming_method(lock, n.as_str())
+                crate::gems::gem_claiming_method(lock, n.as_str()).map(|gem| (gem, None))
+            }
+            DiagnosticKind::Unsupported { construct, detail, .. }
+                if construct.as_str() == "constant" =>
+            {
+                crate::gems::gem_owning_constant(&census, detail).map(|gem| (gem, None))
             }
             _ => None,
         }
@@ -305,12 +368,19 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
     let mut sites: Vec<(FileId, u32, String)> = Vec::new();
     for d in diags.iter_mut() {
         // Already a coverage note (an ingest gap claimed it first).
-        if !eligible(&d.kind) || d.severity == Severity::Info {
+        let unknown_constant = matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "constant"
+        );
+        if (!eligible(&d.kind) && !unknown_constant) || d.severity == Severity::Info {
             continue;
         }
-        if let Some(gem) = gem_for(d) {
+        if let Some((gem, evidence)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
+            if let Some(evidence) = evidence {
+                d.message.push_str(&format!(" ({evidence})"));
+            }
         }
     }
     if sites.is_empty() {
@@ -369,16 +439,6 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
         None => d.message.push_str(&format!(
             " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
         )),
-    }
-}
-
-/// The constant path of a dispatch receiver's class, unions by first
-/// class arm.
-fn recv_root_path(ty: &Ty) -> Option<String> {
-    match ty {
-        Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
-        Ty::Union { variants } => variants.iter().find_map(recv_root_path),
-        _ => None,
     }
 }
 
@@ -526,6 +586,22 @@ mod tests {
         )];
         attribute_ingest_gaps(&mut diags, &app, &gaps);
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn unknown_gem_constant_is_a_coverage_note_not_a_user_error() {
+        let mut app = App::new();
+        app.gem_lock = Some(crate::gems::Lockfile::parse(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    acme-core (1.0.0)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  acme-core\n",
+        ));
+        let mut diags = vec![
+            Diagnostic::unsupported(Span::synthetic(), None, "constant", "AcmeCore::Client"),
+            Diagnostic::unsupported(Span::synthetic(), None, "other construct", "AcmeCore::Client"),
+        ];
+        attribute_unknown_gems(&mut diags, &app);
+        assert_eq!(diags[0].severity, Severity::Info);
+        assert!(diags[0].message.contains("acme-core"));
+        assert_eq!(diags[1].severity, Severity::Error);
     }
 
     #[test]

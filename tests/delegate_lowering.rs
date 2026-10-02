@@ -81,7 +81,7 @@ end
     );
     assert!(
         out.contains(
-            "def request_host\n    if request.nil?\n      nil\n    else\n      request.host\n    end\n  end"
+            "def request_host\n    __delegate_target = request\n    if __delegate_target.nil?\n      nil\n    else\n      __delegate_target.host\n    end\n  end"
         ),
         "got:\n{out}"
     );
@@ -143,4 +143,127 @@ end
     );
     assert!(out.contains("\"already mine\""), "got:\n{out}");
     assert_eq!(out.matches("def fragment").count(), 1, "got:\n{out}");
+}
+
+/// `to: :class` (or any other Ruby keyword) is `self.class` in the
+/// forwarder, as Rails writes it: a bare `class.label` does not parse.
+/// Shopify core has dozens (`delegate :context, to: :class`).
+#[test]
+fn a_keyword_target_is_read_through_self() {
+    let out = emit(
+        r#"class Filter
+  attr_reader :return
+  delegate :label, to: :class
+  delegate :id, to: :return
+
+  def self.label
+    "f"
+  end
+end
+"#,
+    );
+    assert!(out.contains("self.class.label"), "got:\n{out}");
+    assert!(out.contains("self.return.id"), "got:\n{out}");
+}
+
+#[test]
+fn a_delegated_writer_forwards_its_value() {
+    // billing's `delegate :request_id, :request_id=, to: :class`: the
+    // writer needs a parameter, and a zero-arg `def request_id=` is not
+    // Ruby at all — the snippet failed to parse and took the reader
+    // down with it.
+    let out = emit(
+        r#"class Filter
+  delegate :request_id, :request_id=, to: :class
+
+  def self.request_id
+    @request_id
+  end
+end
+"#,
+    );
+    assert!(out.contains("self.class.request_id"), "got:\n{out}");
+    assert!(out.contains("self.class.request_id = value"), "got:\n{out}");
+}
+
+#[test]
+fn delegated_operators_forward_their_operands() {
+    // core's collection wrappers: `delegate :each, :[], :[]=, :<<, :==,
+    // to: :@set`. An operator is not a reader — `[]=` and `==` end in
+    // `=` without being writers — and each has a fixed arity, so it
+    // forwards exactly.
+    let out = emit(
+        r#"class Filter
+  delegate :[], :[]=, :<<, :==, to: :@set
+
+  def initialize
+    @set = {}
+  end
+end
+"#,
+    );
+    assert!(out.contains("@set[key] = value"), "got:\n{out}");
+    assert!(out.contains("@set[key]"), "got:\n{out}");
+    assert!(out.contains("@set << other"), "got:\n{out}");
+    assert!(out.contains("@set == other"), "got:\n{out}");
+}
+
+fn run_emitted(source: &str, exercise: &str) -> String {
+    let emitted = emit(source);
+    let script = format!("{emitted}\n{exercise}");
+    let output = std::process::Command::new("ruby")
+        .args(["-e", &script]).output().expect("ruby");
+    assert!(output.status.success(), "{}\n{script}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).expect("UTF-8")
+}
+
+#[test]
+fn writer_arguments_do_not_shadow_the_target_method() {
+    let source = r#"class Filter
+  attr_reader :value
+  def initialize(value)
+    @value = value
+  end
+  delegate :title=, to: :value
+end
+"#;
+    assert_eq!(run_emitted(source,
+        "target = Struct.new(:title).new; Filter.new(target).title = 'changed'; puts target.title"),
+        "changed\n");
+}
+
+#[test]
+fn nil_operators_return_nil_without_evaluating_the_target_twice() {
+    let source = r#"class Filter
+  attr_reader :calls
+  def initialize(value)
+    @value = value
+    @calls = 0
+  end
+  def key
+    @calls += 1
+    @value
+  end
+  delegate :[], :[]=, :<<, to: :key, allow_nil: true
+end
+"#;
+    assert_eq!(run_emitted(source,
+        "f = Filter.new(nil); p [f[0], f.[]=(0, 'x'), f << 'x', f.calls]"),
+        "[nil, nil, nil, 3]\n");
+    assert_eq!(run_emitted(source,
+        "f = Filter.new(['old']); p [f[0], f.[]=(0, 'new'), f << 'tail', f.calls]"),
+        "[\"old\", \"new\", [\"new\", \"tail\"], 3]\n");
+}
+
+#[test]
+fn nil_comparison_operators_keep_their_boolean_result() {
+    let source = r#"class Filter
+  def initialize
+    @target = nil
+  end
+  delegate :==, :!=, to: :@target, allow_nil: true
+end
+"#;
+    assert_eq!(run_emitted(source, "f = Filter.new; p [f == nil, f != nil, f == 1]"),
+        "[true, false, false]\n");
 }

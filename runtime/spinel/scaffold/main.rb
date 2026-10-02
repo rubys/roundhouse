@@ -54,16 +54,25 @@ module Main
   # `user_ids[]=2&user_ids[]=3` reached the controller as `{"" => "3"}`.
   #
   # A multipart body's text fields arrive by name from its parser
-  # (`Tep::Request#body_fields`), so a repeated multipart field still
-  # keeps its last value; the urlencoded body and the query string are
+  # (`Tep::Request#body_fields`), and a JSON body's flattened the same
+  # way, so a repeated multipart field still keeps its last value; the urlencoded body and the query string are
   # parsed from their raw bytes and keep every one.
+  # Rails' "any format": an Accept that is a bare `*/*` (parameters
+  # allowed), which Rails takes as a valid header whose one format is
+  # Mime::ALL. A browser's list ending in `, */*` is "browser-like" and
+  # Rails reads it as html instead, so a comma rules it out.
+  def self.accepts_any_format?(accept)
+    return false if accept.include?(",")
+    accept.split(";", 2)[0].to_s.strip == "*/*"
+  end
+
   def self.request_params(req, path_params)
     query = ParamBuilder.from_query_string(req.raw_query)
     return nil if query.nil?
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
-    elsif req.multipart?
+    elsif req.multipart? || req.json?
       keys = []
       values = []
       present = []
@@ -486,6 +495,7 @@ module Main
     inbound_flash["alert"] = ain if ain.length > 0
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
+    controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
 
     begin
       controller.process_action(matched.action)

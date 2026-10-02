@@ -130,6 +130,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         body: Vec::new(),
         span: Span::synthetic(),
         enums: indexmap::IndexMap::new(),
+        enum_defaults: indexmap::IndexMap::new(),
         sti_subclass_names: Vec::new(),
     });
     let models_dir = dir.join("models");
@@ -353,6 +354,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         });
     }
 
@@ -888,6 +890,7 @@ impl<'f> RouteWalker<'f> {
                         if_cond_expr: None,
                         unless_cond_expr: None,
                         block: None,
+                        prepend: false,
                     },
                     leading_comments: Vec::new(),
                     leading_blank_line: false,

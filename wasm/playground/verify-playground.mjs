@@ -26,6 +26,7 @@
 //   node verify-playground.mjs     # (run from wasm/playground/)
 
 import { createRequire } from "node:module";
+import "../verify-stack.mjs";
 // Borrow Playwright from the browser_smoke harness (repo-relative, so it
 // resolves on any checkout / CI runner — not just a local macOS path).
 const require = createRequire(new URL("../../tests/browser_smoke/", import.meta.url).pathname);

@@ -23,7 +23,7 @@ module Mime
     # Non-nilable on purpose: upstream's `lookup` answers a Type for any
     # well-formed string and raises for the rest. See the note in mime.rb.
     def self.lookup: (String string) -> Mime::Type
-    def self.lookup_by_extension: (String extension) -> Mime::Type?
+    def self.lookup_by_extension: ((String | Symbol) extension) -> Mime::Type?
     def self.valid?: (String? string) -> bool
   end
 

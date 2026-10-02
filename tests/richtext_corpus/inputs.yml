@@ -1,0 +1,535 @@
+# VENDORED from basecamp/once-campfire-rust (MIT), crates/richtext/tests/corpus/inputs.yml at
+# 080f9035141ac09e1db81476a1b229ed24f08d8f.
+#
+# Differential corpus for the rich text pipeline. Each case is a stored message body (the raw
+# action_text_rich_texts.body column). reference-tools/richtext/generate.rb expands the
+# placeholders, runs the real Rails pipeline in the campfire-reference image, and writes
+# expected.json next to this file.
+#
+# Placeholders:
+#   {{sgid:NAME}}          the user's attachable SGID
+#   {{mention:NAME}}       a Lexxy mention attachment (test_helper.rb's mention_attachment_for)
+#   {{tampered:NAME}}      the SGID's message with an invalid signature
+#   {{rails7:NAME}}        a Rails 7 (Marshal) SGID with an invalid signature
+#   {{expired:NAME}}       an attachable SGID that expired
+#   {{cross_purpose:NAME}} an SGID for another purpose
+#   {{tampered_room}}      a Room SGID with an invalid signature
+#   {{deleted_sgid}}       a valid SGID for a user that no longer exists
+#
+# Optional `host:` sets Current.request_host (default once.campfire.test).
+
+cases:
+  # --- Fixture bodies (test/fixtures/action_text/rich_texts.yml) ----------------------------
+  - name: fixture first
+    body: 'First post!'
+  - name: fixture third
+    body: 'Third time''s a charm.'
+  - name: fixture fourth
+    body: 'You know what the fellow said – in Italy, for thirty years under the Borgias, they had warfare, terror, murder and bloodshed, but they produced Michelangelo, Leonardo da Vinci and the Renaissance. In Switzerland, they had brotherly love, they had five hundred years of democracy and peace – and what did that produce? The cuckoo clock.'
+  - name: fixture sixth
+    body: 'The sense of unhappiness is so much easier to convey than that of happiness. In misery we seem aware of our own existence, even though it may be in the form of a monstrous egotism—this pain of mine is individual, this nerve that winces belongs to me and to no other. But happiness annihilates us—we lose our identity.'
+  - name: fixture tenth
+    body: 'I don''t care a damn about men who are loyal to the people who pay them, to organizations...I don''t think even my country means all that much. There are many countries in our blood, aren''t there, but only one person. Would the world be in the mess it is if we were loyal to love and not to countries?'
+  - name: empty body
+    body: ""
+  - name: whitespace body
+    body: "   \n\t  "
+  - name: plain text with markup characters
+    body: '1 < 2 && 3 > 2 "quoted" ''single'''
+  - name: span only (searchable test)
+    body: '<span>My hovercraft is full of eels</span>'
+  - name: emoji only
+    body: '😄🤘'
+  - name: emoji with text
+    body: 'Haha! 😄🤘'
+  - name: play command
+    body: '/play nonexistent_sound_name'
+
+  # --- Lexxy toolbar features ---------------------------------------------------------------
+  - name: lexxy paragraph
+    body: '<p>Hello world</p>'
+  - name: lexxy paragraphs
+    body: '<p>First</p><p>Second</p><p><br></p><p>Fourth</p>'
+  - name: lexxy bold italic
+    body: '<p>Hello <b><strong class="lexxy-content__bold" style="white-space: pre-wrap;">bold</strong></b> and <i><em class="lexxy-content__italic">italic</em></i></p>'
+  - name: lexxy strong em
+    body: '<p>Hello <strong>bold</strong> <em>it</em></p>'
+  - name: lexxy strikethrough underline mark
+    body: '<p>Hello <s>struck</s> <u>under</u> <mark>marked</mark></p><pre data-language="ruby">def x<br>end</pre>'
+  - name: lexxy highlight with style
+    body: '<p><mark style="color: var(--highlight-1); background-color: var(--highlight-bg-2);">colored</mark> <span style="color: red; background-image: url(javascript:alert(1))">red</span></p>'
+  - name: lexxy highlight class
+    body: '<p><mark class="lexxy-content__highlight" style="background-color: rgb(255, 240, 0)">hi</mark></p>'
+  - name: lexxy inline code
+    body: '<p>Run <code>bin/rails db:migrate</code> now</p>'
+  - name: lexxy code block
+    body: '<pre data-language="javascript">const a = 1;<br>if (a &lt; 2) { console.log("&amp;") }</pre>'
+  - name: lexxy code block plain
+    body: "<pre data-language=\"plain\" data-highlight-language=\"plain\">line 1\n  line 2</pre>"
+  - name: lexxy heading
+    body: '<h1>Heading</h1><h2>Sub</h2><h3>Third</h3><p>Body</p>'
+  - name: lexxy blockquote
+    body: '<blockquote>Quoted text</blockquote><p>After</p>'
+  - name: lexxy empty blockquote
+    body: '<blockquote><br></blockquote>'
+  - name: lexxy bullet list
+    body: '<ul><li>One</li><li>Two</li><li>Three</li></ul>'
+  - name: lexxy numbered list
+    body: '<ol><li>First</li><li>Second</li></ol>'
+  - name: lexxy nested list
+    body: '<ul><li>One<ul><li>Nested a</li><li>Nested b<ol><li>Deep</li></ol></li></ul></li><li>Two</li></ul>'
+  - name: lexxy list with value
+    body: '<ol start="3"><li value="3">Three</li><li value="4">Four</li></ol>'
+  - name: lexxy link
+    body: '<p>See <a href="https://example.com/page?a=1&amp;b=2">the page</a>.</p>'
+  - name: lexxy link with target
+    body: '<p><a href="https://example.com" target="_blank" rel="noopener">x</a></p>'
+  - name: lexxy hr
+    body: '<p>Above</p><hr><p>Below</p>'
+  - name: lexxy table
+    body: '<figure class="lexxy-content__table-wrapper"><table><tbody><tr><th><p>Name</p></th></tr><tr><td><p>Jason</p></td></tr></tbody></table></figure>'
+  - name: lexxy table with colgroup and thead
+    body: '<figure class="lexxy-content__table-wrapper"><table><colgroup><col><col></colgroup><thead><tr><th class="lexxy-content__table-cell--header">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody><tfoot><tr><td>f</td><td>g</td></tr></tfoot></table></figure>'
+  - name: lexxy mention
+    body: '<p>Hey {{mention:david}} how are you?</p>'
+  - name: lexxy two mentions
+    body: '<p>{{mention:david}} and {{mention:jason}} and {{mention:david}}</p>'
+  - name: lexxy mention html name
+    body: '<p>Hi {{mention:mallory}}</p>'
+  - name: lexxy mention quote name
+    body: '<p>{{mention:obrien}}</p>'
+  - name: lexxy embed solo
+    body: '<p><a href="https://basecamp.com/">https://basecamp.com/</a></p><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;actiontext-opengraph-embed&gt;&lt;div class=&quot;og-embed gap&quot;&gt;&lt;div class=&quot;og-embed__content&quot;&gt;&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;https://basecamp.com/&quot;&gt;Basecamp&lt;/a&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__description&quot;&gt;Project management&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__image&quot;&gt;&lt;img src=&quot;https://basecamp.com/og.png&quot; class=&quot;image center&quot; alt=&quot;&quot;&gt;&lt;/div&gt;&lt;/div&gt;&lt;/actiontext-opengraph-embed&gt;"></action-text-attachment>'
+  - name: lexxy embed with text
+    body: '<p>Look at this <a href="https://basecamp.com/">https://basecamp.com/</a></p><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;actiontext-opengraph-embed&gt;&lt;div class=&quot;og-embed gap&quot;&gt;&lt;div class=&quot;og-embed__content&quot;&gt;&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;https://basecamp.com/&quot;&gt;Basecamp&lt;/a&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__description&quot;&gt;Project management&lt;/div&gt;&lt;/div&gt;&lt;/div&gt;&lt;/actiontext-opengraph-embed&gt;"></action-text-attachment>'
+  - name: lexxy tweet avatar
+    body: '<p><a href="https://twitter.com/x/status/1">https://twitter.com/x/status/1</a></p><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;actiontext-opengraph-embed&gt;&lt;div class=&quot;og-embed gap&quot;&gt;&lt;div class=&quot;og-embed__content&quot;&gt;&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;https://twitter.com/x/status/1&quot;&gt;Tweet&lt;/a&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__description&quot;&gt;desc&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__image&quot;&gt;&lt;img src=&quot;https://pbs.twimg.com/profile_images/x.jpg&quot; class=&quot;image center&quot; alt=&quot;&quot; /&gt;&lt;/div&gt;&lt;/div&gt;&lt;/actiontext-opengraph-embed&gt;"></action-text-attachment>'
+  - name: lexxy hand written embed
+    body: '<p><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="https://example.com/image.png" content="&lt;actiontext-opengraph-embed data-controller=&quot;pwn&quot; data-action=&quot;click-&gt;pwn#run&quot;&gt; &lt;div class=&quot;og-embed&quot;&gt;&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;/rooms/1&quot;&gt;Free cookies&lt;/a&gt;&lt;/div&gt; &lt;div class=&quot;og-embed__image&quot;&gt;&lt;img src=&quot;/rooms/1/avatar&quot; data-action=&quot;load-&gt;pwn#run&quot;&gt;&lt;/div&gt;&lt;/div&gt; &lt;/actiontext-opengraph-embed&gt;"></action-text-attachment></p>'
+  - name: lexxy embed long title
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;https://example.com/&quot;&gt;AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&lt;/a&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__description&quot;&gt;  spaced   &lt;/div&gt;"></action-text-attachment>'
+  - name: lexxy embed without title
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;div class=&quot;og-embed__image&quot;&gt;&lt;img src=&quot;https://example.com/i.png&quot;&gt;&lt;/div&gt;"></action-text-attachment>'
+  - name: lexxy embed title without link
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;div class=&quot;og-embed__title&quot;&gt;  Just a title &lt;/div&gt;"></action-text-attachment>'
+  - name: lexxy embed html in details
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" content="&lt;div class=&quot;og-embed__title&quot;&gt;&lt;a href=&quot;https://example.com/page&quot;&gt;&amp;lt;b&amp;gt;Title&amp;lt;/b&amp;gt;&lt;/a&gt;&lt;/div&gt;&lt;div class=&quot;og-embed__description&quot;&gt;&amp;lt;img src=x onerror=alert(1)&amp;gt;&lt;/div&gt;"></action-text-attachment>'
+  - name: lexxy line breaks
+    body: '<p>one<br>two<br><br>three</p>'
+  - name: lexxy everything
+    body: '<h1>Title</h1><p>Intro <strong>bold</strong>, <em>it</em>, <s>s</s>, <u>u</u>, <code>c</code>, <a href="http://example.com">link</a>, {{mention:kevin}}</p><blockquote>quote</blockquote><ul><li>a</li><li>b</li></ul><ol><li>1</li></ol><pre data-language="ruby">puts 1</pre><hr>'
+
+  # --- Trix-era bodies ----------------------------------------------------------------------
+  - name: trix plain div
+    body: '<div>Hello from Trix</div>'
+  - name: trix formatting
+    body: "<div>Hello <strong>bold</strong> <em>it</em> <del>gone</del> <a href=\"https://example.com/\">link</a><br>second line</div><h1>Heading</h1><blockquote>quoted</blockquote><pre>line 1\nline 2</pre><ul><li>one</li></ul><ol><li>first</li></ol>"
+  - name: trix mention
+    body: '<div>Hey <action-text-attachment sgid="{{sgid:david}}" content-type="application/vnd.campfire.mention"></action-text-attachment></div>'
+  - name: trix mention octet stream
+    body: '<div>Hey <action-text-attachment sgid="{{sgid:david}}" content-type="application/octet-stream"></action-text-attachment></div>'
+  - name: trix mention with stale content
+    body: '<div>Hey <action-text-attachment sgid="{{sgid:david}}" content-type="application/vnd.campfire.mention" content="&lt;span class=&quot;mention&quot;&gt;Old name&lt;/span&gt;"><span>inner junk</span></action-text-attachment></div>'
+  - name: trix unfurl basecamp solo
+    body: "<div>https://basecamp.com/<action-text-attachment content-type=\"application/vnd.actiontext.opengraph-embed\" url=\"https://basecamp.com/assets/general/opengraph.png\" href=\"https://basecamp.com/\" filename=\"Project management software, online collaboration\" caption=\"Trusted by millions, Basecamp puts everything you need to get work done in one place. It’s the calm, organized way to manage projects, work with clients, and communicate company-wide.\" content=\"<actiontext-opengraph-embed>\n      <div class=&quot;og-embed&quot;>\n        <div class=&quot;og-embed__content&quot;>\n          <div class=&quot;og-embed__title&quot;>Project management software, online collaboration</div>\n        </div>\n      </div>\n    </actiontext-opengraph-embed>\"></action-text-attachment>\n</div>"
+  - name: trix unfurl with text
+    body: "<div>Hello https://basecamp.com/<action-text-attachment content-type=\"application/vnd.actiontext.opengraph-embed\" url=\"https://basecamp.com/assets/general/opengraph.png\" href=\"https://basecamp.com/\" filename=\"Basecamp\" caption=\"Calm\"></action-text-attachment></div>"
+  - name: trix tweet avatar
+    body: '<div>https://twitter.com/37signals/status/1750290547908952568<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="https://pbs.twimg.com/profile_images/1671940407633010689/9P5gi6LF_200x200.jpg" href="https://twitter.com/37signals/status/1750290547908952568" filename="37signals (@37signals)" caption="We''re back up on all apps, everyone."></action-text-attachment></div>'
+  - name: trix tweet content image
+    body: '<div>https://twitter.com/dhh/status/1748445489648050505<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="https://pbs.twimg.com/media/GEO5l04bsAA9f6H.jpg" href="https://twitter.com/dhh/status/1748445489648050505" filename="DHH (@dhh)" caption="We pay homage to the glorious MIT License!"></action-text-attachment></div>'
+  - name: trix x.com unfurl
+    body: '<div>https://x.com/dhh/status/1752476663303323939<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="https://pbs.twimg.com/ext_tw_video_thumb/1752476502791503873/pu/img/WEAqUgarUxWjPNHD.jpg" href="https://twitter.com/dhh/status/1752476663303323939" filename="DHH (@dhh)" caption="Extension points"></action-text-attachment></div>'
+  - name: trix x.com unfurl with query
+    body: '<div>https://x.com/dhh/status/1752476663303323939?s=20<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="https://pbs.twimg.com/ext_tw_video_thumb/1/pu/img/W.jpg" href="https://twitter.com/dhh/status/1752476663303323939" filename="DHH (@dhh)" caption="Extension points"></action-text-attachment></div>'
+  - name: trix nested divs unfurl
+    body: '<div><div>https://basecamp.com/</div><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://basecamp.com/" filename="Basecamp"></action-text-attachment></div>'
+  - name: trix two unfurls
+    body: '<div>https://basecamp.com/<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://basecamp.com/" filename="A"></action-text-attachment><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://basecamp.com/" filename="B"></action-text-attachment></div>'
+  - name: trix figure attachment
+    body: '<div>Before<figure data-trix-attachment="{&quot;sgid&quot;:&quot;{{sgid:jason}}&quot;,&quot;contentType&quot;:&quot;application/vnd.campfire.mention&quot;}" data-trix-attributes="{&quot;caption&quot;:&quot;cap&quot;}"><figcaption>Jason</figcaption></figure>After</div>'
+  - name: trix figure attachment typed values
+    body: '<div><figure data-trix-attachment="{&quot;contentType&quot;:&quot;image/png&quot;,&quot;url&quot;:&quot;https://example.com/a.png&quot;,&quot;width&quot;:100,&quot;height&quot;:50.5,&quot;previewable&quot;:true,&quot;filesize&quot;:null}"></figure></div>'
+  - name: trix figure attachment empty json
+    body: '<div>a<figure data-trix-attachment="{}">x</figure>b</div>'
+  - name: trix figure attachment broken json
+    body: '<div>a<figure data-trix-attachment="{nope">x</figure>b</div>'
+  - name: trix figure attachment array json
+    body: '<div>a<figure data-trix-attachment="[1,2]">x</figure>b</div>'
+  - name: trix figure attachment json comment
+    body: '<div><figure data-trix-attachment="{&quot;url&quot;:&quot;https://example.com/v.mp4&quot;/* c */,&quot;contentType&quot;:&quot;video/mp4&quot;}"></figure></div>'
+  - name: attachment gallery
+    body: '<div><action-text-attachment presentation="gallery" sgid="{{sgid:david}}"></action-text-attachment> <action-text-attachment presentation="gallery" sgid="{{sgid:jason}}"></action-text-attachment></div>'
+  - name: attachment gallery of missing
+    body: '<div class="x"><action-text-attachment presentation="gallery"></action-text-attachment><action-text-attachment presentation="gallery" caption="c"></action-text-attachment></div>'
+  - name: not a gallery
+    body: '<div><action-text-attachment presentation="gallery" sgid="{{sgid:david}}"></action-text-attachment>text<action-text-attachment presentation="gallery" sgid="{{sgid:jason}}"></action-text-attachment></div>'
+
+  # --- Other attachables ---------------------------------------------------------------------
+  - name: content attachment
+    body: '<p><action-text-attachment content-type="text/html" content="&lt;p&gt;Hi &lt;script&gt;alert(1)&lt;/script&gt;&lt;b onclick=x&gt;there&lt;/b&gt;&lt;/p&gt;"></action-text-attachment></p>'
+  - name: content attachment blank content
+    body: '<p><action-text-attachment content-type="text/html" content="   "></action-text-attachment></p>'
+  - name: content attachment scripts only
+    body: '<p><action-text-attachment content-type="text/html" content="&lt;script&gt;&lt;/script&gt;"></action-text-attachment></p>'
+  - name: content attachment nested mention
+    body: '<action-text-attachment content-type="text/html" content="&lt;div&gt;x &lt;action-text-attachment sgid=&quot;{{sgid:kevin}}&quot;&gt;&lt;/action-text-attachment&gt;&lt;/div&gt;"></action-text-attachment>'
+  - name: remote image
+    body: '<p><action-text-attachment content-type="image/png" url="https://example.com/cat.png" width="10" height="20" caption="A cat"></action-text-attachment></p>'
+  - name: remote image no caption
+    body: '<action-text-attachment content-type="image" url="https://example.com/cat.png"></action-text-attachment>'
+  - name: remote image javascript url
+    body: '<action-text-attachment content-type="image/png" url="javascript:alert(1)"></action-text-attachment>'
+  - name: remote image rooted path
+    body: '<action-text-attachment content-type="image/png" url="/rooms/1/avatar"></action-text-attachment>'
+  - name: remote video
+    body: '<action-text-attachment content-type="video/mp4" url="https://example.com/v.mp4" width="640" filename="v.mp4"></action-text-attachment>'
+  - name: remote video caption
+    body: '<action-text-attachment content-type="video/webm" url="https://example.com/v.webm" caption="Watch"></action-text-attachment>'
+  - name: missing attachable
+    body: '<p>Before <action-text-attachment sgid="nope"></action-text-attachment> after</p>'
+  - name: missing attachable with caption
+    body: '<p><action-text-attachment content-type="application/pdf" caption="Report"></action-text-attachment></p>'
+  - name: attachment without attributes
+    body: '<p>x<action-text-attachment></action-text-attachment>y</p>'
+  - name: attachment with empty sgid
+    body: '<p><action-text-attachment sgid=""></action-text-attachment></p>'
+  - name: attachment inside table cell
+    body: '<table><tr><td>{{mention:david}}</td></tr></table>'
+  - name: attachment in svg
+    body: '<p>x</p><svg><action-text-attachment sgid="{{sgid:david}}"></action-text-attachment></svg>'
+
+  # --- SGID variants -------------------------------------------------------------------------
+  - name: sgid valid
+    body: '<p><action-text-attachment sgid="{{sgid:jason}}" content-type="application/vnd.campfire.mention"></action-text-attachment></p>'
+  - name: sgid tampered user
+    body: '<p><action-text-attachment sgid="{{tampered:jason}}" content-type="application/vnd.campfire.mention"></action-text-attachment></p>'
+  - name: sgid rails 7 marshal
+    body: '<p><action-text-attachment sgid="{{rails7:kevin}}" content-type="application/vnd.campfire.mention"></action-text-attachment></p>'
+  - name: sgid expired
+    body: '<p><action-text-attachment sgid="{{expired:david}}"></action-text-attachment></p>'
+  - name: sgid cross purpose
+    body: '<p><action-text-attachment sgid="{{cross_purpose:david}}"></action-text-attachment></p>'
+  - name: sgid tampered room
+    body: '<p><action-text-attachment sgid="{{tampered_room}}"></action-text-attachment></p>'
+  - name: sgid deleted user
+    body: '<p><action-text-attachment sgid="{{deleted_sgid}}"></action-text-attachment></p>'
+  - name: sgid not base64
+    body: '<p><action-text-attachment sgid="!!!--abc"></action-text-attachment></p>'
+  - name: sgid base64 not json
+    body: '<p><action-text-attachment sgid="aGVsbG8=--abc"></action-text-attachment></p>'
+  - name: sgid json array
+    body: '<p><action-text-attachment sgid="WzFd--abc"></action-text-attachment></p>'
+  - name: sgid json without rails key
+    body: '<p><action-text-attachment sgid="e30=--abc"></action-text-attachment></p>'
+  - name: sgid leading separator
+    body: '<p><action-text-attachment sgid="--abc"></action-text-attachment></p>'
+  - name: sgid only separators
+    body: '<p><action-text-attachment sgid="----"></action-text-attachment></p>'
+  - name: sgid urlsafe unpadded
+    body: '<p><action-text-attachment sgid="eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvMSJ9fQ--x"></action-text-attachment></p>'
+  - name: sgid numeric data
+    body: '<p><action-text-attachment sgid="eyJfcmFpbHMiOnsiZGF0YSI6MX19--x"></action-text-attachment></p>'
+
+  # --- OWASP XSS filter evasion cheat sheet ----------------------------------------------------
+  - name: xss script tag
+    body: '<script>alert(''XSS'')</script>'
+  - name: xss script src
+    body: '<SCRIPT SRC=https://cdn.jsdelivr.net/gh/Moksh45/host-xss.rocks/index.js></SCRIPT>'
+  - name: xss polyglot
+    body: "javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/+alert(42);//'>"
+  - name: xss img javascript
+    body: '<IMG SRC="javascript:alert(''XSS'');">'
+  - name: xss img no quotes
+    body: '<IMG SRC=javascript:alert(''XSS'')>'
+  - name: xss img case
+    body: '<IMG SRC=JaVaScRiPt:alert(''XSS'')>'
+  - name: xss html entities
+    body: '<IMG SRC=javascript:alert(&quot;XSS&quot;)>'
+  - name: xss grave accent
+    body: '<IMG SRC=`javascript:alert("RSnake says, ''XSS''")`>'
+  - name: xss malformed a
+    body: '<a onmouseover="alert(document.cookie)">xxs link</a>'
+  - name: xss malformed a no quotes
+    body: '<a onmouseover=alert(document.cookie)>xxs link</a>'
+  - name: xss malformed img
+    body: '<IMG """><SCRIPT>alert("XSS")</SCRIPT>"\>'
+  - name: xss fromcharcode
+    body: '<IMG SRC=javascript:alert(String.fromCharCode(88,83,83))>'
+  - name: xss default src
+    body: '<IMG SRC=# onmouseover="alert(''xxs'')">'
+  - name: xss onerror
+    body: '<IMG SRC=/ onerror="alert(String.fromCharCode(88,83,83))"></img>'
+  - name: xss decimal entities
+    body: '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#97;&#108;&#101;&#114;&#116;&#40;&#39;&#88;&#83;&#83;&#39;&#41;">Click Me!</a>'
+  - name: xss decimal entities no semicolon
+    body: '<a href="&#0000106&#0000097&#0000118&#0000097&#0000115&#0000099&#0000114&#0000105&#0000112&#0000116&#0000058&#0000097&#0000108&#0000101&#0000114&#0000116&#0000040&#0000039&#0000088&#0000083&#0000083&#0000039&#0000041">Click Me</a>'
+  - name: xss hex entities
+    body: '<a href="&#x6A&#x61&#x76&#x61&#x73&#x63&#x72&#x69&#x70&#x74&#x3A&#x61&#x6C&#x65&#x72&#x74&#x28&#x27&#x58&#x53&#x53&#x27&#x29">Click Me</a>'
+  - name: xss embedded tab
+    body: "<a href=\"jav\tascript:alert('XSS');\">Click Me</a>"
+  - name: xss embedded encoded tab
+    body: '<a href="jav&#x09;ascript:alert(''XSS'');">Click Me</a>'
+  - name: xss embedded newline
+    body: '<a href="jav&#x0A;ascript:alert(''XSS'');">Click Me</a>'
+  - name: xss embedded carriage return
+    body: '<a href="jav&#x0D;ascript:alert(''XSS'');">Click Me</a>'
+  - name: xss null char
+    body: "<a href=\"java\u0000script:alert('XSS')\">x</a>"
+  - name: xss spaces and meta chars
+    body: '<a href=" &#14;  javascript:alert(''XSS'');">Click Me</a>'
+  - name: xss non alpha non digit
+    body: '<SCRIPT/XSS SRC="http://xss.rocks/xss.js"></SCRIPT>'
+  - name: xss body onload
+    body: '<BODY onload!#$%&()*~+-_.,:;?@[/|\]^`=alert("XSS")>'
+  - name: xss extraneous brackets
+    body: '<<SCRIPT>alert("XSS");//\<</SCRIPT>'
+  - name: xss no closing script
+    body: '<SCRIPT SRC=http://xss.rocks/xss.js?< B >'
+  - name: xss protocol resolution
+    body: '<SCRIPT SRC=//xss.rocks/.j>'
+  - name: xss half open img
+    body: '<IMG SRC="`<javascript:alert>`(''XSS'')"'
+  - name: xss title escape
+    body: '</TITLE><SCRIPT>alert("XSS");</SCRIPT>'
+  - name: xss input image
+    body: '<INPUT TYPE="IMAGE" SRC="javascript:alert(''XSS'');">'
+  - name: xss body background
+    body: '<BODY BACKGROUND="javascript:alert(''XSS'')">'
+  - name: xss img dynsrc
+    body: '<IMG DYNSRC="javascript:alert(''XSS'')">'
+  - name: xss style list
+    body: '<STYLE>li {list-style-image: url("javascript:alert(''XSS'')");}</STYLE><UL><LI>XSS</br>'
+  - name: xss svg onload
+    body: '<svg/onload=alert(''XSS'')>'
+  - name: xss svg script
+    body: '<svg><script>alert(1)</script></svg>'
+  - name: xss svg a xlink
+    body: '<svg><a xlink:href="javascript:alert(1)"><text x="20" y="20">XSS</text></a></svg>'
+  - name: xss math
+    body: '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)></style></mglyph></table></mtext></math>'
+  - name: xss math mutation
+    body: '<math><mi><mglyph><svg><mtext><textarea><path id="</textarea><img onerror=alert(1) src=1>"></path></textarea></mtext></svg></mglyph></mi></math>'
+  - name: xss noscript mutation
+    body: '<noscript><p title="</noscript><img src=x onerror=alert(1)>"></noscript>'
+  - name: xss iframe
+    body: '<IFRAME SRC="javascript:alert(''XSS'');"></IFRAME>'
+  - name: xss iframe event
+    body: '<IFRAME SRC=# onmouseover="alert(document.cookie)"></IFRAME>'
+  - name: xss frameset
+    body: '<FRAMESET><FRAME SRC="javascript:alert(''XSS'');"></FRAMESET>'
+  - name: xss table background
+    body: '<TABLE BACKGROUND="javascript:alert(''XSS'')"><TD BACKGROUND="javascript:alert(''XSS'')">x</TD></TABLE>'
+  - name: xss div style url
+    body: '<DIV STYLE="background-image: url(javascript:alert(''XSS''))">x</DIV>'
+  - name: xss div style expression
+    body: '<DIV STYLE="width: expression(alert(''XSS''));">x</DIV>'
+  - name: xss meta refresh
+    body: '<META HTTP-EQUIV="refresh" CONTENT="0;url=javascript:alert(''XSS'');">'
+  - name: xss base href
+    body: '<BASE HREF="javascript:alert(''XSS'');//">'
+  - name: xss object
+    body: '<OBJECT TYPE="text/x-scriptlet" DATA="http://xss.rocks/scriptlet.html"></OBJECT>'
+  - name: xss embed
+    body: '<EMBED SRC="data:image/svg+xml;base64,PHN2ZyB4bWxuczpzdmc9Imh0dH A6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcv MjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hs aW5rIiB2ZXJzaW9uPSIxLjAiIHg9IjAiIHk9IjAiIHdpZHRoPSIxOTQiIGhlaWdodD0iMjAw IiBpZD0ieHNzIj48c2NyaXB0IHR5cGU9InRleHQvZWNtYXNjcmlwdCI+YWxlcnQoIlh TUyIpOzwvc2NyaXB0Pjwvc3ZnPg==" type="image/svg+xml" AllowScriptAccess="always"></EMBED>'
+  - name: xss data uri link
+    body: '<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">x</a>'
+  - name: xss data uri image allowed
+    body: '<a href="data:image/png;base64,iVBORw0KGgo=">png</a>'
+  - name: xss vbscript
+    body: '<a href="vbscript:msgbox(1)">x</a>'
+  - name: xss colon entity
+    body: '<a href="javascript&colon;alert(1)">x</a>'
+  - name: xss percent encoded colon
+    body: '<a href="javascript%3Aalert(1)">x</a>'
+  - name: xss comment conditional
+    body: '<!--[if gte IE 4]><SCRIPT>alert(''XSS'');</SCRIPT><![endif]-->'
+  - name: xss cdata
+    body: '<![CDATA[<script>alert(1)</script>]]>'
+  - name: xss xml namespace
+    body: '<HTML xmlns:xss><?import namespace="xss" implementation="http://xss.rocks/xss.htc"><xss:xss>XSS</xss:xss></HTML>'
+  - name: xss event on allowed tags
+    body: '<p onclick="x()">p</p><div onmouseover="y()" class="c">d</div><span onfocus=z() tabindex=1>s</span><strong style="x" id="i">b</strong>'
+  - name: xss form action
+    body: '<form action="javascript:alert(1)"><button formaction="javascript:alert(2)">b</button><input value="v"></form>'
+  - name: xss template
+    body: '<template><script>alert(1)</script></template><p>ok</p>'
+  - name: xss textarea breakout
+    body: '<textarea></textarea><script>alert(1)</script></textarea>'
+  - name: xss attribute with gt and url
+    body: '<span title="a>b http://example.com/x">t</span>'
+  - name: xss attribute newline and url
+    body: "<span title=\"line one\nhttp://example.com/y\">t</span> tail"
+  - name: xss javascript in autolink text
+    body: '<p>javascript:alert(1) and http://example.com/?q=<b>x</b></p>'
+  - name: xss link data attributes
+    body: '<a href="/x" data-turbo-method="delete" data-controller="evil">x</a>'
+  - name: xss img in content attr
+    body: '<action-text-attachment content-type="text/html" content="&lt;img src=x onerror=alert(1)&gt;&lt;a href=&quot;javascript:1&quot;&gt;a&lt;/a&gt;"></action-text-attachment>'
+  - name: xss mention content payload
+    body: '<action-text-attachment sgid="{{sgid:david}}" content-type="application/vnd.campfire.mention" content="&lt;script&gt;alert(1)&lt;/script&gt;&lt;img src=x onerror=alert(2)&gt;"></action-text-attachment>'
+  - name: xss src srcset
+    body: '<p><img srcset="javascript:alert(1)"><video src="javascript:alert(1)" poster="javascript:alert(2)"></video></p>'
+  - name: xss href whitespace padding
+    body: '<a href="   javascript:alert(1)">x</a><a href="&#x20;javascript:alert(1)">y</a>'
+  - name: xss href unicode escape
+    body: '<a href="javascript:alert(1)">x</a>'
+  - name: xss style tag in allowed
+    body: '<div><style>body{background:red}</style>visible</div>'
+  - name: xss link quotes in href
+    body: '<a href=''https://example.com/"onmouseover="alert(1)''>q</a>'
+  - name: xss name attribute
+    body: '<a name=''a b"c''>n</a>'
+
+  # --- Malformed nesting ---------------------------------------------------------------------
+  - name: malformed unclosed tags
+    body: '<p><b>bold <i>both</p><p>next'
+  - name: malformed misnested
+    body: '<b><i>x</b>y</i>'
+  - name: malformed stray end tags
+    body: '</div></p>text</span></b>'
+  - name: malformed table soup
+    body: '<table><tr><td>a<td>b</table>after<td>c'
+  - name: malformed foster parenting
+    body: '<table><b>bold</b><tr><td>cell</td></tr>text</table>'
+  - name: malformed p in p
+    body: '<p>one<p>two<div>three</div></p>'
+  - name: malformed anchor in anchor
+    body: '<a href="https://a.com">a<a href="https://b.com">b</a></a>'
+  - name: malformed list items
+    body: '<ul><li>a<li>b<ol><li>c</ul>d'
+  - name: malformed headings
+    body: '<h1>one<h2>two</h1>three</h2>'
+  - name: malformed attributes
+    body: '<a href="https://example.com" href="https://evil.com" HREF=x title=unquoted title2 = spaced >x</a>'
+  - name: malformed comment
+    body: 'a<!-- unclosed comment <b>x</b>'
+  - name: malformed bogus comment
+    body: 'a<!x>b<?pi?>c</ >d'
+  - name: malformed select
+    body: '<select><option>x<b>y</b></option></select>z'
+  - name: malformed pre newline
+    body: "<pre>\n\nfirst</pre><textarea>\nt</textarea>"
+  - name: malformed deep nesting ok
+    body: 'DEEP_400'
+  - name: malformed deep nesting too deep
+    body: 'DEEP_401'
+  - name: malformed many attributes
+    body: 'ATTRS_401'
+  - name: malformed html document
+    body: '<!DOCTYPE html><html><head><title>t</title></head><body><p>b</p></body></html>'
+  - name: malformed nested formatting
+    body: '<b><b><b><b><b>deep</b></b></b></b></b><i><i>x'
+  - name: malformed div in span
+    body: '<span>a<div>b</div>c</span>'
+  - name: malformed figure
+    body: '<figure><figcaption>cap</figcaption><img src="https://example.com/x.png"></figure>'
+  - name: malformed attachment children
+    body: '<action-text-attachment sgid="{{sgid:david}}"><script>x</script><p>kept?</p></action-text-attachment>'
+
+  # --- Unicode edge cases --------------------------------------------------------------------
+  - name: unicode rtl
+    body: '<p>שלום עולם مرحبا</p>'
+  - name: unicode zero width
+    body: "<p>zero​width‍joiner﻿bom</p>"
+  - name: unicode combining
+    body: '<p>e&#x301; ñ Å</p>'
+  - name: unicode nbsp
+    body: "<p>a&nbsp;b c  d</p>"
+  - name: unicode emoji zwj
+    body: '<p>👩‍👩‍👧‍👦 🏳️‍🌈 👍🏽</p>'
+  - name: unicode emoji only html
+    body: '<p>🔥💯</p>'
+  - name: unicode crlf
+    body: "<p>line1\r\nline2\rline3</p>\r\n<p>x</p>"
+  - name: unicode control chars
+    body: "<p>bell\u0007 esc\u001B del\u007F c1\u0085</p>"
+  - name: unicode nul
+    body: "<p>a\u0000b&#0;c</p>"
+  - name: unicode line separators
+    body: "<p>a b c http://example.com/ x</p>"
+  - name: unicode astral
+    body: '<p>𝕳𝖊𝖑𝖑𝖔 𠜎𠜱 &#x1F600; &#128512;</p>'
+  - name: unicode invalid char refs
+    body: '<p>&#xD800; &#x110000; &#128; &#x0; &amp;amp; &notin; &notit; &ampx</p>'
+  - name: unicode in urls
+    body: '<p>https://例え.jp/パス and http://example.com/ünïcode</p>'
+  - name: unicode idn link
+    body: '<a href="https://xn--80aswg.xn--p1ai/page">рф</a>'
+  - name: unicode leading whitespace body
+    body: "\n\n  <p>trimmed</p>  \n"
+
+  # --- auto_link -----------------------------------------------------------------------------
+  - name: autolink plain url
+    body: 'Visit https://example.com/path today'
+  - name: autolink www
+    body: 'see www.example.com and www.a'
+  - name: autolink trailing punctuation
+    body: 'Go to https://example.com/page. Or (https://example.com/wiki_(foo)), or https://example.com/x!?'
+  - name: autolink brackets
+    body: "[https://example.com/a] {https://example.com/b} (https://example.com/c)"
+  - name: autolink apostrophe
+    body: 'it''s at https://example.com/it''s'' ok'
+  - name: autolink ampersands
+    body: 'https://example.com/?a=1&b=2&c=3;'
+  - name: autolink trailing gt
+    body: '<p>https://example.com/&gt;</p>'
+  - name: autolink trailing lt
+    body: '<p>https://example.com/&lt;b</p>'
+  - name: autolink existing link
+    body: '<p><a href="https://example.com">https://example.com</a> and https://other.com</p>'
+  - name: autolink existing link multiline
+    body: "<p><a href=\"https://example.com\">first\nhttps://inside.com</a> https://outside.com</p>"
+  - name: autolink schemes
+    body: 'ftp://files.example.com/x irc://irc.example.com mailto://x file:///etc/passwd ssh://host javascript://comment%0Aalert(1)'
+  - name: autolink uppercase scheme
+    body: 'HTTPS://EXAMPLE.COM/UP WWW.EXAMPLE.COM'
+  - name: autolink email
+    body: 'mail me at david@example.com or o''neil+tag@sub.example.co.uk.'
+  - name: autolink email in link
+    body: '<a href="mailto:x@example.com">x@example.com</a> y@example.com'
+  - name: autolink email and url
+    body: 'https://user@example.com/path and me@example.com'
+  - name: autolink email weird
+    body: 'a.@b.com .x@y.co -a@b-c.d _@_._ x@y'
+  - name: autolink url in code
+    body: '<pre>https://example.com/in-pre</pre><code>https://example.com/in-code</code>'
+  - name: autolink url with quotes
+    body: '<p>https://example.com/"quoted" and https://example.com/''single''</p>'
+  - name: autolink url with entity
+    body: '<p>https://example.com/?q=a&amp;b=%20c</p>'
+  - name: autolink url next to mention
+    body: '<p>{{mention:david}}https://example.com/after</p>'
+  - name: autolink nbsp separated
+    body: "<p>https://example.com/a next</p>"
+
+  # --- Opengraph embed URL constraints -------------------------------------------------------
+  - name: og self host link
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://once.campfire.test/rooms/1" url="https://ONCE.Campfire.Test./x.png" filename="Self"></action-text-attachment>'
+  - name: og escaped host
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://%6fnce.campfire.test/rooms/1" url="https://%77ww.example.com/x.png" filename="Escaped"></action-text-attachment>'
+  - name: og bare addresses
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="http://127.0.0.1/rooms/1" url="http://0x7f.0.0.1/x.png" filename="IP"></action-text-attachment><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="http://1.2.3.0xff/x" url="http://[::1]/x.png" filename="IP2"></action-text-attachment>'
+  - name: og relative and scheme relative
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="/rooms/1" url="//example.com/x.png" filename="Rel"></action-text-attachment>'
+  - name: og javascript
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="javascript:alert(1)" url="data:image/svg+xml;base64,PHN2Zy8+" filename="JS"></action-text-attachment>'
+  - name: og malformed urls
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https:/rooms/1" url="http://exa mple.com/ " filename="M"></action-text-attachment><action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https:rooms/1" url="http://:80/x" filename="N"></action-text-attachment>'
+  - name: og mailto raises
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="mailto:nobody" filename="Mail"></action-text-attachment>'
+  - name: og dots host raises
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://.../x" filename="Dots"></action-text-attachment>'
+  - name: og punycode
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://xn--80aswg.xn--p1ai/page" url="https://xn--80aswg.xn--p1ai/image.png" filename="Punycode"></action-text-attachment>'
+  - name: og other host
+    host: example.com
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://example.com/page" url="https://cdn.example.com/x.png" filename="Other host"></action-text-attachment>'
+  - name: og fuzzy content type
+    body: '<action-text-attachment content-type="xapplication/vndXactiontextYopengraph-embedx" href="https://example.com/" filename="Fuzzy"></action-text-attachment>'
+  - name: og with sgid
+    body: '<action-text-attachment sgid="{{sgid:david}}" content-type="application/vnd.actiontext.opengraph-embed" href="https://example.com/" filename="Both"></action-text-attachment>'
+  - name: og filename blank uses content
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" filename="  " href="https://example.com/" content="&lt;div class=&quot;og-embed__title&quot;&gt;From content&lt;/div&gt;"></action-text-attachment>'
+  - name: og href with quotes and spaces
+    body: '<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" href="https://example.com/a&quot;b" url="https://example.com/i.png?x=&lt;y&gt;" filename="Q&quot;uote &amp; &lt;tag&gt;" caption="Cap &lt;b&gt;"></action-text-attachment>'

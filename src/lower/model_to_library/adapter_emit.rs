@@ -95,6 +95,9 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_find_by_id"),
         receiver: MethodReceiver::Class,
@@ -125,6 +128,9 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_all"),
         receiver: MethodReceiver::Class,
@@ -168,6 +174,9 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_last"),
         receiver: MethodReceiver::Class,
@@ -278,6 +287,9 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     };
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_insert"),
         receiver: MethodReceiver::Instance,
@@ -317,6 +329,9 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_update"),
         receiver: MethodReceiver::Instance,
@@ -341,6 +356,9 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_delete"),
         receiver: MethodReceiver::Instance,
@@ -369,6 +387,9 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_count"),
         receiver: MethodReceiver::Class,
@@ -400,6 +421,9 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_exists_by_id?"),
         receiver: MethodReceiver::Class,
@@ -437,7 +461,7 @@ fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
                 Span::synthetic(),
                 ExprNode::Lit {
                     value: Literal::Str {
-                        value: format!("DELETE FROM {}", table.name.as_str()),
+                        value: format!("DELETE FROM {}", crate::naming::sql_ident(table.name.as_str())),
                     },
                 },
             )],
@@ -456,6 +480,9 @@ fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("delete_all"),
         receiver: MethodReceiver::Class,
@@ -478,6 +505,9 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
     });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_truncate"),
         receiver: MethodReceiver::Class,
@@ -552,8 +582,8 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
             arel_lit_str(format!(
                 "SELECT {} FROM {} WHERE {} = ",
                 cols_csv,
-                table.name.as_str(),
-                key.as_str()
+                crate::naming::sql_ident(table.name.as_str()),
+                crate::naming::sql_ident(key.as_str())
             )),
             arel_lit_str("?".to_string()),
             arel_lit_str(" LIMIT 1".to_string()),
@@ -570,8 +600,8 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         let sql_prefix = arel_lit_str(format!(
             "SELECT {} FROM {} WHERE {} = ",
             cols_csv,
-            table.name.as_str(),
-            key.as_str()
+            crate::naming::sql_ident(table.name.as_str()),
+            crate::naming::sql_ident(key.as_str())
         ));
         let escape_id = Expr::new(
             Span::synthetic(),
@@ -651,6 +681,9 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: body_exprs });
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_adapter_reload"),
         receiver: MethodReceiver::Instance,
@@ -683,10 +716,13 @@ fn synth_columns_sql(owner: &ClassId, table: &Table) -> MethodDef {
     let cols_csv: String = table
         .columns
         .iter()
-        .map(|c| format!("{t}.{c} AS {c}", t = table.name.as_str(), c = crate::naming::sql_ident(c.name.as_str())))
+        .map(|c| format!("{t}.{c} AS {c}", t = crate::naming::sql_ident(table.name.as_str()), c = crate::naming::sql_ident(c.name.as_str())))
         .collect::<Vec<_>>()
         .join(", ");
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_columns_sql"),
         receiver: MethodReceiver::Class,
@@ -773,6 +809,9 @@ fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_hydrate_all"),
         receiver: MethodReceiver::Class,

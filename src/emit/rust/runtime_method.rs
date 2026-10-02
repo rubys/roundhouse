@@ -64,7 +64,7 @@ pub fn emit_method(m: &MethodDef) -> String {
 /// Parameter-position type: strings borrowed (`&str`) by idiom.
 fn rust_param_ty(ty: &Ty) -> String {
     match ty {
-        Ty::Str => "&str".to_string(),
+        ty if ty.is_stringish() => "&str".to_string(),
         _ => rust_ty(ty),
     }
 }

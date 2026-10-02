@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Install Playwright's Chromium and its system deps, BOUNDED.
+# Install Playwright's Chromium headless shell and its system deps, BOUNDED.
+# CI consumers use default headless Chromium (no channel or headed launch).
+# Archive READMEs keep their standalone `playwright install chromium` step.
 #
 # `npx playwright install --with-deps` shells out to apt itself and
 # takes no `-o DPkg::Lock::Timeout`, so the flag 49c596a0 put on every
@@ -35,7 +37,7 @@ PER_ATTEMPT="${PLAYWRIGHT_INSTALL_TIMEOUT:-240}"
 "$(dirname "$0")/ci-apt-bound"
 
 for attempt in $(seq 1 "$ATTEMPTS"); do
-    if timeout "$PER_ATTEMPT" npx playwright install --with-deps chromium; then
+    if timeout "$PER_ATTEMPT" npx playwright install --with-deps --only-shell chromium; then
         exit 0
     fi
     echo "::warning::playwright install attempt ${attempt}/${ATTEMPTS} did not finish within ${PER_ATTEMPT}s"

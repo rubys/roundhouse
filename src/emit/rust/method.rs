@@ -269,7 +269,7 @@ fn render_return(m: &MethodDef) -> String {
 /// closures + lifetimes pressure surfaces).
 pub(crate) fn rust_param_ty(ty: &Ty) -> String {
     match ty {
-        Ty::Str | Ty::Sym => "&str".to_string(),
+        ty if ty.is_stringish() => "&str".to_string(),
         other => rust_ty(other),
     }
 }
@@ -856,6 +856,9 @@ mod tests {
 
     fn base_module_method(name: &str) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Class,
@@ -924,6 +927,9 @@ mod tests {
             },
         );
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("foo"),
             receiver: MethodReceiver::Class,
@@ -973,6 +979,9 @@ mod tests {
             effects: EffectSet::pure(),
         };
         let callee = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("each"),
             receiver: MethodReceiver::Class,
@@ -1009,6 +1018,9 @@ mod tests {
             },
         );
         let forwarder = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("forwarder"),
             receiver: MethodReceiver::Class,
@@ -1032,6 +1044,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         block_refine::propagate_one(&mut class);
         let fwd = class
@@ -1057,6 +1070,9 @@ mod tests {
     #[test]
     fn instance_method_with_block_param_no_yield_emits_placeholder() {
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("baz"),
             receiver: MethodReceiver::Instance,

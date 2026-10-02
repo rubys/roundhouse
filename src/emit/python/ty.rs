@@ -15,6 +15,7 @@ pub fn python_ty(ty: &Ty) -> String {
         // `datetime` via an explicit parsing `@property` — see the temporal
         // branch in python/library.rs and `Roundhouse.RhDateTime.parse`.
         Ty::Time => "datetime.datetime".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("python"),
         Ty::Nil => "None".to_string(),
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching
@@ -59,4 +60,3 @@ pub fn python_ty(ty: &Ty) -> String {
         Ty::Bottom => "Never".to_string(),
     }
 }
-

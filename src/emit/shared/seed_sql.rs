@@ -59,6 +59,7 @@
 use std::fmt::Write;
 
 use crate::app::App;
+use crate::dialect::Model;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::schema::Schema;
 
@@ -93,7 +94,7 @@ pub fn render_schema_only_sql(app: &App) -> Option<String> {
          -- `sqlite3 <db> < db/seed.sql` creates the tables.\n",
     );
     for stmt in stmts {
-        out.push_str(&collapse_ws(&stmt));
+        out.push_str(&stmt);
         out.push_str(";\n");
     }
     Some(out)
@@ -108,7 +109,7 @@ pub fn render_seed_sql(app: &App) -> Option<String> {
     // article.id, …)`) on the way out and leaves `app.seeds` untouched.
     // Interpreting the raw form would decline on every association row.
     let seeds = crate::lower::seeds_to_library::rewrite_assoc_create(app.seeds.as_ref()?);
-    let inserts = Interp::new(&app.schema).run(&seeds)?;
+    let inserts = Interp::new(&app.schema, &app.models).run(&seeds)?;
     if inserts.is_empty() {
         return None;
     }
@@ -124,10 +125,8 @@ pub fn render_seed_sql(app: &App) -> Option<String> {
          -- row, in creation order, so ordering by them is deterministic.\n",
     );
     for stmt in render_schema_statements(&app.schema) {
-        // One `;`-terminated line per statement — this file is piped to
-        // `sqlite3`, and the shared renderer's pretty multi-line form
-        // would leave its indentation stranded mid-line.
-        out.push_str(&collapse_ws(&stmt));
+        // Preserve whitespace inside physical identifiers and module args.
+        out.push_str(&stmt);
         out.push_str(";\n");
     }
     for insert in inserts {
@@ -146,6 +145,7 @@ struct Binding {
 
 struct Interp<'s> {
     schema: &'s Schema,
+    models: &'s [Model],
     /// Next id per table, 1-indexed like AUTOINCREMENT.
     next_id: std::collections::HashMap<String, i64>,
     bindings: Vec<Binding>,
@@ -155,9 +155,10 @@ struct Interp<'s> {
 }
 
 impl<'s> Interp<'s> {
-    fn new(schema: &'s Schema) -> Self {
+    fn new(schema: &'s Schema, models: &'s [Model]) -> Self {
         Self {
             schema,
+            models,
             next_id: std::collections::HashMap::new(),
             bindings: Vec::new(),
             tick: 0,
@@ -216,8 +217,8 @@ impl<'s> Interp<'s> {
             return None;
         }
         let ExprNode::Const { path } = &*recv.node else { return None };
-        let model = path.last()?.as_str();
-        let table = self.table_for(model)?;
+        let model = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+        let table = self.table_for(&model)?;
         let ExprNode::Hash { entries, .. } = &*args[0].node else {
             return None;
         };
@@ -249,8 +250,8 @@ impl<'s> Interp<'s> {
         write!(
             stmt,
             "INSERT INTO {} ({}) VALUES ({});",
-            table,
-            cols.join(", "),
+            crate::naming::sql_ident(&table),
+            cols.iter().map(|c| crate::naming::sql_ident(c)).collect::<Vec<_>>().join(", "),
             vals.join(",")
         )
         .ok()?;
@@ -292,12 +293,10 @@ impl<'s> Interp<'s> {
     }
 
     fn table_for(&self, model: &str) -> Option<String> {
-        let want = crate::naming::pluralize_snake(&crate::naming::underscore(model));
-        self.schema
-            .tables
+        let table = &self.models
             .iter()
-            .find(|(_, t)| t.name.as_str() == want)
-            .map(|(_, t)| t.name.as_str().to_string())
+            .find(|m| m.name.0.as_str() == model)?.table.0;
+        self.schema.tables.get(table).map(|t| t.name.as_str().to_string())
     }
 
     fn has_column(&self, table: &str, col: &str) -> bool {
@@ -321,25 +320,6 @@ fn is_guard(e: &Expr) -> bool {
 fn is_ignorable(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Send { recv: None, method, .. }
         if matches!(method.as_str(), "puts" | "print" | "p"))
-}
-
-/// Fold a multi-line DDL statement onto one line, squeezing the
-/// pretty-printer's indentation out.
-fn collapse_ws(stmt: &str) -> String {
-    let mut out = String::with_capacity(stmt.len());
-    let mut pending_space = false;
-    for c in stmt.chars() {
-        if c.is_whitespace() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space && c != ')' && c != ',' {
-            out.push(' ');
-        }
-        pending_space = false;
-        out.push(c);
-    }
-    out
 }
 
 /// A single-quoted SQL string with `'` doubled — SQLite's only escape.

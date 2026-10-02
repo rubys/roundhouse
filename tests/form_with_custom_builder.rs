@@ -97,3 +97,40 @@ fn the_builder_is_honoured_when_the_models_type_is_unknown() {
         "an untyped model must not cost the app its builder: {failures:?}"
     );
 }
+
+#[test]
+fn literal_keyword_producer_retains_builder_and_independent_model_binding() {
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::ty::Ty;
+    fn builder_reads(e: &Expr, out: &mut Vec<Ty>) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "f") {
+            if let Some(ty) = &e.ty {
+                out.push(ty.clone());
+            }
+        }
+        e.node
+            .for_each_child(&mut |child| builder_reads(child, out));
+    }
+    for (body, known_model) in [("    @user = User.new\n", true), ("", false)] {
+        let app = app_with(
+            "<%= form_with(**{model: @user, builder: CustomFormBuilder}) do |f| %>\n<%= f.text_input_field :name %>\n<% end %>\n",
+            body,
+        );
+        let failures = dispatch_failures(&app);
+        assert!(
+            failures.is_empty(),
+            "literal ** options retain custom builder: {failures:?}"
+        );
+        let mut reads = Vec::new();
+        for view in &app.views {
+            builder_reads(&view.body, &mut reads);
+        }
+        assert!(
+            reads.iter().any(|ty| matches!(ty, Ty::Class { id, args }
+            if id.0.as_str() == "CustomFormBuilder" && if known_model {
+                matches!(args.as_slice(), [Ty::Class { id, .. }] if id.0.as_str() == "User")
+            } else { args.is_empty() })),
+            "builder/model binding: {reads:?}"
+        );
+    }
+}

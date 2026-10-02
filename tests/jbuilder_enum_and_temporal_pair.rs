@@ -8,7 +8,8 @@
 //!   `xmlschema(3)`; it now takes the `encode_datetime(<col>_raw)` route
 //!   the Extract arm already gives `json.(message, :created_at)`.
 //! * `json.(user, :role)` on an integer-backed `enum` — Rails serializes
-//!   the LABEL ("bot"), the column reader answers the integer (2).
+//!   the LABEL ("bot"), which the column reader itself now answers, so the
+//!   attribute rides `encode_value` like any other String.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,8 +57,8 @@ fn user_json() -> String {
 fn an_enum_attribute_encodes_as_its_label() {
     let body = user_json();
     assert!(
-        body.contains(r#"JsonBuilder.encode_enum(["member", "administrator", "bot"], user.role)"#),
-        "role should go through encode_enum with the declaration's labels:\n{body}"
+        body.contains("JsonBuilder.encode_value(user.role)") && !body.contains("encode_enum"),
+        "role should ride encode_value on the label-answering reader:\n{body}"
     );
     assert!(body.contains("JsonBuilder.encode_value(user.name)"), "name stays a plain value:\n{body}");
 }

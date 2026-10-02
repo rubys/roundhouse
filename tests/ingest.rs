@@ -1028,6 +1028,98 @@ fn spelled_lambda_scope_ingests_like_arrow_form() {
     assert_eq!(spelled.params[0].name.as_str(), "limit");
 }
 
+/// Procore writes `scope :x, ->(direction) do … end` (the `do…end`
+/// arrow-lambda body, e.g. `components/instructions/app/models/
+/// site_instruction.rb`) and `->(direction = :asc) { … }` (a defaulted
+/// param, e.g. `components/tasks/app/models/task_item.rb`). Both are
+/// still `LambdaNode`s — only the body delimiter or the parameter
+/// default differs from the already-supported `-> { … }` — so both
+/// must ingest exactly like the brace form.
+#[test]
+fn arrow_lambda_scope_do_end_and_defaulted_param_ingest() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  scope :order_by_title, ->(direction) do\n",
+            "    order(\"title #{direction}\")\n",
+            "  end\n",
+            "  scope :order_by_kind, ->(direction = :asc) { order(kind: direction) }\n",
+            "end\n",
+        ),
+    )];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    let app = ingest_app_from_tree(tree).expect("do-end and defaulted-param scopes ingest strict");
+    let widget = &app.models[0];
+    let scopes: Vec<&str> = widget.scopes().map(|s| s.name.as_str()).collect();
+    assert_eq!(scopes, vec!["order_by_title", "order_by_kind"]);
+
+    let do_end = widget.scopes().find(|s| s.name.as_str() == "order_by_title").unwrap();
+    assert_eq!(do_end.params.len(), 1);
+    assert_eq!(do_end.params[0].name.as_str(), "direction");
+
+    let defaulted = widget.scopes().find(|s| s.name.as_str() == "order_by_kind").unwrap();
+    assert_eq!(defaulted.params.len(), 1);
+    assert_eq!(defaulted.params[0].name.as_str(), "direction");
+    assert!(
+        defaulted.params[0].default.is_some(),
+        "defaulted lambda param must carry its default"
+    );
+}
+
+/// `scope :for_tools, (lambda do |tools| … end)` — Procore's
+/// `components/reports/app/models/report.rb` wraps the spelled-out
+/// `lambda do … end` (and `proc`) form in its own parens. Before this
+/// fix, the parens (a `ParenthesesNode`) sat between `parse_scope` and
+/// the `lambda`/`proc` call it was looking for, so `for_tools`,
+/// `for_data_sets`, and `shared` all failed with "scope body must be a
+/// lambda" and killed report.rb's ingest under strict mode.
+#[test]
+fn parenthesized_lambda_scope_ingests() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  scope :for_tools, (lambda do |tools|\n",
+            "    where('tool_type IN (?)', tools)\n",
+            "  end)\n",
+            "  scope :for_data_sets, (lambda do\n",
+            "    joins('INNER JOIN report_tabs')\n",
+            "  end)\n",
+            "  scope :active, (proc { where(active: true) })\n",
+            "end\n",
+        ),
+    )];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    let app = ingest_app_from_tree(tree).expect("parenthesized lambda/proc scopes ingest strict");
+    let widget = &app.models[0];
+    let scopes: Vec<&str> = widget.scopes().map(|s| s.name.as_str()).collect();
+    assert_eq!(scopes, vec!["for_tools", "for_data_sets", "active"]);
+
+    let for_tools = widget.scopes().find(|s| s.name.as_str() == "for_tools").unwrap();
+    assert_eq!(for_tools.params.len(), 1);
+    assert_eq!(for_tools.params[0].name.as_str(), "tools");
+
+    let for_data_sets = widget.scopes().find(|s| s.name.as_str() == "for_data_sets").unwrap();
+    assert_eq!(for_data_sets.params.len(), 0);
+}
+
 /// Survey mode recovers at body-item granularity: one unsupported item
 /// (a scope whose body isn't a lambda in any spelling) records a gap and
 /// is skipped, while the rest of the class — and the class itself —
@@ -1286,208 +1378,271 @@ fn multi_write_with_attr_targets_ingests_and_round_trips() {
     }
 }
 
+/// `enum :x, CONST.map { |v| [v, v.to_s] }.to_h` — Procore's
+/// `bid_package.rb` (`ACCOUNTING_METHODS.map { |method| [method,
+/// method.to_s] }.to_h`) and `potential_change_order.rb` compute an
+/// identity STRING mapping over a constant instead of writing the hash
+/// out by hand. Unlike a bare `enum :x, CONST` (which stores each
+/// label at its array INDEX, Rails' default), this form explicitly
+/// stores each label as its own name — the resulting values must be
+/// `Str`, not the `Int` a plain array mapping would give.
 #[test]
-fn defined_extended_targets_ingest_and_round_trip() {
-    // `defined?` beyond the bareword partial-local idiom: a constant, a
-    // qualified constant path, a real receiver/call chain, and bare
-    // `super`. Each lifts to the same marker-Send shape the bareword
-    // form already used (`Send(None, :defined?, [operand])`), just with
-    // a richer operand — see the `n.as_defined_node()` arm in
-    // `src/ingest/expr.rs`.
-    use roundhouse::emit::ruby::emit_expr;
-    use roundhouse::expr::ExprNode;
+fn computed_enum_map_to_h_over_constant_ingests() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
-    fn ingest_first(source: &[u8]) -> Expr {
+    let computed_src = concat!(
+        "class Widget < ApplicationRecord\n",
+        "  ACCOUNTING_METHODS = %i[amount unit]\n",
+        "  enum :accounting_method, ACCOUNTING_METHODS.map { |method| [method, method.to_s] }.to_h\n",
+        "end\n",
+    );
+
+    let tree_for = |src: &str| -> HashMap<PathBuf, Vec<u8>> {
+        [(PathBuf::from("app/models/widget.rb"), src.as_bytes().to_vec())].into_iter().collect()
+    };
+
+    let computed = ingest_app_from_tree(tree_for(computed_src))
+        .expect("computed .map{}.to_h enum mapping ingests strict");
+
+    let computed_widget = &computed.models[0];
+    let column = roundhouse::Symbol::from("accounting_method");
+    assert_eq!(
+        computed_widget.enums.get(&column).unwrap(),
+        &vec![
+            ("amount".to_string(), Literal::Str { value: "amount".to_string() }),
+            ("unit".to_string(), Literal::Str { value: "unit".to_string() }),
+        ]
+    );
+}
+
+/// `.index_by(&:to_s)` and `.index_with(&:to_s)` over a `CONST` — the
+/// other two identity-string-mapping spellings alongside `.map{}.to_h`,
+/// widened to accept a constant receiver (previously only a literal
+/// `%w[…]` array).
+#[test]
+fn computed_enum_index_by_and_index_with_over_constant_ingest() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  KINDS = %w[invisible nothing]\n",
+            "  enum :kind, KINDS.index_by(&:to_s)\n",
+            "  enum :variant, KINDS.index_with(&:to_s)\n",
+            "end\n",
+        ),
+    )];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    let app = ingest_app_from_tree(tree)
+        .expect("index_by/index_with over a constant ingest strict");
+    let widget = &app.models[0];
+    let expected = vec![
+        ("invisible".to_string(), Literal::Str { value: "invisible".to_string() }),
+        ("nothing".to_string(), Literal::Str { value: "nothing".to_string() }),
+    ];
+    assert_eq!(widget.enums.get(&roundhouse::Symbol::from("kind")).unwrap(), &expected);
+    assert_eq!(widget.enums.get(&roundhouse::Symbol::from("variant")).unwrap(), &expected);
+}
+
+// ── Gap F15: block-argument forms other than `&:symbol`/`&local_var` ──
+
+#[test]
+fn block_arg_method_ref_bare() {
+    fn parse_one(source: &[u8]) -> Expr {
         let result = ruby_prism::parse(source);
         let program = result.node();
         let prog = program.as_program_node().unwrap();
         let stmt = prog.statements().body().iter().next().unwrap();
-        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
     }
 
-    // `defined?(Const)` — a bare constant operand.
-    let e = ingest_first(b"defined?(Widget)");
-    match &*e.node {
-        ExprNode::Send { recv: None, method, args, .. } => {
-            assert_eq!(method.as_str(), "defined?");
-            assert_eq!(args.len(), 1);
-            match &*args[0].node {
-                ExprNode::Const { path } => {
-                    assert_eq!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["Widget"]);
-                }
-                other => panic!("expected Const, got {other:?}"),
-            }
+    let e = parse_one(b"[1, 2].map(&method(:double))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv, name } => {
+            assert!(recv.is_none(), "bare `method(:x)` has no receiver");
+            assert_eq!(name.as_str(), "double");
         }
-        other => panic!("expected Send(defined?, ...), got {other:?}"),
+        other => panic!("expected MethodRef, got {other:?}"),
     }
-    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
-    assert_eq!(round_tripped, emit_expr(&e), "defined?(Const) must round-trip");
+}
 
-    // `defined?(A::B)` — a qualified constant path.
-    let e = ingest_first(b"defined?(Widget::Kind)");
-    match &*e.node {
-        ExprNode::Send { args, .. } => match &*args[0].node {
-            ExprNode::Const { path } => {
-                assert_eq!(
-                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    vec!["Widget", "Kind"]
-                );
-            }
-            other => panic!("expected Const, got {other:?}"),
-        },
-        other => panic!("expected Send(defined?, ...), got {other:?}"),
+#[test]
+fn block_arg_method_ref_self_and_recv() {
+    fn parse_one(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
     }
 
-    // `defined?(a.b)` — a real receiver/call chain, not the bareword
-    // partial-local idiom (which has no receiver and no args).
-    let e = ingest_first(b"defined?(widget.kind)");
-    match &*e.node {
-        ExprNode::Send { args, .. } => match &*args[0].node {
-            ExprNode::Send { recv: Some(_), method, .. } => {
-                assert_eq!(method.as_str(), "kind");
-            }
-            other => panic!("expected a receiver Send, got {other:?}"),
-        },
-        other => panic!("expected Send(defined?, ...), got {other:?}"),
-    }
-    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
-    assert_eq!(round_tripped, emit_expr(&e), "defined?(a.b) must round-trip");
-
-    // `defined?(super)` — bare `super`, no parens.
-    let e = ingest_first(b"defined?(super)");
-    match &*e.node {
-        ExprNode::Send { args, .. } => {
-            assert!(matches!(&*args[0].node, ExprNode::Super { args: None }));
+    let e = parse_one(b"[1, 2].map(&self.method(:triple))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv: Some(recv), name } => {
+            assert!(matches!(&*recv.node, ExprNode::SelfRef));
+            assert_eq!(name.as_str(), "triple");
         }
-        other => panic!("expected Send(defined?, ...), got {other:?}"),
+        other => panic!("expected MethodRef with SelfRef recv, got {other:?}"),
     }
-    let round_tripped = emit_expr(&ingest_first(emit_expr(&e).as_bytes()));
-    assert_eq!(round_tripped, emit_expr(&e), "defined?(super) must round-trip");
+
+    let e = parse_one(b"[1, 2].map(&widget.method(:quad))");
+    let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+        panic!("expected Send, got {:?}", e.node);
+    };
+    match &*block.node {
+        ExprNode::MethodRef { recv: Some(_), name } => {
+            assert_eq!(name.as_str(), "quad");
+        }
+        other => panic!("expected MethodRef with a receiver, got {other:?}"),
+    }
+}
+
+#[test]
+fn block_arg_stabby_lambda_and_proc_desugar_to_lambda() {
+    fn parse_one(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    for src in [
+        &b"[1, 2].each(&->(a) { a + 1 })"[..],
+        &b"[1, 2].each(&proc { |a| a + 1 })"[..],
+        &b"[1, 2].each(&lambda { |a| a + 1 })"[..],
+    ] {
+        let e = parse_one(src);
+        let ExprNode::Send { block: Some(block), .. } = &*e.node else {
+            panic!("expected Send, got {:?}", e.node);
+        };
+        match &*block.node {
+            ExprNode::Lambda { params, .. } => {
+                assert_eq!(params.len(), 1, "source: {}", String::from_utf8_lossy(src));
+                assert_eq!(params[0].as_str(), "a");
+            }
+            other => panic!("expected Lambda, got {other:?} for {}", String::from_utf8_lossy(src)),
+        }
+    }
+}
+
+#[test]
+fn block_arg_ivar_and_call_result_preserve_the_forwarded_expression() {
+    for (source, is_ivar) in [(b"[1, 2].each(&@callback)".as_slice(), true), (b"[1, 2].each(&compute(1))".as_slice(), false)] {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<literal>").expect("block operand ingests");
+        let ExprNode::Send { block: Some(block), .. } = &*expr.node else { panic!("missing block operand") };
+        if is_ivar {
+            assert!(matches!(&*block.node, ExprNode::Ivar { name } if name.as_str() == "callback"));
+        } else {
+            assert!(matches!(&*block.node, ExprNode::Send { method, args, .. } if method.as_str() == "compute" && args.len() == 1));
+        }
+    }
+}
+
+#[test]
+fn defined_extended_targets_ingest_and_round_trip() {
+    // Gap #18.2: retain Tim Tischler's constant, call and super controls.
+    use roundhouse::emit::ruby::emit_expr;
+
+    for source in ["defined?(Widget)", "defined?(Widget::Kind)", "defined?(widget.kind)", "defined?(super)"] {
+        let parse = |source: &str| {
+            let result = ruby_prism::parse(source.as_bytes());
+            let program = result.node();
+            let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        };
+        let expr = parse(source);
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            panic!("expected defined? marker: {expr:?}");
+        };
+        assert_eq!(method.as_str(), "defined?");
+        assert_eq!(args.len(), 1);
+        match source {
+            "defined?(Widget)" => assert!(matches!(&*args[0].node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget"])),
+            "defined?(Widget::Kind)" => assert!(matches!(&*args[0].node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget", "Kind"])),
+            "defined?(widget.kind)" => assert!(matches!(&*args[0].node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "kind")),
+            _ => assert!(matches!(&*args[0].node, ExprNode::Super { args: None })),
+        }
+        let emitted = emit_expr(&expr);
+        assert_eq!(emit_expr(&parse(&emitted)), emitted);
+    }
 }
 
 #[test]
 fn class_variable_compound_assignment_in_method_body_ingests_and_round_trips() {
-    // `@@x ||= y` / `@@x = y` in a method body (as opposed to the
-    // class-body initializer `library_class.rs` handles separately).
-    // Both mirror the local-variable-write arms: the `@@`-prefixed name
-    // rides straight into `LValue::Var` so the sigil round-trips on
-    // emit without a dedicated class-variable target, matching how a
-    // class-variable READ already ingests (`n.as_class_variable_read_node()`).
     use roundhouse::emit::ruby::emit_expr;
-    use roundhouse::expr::{ExprNode, LValue, OpAssignOp};
+    use roundhouse::expr::{LValue, OpAssignOp};
 
-    fn ingest_first(source: &[u8]) -> Expr {
-        let result = ruby_prism::parse(source);
-        let program = result.node();
-        let prog = program.as_program_node().unwrap();
-        let stmt = prog.statements().body().iter().next().unwrap();
-        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
-    }
-
-    let or_write = ingest_first(b"@@count ||= 0");
-    match &*or_write.node {
-        ExprNode::OpAssign { target: LValue::Var { name, .. }, op, .. } => {
-            assert_eq!(name.as_str(), "@@count");
-            assert_eq!(*op, OpAssignOp::OrOr);
+    for source in ["@@count ||= 0", "@@count = 1"] {
+        let parse = |source: &str| {
+            let result = ruby_prism::parse(source.as_bytes());
+            let program = result.node();
+            let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        };
+        let expr = parse(source);
+        if source.contains("||=") {
+            assert!(matches!(&*expr.node, ExprNode::OpAssign { target: LValue::Var { name, .. }, op: OpAssignOp::OrOr, .. } if name.as_str() == "@@count"));
+        } else {
+            assert!(matches!(&*expr.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "@@count"));
         }
-        other => panic!("expected OpAssign(@@count, OrOr, ...), got {other:?}"),
+        assert_eq!(emit_expr(&expr), source);
+        assert_eq!(emit_expr(&parse(source)), source);
     }
-    let emitted = emit_expr(&or_write);
-    assert_eq!(emitted, "@@count ||= 0");
-    assert_eq!(emit_expr(&ingest_first(emitted.as_bytes())), emitted);
-
-    let plain_write = ingest_first(b"@@count = 1");
-    match &*plain_write.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
-            assert_eq!(name.as_str(), "@@count");
-        }
-        other => panic!("expected Assign(@@count, ...), got {other:?}"),
-    }
-    let emitted = emit_expr(&plain_write);
-    assert_eq!(emitted, "@@count = 1");
-    assert_eq!(emit_expr(&ingest_first(emitted.as_bytes())), emitted);
 }
 
 #[test]
 fn specific_ledger_messages_replace_the_generic_catch_all() {
-    // Constructs that cannot round-trip at all (a shell-out, a Prism
-    // recovery node, a global write, a runtime class/module def) should
-    // report BY NAME, not fall through to "unsupported expression node:
-    // <debug dump>" — the generic message that makes every one of these
-    // indistinguishable in the ledger.
     use roundhouse::ingest::IngestError;
 
-    fn ingest_first_err(source: &[u8]) -> String {
-        let result = ruby_prism::parse(source);
+    for (source, expected) in [
+        ("`ls`", "shell command (backticks) is not modeled"),
+        ("%x{ls}", "shell command (backticks) is not modeled"),
+        ("$stdout = out", "global variable write"),
+        ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
+        ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
+        ("1 + ", "unparsed fragment (Prism recovery node)"),
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();
-        let prog = program.as_program_node().unwrap();
-        let stmt = prog.statements().body().iter().next().unwrap();
-        match roundhouse::ingest::ingest_expr(&stmt, "<snippet>") {
-            Err(IngestError::Unsupported { message, .. }) => message,
-            other => panic!("expected IngestError::Unsupported, got {other:?}"),
-        }
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let Err(IngestError::Unsupported { message, .. }) = roundhouse::ingest::ingest_expr(&stmt, "<snippet>") else {
+            panic!("expected unsupported: {source}");
+        };
+        assert_eq!(message, expected);
     }
-
-    assert_eq!(ingest_first_err(b"`ls`"), "shell command (backticks) is not modeled");
-    assert_eq!(
-        ingest_first_err(b"%x{ls}"),
-        "shell command (backticks) is not modeled"
-    );
-    assert_eq!(ingest_first_err(b"$stdout = out"), "global variable write");
-    assert_eq!(
-        ingest_first_err(b"class Foo; end"),
-        "class/module defined inside a method or block (runtime class definition)"
-    );
-    assert_eq!(
-        ingest_first_err(b"module Foo; end"),
-        "class/module defined inside a method or block (runtime class definition)"
-    );
-    // `1 + ` — a dangling binary operator. Prism recovers by inserting a
-    // `MissingNode` in the missing operand's place.
-    assert_eq!(
-        ingest_first_err(b"1 + "),
-        "unparsed fragment (Prism recovery node)"
-    );
 }
 
 #[test]
 fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
-    // `a, *b, c = expr` — a target AFTER the splat. `b` claims
-    // everything between the leading positionals and the trailing
-    // ones; `c` reads from the tail by negative index regardless of
-    // how long `b` ends up being.
     use roundhouse::emit::ruby::emit_expr;
 
-    fn ingest_first(source: &[u8]) -> Expr {
-        let result = ruby_prism::parse(source);
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();
-        let prog = program.as_program_node().unwrap();
-        let stmt = prog.statements().body().iter().next().unwrap();
-        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
-    }
-
-    // The desugar expands one source statement into several emitted
-    // lines (a temp bind, then one assignment per target), so
-    // re-ingesting for the round-trip check needs the WHOLE statement
-    // list, not just its first line — mirrors how `ingest_ruby_program`
-    // (and `roundhouse-ast --round-trip`) ingest a full program.
-    fn ingest_program(source: &[u8]) -> Expr {
-        let result = ruby_prism::parse(source);
-        let program = result.node();
-        let prog = program.as_program_node().unwrap();
-        roundhouse::ingest::ingest_expr(&prog.statements().as_node(), "<snippet>").unwrap()
-    }
-
-    let e = ingest_first(b"a, *b, c = [1, 2, 3, 4]");
-    let emitted = emit_expr(&e);
-    assert!(emitted.contains("a = "), "leading target reads positionally:\n{emitted}");
-    assert!(
-        emitted.contains("...-1]") || emitted.contains("... -1]"),
-        "the rest slice stops short of the trailing target(s):\n{emitted}"
-    );
-    assert!(emitted.contains("[-1]"), "the trailing target reads off the tail:\n{emitted}");
-
-    // Re-ingesting the emitted Ruby (now several statements) must reach
-    // the same fixed point.
-    assert_eq!(emit_expr(&ingest_program(emitted.as_bytes())), emitted);
+        roundhouse::ingest::ingest_expr(&program.as_program_node().unwrap().statements().as_node(), "<snippet>").unwrap()
+    };
+    let emitted = emit_expr(&parse("a, *b, c = [1, 2, 3, 4]"));
+    assert!(emitted.contains("a = "), "{emitted}");
+    assert!(emitted.contains("...-1]") || emitted.contains("... -1]"), "{emitted}");
+    assert!(emitted.contains("[-1]"), "{emitted}");
+    assert_eq!(emit_expr(&parse(&emitted)), emitted);
 }

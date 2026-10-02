@@ -100,8 +100,8 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
 pub fn apply_kwrest_forward_lowering(app: &mut App) -> Vec<Diagnostic> {
+    let mut diags = super::forwarding::apply(app);
     let sigs = helper_signatures(app);
-    let mut diags = Vec::new();
     if sigs.is_empty() {
         return diags;
     }

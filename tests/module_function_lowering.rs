@@ -146,3 +146,44 @@ end
     assert!(!out.contains("def self.before"), "pre-marker def must not flip:\n{out}");
     assert!(out.contains("def self.after"), "post-marker def flips:\n{out}");
 }
+
+#[test]
+fn module_function_copies_are_public_even_when_the_instance_definition_is_private() {
+    use roundhouse::dialect::{MethodReceiver, MethodVisibility};
+    for source in [
+        "module Util; private; def helper; 11; end; module_function :helper; end",
+        "module Util; private; module_function; def helper; 12; end; end",
+        "module Util; module_function; private def helper; 13; end; def later; 14; end; end",
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "util.rb").unwrap();
+        for method in &classes[0].methods {
+            assert_eq!(method.receiver, MethodReceiver::Class, "{source}");
+            assert_eq!(method.visibility, MethodVisibility::Public, "{source}");
+        }
+        let out = emit(source);
+        assert!(!out.contains("private_class_method"), "{out}");
+    }
+}
+
+#[test]
+fn only_bare_instance_visibility_markers_end_module_function_mode() {
+    use roundhouse::dialect::{MethodReceiver, MethodVisibility};
+    for (marker, visibility) in [
+        ("public", MethodVisibility::Public),
+        ("protected", MethodVisibility::Protected),
+        ("private", MethodVisibility::Private),
+    ] {
+        let source = format!(
+            "module Util; module_function; def first; 21; end; private :first; \
+             def second; 22; end; {marker}; def last; 23; end; end"
+        );
+        let classes = ingest_library_classes(source.as_bytes(), "util.rb").unwrap();
+        let methods = &classes[0].methods;
+        for method in &methods[..2] {
+            assert_eq!(method.receiver, MethodReceiver::Class, "{source}");
+            assert_eq!(method.visibility, MethodVisibility::Public, "{source}");
+        }
+        assert_eq!(methods[2].receiver, MethodReceiver::Instance, "{source}");
+        assert_eq!(methods[2].visibility, visibility, "{source}");
+    }
+}

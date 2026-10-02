@@ -248,6 +248,7 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
 /// signal that the lowerer guarantees Builder semantics are safe.
 fn try_string_builder(e: &Expr) -> Option<String> {
     match e.hint? {
+        IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {
                 target: LValue::Var { name, .. }, ..
@@ -285,6 +286,18 @@ fn try_string_builder(e: &Expr) -> Option<String> {
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::ForwardArgs => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "full argument forwarding has no carrier on this target",
+        ),
+        ExprNode::KeywordSplat { .. } => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "keyword argument forwarding has no carrier on this target",
+        ),
         ExprNode::Var { name, .. } => escape_ident(name.as_str()),
         ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::SelfRef => "self".to_string(),
@@ -634,6 +647,17 @@ fn emit_node(n: &ExprNode) -> String {
             "crystal",
             n.kind_str(),
             "Crystal has no retry/redo equivalent",
+        ),
+        // `&method(:name)` / `&recv.method(:name)` — the callee's
+        // arity is only known via the class registry, not statically
+        // at this call site; Crystal needs a concrete proc/closure
+        // type at the parameter, so degrade rather than guess. See
+        // `ExprNode::MethodRef`'s doc comment for the Ruby/Spinel path.
+        ExprNode::MethodRef { .. } => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "block argument is a bound-method reference (&method(:name))",
         ),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::MultiAssign { targets, value } => {
@@ -1681,7 +1705,9 @@ pub(super) fn emit_literal(l: &Literal) -> String {
                 format!("{s}.0")
             }
         }
-        Literal::Str { value } => format!("{value:?}"),
+        // Rust's debug escaping covers quotes/backslashes, but Crystal
+        // also interpolates #{...}; literal data must stay literal.
+        Literal::Str { value } => format!("{value:?}").replace("#{", "\\#{"),
         Literal::Sym { value } => format!(":{value}"),
         Literal::Regex { pattern, flags } => format!(
             "/{}/{flags}",

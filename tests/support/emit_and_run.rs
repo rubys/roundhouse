@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use roundhouse::analyze::{diagnose, Analyzer};
+use roundhouse::analyze::diagnose;
 use roundhouse::diagnostic::Severity;
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
@@ -61,6 +61,14 @@ pub fn real_blog() -> Overlay {
     Overlay { base: roundhouse::fixtures::real_blog().to_path_buf(), edits: Vec::new() }
 }
 
+/// Start from an empty tree and `write` the app file by file, for a
+/// shape the blog cannot be edited into, such as an app with no views.
+pub fn empty_app() -> Overlay {
+    let base = scratch_dir();
+    std::fs::create_dir_all(&base).expect("mkdir");
+    Overlay { base, edits: Vec::new() }
+}
+
 pub struct Overlay {
     base: PathBuf,
     edits: Vec<Edit>,
@@ -69,12 +77,21 @@ pub struct Overlay {
 enum Edit {
     Write { path: String, content: String },
     Replace { path: String, find: String, replace: String },
+    Remove { path: String },
 }
 
 impl Overlay {
     /// Add a file, or replace one outright.
     pub fn write(mut self, path: &str, content: &str) -> Self {
         self.edits.push(Edit::Write { path: path.into(), content: content.into() });
+        self
+    }
+
+    /// Delete an existing file, such as `db/schema.rb` for an app that
+    /// keeps its schema in `db/structure.sql` instead. Panics when it is
+    /// absent.
+    pub fn remove(mut self, path: &str) -> Self {
+        self.edits.push(Edit::Remove { path: path.into() });
         self
     }
 
@@ -94,21 +111,37 @@ impl Overlay {
     /// Emit, then run one of the emitted test files
     /// (`ruby -Itest -I. <path>` in the emitted tree).
     pub fn run_test(self, test_path: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        self.run_test_with(&[], test_path)
+    }
+
+    /// `run_test` with every string literal frozen
+    /// (`ruby --enable-frozen-string-literal`), as spinel compiles the
+    /// tree. A construct whose emitted Ruby mutates a literal passes on
+    /// plain CRuby and raises FrozenError in the spinel binary; this
+    /// makes the CRuby run fail the same way.
+    pub fn run_test_frozen(self, test_path: &str) -> Run {
+        self.run_test_with(&["--enable-frozen-string-literal"], test_path)
+    }
+
+    fn run_test_with(self, flags: &[&str], test_path: &str) -> Run {
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let output = ruby()
+            .args(flags)
             .args(["-Itest", "-I."])
             .arg(test_path)
             .current_dir(&emitted)
             .output()
             .expect("spawn ruby");
-        Run::new(format!("ruby -Itest -I. {test_path}"), emitted, errors, output)
+        let command: Vec<&str> =
+            std::iter::once("ruby").chain(flags.iter().copied()).chain(["-Itest", "-I.", test_path]).collect();
+        Run::new(command.join(" "), emitted, errors, output)
     }
 
     /// Emit, then run `script` against the booted app: `main.rb` is
     /// required and the default adapter configured on an in-memory
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
-        let (emitted, errors) = self.emit();
+        let (emitted, errors) = self.emit(BuildTarget::Ruby);
         let script = format!(
             "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
         );
@@ -122,9 +155,28 @@ impl Overlay {
         Run::new("ruby -e <script>".into(), emitted, errors, output)
     }
 
+    /// Compile the unchanged Spinel output and run its native binary.
+    /// The consumer boots libraries, not the HTTP server or a database.
+    pub fn run_spinel(self, script: &str) -> Run {
+        let (emitted, errors) = self.emit(BuildTarget::Spinel);
+        std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
+            .expect("write native consumer");
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let compiled = Command::new(&compiler).args(["contract.rb", "-o", "contract"])
+            .current_dir(&emitted).output().expect("spawn spinel");
+        std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
+        std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
+        if !compiled.status.success() {
+            return Run::new(format!("{compiler} contract.rb -o contract"), emitted, errors, compiled);
+        }
+        let output = Command::new(emitted.join("contract")).current_dir(&emitted)
+            .output().expect("run native consumer");
+        Run::new(format!("{compiler} contract.rb -o contract && ./contract"), emitted, errors, output)
+    }
+
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
     /// target. Returns the emitted tree and `check`'s error diagnostics.
-    fn emit(self) -> (PathBuf, Vec<String>) {
+    fn emit(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
         let scratch = scratch_dir();
         let source = scratch.join("app");
         copy_tree(&self.base, &source);
@@ -147,20 +199,30 @@ impl Overlay {
                     std::fs::write(full, text.replacen(find.as_str(), replace, 1))
                         .expect("write overlay edit");
                 }
+                Edit::Remove { path } => {
+                    std::fs::remove_file(source.join(path))
+                        .unwrap_or_else(|e| panic!("overlay remove: cannot remove {path}: {e}"));
+                }
             }
         }
 
         let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
-        Analyzer::new(&app).analyze(&mut app);
-        let errors = diagnose(&app)
+        let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+        let mut errors: Vec<_> = diagnose(&app)
             .into_iter()
+            .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
             .map(|d| format!("{:?}: {}", d.span, d.message))
             .collect();
 
         let emitted = scratch.join("emitted");
-        let files = roundhouse::project::target_files(&app, &source, BuildTarget::Ruby)
-            .expect("ruby target files");
+        let (files, emit_diags) = roundhouse::emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&app, &source, target)
+        });
+        errors.extend(emit_diags.into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message)));
+        let files = files.expect("target files");
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
         (emitted, errors)
     }
@@ -170,7 +232,7 @@ impl Overlay {
 pub struct Run {
     command: String,
     pub emitted: PathBuf,
-    /// `check`'s error diagnostics for the overlaid app.
+    /// Analysis, lowering and emission error diagnostics for the overlaid app.
     pub errors: Vec<String>,
     pub success: bool,
     pub stdout: String,
@@ -189,17 +251,17 @@ impl Run {
         }
     }
 
-    /// The whole claim: `check` reports no errors AND the emitted
+    /// The whole claim: analysis and emit report no errors AND the emitted
     /// program ran clean. Either half alone is not support.
     pub fn assert_passes(&self) {
         assert!(
             self.errors.is_empty(),
-            "check reports errors, so the construct is not supported yet:\n{}",
+            "analysis or emit reports errors, so the construct is not supported yet:\n{}",
             self.errors.join("\n")
         );
         assert!(
             self.success,
-            "check is clean but the emitted program failed: `{}` in {}\n\
+            "analysis and emit are clean but the emitted program failed: `{}` in {}\n\
              \n=== stdout ===\n{}\n=== stderr ===\n{}",
             self.command,
             self.emitted.display(),

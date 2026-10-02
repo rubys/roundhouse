@@ -26,6 +26,23 @@
 //! surrounding `reset`/`drain` the table just accumulates on the test
 //! thread, which is harmless. Re-registering a path keeps the first
 //! text — ids stay stable for spans already handed out.
+//!
+//! A label starting with `<` (`"<delegate>"`, `"<channel>"`, …) never
+//! gets a slot: [`register`] refuses it outright, returning the
+//! synthetic `FileId(0)`. Those labels mark synthesized Ruby that a
+//! lowering pass (`ingest::delegate` and its siblings) re-ingests to
+//! expand a macro into real methods — text that was never in the app
+//! and has no stable place in `App::sources`. Registering one anyway
+//! is how a synthesized parse failure once rendered against an
+//! unrelated real file: [`ingest_app_with_vfs`][super::app::ingest_app_with_vfs]
+//! takes one [`snapshot`] mid-ingest (for a pass that needs to read the
+//! app's real source text before the synthesizing passes run) and one
+//! real [`drain`] at the end; a real file registered in between would
+//! be safe either way, but a synthesized one that slipped past its own
+//! `prism::scope` isolation would have collided with a fresh low
+//! `FileId` once the table's next drain emptied out from under it.
+//! This refusal is the backstop for that case — it holds regardless of
+//! ordering.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -50,7 +67,16 @@ pub fn reset() {
 /// Record a source file and return its `FileId` (1-based). Idempotent
 /// by path: a second registration of the same path returns the
 /// existing id and keeps the first text.
+///
+/// A `path` starting with `<` is refused — it never occupies a slot,
+/// and this always returns the synthetic `FileId(0)` instead. Those
+/// labels mark synthesized (not-really-a-file) Ruby a lowering pass
+/// re-ingests; see the module doc for why a real id is never safe for
+/// one.
 pub fn register(path: &str, text: &str) -> FileId {
+    if path.starts_with('<') {
+        return FileId(0);
+    }
     SOURCES.with(|s| {
         let mut reg = s.borrow_mut();
         if let Some(id) = reg.by_path.get(path) {
@@ -115,6 +141,19 @@ pub fn drain() -> Vec<SourceFile> {
     })
 }
 
+/// Clone the registered files without clearing the registry — unlike
+/// [`drain`], `FileId`s already handed out (and any registered after
+/// this call) stay valid, because the table itself is untouched.
+///
+/// For a mid-ingest read of "the real app source registered so far"
+/// (`keep_initializer_defined`'s scan of `app/`/`lib/` text) that has
+/// to happen before the synthesizing lowering passes run, but must not
+/// reset the `FileId` counter out from under them the way [`drain`]
+/// would.
+pub fn snapshot() -> Vec<SourceFile> {
+    SOURCES.with(|s| s.borrow().files.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +198,44 @@ mod tests {
         assert_eq!(files[0].path, "a.rb");
         assert_eq!(files[1].path, "b.rb");
         assert_eq!(file_id("a.rb"), FileId(0));
+    }
+
+    #[test]
+    fn a_bracketed_label_is_refused_a_real_id() {
+        reset();
+        assert_eq!(register("<delegate>", "class X\nend\n"), FileId(0));
+        assert_eq!(file_id("<delegate>"), FileId(0));
+        // And it never took a slot at all.
+        assert!(drain().is_empty());
+    }
+
+    #[test]
+    fn refusing_a_bracketed_label_does_not_disturb_real_ids() {
+        reset();
+        let a = register("a.rb", "1");
+        assert_eq!(register("<delegate>", "class X\nend\n"), FileId(0));
+        let b = register("b.rb", "2");
+        // The refused registration didn't consume a slot, so real
+        // files keep contiguous ids either side of it.
+        assert_eq!(a, FileId(1));
+        assert_eq!(b, FileId(2));
+        assert_eq!(drain().len(), 2);
+    }
+
+    #[test]
+    fn snapshot_does_not_clear_or_reset_ids() {
+        reset();
+        let a = register("a.rb", "1");
+        let snap = snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].path, "a.rb");
+        // Unlike `drain`, the registry is untouched: `a.rb` is still
+        // registered, and the next real registration continues the
+        // same id sequence rather than restarting at 1.
+        assert_eq!(file_id("a.rb"), a);
+        let b = register("b.rb", "2");
+        assert_eq!(b, FileId(2));
+        let files = drain();
+        assert_eq!(files.len(), 2);
     }
 }

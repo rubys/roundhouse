@@ -431,6 +431,26 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("kredis", &["kredis_string", "kredis_integer", "kredis_boolean", "kredis_list", "kredis_unique_list", "kredis_set", "kredis_hash", "kredis_flag", "kredis_counter", "kredis_json", "kredis_datetime"]),
 ];
 
+/// Class-body DSLs whose methods are named by the author's own
+/// arguments (`event :publish` → `publish!`, `may_publish?`), so no
+/// fixed `SURFACES` list can name them. Attribution reads the names off
+/// the declaration instead (`analyze::attribution::generated_methods`).
+/// Each DSL lists the gems that provide it, most specific first.
+pub(crate) const GENERATING_DSLS: &[(&str, &[&str])] = &[
+    ("aasm", &["aasm"]),
+    ("state_machine", &["state_machines-activerecord", "state_machines", "state_machine"]),
+];
+
+/// The gem in `lock` that provides a generating DSL, if any does.
+pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static str> {
+    GENERATING_DSLS
+        .iter()
+        .filter(|(name, _)| *name == dsl)
+        .flat_map(|(_, gems)| gems.iter())
+        .find(|gem| lock.has(gem))
+        .copied()
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).
@@ -519,22 +539,29 @@ fn camelize(gem: &str) -> String {
         .collect()
 }
 
-/// The unknown gem (in `lock`) whose namespace `constant_path` sits
-/// under, if any: `Redcarpet::Markdown` → `redcarpet`.
+/// The unique resolved unknown gem whose namespace `constant_path`
+/// sits under, if any. Ambiguous prefixes must not pick lockfile order.
 pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
+    let owners = gems_owning_constant(census, constant_path);
+    (owners.len() == 1).then(|| owners[0])
+}
+
+/// All candidates in the best namespace-matching tier. Full/irregular
+/// names beat dashed-prefix guesses (`Alba`: alba, not alba-inertia).
+pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
     let head = constant_path.split("::").next().unwrap_or(constant_path);
-    // Two passes, so a full-name match always beats a first-segment
-    // one: two house gems under the same prefix both answer to `Acme`,
-    // and the one that spells the whole constant is the better claim.
-    census
+    let exact: Vec<_> = census
         .unknown()
-        .find(|g| namespace_of(&g.name) == head)
-        .or_else(|| {
-            census
-                .unknown()
-                .find(|g| namespace_candidates(&g.name).iter().any(|c| c == head))
-        })
+        .filter(|g| g.version.is_some() && namespace_of(&g.name) == head)
         .map(|g| g.name.as_str())
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    census.unknown()
+        .filter(|g| g.version.is_some() && namespace_candidates(&g.name).iter().any(|c| c == head))
+        .map(|g| g.name.as_str())
+        .collect()
 }
 
 #[cfg(test)]
@@ -629,7 +656,8 @@ BUNDLED WITH
         );
         // A dashed gem answers to its first segment as well as to its
         // whole name, which is what `aws-sdk-s3 → Aws` says by hand.
-        assert_eq!(gem_owning_constant(&census, "Acme::Client"), Some("acme-core"));
+        assert_eq!(gem_owning_constant(&census, "Acme::Client"), None, "two prefix candidates are ambiguous");
+        assert_eq!(gems_owning_constant(&census, "Acme::Client"), vec!["acme-core", "acme-telemetry"]);
         assert_eq!(
             gem_owning_constant(&census, "AcmeTelemetry::Span"),
             Some("acme-telemetry"),

@@ -38,7 +38,19 @@ pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 /// even the question the index answers (NULLs compare distinct, so such
 /// rows never conflict). Dropping those indexes leaves the guard
 /// conservative — it skips only rows it positively found.
-pub type UniqueKeys = HashMap<ClassId, Vec<Vec<Symbol>>>;
+pub type UniqueKeys = HashMap<ClassId, Vec<UniqueKey>>;
+
+/// One unique index the guard reads: its columns, and the predicate of
+/// a partial one (`where:`), which only conflicts with the rows it
+/// selects. The predicate is the one the SQLite DDL renders
+/// ([`crate::emit::shared::schema_sql::Dialect::index_predicate`]), so
+/// the guard and the index agree; an index whose predicate SQLite isn't
+/// trusted to run is unique over every row in both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniqueKey {
+    pub columns: Vec<Symbol>,
+    pub predicate: Option<String>,
+}
 
 /// Read the unique keys off the schema, keyed by model.
 pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> UniqueKeys {
@@ -48,12 +60,17 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
         let not_null = |name: &Symbol| {
             table.columns.iter().any(|c| &c.name == name && !c.nullable)
         };
-        let keys: Vec<Vec<Symbol>> = table
+        let keys: Vec<UniqueKey> = table
             .indexes
             .iter()
             .filter(|i| i.unique && !i.columns.is_empty())
             .filter(|i| i.columns.iter().all(not_null))
-            .map(|i| i.columns.clone())
+            .map(|i| UniqueKey {
+                columns: i.columns.clone(),
+                predicate: crate::emit::shared::schema_sql::Dialect::Sqlite
+                    .index_predicate(table, i)
+                    .map(str::to_string),
+            })
             .collect();
         if !keys.is_empty() {
             out.insert(m.name.clone(), keys);
@@ -83,6 +100,9 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
                 }
                 ModelBodyItem::Method { method, .. }
                     if method.receiver == crate::dialect::MethodReceiver::Class
+                        // Relation threading cannot append a formal to `...`
+                        // or treat its nameless packet as fixed arity.
+                        && !method.params.iter().any(|p| p.forwarding)
                         && mentions_bare_chain_start(&method.body) =>
                 {
                     // Declared scopes win on a name collision.
@@ -125,6 +145,22 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
             .chain(crate::lower::rich_text::preload_scope_names(m))
         {
             map.entry(name).or_default();
+        }
+    }
+    // Not only the model's own scopes: one declared on an abstract base answers on the subclass (`article.comments.approved`), the child's own declaration winning.
+    let parents: HashMap<ClassId, ClassId> =
+        models.iter().filter_map(|m| m.parent.clone().map(|p| (m.name.clone(), p))).collect();
+    for m in models {
+        let mut current = parents.get(&m.name).cloned();
+        for _ in 0..32 {
+            let Some(p) = current else { break };
+            let inherited: Vec<(Symbol, Vec<Param>)> =
+                reg.get(&p).map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+            let own = reg.entry(m.name.clone()).or_default();
+            for (name, params) in inherited {
+                own.entry(name).or_insert(params);
+            }
+            current = parents.get(&p).cloned();
         }
     }
     reg
@@ -430,6 +466,9 @@ fn assoc_scope_shape(
     owner: &ClassId,
     scopes: &ScopeRegistry,
 ) -> AssocScopeShape {
+    if method_def.params.iter().any(|p| p.forwarding) {
+        return AssocScopeShape::Blocked("full forwarding cannot use the relation-threading argument ABI".into());
+    }
     let mut found = false;
     let mut queries = false;
     let mut blocked: Option<String> = None;
@@ -1316,6 +1355,186 @@ pub fn all_scope_names(scopes: &ScopeRegistry) -> HashSet<Symbol> {
     scopes.values().flat_map(|m| m.keys().cloned()).collect()
 }
 
+/// Literal reflective hops on Rails' PUBLIC generated association/scope
+/// surface must be visible to the ordinary relation-threading pass.
+/// Never erase reflection on arbitrary user methods: `send` can call a
+/// private helper where `public_send` and a direct receiver call cannot.
+/// Ingest refuses visibility changes on generated DSL methods without a
+/// local MethodDef; local overrides are vetoed by `app_method` below.
+pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: &AssocRegistry) {
+    expr.node
+        .for_each_child_mut(&mut |child| ground_literal_model_dispatch(child, app, assocs));
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        ..
+    } = &mut *expr.node
+    else {
+        return;
+    };
+    if !matches!(method.as_str(), "send" | "__send__" | "public_send") {
+        return;
+    }
+    let Some(Expr { node, .. }) = args.first() else {
+        return;
+    };
+    let name = match &**node {
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => value.clone(),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => Symbol::from(value.as_str()),
+        _ => return,
+    };
+    let Some(ty) = recv.ty.as_ref().map(|ty| ty.peel_nilable()) else {
+        return;
+    };
+    let (id, association) = match ty {
+        crate::ty::Ty::Class { id, .. } => (id, !matches!(&*recv.node, ExprNode::Const { .. })),
+        crate::ty::Ty::Relation { of } => (of, false),
+        crate::ty::Ty::Array { elem } => {
+            let crate::ty::Ty::Class { id, .. } = elem.peel_nilable() else {
+                return;
+            };
+            // An arbitrary Array[Model] is not a Rails collection proxy.
+            // Only the association read the seed arm can reproduce is.
+            let ExprNode::Send {
+                recv: Some(owner),
+                method: aname,
+                args: aargs,
+                block: None,
+                ..
+            } = &*recv.node
+            else {
+                return;
+            };
+            if !aargs.is_empty() {
+                return;
+            }
+            let owner_id = owner.ty.as_ref().and_then(|ty| match ty.peel_nilable() {
+                crate::ty::Ty::Class { id, .. } => Some(id),
+                _ => None,
+            });
+            if !owner_id
+                .and_then(|owner| assocs.has_many_fk(owner, aname))
+                .is_some_and(|(target, _)| target == id)
+            {
+                return;
+            }
+            // Replacing the read with a relation seed bypasses this
+            // reader. It is safe only while the macro-generated reader
+            // still owns the name throughout the recorded ancestry.
+            if owner_id.is_some_and(|owner| {
+                app_method(app, owner, aname, crate::dialect::MethodReceiver::Instance)
+            }) {
+                return;
+            }
+            (id, false)
+        }
+        _ => return,
+    };
+    let Some(model) = app.models.iter().find(|m| &m.name == id) else {
+        return;
+    };
+    let side = if association {
+        crate::dialect::MethodReceiver::Instance
+    } else {
+        crate::dialect::MethodReceiver::Class
+    };
+    // Both calls being collapsed must still be framework-owned. A
+    // dispatcher override changes `send` itself; a target override means
+    // the literal does not select the macro-generated public method.
+    if app_method(app, id, method, side) || app_method(app, id, &name, side) {
+        return;
+    }
+    let generated = if association {
+        args.len() == 1 && model.associations().any(|a| a.name() == &name)
+    } else {
+        model.scopes().any(|s| s.name == name)
+    };
+    if generated {
+        *method = name;
+        args.remove(0);
+    }
+}
+
+/// Whether app metadata proves that `id`'s lookup chain contains a
+/// user-defined method. This deliberately walks models, library classes,
+/// all reopenings, includes, parents and initializer-installed mixins.
+/// Unknown framework roots terminate the walk.
+pub(crate) fn app_method(
+    app: &crate::App,
+    id: &ClassId,
+    name: &Symbol,
+    side: crate::dialect::MethodReceiver,
+) -> bool {
+    fn visit(
+        app: &crate::App,
+        id: &ClassId,
+        name: &Symbol,
+        side: crate::dialect::MethodReceiver,
+        seen: &mut HashSet<ClassId>,
+    ) -> bool {
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        for model in app.models.iter().filter(|m| &m.name == id) {
+            if model
+                .methods()
+                .any(|m| m.name == *name && m.receiver == side)
+            {
+                return true;
+            }
+            if crate::analyze::model_includes(model)
+                .iter()
+                .any(|inc| visit(app, inc, name, side, seen))
+            {
+                return true;
+            }
+            if model
+                .parent
+                .as_ref()
+                .is_some_and(|p| visit(app, p, name, side, seen))
+            {
+                return true;
+            }
+        }
+        for class in app.library_classes.iter().filter(|c| &c.name == id) {
+            if class
+                .methods
+                .iter()
+                .any(|m| m.name == *name && m.receiver == side)
+            {
+                return true;
+            }
+            if class
+                .includes
+                .iter()
+                .any(|inc| visit(app, inc, name, side, seen))
+            {
+                return true;
+            }
+            if class
+                .parent
+                .as_ref()
+                .is_some_and(|p| visit(app, p, name, side, seen))
+            {
+                return true;
+            }
+        }
+        // Both retained `include` and `prepend` change instance lookup,
+        // not the singleton side. Their order cannot make the proof safer:
+        // the optimization needs every represented override to be absent.
+        side == crate::dialect::MethodReceiver::Instance
+            && app.module_mixins.iter()
+                .filter(|m| m.target == id.0)
+                .any(|m| visit(app, &ClassId(m.module.clone()), name, side, seen))
+    }
+    visit(app, id, name, side, &mut HashSet::new())
+}
+
 /// True if `expr` (or a descendant) calls a method whose name is a scope.
 pub fn mentions_scope(expr: &Expr, names: &HashSet<Symbol>) -> bool {
     let mut found = false;
@@ -2181,10 +2400,11 @@ fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
 /// ```
 ///
 /// One `unless` per unique key, OR'd, so a table with two unique
-/// indexes skips a row conflicting on either. A model with no usable
-/// unique key (none declared, or every one of them nullable — see
-/// [`UniqueKeys`]) keeps the bare save: there is nothing to conflict on
-/// that this can read.
+/// indexes skips a row conflicting on either. A partial index adds its
+/// predicate, `.where("(revoked_at IS NULL)")`, so only a row it covers
+/// counts as a conflict. A model with no usable unique key (none
+/// declared, or every one of them nullable — see [`UniqueKeys`]) keeps
+/// the bare save: there is nothing to conflict on that this can read.
 fn guard_on_unique_keys(
     span: crate::span::Span,
     model: &ClassId,
@@ -2195,8 +2415,10 @@ fn guard_on_unique_keys(
     let Some(keys) = ctx.unique_keys.get(model) else { return save };
     let mut cond: Option<Expr> = None;
     for key in keys {
-        // `<Model>.where(col: __attrs[:col], …).exists?`
+        // `<Model>.where(col: __attrs[:col], …).exists?`, with a partial
+        // index's predicate as a second `where`.
         let entries = key
+            .columns
             .iter()
             .map(|col| {
                 let k = syn(span, ExprNode::Lit { value: Literal::Sym { value: col.clone() } });
@@ -2216,7 +2438,7 @@ fn guard_on_unique_keys(
                 (k, v)
             })
             .collect::<Vec<_>>();
-        let where_call = syn(
+        let mut where_call = syn(
             span,
             ExprNode::Send {
                 recv: Some(relation_new(span, model)),
@@ -2226,6 +2448,21 @@ fn guard_on_unique_keys(
                 parenthesized: true,
             },
         );
+        if let Some(predicate) = &key.predicate {
+            where_call = syn(
+                span,
+                ExprNode::Send {
+                    recv: Some(where_call),
+                    method: Symbol::from("where"),
+                    args: vec![syn(
+                        span,
+                        ExprNode::Lit { value: Literal::Str { value: predicate.clone() } },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+        }
         let mut exists = syn(
             span,
             ExprNode::Send {

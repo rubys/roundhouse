@@ -257,13 +257,14 @@ impl Server {
         };
         let code_filter = args.get("code").and_then(|v| v.as_str());
         let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
-        let (app, parse_diags, gaps, _) = self.analyze()?;
+        let (app, parse_diags, mut gaps, _) = self.analyze()?;
         let (mut diags, preload_cov) = diagnose_with_coverage(&app);
         // Diagnostics shadowing a recorded ingest gap become `note[...]`
         // lines naming the gap — an agent reading this output must be able
         // to tell "your code has a problem" from "roundhouse didn't
         // analyze the construct responsible".
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+        crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
         crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
         diags.extend(parse_diags);
 
@@ -328,7 +329,7 @@ impl Server {
         }
         if !gap_lines.is_empty() {
             sections.push(format!(
-                "{} ingest gap(s) — not analyzed, result above is best-effort:\n{}",
+                "{} ingest gap(s) — coverage incomplete, result above is best-effort:\n{}",
                 gap_lines.len(),
                 gap_lines.join("\n")
             ));
@@ -439,13 +440,14 @@ impl Server {
     /// see), and how many of the current diagnostics are attributed to
     /// each.
     fn tool_gems(&self, _args: &Value) -> Result<String, String> {
-        let (app, _, gaps, _) = self.analyze()?;
+        let (app, _, mut gaps, _) = self.analyze()?;
         let Some(lock) = &app.gem_lock else {
             return Ok("No Gemfile.lock in the app root — no gem census.".to_string());
         };
         let census = crate::gems::GemCensus::of(lock);
         let mut diags = crate::analyze::diagnose(&app);
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+        crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
         crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
         let attributed = |gem: &str| {
             let needle = format!("`{gem}` gem");
@@ -1055,7 +1057,7 @@ mod tests {
 
     #[test]
     fn wont_lower_lowers_datetime_cleanly_and_bad_target_is_an_error() {
-        // real-blog has Date/DateTime columns, which type as the first-
+        // real-blog has DateTime columns, which type as the first-
         // class `Ty::Time`. The shared Stage-2 datetime foundation stores
         // temporal columns as ISO-8601 TEXT and exposes them through a
         // synthesized reader that parses to a native datetime — so `Ty::Time`

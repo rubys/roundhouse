@@ -106,6 +106,7 @@ end
 fn resources_param_flows_into_nested_children_and_member_blocks() {
     // Rails: a child of `resources :tasks, param: :task_id` nests
     // under `:task_task_id`; a `member do` route binds `:task_id`.
+    // Block declarations register before the generated show route.
     let got = paths(
         r#"Rails.application.routes.draw do
   resources :tasks, only: [:show], param: :task_id do
@@ -120,9 +121,9 @@ end
     assert_eq!(
         got,
         vec![
-            "Get /tasks/:task_id",
             "Get /tasks/:task_task_id/notes",
             "Post /tasks/:task_id/archive",
+            "Get /tasks/:task_id",
         ]
     );
 }

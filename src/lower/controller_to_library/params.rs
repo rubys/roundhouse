@@ -1212,6 +1212,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         }),
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -1279,6 +1280,9 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Private,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
@@ -1311,6 +1315,9 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: field.clone(),
         receiver: MethodReceiver::Instance,
@@ -1383,6 +1390,9 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("except"),
         receiver: MethodReceiver::Instance,
@@ -1425,6 +1435,9 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("{}=", field.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1569,6 +1582,9 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
     stmts.push(var(&instance, owner_ty.clone()));
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("from_raw"),
         receiver: MethodReceiver::Class,
@@ -1674,6 +1690,9 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     stmts.push(attrs_var());
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("to_attrs"),
         receiver: MethodReceiver::Instance,
@@ -1757,6 +1776,9 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
@@ -1847,6 +1869,9 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     };
     let ret_ty = hash_ty;
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("to_h"),
         receiver: MethodReceiver::Instance,

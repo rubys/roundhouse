@@ -714,9 +714,18 @@ module ActionText
       i = from
       n = html.length
       while i < n
-        if html[i, 1].to_s == "<"
+        # An OPEN tag: HTML5's tag-open rule (`tag_open_at?` — a `<` before
+        # anything but a letter, `/`, `!` or `?` is TEXT), minus the close,
+        # comment and declaration forms, which are not elements. Every
+        # scanner here used to take any `<` for a tag: `1 < 2 && 3 > 2`
+        # read `< 2 && 3 >` as an element, and SanitizeTags removed it and
+        # the rest of the message (once-campfire-rust's rich-text corpus,
+        # scripts/campfire-richtext-corpus: "plain text with markup
+        # characters" rendered `1 `). The same rule now gates
+        # `element_end`, `to_plain_text` and `scan_tags`.
+        if html[i, 1].to_s == "<" && ActionView::ViewHelpers.tag_open_at?(html, i)
           nxt = html[i + 1, 1].to_s
-          return i if nxt != "/" && nxt != "!" && nxt != ""
+          return i if nxt != "/" && nxt != "!" && nxt != "?"
         end
         i = i + 1
       end
@@ -762,7 +771,7 @@ module ActionText
       n = html.length
       stop = n
       while i < n && depth > 0
-        if html[i, 1].to_s == "<"
+        if html[i, 1].to_s == "<" && ActionView::ViewHelpers.tag_open_at?(html, i)
           close = html[i + 1, 1].to_s == "/"
           start = close ? i + 2 : i + 1
           j = Content.tag_end(html, i)
@@ -1278,7 +1287,7 @@ module ActionText
       n = @html.length
       while i < n
         c = @html[i, 1].to_s
-        if c == "<"
+        if c == "<" && ActionView::ViewHelpers.tag_open_at?(@html, i)
           close = @html[i + 1, 1].to_s == "/"
           name_start = close ? i + 2 : i + 1
           # Quote-aware: an opengraph node's `content` attribute holds
@@ -1429,7 +1438,7 @@ module ActionText
       i = 0
       n = html.length
       while i < n
-        if html[i, 1].to_s == "<"
+        if html[i, 1].to_s == "<" && ActionView::ViewHelpers.tag_open_at?(html, i)
           j = Content.tag_end(html, i)
           j = n if j < 0
           raw = html[i + 1, j - i - 1].to_s

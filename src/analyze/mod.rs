@@ -23,17 +23,23 @@
 //!
 //! Each of those comes when a fixture forces it.
 
+mod alba;
 mod body;
+mod class_configuration;
 pub(crate) use body::string_answers;
+pub(crate) use body::ConstResolverTask;
+pub use body::PreparedConstResolver;
 pub mod async_color;
 pub mod attribution;
 pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 mod registry;
+mod test_module;
 mod render;
 mod effects;
 mod diagnostics;
+pub(crate) mod forwarding;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
@@ -41,6 +47,7 @@ pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
 
 pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
+pub(crate) use body::PARAM_VALUE;
 use render::{
     collect_action_render_views, collect_content_partial_literals,
     collect_dynamic_render_ivars, content_partial_view_name,
@@ -50,6 +57,8 @@ pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
 use std::collections::{BTreeSet, HashMap};
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
@@ -60,7 +69,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Row, Ty};
+use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -86,6 +95,10 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Method names the host fold copied onto each MODULE from its
+    /// includers (see `fold_host_surfaces`). Kept out of what the
+    /// concern fold copies back down, and rewritten every round.
+    host_folded: HashMap<ClassId, BTreeSet<Symbol>>,
     /// Methods whose body ends in `.inquiry` — the evidence
     /// [`inquiry::is_inquiry_predicate`] needs to answer
     /// `content_type.attachment?` as Bool on a `Str` receiver.
@@ -105,12 +118,11 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
-    /// `body::ConstIndex` over `classes`, with the class count it was
-    /// built at. The registry only grows, so a count change is exactly
-    /// when it goes stale.
-    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
+    /// Resolved once from the source snapshot supplied to `Analyzer::new`.
+    const_resolver: std::sync::Arc<body::ConstResolver>,
+    /// Inferred values keyed by Rubydex declaration IDs, not by names.
+    typed_constants: IdentityHashMap<DeclarationId, Ty>,
 }
-
 
 impl Analyzer {
     /// Build an analyzer with the default database adapter
@@ -351,7 +363,16 @@ impl Analyzer {
             // (writer) all resolve.
             for (name, ty) in &model.attributes.fields {
                 let n = name.as_str();
-                cls.instance_methods.insert(name.clone(), ty.clone());
+                // Not the stored value: an enum's reader answers its label, or nil for a value no label names.
+                let reader_ty = if crate::dialect::enum_reads_label(model, name) {
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                } else {
+                    ty.clone()
+                };
+                cls.instance_methods.insert(name.clone(), reader_ty);
+                if model.enums.contains_key(name) {
+                    cls.instance_methods.entry(Symbol::from(format!("{n}_before_type_cast"))).or_insert(ty.clone());
+                }
                 let predicate = Symbol::from(format!("{n}?"));
                 cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
                 let writer = Symbol::from(format!("{n}="));
@@ -675,6 +696,11 @@ impl Analyzer {
                 cls.includes = includes;
             }
 
+            // Not every parent: only another app model, so an abstract base's enums and methods reach the classes below it.
+            if let Some(parent) = model.parent.as_ref().filter(|p| model_parents.contains_key(p)) {
+                cls.parent = Some(parent.clone());
+            }
+
             classes.insert(model.name.clone(), cls);
         }
 
@@ -752,14 +778,22 @@ impl Analyzer {
             }
         }
 
+        // Test helpers are source methods, not a surface invented by test
+        // emission. Register their real identities and declarations before
+        // source typing; inferred returns converge in the same registry as
+        // ordinary application methods.
+        test_module::register(&mut classes, app);
+
         Self {
             classes,
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
+            host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
-            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
+            const_resolver: app.const_resolver.for_sources(&app.sources),
+            typed_constants: IdentityHashMap::default(),
         }
     }
 
@@ -768,19 +802,8 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
-            .with_const_index(self.const_index())
-    }
-
-    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
-        let mut slot = self.const_index.lock().unwrap();
-        if let Some((count, index)) = &*slot {
-            if *count == self.classes.len() {
-                return index.clone();
-            }
-        }
-        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
-        *slot = Some((self.classes.len(), index.clone()));
-        index
+            .with_const_resolver(self.const_resolver.clone())
+            .with_typed_constants(&self.typed_constants)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -830,8 +853,8 @@ impl Analyzer {
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
         for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
-            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -840,7 +863,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
+            crate::timings::phase(format_args!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -906,7 +929,7 @@ impl Analyzer {
         self.type_direct_helper_bodies(app);
         self.type_rails_application_body(app);
 
-        self.stamp_inferred_library_signatures(app);
+        self.stamp_inferred_method_signatures(app);
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -1070,7 +1093,7 @@ impl Analyzer {
     }
 
     /// Post-fixpoint: write what inference discovered into the
-    /// `MethodDef.signature` of every library-class method, so the
+    /// `MethodDef.signature` of library methods and source test helpers, so the
     /// emitted RBS carries it (`errors_for: (Comment | Story | …) ->
     /// String?` instead of `(untyped) -> untyped`) and AOT targets can
     /// dispatch inside the body. Self-describing IR: the body typer
@@ -1099,17 +1122,18 @@ impl Analyzer {
     ///   `Var`/`Untyped`/absent return render exactly what the untyped
     ///   fallback renders, so skipping keeps the output byte-identical
     ///   rather than routing it through a second code path.
-    fn stamp_inferred_library_signatures(&self, app: &mut App) {
-        for lc in &mut app.library_classes {
-            let registered = self.classes.get(&lc.name);
-            for method in &mut lc.methods {
+    fn stamp_inferred_method_signatures(&self, app: &mut App) {
+        for (owner, methods) in app.library_classes.iter_mut().map(|lc| (&lc.name, &mut lc.methods))
+            .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
+            let registered = self.classes.get(owner);
+            for method in methods {
                 if method.signature.is_some() {
                     continue;
                 }
                 if method.name.as_str() == "initialize" {
                     continue;
                 }
-                let key = (lc.name.clone(), method.name.clone());
+                let key = (owner.clone(), method.name.clone());
                 let inferred = self.inferred_params.get(&key);
                 let has_params = inferred
                     .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
@@ -1173,32 +1197,30 @@ impl Analyzer {
         }
     }
 
-    /// Collect every app-level constant (`CONST = <value>`) declared in a
-    /// model or controller body, type its value, and build a global
-    /// name→type registry keyed by the constant's last path segment — the
-    /// shape `ExprNode::Const` dispatch consults (`Vote::COMMENT_REASONS`
-    /// looks up `COMMENT_REASONS`). This is the cross-class channel: a
-    /// constant declared in `Vote` resolves when referenced from a
-    /// controller, a view, another model, or seeds — none of which the
-    /// per-class `extract_*_const_assignments` tables reach.
-    ///
-    /// Typed as a small fixpoint so a constant defined in terms of another
-    /// (`ALL_COMMENT_REASONS = COMMENT_REASONS.merge(...).freeze`) resolves
-    /// once its dependency does. A name declared in two classes with
-    /// conflicting types is dropped as ambiguous: a bare reference can't
-    /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
-    /// `Ty::Var` results are skipped — uninformative, and registering them
-    /// would only mask the `Const` fallback without adding signal.
+    /// Type each app constant value. Rubydex already owns the constant
+    /// names and their lexical resolution, so source reads use its
+    /// `DeclarationId` to find these inferred types. The bare-name map
+    /// remains only for generated expressions without Ruby source.
+    /// The rounds continue until no value changes, so `B = A` can use
+    /// the value of `A` from the round before.
     fn build_constant_registry(
         &self,
         app: &App,
-    ) -> (HashMap<Symbol, Ty>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
-        // (defining class's self_ty, last-segment name, cloned value expr).
-        let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
+    ) -> (HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>) {
+        // Ingest can move a constant to another IR owner: a file-level
+        // constant goes to the first class of its file. The declaration
+        // ID comes from the source position, not from the owner.
+        let declaration_id = |name: &Symbol, value: &Expr| {
+            self.const_resolver.constant_declaration(value.span, name.as_str())
+        };
+        // (defining class, last-segment name, Rubydex ID, value,
+        // eligible for the production generated-expression fallback).
+        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr, bool)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
             if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
                 if let Some(last) = path.last() {
-                    entries.push((self_ty, last.clone(), value.clone()));
+                    let id = declaration_id(last, value);
+                    entries.push((self_ty, last.clone(), id, value.clone(), true));
                 }
             }
         };
@@ -1229,25 +1251,41 @@ impl Analyzer {
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
-                entries.push((
-                    Ty::Class { id: lc.name.clone(), args: vec![] },
-                    name.clone(),
-                    value.clone(),
-                ));
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
+            }
+        }
+        // Original source tests use the same DeclarationId contract.
+        // Their constants participate in the value fixpoint, but must
+        // not change the bare-name fallback used by production views.
+        for module in &app.test_modules {
+            for (owner, constants) in std::iter::once((&module.name, &module.constants))
+                .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
+            {
+                for (name, value) in constants {
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+                }
             }
         }
 
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-        // Cap matches the outer analyze fixpoint; one level of constant
-        // dependency needs two passes, the cap leaves slack.
-        for _ in 0..4 {
+        let mut resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+        // Each round can type one more link of a `B = A` chain, so n
+        // values need at most n + 1 rounds when no value changes after
+        // it is typed. A cycle (`A = B`, `B = A`) never types and stays
+        // unknown, and the read reports it. The bound also stops values
+        // that change on each round.
+        for _ in 0..=entries.len() {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
+            let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
             let shared = body::ConstScope::global(map.clone());
-            for (self_ty, name, value) in entries.iter_mut() {
-                if ambiguous.contains(name) {
-                    continue;
-                }
+            let typer = BodyTyper::new(&self.classes)
+                .with_inquirers(&self.inquirers)
+                .with_const_resolver(self.const_resolver.clone())
+                .with_typed_constants(&resolved);
+            for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
@@ -1256,8 +1294,14 @@ impl Analyzer {
                     annotate_self_dispatch: false,
                     in_view: false,
                 };
-                let ty = self.body_typer().analyze_expr(value, &ctx);
+                let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                if let Some(id) = id {
+                    next_resolved.insert(*id, ty.clone());
+                }
+                if !*production || ambiguous.contains(name) {
                     continue;
                 }
                 match next.get(name) {
@@ -1269,39 +1313,16 @@ impl Analyzer {
                     }
                 }
             }
-            for a in &ambiguous {
-                next.remove(a);
+            for name in &ambiguous {
+                next.remove(name);
             }
-            if next == map {
+            if next == map && next_resolved == resolved {
                 break;
             }
             map = next;
+            resolved = next_resolved;
         }
-        // The same types, kept per owning class as well: a qualified
-        // read can then be answered exactly, including for a name two
-        // classes both define — which the map above has to drop.
-        let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = body::ConstScope::global(map.clone());
-        for (self_ty, name, value) in entries.iter_mut() {
-            let owner = match &self_ty {
-                Ty::Class { id, .. } => id.clone(),
-                _ => continue,
-            };
-            let ctx = Ctx {
-                self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
-                constants: shared.clone(),
-                annotate_self_dispatch: false,
-                in_view: false,
-            };
-            let ty = self.body_typer().analyze_expr(value, &ctx);
-            if matches!(ty, Ty::Var { .. }) {
-                continue;
-            }
-            per_class.entry(owner).or_default().insert(name.clone(), ty);
-        }
-        (map, per_class)
+        (map, resolved)
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -1311,18 +1332,12 @@ impl Analyzer {
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
     fn run_typing_passes(&mut self, app: &mut App) {
-        // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
-        // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
-        // and seeds so cross-class constant references resolve to the
-        // value's type instead of the `Ty::Class { id: ConstName }`
-        // fallback. Seeded under each class's own constants (own shadows
-        // global on a name clash).
-        let (global_constants, class_constants) = self.build_constant_registry(app);
-        // Shared by every context below — see `Ctx::constants`.
-        let global_constants = body::ConstScope::global(global_constants);
-        for (id, constants) in class_constants {
-            self.classes.entry(id).or_default().constants.extend(constants);
-        }
+        // Source-backed constant reads use Rubydex declaration IDs.
+        // A bare-name fallback remains for generated expressions without
+        // a Ruby source reference.
+        let (fallback, resolved_values) = self.build_constant_registry(app);
+        self.typed_constants = resolved_values;
+        let global_constants = body::ConstScope::global(fallback);
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
@@ -1382,6 +1397,16 @@ impl Analyzer {
             /// `App::controller_resolutions` chain keeps After/Skip.
             sourced_filters: Vec<(Filter, ClassId)>,
             action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>>,
+            /// Typed body per method name — own actions/private helpers,
+            /// block-filter bodies, and directly mixed-in concern
+            /// methods. The body-carrying twin of `action_bindings`
+            /// (same keys, unconditionally populated even when a
+            /// method's OWN direct writes are empty, since a method
+            /// like `authorize` — no direct `@x = ...` of its own —
+            /// still needs its body on hand as a resolution target for
+            /// [`collect_transitive_filter_ivars`] to walk *into*).
+            /// Consumed only by Phase B's `chained_bodies` table.
+            action_bodies: HashMap<Symbol, Expr>,
             /// Per-method effect sets (own actions + concern methods
             /// typed against this controller's self), for the persisted
             /// chain's per-hop effects.
@@ -1417,6 +1442,8 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .map(|lc| (lc.name.clone(), lc.includes.clone()))
             .collect();
+
+        self.analyze_class_configuration(&mut app.controllers);
 
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
@@ -1513,11 +1540,41 @@ impl Analyzer {
                     (a.name.clone(), ivars)
                 })
                 .collect();
+            // Body-carrying twin of `action_bindings` — see the field
+            // doc on `ControllerMeta::action_bodies`. Seeded
+            // unconditionally (every own action/private helper, not
+            // just the ones with a nonempty direct binding) because a
+            // filter target like `authorize` writes nothing itself but
+            // still needs to be a resolvable call target for
+            // `collect_transitive_filter_ivars`.
+            let mut action_bodies: HashMap<Symbol, Expr> =
+                controller.actions().map(|a| (a.name.clone(), a.body.clone())).collect();
 
             // Register each block filter's synthetic target so the seeding
             // lookups (`merged_before_seed`, the view-ivar build) resolve it.
             for (target, ivars) in block_filter_bindings {
                 action_bindings.insert(target, ivars);
+            }
+            // Same registration for `action_bodies`: a block-form
+            // filter's target resolves through `sourced_filters`'
+            // `Filter::block` (the full call expr the block-form filter
+            // synthesized in `build_sourced_filter_chain`) rather than
+            // through `block_filter_bindings` above, which only carries
+            // the already-extracted direct ivars, not the body itself.
+            // Re-deriving the block body here (instead of threading it
+            // out of `build_sourced_filter_chain`'s return) keeps this
+            // change out of that function, which a sibling branch also
+            // edits.
+            for (filter, _source) in &sourced_filters {
+                let Some(call_expr) = &filter.block else { continue };
+                let ExprNode::Send { block: Some(block), .. } = &*call_expr.node else {
+                    continue;
+                };
+                let body: &Expr = match &*block.node {
+                    ExprNode::Lambda { body, .. } => body,
+                    _ => block,
+                };
+                action_bodies.entry(filter.target.clone()).or_insert_with(|| body.clone());
             }
 
             // Mixed-in concerns: Rails evaluates a module's `included do`
@@ -1559,6 +1616,12 @@ impl Analyzer {
                     if !ivars.is_empty() {
                         action_bindings.insert(method.name.clone(), ivars);
                     }
+                    // Unconditional, unlike `action_bindings` above: a
+                    // concern method with no DIRECT write of its own
+                    // (`authorize`) still needs its typed body on hand
+                    // as a resolution target for
+                    // `collect_transitive_filter_ivars`.
+                    action_bodies.entry(method.name.clone()).or_insert_with(|| body.clone());
                     let effects = self.collect_effects(&mut body, &ctx);
                     if !effects.is_pure() {
                         concern_effects.entry(method.name.clone()).or_insert(effects);
@@ -1581,6 +1644,7 @@ impl Analyzer {
                     self_ty,
                     sourced_filters,
                     action_bindings,
+                    action_bodies,
                     action_effects,
                     class_constants,
                     layout,
@@ -1738,6 +1802,64 @@ impl Analyzer {
             }
             for (name, ivars) in &meta.action_bindings {
                 layer(&mut chained_bindings, &ctrl_name, name, ivars);
+            }
+
+            // Body-carrying twin of `chained_bindings`, same flat
+            // method-name → resolution table and the same
+            // nearest-definition-wins ordering (ancestors oldest-first,
+            // then self last). Unlike `chained_bindings` it carries no
+            // Phase-B refinement layer — it exists only to give
+            // `collect_transitive_filter_ivars` a body to resolve a
+            // filter target's own receiverless calls into, immediately
+            // below.
+            let mut chained_bodies: HashMap<Symbol, Expr> = HashMap::new();
+            for (_, ancestor) in ancestors.iter().rev() {
+                for (name, body) in &ancestor.action_bodies {
+                    chained_bodies.insert(name.clone(), body.clone());
+                }
+            }
+            for (name, body) in &meta.action_bodies {
+                chained_bodies.insert(name.clone(), body.clone());
+            }
+
+            // Transitive filter-target ivar writes: a Before/Around
+            // filter target whose own body writes no ivar directly, but
+            // reaches one through its own receiverless calls (Procore's
+            // `authorize` → `set_variables_in_authorize!` →
+            // `set_project_variables!` → `@project = ...`, three
+            // methods away), gets that write folded into its
+            // `chained_bindings` entry here. This runs once per
+            // controller, before either seeding sweep below, so both
+            // the per-action `merged_before_seed` overlay and the
+            // controller-wide union just below read the augmented
+            // entry for free — no other change needed to either.
+            // See `collect_transitive_filter_ivars` for the depth cap
+            // and may-write/nilability rules.
+            for (filter, _, _) in &chained_filters {
+                if !matches!(filter.kind, FilterKind::Before | FilterKind::Around) {
+                    continue;
+                }
+                let Some(target_body) = chained_bodies.get(&filter.target) else { continue };
+                let mut visited: BTreeSet<Symbol> = BTreeSet::new();
+                visited.insert(filter.target.clone());
+                let transitive = collect_transitive_filter_ivars(
+                    target_body,
+                    &chained_bodies,
+                    MAX_FILTER_CALL_DEPTH,
+                    &mut visited,
+                    true,
+                );
+                if transitive.is_empty() {
+                    continue;
+                }
+                let entry = chained_bindings.entry(filter.target.clone()).or_default();
+                for (k, v) in transitive {
+                    let merged = match entry.remove(&k) {
+                        Some(prev) => crate::analyze::body::union_of(prev, v),
+                        None => v,
+                    };
+                    entry.insert(k, merged);
+                }
             }
 
             // Controller-wide ivar environment: in Ruby, instance
@@ -2028,7 +2150,7 @@ impl Analyzer {
                 // helper that itself calls another ivar-writing helper is
                 // not chased (the direct-call case is what recurs). Own
                 // and before_action assignments already present win.
-                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
                 // Only own-class sites are consumed below, so helper
                 // attribution is irrelevant — an empty index keeps
                 // this walk exactly as before.
@@ -2235,6 +2357,7 @@ impl Analyzer {
                     }
                 }
             }
+
         }
         // Flush Phase B's refinements. Later rounds of the whole-program
         // fixpoint read them back through `layer` above, which is what
@@ -2699,7 +2822,7 @@ impl Analyzer {
                     reseeded.insert(name, seeded);
                 }
                 let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
+                    self_ty: class_ctx.self_ty.clone(),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false,
@@ -2980,6 +3103,11 @@ impl Analyzer {
             .iter()
             .map(|(view, locals)| (view.clone(), locals.clone()))
             .collect();
+
+        // Type the ORIGINAL test scopes, before source contracts inspect
+        // them. Emission later clones/rewrites these bodies; it is too late
+        // for that typing to establish a source admission fact.
+        self.type_test_modules(app, &global_constants);
 
         // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
         // ivars, no before-action scaffolding. Just an expression
@@ -3271,6 +3399,17 @@ impl Analyzer {
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
         }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                let ret = self.method_return_ty(&module.name, method);
+                let class = self.classes.entry(module.name.clone()).or_default();
+                let table = match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &mut class.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &mut class.class_methods,
+                };
+                Self::register_method_return(table, &method.name, ret.as_ref());
+            }
+        }
         // Controllers: harvest each action/helper method's return type so a
         // sibling call (`@story = find_story`) resolves. Conservative like
         // library classes — only concrete (non-Var) bodies are registered;
@@ -3279,6 +3418,11 @@ impl Analyzer {
         // no class-receiver variant).
         for controller in &app.controllers {
             let class_id = &controller.name;
+            for method in controller.class_methods() {
+                let ret = self.method_return_ty(class_id, method);
+                let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
+                Self::register_method_return(target, &method.name, ret.as_ref());
+            }
             for action in controller.actions() {
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
@@ -3296,6 +3440,7 @@ impl Analyzer {
 
         self.harvest_block_value_methods(app);
         self.fold_concern_surfaces(app);
+        self.fold_host_surfaces(app);
         self.fold_current_attribute_forwarders(app);
     }
 
@@ -3404,14 +3549,14 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .filter_map(|lc| {
                 let cls = self.classes.get(&lc.name)?;
-                Some((
-                    lc.name.clone(),
-                    (
-                        cls.instance_methods.clone(),
-                        cls.class_methods.clone(),
-                        cls.includes.clone(),
-                    ),
-                ))
+                // What the host fold lent the module is the includers'
+                // own surface; copying it back down would only hand an
+                // includer a stale answer about itself.
+                let mut inst = cls.instance_methods.clone();
+                if let Some(lent) = self.host_folded.get(&lc.name) {
+                    inst.retain(|name, _| !lent.contains(name));
+                }
+                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
             })
             .collect();
         if module_surfaces.is_empty() {
@@ -3456,6 +3601,101 @@ impl Analyzer {
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
                 }
+            }
+        }
+    }
+
+    /// Host fold: the other direction of `fold_concern_surfaces`. A
+    /// concern's methods run on its includer, so a bare call in one
+    /// (`resume_session` in `Impersonation`) may name a method the
+    /// module never defines — the includer does, or a sibling concern
+    /// the includer also mixes in. With ONE includer the module's
+    /// bodies are typed with that class as `self` and the call resolves
+    /// there. With several, `self` stays the module (a union `self` is
+    /// a poly cliff on every send) and the call fell to `untyped`,
+    /// which then spread: Rails' authentication concern split across
+    /// two modules left `current_user` as `User | untyped` in every
+    /// controller that read it.
+    ///
+    /// So lend the module the answer when there is exactly one: a name
+    /// the module's bodies call on implicit `self`, that the module
+    /// does not define, and that EVERY includer resolves to the same
+    /// type. Includers that disagree, or one that lacks the method,
+    /// leave the call as it was. Runs after the concern fold, so an
+    /// includer's surface already carries its other concerns' methods.
+    fn fold_host_surfaces(&mut self, app: &App) {
+        let modules: BTreeSet<&ClassId> =
+            app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
+        if modules.is_empty() {
+            return;
+        }
+        // Module → the non-module classes that include it, transitively.
+        let mut hosts: HashMap<ClassId, BTreeSet<ClassId>> = HashMap::new();
+        for (id, cls) in &self.classes {
+            if modules.contains(id) || cls.includes.is_empty() {
+                continue;
+            }
+            let mut queue = cls.includes.clone();
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if modules.contains(&m) {
+                    hosts.entry(m.clone()).or_default().insert(id.clone());
+                }
+                for n in self.classes.get(&m).map(|c| c.includes.as_slice()).unwrap_or_default() {
+                    if seen.insert(n.clone()) {
+                        queue.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        fn bare_calls(e: &Expr, out: &mut BTreeSet<Symbol>) {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                out.insert(method.clone());
+            }
+            e.node.for_each_child(&mut |c| bare_calls(c, out));
+        }
+
+        for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+            let lent_before = self.host_folded.remove(&lc.name).unwrap_or_default();
+            let mut lent = BTreeSet::new();
+            let mut agreed: Vec<(Symbol, Ty)> = Vec::new();
+            // A sole includer is `self` in the module's bodies already.
+            if let Some(hosts) = hosts.get(&lc.name).filter(|h| h.len() > 1) {
+                let mut called = BTreeSet::new();
+                for method in &lc.methods {
+                    bare_calls(&method.body, &mut called);
+                }
+                let own = self.classes.get(&lc.name);
+                for name in called {
+                    if own.is_some_and(|c| c.instance_methods.contains_key(&name))
+                        && !lent_before.contains(&name)
+                    {
+                        continue; // the module's own answer
+                    }
+                    let mut answers = hosts.iter().map(|h| {
+                        self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
+                    });
+                    let Some(Some(first)) = answers.next() else { continue };
+                    if first.is_unknown() || !answers.all(|a| a == Some(first)) {
+                        continue;
+                    }
+                    agreed.push((name, first.clone()));
+                }
+            }
+            let cls = self.classes.entry(lc.name.clone()).or_default();
+            for name in &lent_before {
+                cls.instance_methods.remove(name);
+            }
+            for (name, ty) in agreed {
+                cls.instance_methods.insert(name.clone(), ty);
+                lent.insert(name);
+            }
+            if !lent.is_empty() {
+                self.host_folded.insert(lc.name.clone(), lent);
             }
         }
     }
@@ -3656,7 +3896,7 @@ impl Analyzer {
         // description of the argument list that disagrees with the
         // `def`. campfire's `next_involvement_for` emitted exactly
         // that, and spinel gave the param an `sp_SymPolyHash *`.
-        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
         let params_by_method = Self::param_shapes(app);
         for model in &app.models {
             for method in model.methods() {
@@ -3671,9 +3911,29 @@ impl Analyzer {
                 self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
             }
         }
+        let mut test_sites = Vec::new();
+        for module in &app.test_modules {
+            if let Some(setup) = &module.setup {
+                self.collect_send_sites(setup, Some(&module.name), helpers, &mut test_sites);
+            }
+            for body in module.helpers.iter().flat_map(|method| {
+                method.params.iter().filter_map(|param| param.default.as_ref())
+                    .chain(std::iter::once(&method.body))
+            })
+                .chain(module.tests.iter().map(|test| &test.body)) {
+                self.collect_send_sites(body, Some(&module.name), helpers, &mut test_sites);
+            }
+        }
+        let test_sites = test_sites.into_iter().filter_map(|(class, method, args, kwargs)| {
+            self.test_helper_owner(app, &class, &method)
+                .map(|owner| (owner, method, args, kwargs))
+        }).collect();
         for controller in &app.controllers {
             for action in controller.actions() {
                 self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
+            }
+            for method in controller.class_methods() {
+                self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
             }
         }
         for view in &app.views {
@@ -3683,31 +3943,37 @@ impl Analyzer {
             self.collect_send_sites(seeds, None, helpers, &mut sites);
         }
 
-        for (class_id, method, arg_tys, kw_tys) in sites {
-            let arg_tys = Self::place_keyword_args(
-                params_by_method.get(&(class_id.clone(), method.clone())),
-                arg_tys,
-                kw_tys,
-            );
-            // Cross-reference against MethodDef.params to know the
-            // arity. If the called method's params can't be located,
-            // still accumulate up to arg count under the same key —
-            // RBS-only methods don't have a MethodDef but do have an
-            // Fn signature, and inferred_params can extend either way.
-            let arity = arg_tys.len();
-            let entry = self
-                .inferred_params
-                .entry((class_id.clone(), method.clone()))
-                .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
-            if entry.len() < arity {
-                entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+        for (phase, sites) in [sites, test_sites].into_iter().enumerate() {
+            if phase == 1 {
+                // Production signatures keep their production callers' shape.
+                // Fold before adding test-owned observations: a same-named test
+                // helper must not feed an included production concern either.
+                self.fold_concern_param_sites(app);
             }
-            for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                *slot = unify_param_ty(slot.clone(), observed);
+            for (class_id, method, arg_tys, kw_tys) in sites {
+                let arg_tys = Self::place_keyword_args(
+                    params_by_method.get(&(class_id.clone(), method.clone())),
+                    arg_tys,
+                    kw_tys,
+                );
+                // Cross-reference against MethodDef.params to know the
+                // arity. If the called method's params can't be located,
+                // still accumulate up to arg count under the same key —
+                // RBS-only methods don't have a MethodDef but do have an
+                // Fn signature, and inferred_params can extend either way.
+                let arity = arg_tys.len();
+                let entry = self
+                    .inferred_params
+                    .entry((class_id.clone(), method.clone()))
+                    .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
+                if entry.len() < arity {
+                    entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+                }
+                for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
+                    *slot = unify_param_ty(slot.clone(), observed);
+                }
             }
         }
-
-        self.fold_concern_param_sites(app);
     }
 
     /// The param-table twin of `fold_concern_surfaces`.
@@ -3799,7 +4065,7 @@ impl Analyzer {
                 for name in names {
                     // The includer's OWN def wins — unless it is this
                     // module's def, spliced in verbatim
-                    // (`splice_concern_class_methods_into_models`).
+                    // (`splice_concern_class_methods_into_includers`).
                     // Then it is one method with two `MethodDef`s and
                     // the observations belong to both.
                     let spliced_from_here = app
@@ -3827,8 +4093,8 @@ impl Analyzer {
         }
     }
 
-    /// Every (class, method) pair's parameter NAMES and whether each
-    /// binds by keyword — the shape `place_keyword_args` needs to put a
+    /// Every (class, method) pair's parameter names and canonical kinds
+    /// — the shape `place_keyword_args` needs to put a
     /// call's kwargs on the right slots.
     ///
     /// Keyed the way `inferred_params` is, by (class, method) with no
@@ -3837,11 +4103,13 @@ impl Analyzer {
     /// POISONED rather than picked: placing keywords from the wrong
     /// `def` is worse than leaving the hash where it sits, which is the
     /// behaviour that stood before this table existed.
-    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, bool)>> {
-        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, bool)>>> = HashMap::new();
+    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), ParamShape> {
+        let mut out: HashMap<(ClassId, Symbol), Option<ParamShape>> = HashMap::new();
         let mut record = |class: &ClassId, m: &crate::dialect::MethodDef| {
-            let shape: Vec<(Symbol, bool)> =
-                m.params.iter().map(|p| (p.name.clone(), p.keyword)).collect();
+            let shape = ParamShape {
+                slots: m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect(),
+                keywords_by_kind: false,
+            };
             out.entry((class.clone(), m.name.clone()))
                 .and_modify(|slot| {
                     if slot.as_ref() != Some(&shape) {
@@ -3858,6 +4126,39 @@ impl Analyzer {
         for lc in &app.library_classes {
             for m in &lc.methods {
                 record(&lc.name, m);
+            }
+        }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                record(&module.name, method);
+            }
+        }
+        // A controller helper's keywords are call-site evidence too:
+        // without its shape, `describe(name: "gear", count: 2)` against
+        // `def describe(name:, count:)` typed the first slot with the
+        // whole kwargs Hash. Same slot order the controller lowering
+        // builds: positionals, optionals, keywords, `**rest`.
+        for controller in &app.controllers {
+            for a in controller.actions() {
+                let mut shape: Vec<(Symbol, ParamKind)> =
+                    a.params.fields.iter().map(|(n, _)| (n.clone(), ParamKind::Required)).collect();
+                shape.extend(a.opt_params.iter().map(|(n, _)| (n.clone(), ParamKind::Optional)));
+                shape.extend(
+                    a.kw_params.iter().map(|(n, d)| (n.clone(), ParamKind::Keyword { required: d.is_none() })),
+                );
+                if let Some(n) = &a.kwrest_param {
+                    shape.push((n.clone(), ParamKind::KeywordRest));
+                }
+                // Controller lowering keeps every keyword a keyword, so a
+                // key binds by kind here, never to a same-named positional.
+                let shape = ParamShape { slots: shape, keywords_by_kind: true };
+                out.entry((controller.name.clone(), a.name.clone()))
+                    .and_modify(|slot| {
+                        if slot.as_ref() != Some(&shape) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(shape));
             }
         }
         out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
@@ -3885,18 +4186,63 @@ impl Analyzer {
     /// not pass an optional keyword is no evidence about its type, and
     /// `unify_param_ty` reads `Var` as exactly that.
     fn place_keyword_args(
-        shape: Option<&Vec<(Symbol, bool)>>,
+        shape: Option<&ParamShape>,
         mut arg_tys: Vec<Ty>,
-        kw_tys: Vec<(Symbol, Ty)>,
+        kw: SiteKeywords,
     ) -> Vec<Ty> {
+        if let Some(shape) = shape.filter(|s| s.keywords_by_kind) {
+            if kw.group {
+                if let Some(placed) = Self::bind_keyword_group(shape, &arg_tys, &kw.keys) {
+                    return placed;
+                }
+            }
+        }
+        let kw_tys = kw.keys;
         if kw_tys.is_empty() {
+            // Ingest erases ** forwarding to the Hash expression itself.
+            // A whole bundle cannot prove an individual named keyword's
+            // value. Mask only those slots, without moving observations:
+            // keyword-rest DOES bind the Hash, and positional/default/rest
+            // parameters keep their existing inference contract.
+            if let Some(shape) = shape {
+                for (observed, (_, kind)) in arg_tys.iter_mut().zip(&shape.slots) {
+                    if matches!(kind, ParamKind::Keyword { .. }) {
+                        *observed = Ty::Var { var: crate::ident::TyVar(0) };
+                    }
+                }
+            }
             return arg_tys;
         }
-        let Some(params) = shape else {
+        let Some(shape) = shape else {
             return arg_tys;
         };
-        let slot_of = |key: &Symbol| params.iter().position(|(n, _kw)| n == key);
-        if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
+        let params = &shape.slots;
+        // Where a shape keeps its keywords as keywords (a controller
+        // helper's), Ruby binds a key only to a keyword slot:
+        // `h("text", a: 2)` against `def h(a, **opts)` is `a = "text"`,
+        // `opts = {a: 2}`. Positional slots still count for the index.
+        let slot_of = |key: &Symbol| {
+            params.iter().position(|(n, kind)| {
+                n == key && (!shape.keywords_by_kind || matches!(kind, ParamKind::Keyword { .. }))
+            })
+        };
+        // A key no parameter names still leaves the hash alone, unless
+        // the slot it would land on is a named keyword: Ruby never binds
+        // a kwargs hash to one, so `tagged(label: x, tone: y)` against
+        // `def tagged(label:, **rest)` types `label` from `x` and leaves
+        // `tone` to the `**rest` it binds to. `**rest` itself is not
+        // such a slot: when the hash lands there (`h(1, x: 2)` against
+        // `def h(a, **opts)`), Ruby binds `opts` to exactly that hash,
+        // so the observation stays where it is. Every slot from the
+        // hash's own position on counts, not just that one: with no
+        // positional passed, `h(label: 1, tone: 2)` against `def h(prefix
+        // = nil, label:, **rest)` binds `label`, never `prefix`.
+        let supplied_positionals = arg_tys.len().saturating_sub(1);
+        let lands_on_keyword = params
+            .iter()
+            .skip(supplied_positionals)
+            .any(|(_, kind)| matches!(kind, ParamKind::Keyword { .. }));
+        if !lands_on_keyword && !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
             return arg_tys;
         }
         arg_tys.pop();
@@ -3911,6 +4257,62 @@ impl Analyzer {
         arg_tys
     }
 
+    /// A controller helper's call whose last argument is its keyword
+    /// group, placed the way Ruby binds it: the positionals fill the
+    /// positional slots in order, a key fills the keyword slot that
+    /// names it, and the group as a whole never fills a positional.
+    /// `spread(1, x: 2)` against `def spread(a, b = nil, **rest)` is
+    /// `b = nil`, `rest = {x: 2}`; `forwarded(**opts)` against `def
+    /// forwarded(prefix = nil, label:, **rest)` leaves `prefix` at its
+    /// default. The Hash goes to `**rest` only when no named keyword
+    /// can take part of it, so `**rest` binds exactly that hash, as in
+    /// `h(1, x: 2)` against `def h(a, **opts)`; a `**splat`'s unknown
+    /// keys leave every named keyword `Var`.
+    ///
+    /// `None` when the shape takes no keywords at all: Ruby then passes
+    /// the group as one positional Hash (`def p(a, b = nil)` called
+    /// `p(1, x: 2)` is `b = {x: 2}`), the rule the caller already has.
+    fn bind_keyword_group(
+        shape: &ParamShape,
+        arg_tys: &[Ty],
+        keys: &[(Symbol, Ty)],
+    ) -> Option<Vec<Ty>> {
+        let params = &shape.slots;
+        let is_named = |kind: &ParamKind| matches!(kind, ParamKind::Keyword { .. });
+        let has_named = params.iter().any(|(_, kind)| is_named(kind));
+        let rest = params
+            .iter()
+            .position(|(_, kind)| matches!(kind, ParamKind::KeywordRest));
+        if rest.is_none() && !has_named {
+            return None;
+        }
+        let (hash, positionals) = arg_tys.split_last()?;
+        let unseen = Ty::Var {
+            var: crate::ident::TyVar(0),
+        };
+        let mut out = vec![unseen; params.len()];
+        let positional_slots = params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, kind))| matches!(kind, ParamKind::Required | ParamKind::Optional))
+            .map(|(i, _)| i);
+        for (i, t) in positional_slots.zip(positionals) {
+            out[i] = t.clone();
+        }
+        for (key, t) in keys {
+            if let Some(i) = params
+                .iter()
+                .position(|(n, kind)| n == key && is_named(kind))
+            {
+                out[i] = t.clone();
+            }
+        }
+        if let (Some(i), false) = (rest, has_named) {
+            out[i] = hash.clone();
+        }
+        Some(out)
+    }
+
     /// Walk one expression tree, collecting (class_id, method, arg_tys)
     /// for every Send whose receiver type is known. Used by
     /// `unify_params_from_call_sites`. The receiver's type was set by
@@ -3922,7 +4324,7 @@ impl Analyzer {
         expr: &Expr,
         self_class: Option<&ClassId>,
         helpers: &HashMap<Symbol, ClassId>,
-        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)>,
+        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)>,
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
@@ -3976,7 +4378,7 @@ impl Analyzer {
                     // the value binds to, and one such key disqualifies
                     // the whole hash (an incomplete map would place
                     // some keywords and silently drop the rest).
-                    let kw_tys = match args.last().map(|a| &*a.node) {
+                    let keys = match args.last().map(|a| &*a.node) {
                         Some(ExprNode::Hash { entries, kwargs: true }) => {
                             let mut pairs = Vec::with_capacity(entries.len());
                             let mut all_sym = true;
@@ -4004,6 +4406,14 @@ impl Analyzer {
                         }
                         _ => Vec::new(),
                     };
+                    // Whether the last argument is the call's keyword
+                    // group at all: a `k: v` list or one with a
+                    // `**splat`, never a positional `{…}` literal.
+                    let group = matches!(
+                        args.last().map(|a| &*a.node),
+                        Some(ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })
+                    );
+                    let kw_tys = SiteKeywords { group, keys };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -4062,6 +4472,11 @@ impl Analyzer {
                 self.collect_send_sites(body, self_class, helpers, out);
             }
             ExprNode::Lambda { body, .. } => self.collect_send_sites(body, self_class, helpers, out),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    self.collect_send_sites(r, self_class, helpers, out);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 self.collect_send_sites(fun, self_class, helpers, out);
                 for a in args { self.collect_send_sites(a, self_class, helpers, out); }
@@ -4107,7 +4522,9 @@ impl Analyzer {
             ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.collect_send_sites(v, self_class, helpers, out); }
             }
-            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, helpers, out),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+                self.collect_send_sites(value, self_class, helpers, out)
+            }
             ExprNode::MultiAssign { value, .. } => {
                 self.collect_send_sites(value, self_class, helpers, out)
             }
@@ -4126,6 +4543,7 @@ impl Analyzer {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
         }
     }
@@ -4472,6 +4890,317 @@ pub(crate) fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bo
 /// same ivar is set by multiple callbacks. The chain carries all filter
 /// kinds (for `App::controller_resolutions`); only Before/Around run
 /// ahead of the action and contribute ivars here.
+/// Cap on the number of call-chain hops [`collect_transitive_filter_ivars`]
+/// will follow from a filter's target method. Four hops covers every
+/// filter → helper → helper → helper chain seen in practice — Procore's
+/// `authorize` → `set_variables_in_authorize!` → `set_project_variables!`
+/// → `@project = ...` is two hops from the filter target, and
+/// `set_project_variables!` → `set_provider_variables!` → `@domain =
+/// ...` a third — while still bounding the walk against a runaway or
+/// accidentally-cyclic call graph. A chain longer than the cap simply
+/// stays unresolved past the cut, same as today's zero-hop behavior.
+const MAX_FILTER_CALL_DEPTH: usize = 4;
+
+/// Ivar writes reachable from `expr` (a filter target's own body, or a
+/// method it transitively calls) by following every receiverless
+/// self-call (`foo`, `self.foo`, `foo(args)`) into its resolved body,
+/// recursively, up to `depth` hops. `bodies` is the flat method-name →
+/// typed-body table built in `run_typing_passes` as `chained_bodies` —
+/// the same resolution order dispatch itself uses: the controller's own
+/// methods, its ancestors (nearest first), and every directly or
+/// transitively mixed-in concern.
+///
+/// This is may-write semantics — the same kind the direct (non-
+/// transitive) filter-body seeding in [`extract_ivar_assignments`]
+/// already performs within ONE method body (union whatever every
+/// branch writes; never evaluate which branch actually runs) — carried
+/// across call boundaries instead of stopping at them:
+///
+///   - A call reached unconditionally (the top level of a `Seq`, or
+///     every alternative of a branching construct) contributes its
+///     callee's writes as-is, unioned with whatever else is reachable.
+///   - A call reached on only SOME alternative of an `If`/`Case`/
+///     `BoolOp`/loop/rescue (the other alternative(s) don't reach an
+///     equivalent write) contributes its writes with a `Ty::Nil` arm
+///     unioned in for the alternatives that don't write it — see
+///     [`merge_alternative_branches`]. This is what turns Procore's
+///     `@project` (written only on the `if self.class.project_area?`
+///     arm of `set_variables_in_authorize!`, with `company_area?` /
+///     `super_area?` / an `else` that logs and returns) into
+///     `Project?` rather than a false unconditional `Project`: the
+///     union of "`Project` on one arm" and "nothing on the other
+///     three" is nilable, not `Project`. That is strictly better than
+///     today's `ivar_unresolved` on `@project` and does not misreport
+///     the one case that matters (a caller that reads `@project`
+///     without a nil check on a path where it truly is always set
+///     still gets `Project?`, a conservative widening, never a false
+///     `Project` that would hide a real nil).
+///   - Class-side predicates on the controller's own class
+///     (`self.class.project_area?`, `self.class.company_area?`, ...)
+///     and conditions behind feature flags or other calls this
+///     analyzer can't evaluate (`unless feature_active?(...)`) are
+///     NEVER evaluated for their value — this function only ever reads
+///     a branching node's *branches*, not its condition's truthiness,
+///     so "both/every arm may run" falls out automatically rather than
+///     needing a special case per condition shape.
+///
+/// `visited` is the current call STACK (pushed on entry to a callee,
+/// popped on return), not a global "ever seen" set: a diamond-shaped
+/// call graph (two different callees that both reach a common helper)
+/// still gets that helper's contribution on both paths; only a genuine
+/// cycle (mutual or self-recursion) is cut off, with the depth cap as
+/// the backstop for a long-but-non-cyclic chain.
+fn collect_transitive_filter_ivars(
+    expr: &Expr,
+    bodies: &HashMap<Symbol, Expr>,
+    depth: usize,
+    visited: &mut BTreeSet<Symbol>,
+    own: bool,
+) -> HashMap<Symbol, Ty> {
+    if depth == 0 {
+        return HashMap::new();
+    }
+    match &*expr.node {
+        ExprNode::Seq { exprs } => {
+            let mut out = HashMap::new();
+            for e in exprs {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
+            }
+            out
+        }
+        // The condition is never evaluated (see doc above) — only
+        // walked for calls of its own (`unless feature_active?(...)`
+        // is itself a receiverless call, followed like any other).
+        // `then_branch`/`else_branch` are alternatives: Ruby's `if`
+        // with no `else` types the missing branch as a Nil-producing
+        // no-op, which `merge_alternative_branches` needs as an
+        // explicit empty contribution to make an only-one-arm write
+        // nilable — it's already exactly that shape here because
+        // `else_branch` is a literal `nil` expression when the source
+        // omitted one, and walking it yields `{}`.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited, own);
+            let branches = vec![
+                collect_transitive_filter_ivars(then_branch, bodies, depth, visited, own),
+                collect_transitive_filter_ivars(else_branch, bodies, depth, visited, own),
+            ];
+            union_ivar_maps(&mut out, merge_alternative_branches(branches));
+            out
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            let mut out = collect_transitive_filter_ivars(scrutinee, bodies, depth, visited, own);
+            let mut branches: Vec<HashMap<Symbol, Ty>> = arms
+                .iter()
+                .map(|arm| collect_transitive_filter_ivars(&arm.body, bodies, depth, visited, own))
+                .collect();
+            // No `when`/pattern may match — Ruby's `case` with nothing
+            // matching (and no `else`) evaluates to nil — so an
+            // implicit empty alternative is added even when every
+            // explicit arm agrees, otherwise an exhaustive-looking
+            // `case` would wrongly type as non-nilable.
+            branches.push(HashMap::new());
+            union_ivar_maps(&mut out, merge_alternative_branches(branches));
+            out
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            let mut out = collect_transitive_filter_ivars(left, bodies, depth, visited, own);
+            let right_out = collect_transitive_filter_ivars(right, bodies, depth, visited, own);
+            // `right` only evaluates if `left` doesn't short-circuit
+            // the operator — may-not-run, same treatment as an `If`
+            // with no `else`.
+            union_ivar_maps(&mut out, merge_alternative_branches(vec![right_out, HashMap::new()]));
+            out
+        }
+        ExprNode::While { cond, body, .. } => {
+            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited, own);
+            let body_out = collect_transitive_filter_ivars(body, bodies, depth, visited, own);
+            // The body may run zero times.
+            union_ivar_maps(&mut out, merge_alternative_branches(vec![body_out, HashMap::new()]));
+            out
+        }
+        ExprNode::RescueModifier { expr: e, fallback } => {
+            let mut out = collect_transitive_filter_ivars(e, bodies, depth, visited, own);
+            let fb = collect_transitive_filter_ivars(fallback, bodies, depth, visited, own);
+            union_ivar_maps(&mut out, merge_alternative_branches(vec![fb, HashMap::new()]));
+            out
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let mut out = collect_transitive_filter_ivars(body, bodies, depth, visited, own);
+            let mut alt: Vec<HashMap<Symbol, Ty>> = rescues
+                .iter()
+                .map(|r| collect_transitive_filter_ivars(&r.body, bodies, depth, visited, own))
+                .collect();
+            alt.push(HashMap::new()); // no rescue triggers
+            union_ivar_maps(&mut out, merge_alternative_branches(alt));
+            if let Some(e) = else_branch {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
+            }
+            if let Some(e) = ensure {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
+            }
+            out
+        }
+        // The call-following core: a receiverless send (`foo`,
+        // `foo(args)`) or an explicit-self send (`self.foo`) resolves
+        // against `bodies` exactly like `authorize` → `set_variables_
+        // in_authorize!` in the doc comment above. Any other receiver
+        // (`@provider.tools`, `Project.find(...)`) is not followed —
+        // only OWN-class dispatch is in scope here — but is still
+        // walked structurally so a self-call buried in its receiver,
+        // args, or block is still found.
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let mut out = HashMap::new();
+            let is_self_call = match recv {
+                None => true,
+                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+            };
+            if is_self_call {
+                if let Some(callee_body) = bodies.get(method) {
+                    if visited.insert(method.clone()) {
+                        // One recursive call finds BOTH the callee's own
+                        // direct writes and whatever it further calls —
+                        // the Assign/OpAssign/MultiAssign arms below
+                        // record a direct write with the same
+                        // branch-aware nilability as everything else in
+                        // this function. Do not swap this for a plain
+                        // `extract_ivar_assignments(callee_body, ..)`:
+                        // that function's own `If`/`Case` arms union
+                        // every branch's writes WITHOUT a Nil arm for
+                        // "this branch didn't write it" (correct for
+                        // its existing direct, single-body callers,
+                        // which never needed that distinction) — using
+                        // it here silently discarded the nilability
+                        // this function exists to add, which is exactly
+                        // how `set_variables_in_authorize!`'s `@project`
+                        // (real one arm of an if/elsif/elsif/else) was
+                        // first observed coming out as non-nilable
+                        // `Project` instead of `Project?`.
+                        union_ivar_maps(
+                            &mut out,
+                            collect_transitive_filter_ivars(
+                                callee_body,
+                                bodies,
+                                depth - 1,
+                                visited,
+                                false,
+                            ),
+                        );
+                        visited.remove(method);
+                    }
+                }
+            }
+            if let Some(r) = recv {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(r, bodies, depth, visited, own));
+            }
+            for a in args {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(a, bodies, depth, visited, own));
+            }
+            if let Some(b) = block {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(b, bodies, depth, visited, own));
+            }
+            out
+        }
+        ExprNode::Lambda { body, .. } => collect_transitive_filter_ivars(body, bodies, depth, visited, own),
+        ExprNode::Let { value, body, .. } => {
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            union_ivar_maps(&mut out, collect_transitive_filter_ivars(body, bodies, depth, visited, own));
+            out
+        }
+        ExprNode::Return { value } | ExprNode::Raise { value } => {
+            collect_transitive_filter_ivars(value, bodies, depth, visited, own)
+        }
+        // A direct ivar write, recorded the same way
+        // `extract_ivar_assignments` records one — from `value.ty`,
+        // unioned with anything already known for that name — except
+        // this arm sits inside the branch-aware walk above, so a write
+        // that only some `If`/`Case` alternatives reach still gets its
+        // Nil arm from `merge_alternative_branches` at the enclosing
+        // branch node, not lost the way going through
+        // `extract_ivar_assignments` on the whole callee body would.
+        ExprNode::Assign { target: LValue::Ivar { name }, value }
+        | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            if !own {
+                if let Some(ty) = value.ty.clone() {
+                    union_ivar_maps(&mut out, HashMap::from([(name.clone(), ty)]));
+                }
+            }
+            out
+        }
+        // `@a, @b = expr` — same per-position typing
+        // `extract_ivar_assignments` uses for the non-transitive case.
+        ExprNode::MultiAssign { targets, value } => {
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            for (i, target) in targets.iter().enumerate() {
+                if let (LValue::Ivar { name }, false) = (target, own) {
+                    if let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                        union_ivar_maps(&mut out, HashMap::from([(name.clone(), ty)]));
+                    }
+                }
+            }
+            out
+        }
+        // Any other assignment target (local var, constant, attribute,
+        // `@hash[k] = v` index write). Only the RHS/index can hide a
+        // further call or a nested ivar write; the target itself
+        // contributes nothing here (the Hash-value-widening
+        // `extract_ivar_assignments` does for `@hash[k] = v` is a
+        // refinement this transitive walk doesn't attempt — out of
+        // scope for the filter-chain gap this function targets).
+        ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            if let LValue::Index { recv, index } = target {
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(recv, bodies, depth, visited, own));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(index, bodies, depth, visited, own));
+            }
+            out
+        }
+        _ => HashMap::new(),
+    }
+}
+
+/// Union `incoming` into `out`, joining any overlapping key with
+/// [`union_of`] (accumulate, matching `extract_ivar_assignments`'s
+/// treatment of repeated writes — never last-write-wins).
+fn union_ivar_maps(out: &mut HashMap<Symbol, Ty>, incoming: HashMap<Symbol, Ty>) {
+    for (k, v) in incoming {
+        let merged = match out.remove(&k) {
+            Some(prev) => crate::analyze::body::union_of(prev, v),
+            None => v,
+        };
+        out.insert(k, merged);
+    }
+}
+
+/// Merge mutually-exclusive branch contributions (the arms of an `if`/
+/// `case`/loop/rescue): a key written on every branch keeps the union
+/// of its per-branch types; a key written on only SOME branches gets
+/// `Ty::Nil` unioned in for the branches that don't write it, because
+/// only one alternative actually runs at request time and it might be
+/// one of the ones that doesn't. `union_of(_, Ty::Nil)` widens whatever
+/// the other branches contributed into a nilable union.
+fn merge_alternative_branches(branches: Vec<HashMap<Symbol, Ty>>) -> HashMap<Symbol, Ty> {
+    let mut keys: BTreeSet<Symbol> = BTreeSet::new();
+    for b in &branches {
+        keys.extend(b.keys().cloned());
+    }
+    let mut out = HashMap::new();
+    for k in keys {
+        let mut ty: Option<Ty> = None;
+        for b in &branches {
+            let contribution = b.get(&k).cloned().unwrap_or(Ty::Nil);
+            ty = Some(match ty {
+                Some(prev) => crate::analyze::body::union_of(prev, contribution),
+                None => contribution,
+            });
+        }
+        if let Some(t) = ty {
+            out.insert(k, t);
+        }
+    }
+    out
+}
+
 fn merged_before_seed(
     chained_filters: &[(Filter, ClassId, ClassId)],
     action_name: &Symbol,
@@ -4545,13 +5274,8 @@ fn build_sourced_filter_chain(
                     // module's `included do` filters into this body, each
                     // tagged with `from_concern` for provenance. Splicing
                     // again here would double every concern filter.
-                    "before_action" | "around_action" | "after_action" => {
+                    "around_action" => {
                         let Some(block) = block else { continue };
-                        let kind = match method.as_str() {
-                            "before_action" => FilterKind::Before,
-                            "around_action" => FilterKind::Around,
-                            _ => FilterKind::After,
-                        };
                         // The attached block is a Lambda whose body is
                         // the filter code.
                         let body = match &*block.node {
@@ -4569,7 +5293,7 @@ fn build_sourced_filter_chain(
                         chain.push((
                             Filter {
                                 target_span: crate::span::Span::synthetic(),
-                                kind,
+                                kind: FilterKind::Around,
                                 target: target.clone(),
                                 from_concern,
                                 only,
@@ -4581,6 +5305,55 @@ fn build_sourced_filter_chain(
                                 if_cond_expr: None,
                                 unless_cond_expr: None,
                                 block: Some(expr.clone()),
+                                prepend: false,
+                            },
+                            source,
+                        ));
+                        block_bindings.push((target, ivars));
+                    }
+                    // `before_action`/`after_action`/`prepend_before_action`
+                    // whose target is a lambda/proc/block literal instead
+                    // of a Symbol — the block-attached form handled above
+                    // for `around_action`, or `before_action -> { … },
+                    // only: […]`'s argument form, which has no attached
+                    // block at all (`ingest::controller::
+                    // lambda_filter_target` recognizes both surfaces so
+                    // this arm and `report_unrecognized_controller_macros`
+                    // / `build_filter_preamble` agree on what counts).
+                    "before_action" | "after_action" | "prepend_before_action" => {
+                        let Some(target_info) =
+                            crate::ingest::controller::lambda_filter_target(expr)
+                        else {
+                            continue;
+                        };
+                        let kind = if method.as_str() == "after_action" {
+                            FilterKind::After
+                        } else {
+                            FilterKind::Before
+                        };
+                        let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                        extract_ivar_assignments(&target_info.body, &mut ivars);
+                        let target =
+                            Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
+                        let from_concern =
+                            spliced_origin.and_then(|m| m.get(&target)).cloned();
+                        let source = from_concern.clone().unwrap_or_else(|| own_id.clone());
+                        chain.push((
+                            Filter {
+                                target_span: crate::span::Span::synthetic(),
+                                kind,
+                                target: target.clone(),
+                                from_concern,
+                                only: target_info.only,
+                                except: target_info.except,
+                                only_style: crate::expr::ArrayStyle::default(),
+                                except_style: crate::expr::ArrayStyle::default(),
+                                if_cond: target_info.if_cond,
+                                unless_cond: target_info.unless_cond,
+                                if_cond_expr: target_info.if_cond_expr,
+                                unless_cond_expr: target_info.unless_cond_expr,
+                                block: Some(expr.clone()),
+                                prepend: method.as_str() == "prepend_before_action",
                             },
                             source,
                         ));
@@ -4881,6 +5654,28 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
     out
 }
 
+/// A call's trailing keyword arguments as `collect_send_sites` saw them.
+#[derive(Clone, Debug)]
+struct SiteKeywords {
+    /// The last argument is the keyword group (`k: v` or `**splat`).
+    group: bool,
+    /// Its `key: value` pairs, by name; empty when any key is not a
+    /// literal symbol (a `**splat` included).
+    keys: Vec<(Symbol, Ty)>,
+}
+
+/// A method's declared parameter slots, in declaration order, as
+/// `place_keyword_args` reads them.
+#[derive(Debug, PartialEq)]
+struct ParamShape {
+    slots: Vec<(Symbol, ParamKind)>,
+    /// True when every keyword in `slots` is still declared a keyword,
+    /// so a call's key binds only to a `ParamKind::Keyword` slot. False
+    /// for shapes whose optional keywords ingest may have lowered to
+    /// positionals-with-default, which a key must still find by name.
+    keywords_by_kind: bool,
+}
+
 /// A parameter's type from what the call sites passed AND what its
 /// default is: an optional parameter no caller passes IS its default,
 /// and one some callers pass is the union. `None` when neither says
@@ -4918,16 +5713,30 @@ pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
     controller_include_groups(controller).into_iter().flatten().collect()
 }
 
-/// The controller's `include` statements, one inner list per statement
-/// in source order, each in the order its arguments were written. The
-/// grouping is what the filter-registration order needs: Ruby processes
-/// one statement's arguments last-first, but statements first-to-last.
+/// The controller's `include` (and `prepend`) statements, one inner
+/// list per statement in source order, each in the order its arguments
+/// were written. The grouping is what the filter-registration order
+/// needs: Ruby processes one statement's arguments last-first, but
+/// statements first-to-last.
+///
+/// `prepend Mod` is folded in here too — same membership (a
+/// prepended module's directly-defined instance methods, and any
+/// concern filters it exports, become reachable exactly like an
+/// included module's), but NOT the same priority: Ruby puts a
+/// prepended module AHEAD of the class in the method-resolution
+/// order, so it should win a name collision with the class's own
+/// method, and this walk doesn't distinguish that — a prepended
+/// module that redefines a name the controller also defines itself
+/// resolves to the controller's own version here, the wrong one. See
+/// `CONSUMED_CONTROLLER_MACROS`'s `"prepend"` entry for why that's an
+/// accepted gap rather than a blocker: no controller in this
+/// codebase's fixtures collides that way.
 pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<ClassId>> {
     let mut out = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "include" {
+        if !matches!(method.as_str(), "include" | "prepend") {
             continue;
         }
         let mut group = Vec::new();

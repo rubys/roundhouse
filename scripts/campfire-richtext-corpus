@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# scripts/campfire-richtext-corpus — campfire's rich-text pipeline, Rails
+# vs the emit, over once-campfire-rust's corpus of message bodies.
+#
+# BORROWED, NOT INVENTED: their corpus (tests/richtext_corpus/inputs.yml,
+# 247 handwritten bodies — fixtures, mentions, attachments with good,
+# tampered, expired, cross-purpose and Rails-7 sgids, opengraph embeds,
+# autolinks, hostile markup — plus seeded fuzz and mutations of them)
+# and their generator (generate.rb), both vendored. Run by OUR oracle,
+# the generator's output is byte-identical to theirs on every case the
+# two share (checked 2026-09-30).
+#
+#   1. generate.rb, under the Rails oracle, builds the corpus database
+#      (users, a room, one stored body per case) and expected.json.
+#   2. overlay.rb adds GET /_richtext/:id to a copy of the oracle tree and
+#      to a copy of campfire: one message through campfire's own
+#      `message_presentation`, and its plain text.
+#   3. Rails and the emit (ruby, or --spinel) serve copies of the same
+#      database with the same secret; compare.rb fetches every case from
+#      both, with each case's host, and compares field by field — and the
+#      Rails-served page against expected.json, so a harness fault is its
+#      own count.
+#
+# What it measures on the spinel lane is the sanitizer campfire's
+# pipeline runs through — today the ported engine, tomorrow
+# spinel-loofah under rails-html-sanitizer — plus everything around it
+# the transpiler compiles: content filters, mentions, sgid resolution,
+# opengraph, auto_link.
+#
+# Usage:  scripts/campfire-richtext-corpus [--spinel] [--keep] [--reuse DIR] [-v]
+#
+#   FUZZ=N MUTATIONS=N   generator case counts (default 400 / 400)
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"
+APP="$HOME/git/once-campfire"
+ORACLE="$REPO_ROOT/build/campfire-oracle"
+LANE=ruby
+KEEP=0
+REUSE=""
+VERBOSE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --spinel) LANE=spinel; shift ;;
+        --keep)   KEEP=1; shift ;;
+        --reuse)  REUSE="$2"; shift 2 ;;
+        -v)       VERBOSE=-v; shift ;;
+        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+        *) APP="$1"; shift ;;
+    esac
+done
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
+fail() { printf '\033[1;31m%s\033[0m\n' "$1"; }
+die()  { fail "$1"; exit 1; }
+
+[[ -f "$ORACLE/oracle.json" ]] || die "no oracle at $ORACLE — run scripts/campfire-oracle prepare first"
+command -v sqlite3 >/dev/null || die "sqlite3 not on PATH"
+redis-cli ping >/dev/null 2>&1 || die "redis is not running — the Rails lane needs it"
+
+RAILS_PORT="${RICHTEXT_RAILS_PORT:-4293}"
+EMIT_PORT="${RICHTEXT_EMIT_PORT:-4294}"
+for p in "$RAILS_PORT" "$EMIT_PORT"; do
+    if lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+        die "port $p is taken (set RICHTEXT_RAILS_PORT / RICHTEXT_EMIT_PORT)"
+    fi
+done
+
+# once-campfire-rust's test-only SECRET_KEY_BASE (parity/.env.reference),
+# the one their expected.json was minted under: with it, the corpus this
+# run generates is byte-comparable with theirs. Both servers sign and
+# verify the corpus sgids with it.
+SECRET="5335c3b1ad35b4ad170c3413bd651ef3b6ed64e257261871a6de3f978cf3868ee417a927040935fb30b0f7debdedb34a2a403e9f34b16cf594c917c2ecd4a995"
+
+WORK="$(mktemp -d -t roundhouse-campfire-richtext.XXXXXX)"
+RAILS_PID=""
+EMIT_PID=""
+cleanup() {
+    [[ -n "$RAILS_PID" ]] && kill "$RAILS_PID" 2>/dev/null || true
+    [[ -n "$EMIT_PID" ]] && kill "$EMIT_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+    if [[ $KEEP -eq 0 ]]; then rm -rf "$WORK"; else echo "  kept $WORK"; fi
+}
+trap cleanup EXIT INT TERM
+
+# ── 1. the corpus, built and answered by Rails in-process ────────────
+step "generating the corpus with the Rails oracle"
+(cd "$ORACLE" && RAILS_ENV=production RAILS_LOG_LEVEL=fatal DISABLE_SSL=1 SKIP_TELEMETRY=true \
+    SECRET_KEY_BASE="$SECRET" DATABASE_URL="sqlite3:$WORK/corpus.sqlite3" \
+    bin/rails db:schema:load >/dev/null 2>&1) || die "schema load failed"
+(cd "$ORACLE" && RAILS_ENV=production RAILS_LOG_LEVEL=fatal DISABLE_SSL=1 SKIP_TELEMETRY=true \
+    SECRET_KEY_BASE="$SECRET" DATABASE_URL="sqlite3:$WORK/corpus.sqlite3" \
+    RICHTEXT_INPUT="$REPO_ROOT/tests/richtext_corpus/inputs.yml" RICHTEXT_OUTPUT="$WORK/expected.json" \
+    RICHTEXT_FUZZ_CASES="${FUZZ:-400}" RICHTEXT_MUTATION_CASES="${MUTATIONS:-400}" \
+    bin/rails runner "$REPO_ROOT/tests/richtext_corpus/generate.rb" >"$WORK/generate.log" 2>&1) \
+    || { tail -5 "$WORK/generate.log"; die "the generator failed"; }
+tail -1 "$WORK/generate.log"
+sqlite3 "$WORK/corpus.sqlite3" "PRAGMA wal_checkpoint(TRUNCATE)" >/dev/null
+
+# ── 2. Rails serving the overlay ──────────────────────────────────────
+step "Rails (oracle tree + overlay) on :$RAILS_PORT"
+rsync -a --link-dest="$ORACLE/" --exclude='/storage/*' --exclude='/tmp/*' --exclude='/log/*' \
+    "$ORACLE/" "$WORK/rails/"
+mkdir -p "$WORK/rails/storage/db" "$WORK/rails/storage/files" "$WORK/rails/tmp/pids" "$WORK/rails/log"
+ruby "$REPO_ROOT/tests/richtext_corpus/overlay.rb" "$WORK/rails" >/dev/null
+cp "$WORK/corpus.sqlite3" "$WORK/rails/storage/db/production.sqlite3"
+SECRET_KEY_BASE="$SECRET" "$REPO_ROOT/scripts/campfire-oracle" serve --out "$WORK/rails" --port "$RAILS_PORT" \
+    >"$WORK/rails-server.log" 2>&1 &
+RAILS_PID=$!
+
+# ── 3. the emit ───────────────────────────────────────────────────────
+if [[ -n "$REUSE" ]]; then
+    OUT="$REUSE"
+    step "reusing emit at $OUT"
+else
+    step "transpiling campfire + the overlay (target: $LANE)"
+    rsync -a --exclude=.git --exclude=/storage --exclude=/tmp --exclude=/log --exclude=node_modules \
+        "$APP/" "$WORK/app/"
+    ruby "$REPO_ROOT/tests/richtext_corpus/overlay.rb" "$WORK/app" >/dev/null
+    OUT="$WORK/emit"
+    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+        --target "$LANE" "$WORK/app" -o "$OUT" --allow-unsupported) 2>"$WORK/transpile.log" | tail -1
+    if [[ "$LANE" == spinel ]]; then
+        spinel_link_path
+        step "building the binary"
+        (cd "$OUT" && make build) >"$WORK/build.log" 2>&1 || { tail -20 "$WORK/build.log"; die "spinel build failed"; }
+    fi
+fi
+mkdir -p "$OUT/storage"
+cp "$WORK/corpus.sqlite3" "$OUT/storage/development.sqlite3"
+rm -f "$OUT/storage/development.sqlite3-wal" "$OUT/storage/development.sqlite3-shm"
+
+step "the emit ($LANE) on :$EMIT_PORT"
+if [[ "$LANE" == spinel ]]; then
+    ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" SECRET_KEY_BASE="$SECRET" \
+        exec ./build/blog ) >"$WORK/emit-server.log" 2>&1 &
+else
+    ( cd "$OUT" && RAILS_ENV=development SECRET_KEY_BASE="$SECRET" exec ruby -S puma -p "$EMIT_PORT" config.ru ) \
+        >"$WORK/emit-server.log" 2>&1 &
+fi
+EMIT_PID=$!
+
+wait_up() {
+    local port="$1" pid="$2" log="$3"
+    for _ in $(seq 1 60); do
+        curl -so /dev/null "http://127.0.0.1:$port/" 2>/dev/null && return 0
+        kill -0 "$pid" 2>/dev/null || { tail -20 "$log"; return 1; }
+        sleep 1
+    done
+    tail -20 "$log"; return 1
+}
+wait_up "$RAILS_PORT" "$RAILS_PID" "$WORK/rails-server.log" || die "Rails never came up"
+wait_up "$EMIT_PORT" "$EMIT_PID" "$WORK/emit-server.log" || die "the emit never came up"
+
+# ── 4. every case, both sides ────────────────────────────────────────
+step "Rails vs emit ($LANE), case by case"
+ruby "$REPO_ROOT/tests/richtext_corpus/compare.rb" "$RAILS_PORT" "$EMIT_PORT" \
+    "$WORK/expected.json" "$WORK/corpus.sqlite3" $VERBOSE

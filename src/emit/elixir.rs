@@ -781,6 +781,9 @@ fn module_funcs_to_library_class(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
@@ -805,6 +808,7 @@ fn module_funcs_to_library_class(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

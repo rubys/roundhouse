@@ -34,6 +34,8 @@ module ActionController
     def request_path=: (String) -> String
     def request_format: () -> Symbol
     def request_format=: (Symbol) -> Symbol
+    def accepts_any_format: () -> bool
+    def accepts_any_format=: (bool) -> bool
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
 

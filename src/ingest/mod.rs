@@ -15,17 +15,23 @@
 //! type. The expression-level recursive descent lives in [`expr`]; small
 //! cross-cutting Prism AST helpers live in [`util`].
 
+mod alba;
+mod class_configuration;
 pub mod allow_browser;
 pub mod app;
+mod concern_accessors;
 pub mod controller;
 pub mod expr;
 pub mod fixture;
+pub(crate) mod forwarding;
 pub mod jbuilder;
 pub mod library_class;
 pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
+pub mod thread_mattr;
 pub mod model;
+mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;
 pub mod rate_limit;
@@ -37,10 +43,12 @@ pub mod sequel_model;
 pub mod sorbet_sig;
 pub mod sources;
 pub mod sql_functions;
+pub mod structure_sql;
 pub mod survey;
 pub mod test;
 pub mod util;
 pub mod view;
+mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use controller::ingest_controller;
@@ -56,6 +64,7 @@ pub use routes::ingest_routes;
 pub use schema::{ingest_migration, ingest_schema};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
+pub use structure_sql::ingest_structure_sql;
 pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 

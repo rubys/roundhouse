@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::typescript;
@@ -70,7 +71,10 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("roundhouse-framework-tests").join(tag)
+    // Keep overlapping filtered invocations from deleting each other's npm install.
+    base.join("roundhouse-framework-tests")
+        .join(std::process::id().to_string())
+        .join(tag)
 }
 
 fn build_and_run(test_file: &Path, tag: &str) {
@@ -99,25 +103,64 @@ fn build_and_run(test_file: &Path, tag: &str) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
-    let install = Command::new("npm")
-        .arg("install")
-        .arg("--silent")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .current_dir(&scratch)
-        .output()
-        .expect("run npm install");
-    assert!(
-        install.status.success(),
-        "npm install failed at {}:\n=== stdout ===\n{}\n=== stderr ===\n{}",
-        scratch.display(),
-        String::from_utf8_lossy(&install.stdout),
-        String::from_utf8_lossy(&install.stderr),
+    // Node resolves packages from the parent directory. Install once per
+    // Rust test process, but keep every suite's emit and execution isolated.
+    static INSTALL: OnceLock<()> = OnceLock::new();
+    let deps = scratch_dir("");
+    INSTALL.get_or_init(|| {
+        // Each process leaves a full node_modules behind; reclaim the ones
+        // whose process has exited, leaving overlapping live runs alone.
+        if let Some(root) = deps.parent() {
+            for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let Some(pid) = name.to_str().filter(|p| p.parse::<u32>().is_ok()) else {
+                    continue;
+                };
+                if pid == std::process::id().to_string() {
+                    continue;
+                }
+                let alive = Command::new("kill")
+                    .args(["-0", pid])
+                    .status()
+                    .map_or(true, |s| s.success());
+                if !alive {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        if deps.join("node_modules").exists() {
+            std::fs::remove_dir_all(deps.join("node_modules")).expect("clean dependencies");
+        }
+        if deps.join("package-lock.json").exists() {
+            std::fs::remove_file(deps.join("package-lock.json")).expect("clean lockfile");
+        }
+        std::fs::copy(scratch.join("package.json"), deps.join("package.json"))
+            .expect("copy dependency manifest");
+        let install = Command::new("npm")
+            .arg("install")
+            .arg("--silent")
+            .arg("--no-audit")
+            .arg("--no-fund")
+            .current_dir(&deps)
+            .output()
+            .expect("run npm install");
+        assert!(
+            install.status.success(),
+            "npm install failed at {}:\n=== stdout ===\n{}\n=== stderr ===\n{}",
+            deps.display(),
+            String::from_utf8_lossy(&install.stdout),
+            String::from_utf8_lossy(&install.stderr),
+        );
+    });
+    assert_eq!(
+        std::fs::read(scratch.join("package.json")).expect("read suite manifest"),
+        std::fs::read(deps.join("package.json")).expect("read shared manifest"),
+        "framework suites must use the same dependencies",
     );
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
+        .arg("../node_modules/.bin/tsx --test test/*.test.ts")
         .current_dir(&scratch)
         .output()
         .expect("run tsx --test");

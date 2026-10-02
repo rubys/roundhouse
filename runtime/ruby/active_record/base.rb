@@ -27,19 +27,65 @@ module ActiveRecord
   # in a `Cast` to String, which is the seam the strict targets already
   # use for every other attribute write — and it keeps this body
   # concretely typed, which the framework-runtime residual gate counts.
-  #
-  # A value that names no label falls through to `to_i`, which is what
-  # an integer (or its string spelling) already meant — the same `to_i`
-  # the per-column `Cast` did before this existed.
-  def self.enum_int(text, labels, values)
-    result = -1
+  # Not `values.index(value)`: a stored value no label names answers nil, the way Rails' reader does.
+  def self.enum_label(value, labels, values)
+    found = -1
     i = 0
-    while i < labels.length
-      result = values[i] if labels[i] == text
+    while i < values.length
+      found = i if found == -1 && values[i] == value
       i += 1
     end
-    result = text.to_i if result == -1
+    found == -1 ? nil : labels[found]
+  end
+
+  # Not a `to_i` fallback: a label no mapping names (`"bogus"`, `"Draft"`, `5`) raises as Rails' enum type does, rather than storing 0.
+  # Not `values[i].to_s`: the caller passes each value's spelling, so the comparison stays String to String on every target.
+  def self.enum_int(text, labels, values, texts, attr)
+    result = 0
+    found = text == ""
+    i = 0
+    while i < labels.length
+      if labels[i] == text || texts[i] == text
+        result = values[i]
+        found = true
+      end
+      i += 1
+    end
+    raise ArgumentError, "'" + text + "' is not a valid " + attr unless found
     result
+  end
+
+  def self.enum_int_or_nil(text, labels, values, texts, attr)
+    text == "" ? nil : enum_int(text, labels, values, texts, attr)
+  end
+
+  def self.enum_str(text, labels, values, attr)
+    result = text + ""
+    found = text == ""
+    i = 0
+    while i < labels.length
+      if labels[i] == text || values[i] == text
+        result = values[i]
+        found = true
+      end
+      i += 1
+    end
+    raise ArgumentError, "'" + text + "' is not a valid " + attr unless found
+    result
+  end
+
+  def self.enum_str_or_nil(text, labels, values, attr)
+    text == "" ? nil : enum_str(text, labels, values, attr)
+  end
+
+  def self.enum_label_str(value, labels, values)
+    found = -1
+    i = 0
+    while i < values.length
+      found = i if found == -1 && values[i] == value
+      i += 1
+    end
+    found == -1 ? nil : labels[found]
   end
 
   # Base class for all models. Designed to contain *zero* metaprogramming:
@@ -169,6 +215,13 @@ module ActiveRecord
       raise NotImplementedError, "#{name}.table_name must be overridden"
     end
 
+    # Emitted schema-backed models override this with the compiler's
+    # quoted identifier. The default preserves hand-written ordinary
+    # models; table_name itself always remains raw metadata.
+    def self._table_sql
+      table_name
+    end
+
     def self.schema_columns
       raise NotImplementedError, "#{name}.schema_columns must be overridden"
     end
@@ -180,6 +233,17 @@ module ActiveRecord
     # Read by the upsert builder to name its conflict target.
     def self.primary_key
       "id"
+    end
+
+    # Finder casting runs in connection.rb (Relation is ruby-family
+    # only). Keep the typed contract here without transpiling a union
+    # receiver's conversion into strict targets.
+    def self._cast_primary_key(_id)
+      raise NotImplementedError, "finder casting requires the Relation runtime"
+    end
+
+    def self._string_primary_key
+      false
     end
 
     # The temporal subset of `schema_columns`. Unlike its siblings this

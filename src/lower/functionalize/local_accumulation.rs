@@ -259,6 +259,9 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -283,6 +286,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- accumulation ---\n{ex}\n--------------------");
@@ -308,6 +312,9 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -331,6 +338,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
@@ -360,6 +368,9 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("article"),
             receiver: MethodReceiver::Class,
@@ -383,6 +394,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- string builder ---\n{ex}\n----------------------");
@@ -409,6 +421,9 @@ mod tests {
             ],
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("build"),
             receiver: MethodReceiver::Class,
@@ -432,6 +447,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("r = %{r | notice: v}"), "attr setter → struct update:\n{ex}");
@@ -462,6 +478,9 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
@@ -485,6 +504,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- block reduce ---\n{ex}\n--------------------");
@@ -507,6 +527,9 @@ mod tests {
             parenthesized: false,
         });
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: s("fill"),
             receiver: MethodReceiver::Class,
@@ -530,6 +553,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(

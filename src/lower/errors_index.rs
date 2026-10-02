@@ -63,8 +63,14 @@ use crate::ty::Ty;
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &mut diags));
-    super::for_each_test_body(app, &mut |body| rewrite(body, &mut diags));
+    super::for_each_hook_body(app, &mut |body| {
+        rewrite(body, &mut diags);
+        ledger_messages(body, &mut diags);
+    });
+    super::for_each_test_body(app, &mut |body| {
+        rewrite(body, &mut diags);
+        ledger_messages(body, &mut diags);
+    });
     diags
 }
 
@@ -94,8 +100,72 @@ fn is_errors_read(e: &Expr) -> bool {
     )
 }
 
+fn is_messages_read(e: &Expr) -> bool {
+    matches!(&*e.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "messages" && args.is_empty() && is_errors_read(r))
+}
+
+fn send(span: crate::span::Span, recv: Expr, method: &str, args: Vec<Expr>, ty: Ty) -> Expr {
+    let mut e = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false },
+    );
+    e.ty = Some(ty);
+    e
+}
+
+// Not a Hash: the accumulator is the Array of full messages, so each `messages` question is asked of it directly.
+fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let span = expr.span;
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
+    if !is_messages_read(r) {
+        return;
+    }
+    let ExprNode::Send { recv: Some(errors), .. } = &*r.node else { return };
+    let accumulator = errors.clone();
+    let replacement = match (method.as_str(), args.as_slice()) {
+        ("[]", [_]) => {
+            *r = accumulator;
+            None
+        }
+        ("key?" | "has_key?" | "include?" | "member?", [field]) => {
+            let field = field.clone();
+            let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: Box::new(Ty::Str) });
+            rewrite_index(&mut index, diags);
+            Some(send(span, index, "any?", vec![], Ty::Bool))
+        }
+        ("blank?" | "empty?", []) => Some(send(span, accumulator, "empty?", vec![], Ty::Bool)),
+        ("present?" | "any?", []) => Some(send(span, accumulator, "any?", vec![], Ty::Bool)),
+        _ => None,
+    };
+    if let Some(new) = replacement {
+        *expr = new;
+    }
+}
+
 fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, diags));
+    rewrite_messages(expr, diags);
+    rewrite_index(expr, diags);
+}
+
+fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    if is_messages_read(expr) {
+        diags.push(crate::lower::residue_diagnostic(
+            "errors_index",
+            "errors.messages",
+            expr.span,
+            "whole_hash",
+            "`errors.messages` grounds only as `[]`, `key?`, `blank?`/`empty?` or `present?`/`any?`; the error \
+             accumulator keeps no attribute column to build the Hash from"
+                .to_string(),
+        ));
+    }
+    expr.node.for_each_child_mut(&mut |c| ledger_messages(c, diags));
+}
+
+fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let matches_shape = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }

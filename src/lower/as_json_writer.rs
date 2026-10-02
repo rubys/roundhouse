@@ -81,6 +81,9 @@ pub fn writer_method(
 ) -> Result<MethodDef, ShapeError> {
     let stmts = writer_body(pairs, table, assoc_names)?;
     Ok(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,
@@ -130,6 +133,8 @@ pub enum PairEncoding {
     Scalar(Ty),
     /// `Array[String]`: `JsonBuilder.encode_string_array`.
     StringArray,
+    /// A date-only column: canonical YYYY-MM-DD text or JSON null.
+    DateColumn,
     /// A temporal COLUMN, as Rails' `TimeWithZone#as_json` renders it —
     /// `xmlschema(3)` in the app's `config.time_zone`, through the
     /// runtime's `ActiveSupport.json_time` seam over the stored text.
@@ -152,6 +157,9 @@ pub fn typed_writer_method(
         Ok(typed_value(pair, &encodings[i]))
     })?;
     Ok(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,
@@ -178,18 +186,31 @@ fn typed_value(pair: &JsonPair, enc: &PairEncoding) -> Expr {
             "encode_string_array",
             value(Ty::Array { elem: Box::new(Ty::Str) }),
         ),
-        PairEncoding::ZonedTime => {
+        PairEncoding::DateColumn | PairEncoding::ZonedTime => {
             let PairValue::Reader(name) = &pair.value else {
-                unreachable!("ZonedTime is a column reader's encoding")
+                unreachable!("temporal encoding requires a column reader")
             };
             let raw = with_ty(
                 self_send(&format!("{}_raw", name.as_str())),
                 Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
             );
-            let text = with_ty(
-                send(Some(const_ref("ActiveSupport")), "json_time", vec![raw], true),
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-            );
+            let text = if matches!(enc, PairEncoding::DateColumn) {
+                // Match the public reader, including absent storage
+                // encoded as "" for an unset nonnullable raw slot.
+                let date = with_ty(
+                    send(Some(const_ref("ActiveSupport")), "parse_db_date", vec![raw], true),
+                    Ty::Union { variants: vec![Ty::Date, Ty::Nil] },
+                );
+                with_ty(
+                    send(Some(const_ref("ActiveSupport")), "format_db_date", vec![date], true),
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                )
+            } else {
+                with_ty(
+                    send(Some(const_ref("ActiveSupport")), "json_time", vec![raw], true),
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                )
+            };
             json_builder_call("encode_value", text)
         }
     }

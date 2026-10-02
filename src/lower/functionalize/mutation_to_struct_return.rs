@@ -1254,6 +1254,9 @@ mod tests {
     }
     fn instance_method(name: &str, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver: MethodReceiver::Instance,
@@ -1279,6 +1282,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         crate::emit::elixir::emit_library_class(&class).expect("emit")
     }
@@ -1481,6 +1485,9 @@ mod tests {
             ],
         });
         let init = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: sym("initialize"),
             receiver: MethodReceiver::Instance,
@@ -1506,6 +1513,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- ctor ---\n{ex}\n------------");

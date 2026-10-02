@@ -38,7 +38,8 @@ error diagnostics fire, and the framework Ruby is itself sound.
   `#[ignore]`d, so it gates every `cargo test`.
 
 All of this runs in the `unit` CI job (`cargo test --all-targets`) —
-the one job the Pages deploy is actually gated on (see CI topology).
+part of the compact floor required for Pages publication, alongside
+the other baseline checks and verified assembly (see CI topology).
 
 **Why it exists:** if the ingester silently drops a construct, the
 emitter has nothing to emit and downstream tests trivially pass.
@@ -251,9 +252,10 @@ Both lanes **publish a worklist**, not just a floor.
 per-file tally, spliced-stub ledger, and the failures clustered into
 named causes by `bench/campfire/suite-causes.json` — which
 `scripts/campfire-suite-report` renders to
-`/bench/campfire-suite/`. build-site consumes that artifact from the
-same run WITHOUT gating on the job's conclusion: a run that trips the
-floor is precisely the run whose page someone needs to read. The
+`/bench/campfire-suite/`. Publication assembly consumes that artifact
+from the same run and can render a failed conformance report for triage.
+A failed compact floor still prevents Pages deployment; the raw CI
+summary remains available for investigation. The
 lobsters twin (`scripts/lobsters-spec-report` →
 `/bench/lobsters-specs/`) keeps the same contract over data fetched
 from the bench box. Re-running either report against a saved tally is
@@ -282,34 +284,41 @@ diffs between two IRs drop out from plain `diff` across the outputs.
 
 ## CI topology
 
-`.github/workflows/ci.yml`, honestly stated:
+The current selection and publication policy is documented in
+[CI coverage](../ci-reuse.md). The ownership boundaries are:
 
 - **`generate-fixture`** builds `fixtures/real-blog` once per run and
   shares it as an artifact every downstream job downloads.
-- **The hard gate is `unit`.** `deploy` needs exactly
-  `[build-site, unit]`; `build-site` needs
-  `[generate-fixture, build-wasm]`. Archives publish *current emit*
-  even when target jobs are red — broken emit is exactly what's
-  interesting to investigate upstream (see the build-site comment).
-- **Everything else is red-as-signal:** compare, smoke,
-  framework-tests, and toolchain jobs turn the run red without
-  blocking deploy; the red is the shared worklist.
-- **Seven jobs are `continue-on-error`**, all for one structural
-  reason — they track matz/spinel master unpinned, so upstream churn
-  must not gate unrelated work: `build-spinel`,
-  `framework-tests-spinel`, `toolchain-spinel`, `compare-spinel`,
-  `smoke-spinel`, `smoke-campfire`, and `campfire-compare-spinel`,
-  which runs as three legs. The cost: an advisory failure is invisible
-  in the run's conclusion. Read the jobs, not the conclusion.
+- **PRs/main pushes select coverage**, rather than running every target
+  on every push: compact floor plus owned additions, or full coverage
+  for policy/shared-emitter changes and `ci:full`. Drafts run fixture + unit.
+- **`CI summary` reports selected results**, including missing/skipped/
+  cancelled non-advisory checks. It does not configure mandatory merge
+  protection; maintainers decide when to merge.
+- **Spinel master remains advisory.** Its revision is resolved once per
+  run and the actual built revision is recorded. Failures can come from
+  Roundhouse runtime/RBS/packaging or upstream. Inspect raw job outcomes
+  and archive evidence, not just the overall run conclusion.
+- **Publication is separate**, in `.github/workflows/full-ci.yml`:
+  four-hour scheduled validation/publication on canonical main, or fresh
+  manual validation with publication opt-in. PR checks never deploy.
+  Pages requires the compact floor, verified same-run assembly and a
+  live-main SHA check. Extra-target/advisory failures may remain useful
+  repro archives, but are not presented as successful validation.
+
+The native Campfire comparison's GC modes run when that lane is selected,
+not automatically for every native-runtime change:
+
 - **`campfire-compare-spinel (default)`, `(minor-gc)` and
-  `(verify-gen)`** serve the same binary, from the same `build-spinel`
-  artifact, through the same Rails-oracle walk. `minor-gc` adds
+  `(verify-gen)`** serve the same comparison binary, produced by
+  `build-campfire-compare-spinel` using the shared `build-spinel` toolchain,
+  through the same Rails-oracle walk. `minor-gc` adds
   `SPINEL_GC_MINOR=1`, spinel's generational collector, which is opt-in
   until it goes default-on. matz asked for that leg
   (matz/spinel#4260): campfire is the retained-heap shape the
   default-on decision lacks. A red `minor-gc` beside a green `default`
-  is the collector alone — reduce it, file it upstream, and say
-  minor-GC-only in the title.
+  is a mode-specific signal: reduce the failing case and establish its
+  cause before attributing it upstream.
 - **`(verify-gen)` is why the other two can be believed.** `minor-gc`
   only fails when a missed write barrier reaches the page;
   `SPINEL_GC_VERIFY_GEN=1` re-marks the whole heap after every minor

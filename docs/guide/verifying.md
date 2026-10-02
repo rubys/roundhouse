@@ -93,6 +93,11 @@ and by the transpiled app from the same fixtures, every table diffed,
 then Rails booted on the database the emit wrote — the check that
 someone can go back.
 
+`scripts/campfire-richtext-corpus` holds the rich-text pipeline — what
+a message body becomes on the page — to Rails over 1,047 stored bodies
+(once-campfire-rust's corpus: handwritten cases, fuzz and mutations),
+byte for byte and DOM for DOM.
+
 ## Reading a failure
 
 A compare failure is one of three things, and the report usually says

@@ -1,17 +1,7 @@
-//! `A::B::Name` means `Name` in the namespace `A::B` — not whatever
-//! `Name` happens to mean somewhere else in the app.
-//!
-//! `ExprNode::Const` looked up the LAST path segment in the global
-//! by-bare-name constant registry before considering the path at all.
-//! One constant named `Drafting` anywhere in the app therefore
-//! captured every qualified read ending in `::Drafting`, including
-//! the class of that name — its reads typed as the other constant's
-//! value, and everything downstream of them went untyped.
-//!
-//! An app hits this as soon as a constant shares a name with a class,
-//! which a `T::Enum` makes easy: its members are constants, and an
-//! enum of subsystem names is exactly a list of class names.
-
+//! Source-backed Ruby constant resolution is determined at the reference
+//! site, not by the body's inferred `self` class or a same-suffix registry
+//! entry. Qualified enum members and classes must retain their declaration
+//! owner, while names outside that lexical scope stay unresolved.
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -19,9 +9,7 @@ use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::ty::Ty;
 
-/// A stage enum with a member named `Drafting`, and a class of
-/// that name in another namespace — the shape from the app this came
-/// from.
+/// A stage enum member and a same-named class in another namespace.
 const TRACKING: &str = r#"module Core
   class StageEnum < T::Enum
     enums do
@@ -43,8 +31,32 @@ const DRAFTING: &str = r#"module Workspace
 end
 "#;
 
+const LEXICAL_SCOPES: &str = r#"module Lexical
+  class Target
+  end
+  module Nested
+    VALUE = Target
+  end
+end
+class Lexical::Explicit
+  VALUE = Target
+end
+module Elsewhere
+  class Target
+  end
+end
+"#;
+
 fn app_with(action: &str) -> roundhouse::App {
-    let tree: HashMap<PathBuf, Vec<u8>> = [
+    app_with_sources(action, None)
+}
+
+fn app_with_lexical_scope(action: &str) -> roundhouse::App {
+    app_with_sources(action, Some(("app/services/lexical_scope.rb", LEXICAL_SCOPES)))
+}
+
+fn app_with_sources(action: &str, extra_source: Option<(&str, &str)>) -> roundhouse::App {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = [
         (
             "db/schema.rb",
             "ActiveRecord::Schema.define do\n  create_table \"reports\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n".to_string(),
@@ -66,8 +78,11 @@ fn app_with(action: &str) -> roundhouse::App {
         ),
     ]
     .into_iter()
-    .map(|(p, c)| (PathBuf::from(p), c.into_bytes()))
+    .map(|(path, content)| (PathBuf::from(path), content.into_bytes()))
     .collect();
+    if let Some((path, source)) = extra_source {
+        tree.insert(PathBuf::from(path), source.as_bytes().to_vec());
+    }
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
     app
@@ -80,6 +95,18 @@ fn ty_at(app: &roundhouse::App, line: u32, character: u32) -> Option<Ty> {
         roundhouse::ide::Position { line, character },
     )
     .and_then(|t| t.ty)
+}
+
+#[test]
+fn a_bare_model_read_uses_its_source_declaration() {
+    let app = app_with_sources(
+        "@a = Article.new",
+        Some(("app/models/article.rb", "class Article < ApplicationRecord\nend\n")),
+    );
+    assert_eq!(
+        ty_at(&app, 2, 9),
+        Some(Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] }),
+    );
 }
 
 #[test]
@@ -104,6 +131,31 @@ fn a_qualified_constant_read_still_resolves_through_its_owner() {
         ty,
         Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![] },
         "an enum member is an instance of its enum"
+    );
+}
+
+#[test]
+fn source_references_use_ruby_lexical_nesting_not_the_body_self_class() {
+    let app = app_with_lexical_scope(
+        "@nested = Lexical::Nested::VALUE\n    @explicit = Lexical::Explicit::VALUE",
+    );
+    assert_eq!(
+        ty_at(&app, 2, 14),
+        Some(Ty::Class { id: ClassId(Symbol::from("Lexical::Target")), args: vec![] }),
+        "a nested module block includes Lexical in its constant nesting"
+    );
+    assert!(
+        matches!(ty_at(&app, 3, 16), Some(Ty::Var { .. })),
+        "`class Lexical::Explicit` does not lexically nest inside Lexical"
+    );
+    let diagnostics = roundhouse::analyze::diagnose(&app);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == roundhouse::diagnostic::Severity::Error
+                && diagnostic.code() == "unsupported"
+                && diagnostic.message.contains("Lexical::Explicit::VALUE")
+        }),
+        "the unrelated Elsewhere::Target must not capture the unresolved reference: {diagnostics:?}"
     );
 }
 
@@ -173,4 +225,26 @@ end
         !diagnostics.iter().any(|d| d.contains("send_dispatch_failed")),
         "`serialize` dispatches against the enum; diagnostics = {diagnostics:?}"
     );
+}
+
+#[test]
+fn an_absolute_class_uses_the_same_registry_identity_as_a_bare_class() {
+    let app = app_with("@a = ::Time.now");
+    assert_eq!(
+        ty_at(&app, 2, 16),
+        Some(Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] }),
+    );
+}
+
+#[test]
+fn an_absolute_nested_constant_keeps_its_root_and_resolves_its_owner() {
+    let app = app_with("@a = ::Core::StageEnum::Drafting");
+    assert_eq!(
+        ty_at(&app, 2, 9),
+        Some(Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![] }),
+    );
+    let parsed = ruby_prism::parse(b"::Core::StageEnum::Drafting");
+    let expr = roundhouse::ingest::ingest_expr(&parsed.node().as_program_node().unwrap().statements().as_node(), "root.rb")
+        .expect("ingest");
+    assert_eq!(roundhouse::emit::ruby::emit_expr(&expr), "::Core::StageEnum::Drafting");
 }

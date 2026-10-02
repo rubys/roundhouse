@@ -41,8 +41,25 @@ fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
     let replacement = match &mut *expr.node {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if matches!(method.as_str(), "symbolize_keys" | "symbolize_keys!")
-                && args.is_empty() =>
+            if method.as_str() == "stringify_keys" && args.is_empty() =>
+        {
+            match r.ty.as_ref() {
+                Some(Ty::Hash { key, .. }) if **key == Ty::Str => Some(r.clone()),
+                Some(Ty::Hash { key, value }) if **key == Ty::Sym => {
+                    let value = value.clone();
+                    let mut call = active_support_call(expr.span, "stringify_keys", r.clone());
+                    call.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value });
+                    Some(call)
+                }
+                _ => None,
+            }
+        }
+        // Not every `deep_symbolize_keys`: only a receiver whose values cannot be hashes, where the deep form is the shallow one.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if matches!(method.as_str(), "symbolize_keys" | "symbolize_keys!" | "deep_symbolize_keys")
+                && args.is_empty()
+                && (method.as_str() != "deep_symbolize_keys"
+                    || matches!(r.ty.as_ref(), Some(Ty::Hash { value, .. }) if is_scalar(value))) =>
         {
             // `Result#first` answers `Hash[String, _]?`; a nil there
             // raises on either spelling, so the nilable form counts.
@@ -97,4 +114,28 @@ fn rewrite(expr: &mut Expr) {
     if let Some(r) = replacement {
         *expr = r;
     }
+}
+
+fn is_scalar(ty: &Ty) -> bool {
+    match ty {
+        Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Time => true,
+        Ty::Union { variants } => variants.iter().all(is_scalar),
+        _ => false,
+    }
+}
+
+fn active_support_call(span: crate::span::Span, method: &str, arg: Expr) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const { path: vec![crate::ident::Symbol::from("ActiveSupport")] },
+            )),
+            method: crate::ident::Symbol::from(method),
+            args: vec![arg],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }

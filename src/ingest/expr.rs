@@ -184,7 +184,7 @@ fn ingest_multi_write(
 /// is one: `T.let(x, Type)` / `T.cast` / `T.must` / `T.must_because` /
 /// `T.unsafe` / `T.bind` / `T.assert_type!` → `x`. `T.nilable(...)` and
 /// friends are type expressions, not values, and are not listed.
-fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+pub(super) fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
     let call = node.as_call_node()?;
     let method = call.name();
     if !matches!(
@@ -255,7 +255,7 @@ fn absurd_raise(span: Span, value: Expr) -> ExprNode {
             span,
             ExprNode::Send {
                 recv: Some(Expr::new(
-                    span,
+                    Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("TypeError")] },
                 )),
                 method: Symbol::from("new"),
@@ -316,16 +316,21 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_constant_path_node().is_some() => {
             let p = n.as_constant_path_node().unwrap();
-            ExprNode::Const { path: constant_path_segments(&p) }
+            // `::StatsD` names the top-level constant from anywhere; an empty
+            // first segment keeps that through passes that qualify a bare
+            // name into its enclosing namespace (`qualify_lexical_consts`
+            // made it `BackgroundQueue::StatsD`) and emits as `::StatsD`.
+            let mut path = constant_path_segments(&p);
+            if super::util::constant_path_is_rooted(&p) {
+                path.insert(0, Symbol::from(""));
+            }
+            ExprNode::Const { path }
         }
         n if n.as_call_node().is_some() => {
             let c = n.as_call_node().unwrap();
             let method = constant_id_str(&c.name()).to_string();
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
-                a.arguments()
-                    .iter()
-                    .map(|arg| ingest_expr(&arg, file))
-                    .collect::<IngestResult<_>>()?
+                ingest_forwardable_arguments(&a, file)?
             } else {
                 vec![]
             };
@@ -368,15 +373,38 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // exist — the target's string/builder is whatever it is — so
             // unary `+@` on a string literal is the identity: lower to
             // the literal. The ruby-family trees ship their runtime
-            // sources verbatim (never through this path), so the idiom
-            // survives where it matters.
+            // sources verbatim (never through this path), but an APP's
+            // models and services do come through it, and on spinel a
+            // bare literal is frozen: `buf = ""; buf << x` raises
+            // FrozenError. So the literal carries the hint, and the
+            // ruby emitter writes the `+` back.
             if method == "+@" && args.is_empty() && block.is_none() {
                 if let Some(r) = &recv {
                     if matches!(
                         &*r.node,
                         ExprNode::Lit { value: Literal::Str { .. } }
                     ) {
-                        return Ok(recv.unwrap());
+                        let mut lit = recv.unwrap();
+                        lit.hint = Some(crate::expr::IrHint::MutableStringLiteral);
+                        return Ok(lit);
+                    }
+                }
+            }
+            // `binding.local_variable_get(:class)` is how Ruby reads a
+            // local named after a reserved word (a keyword param such as
+            // `class:`). It is a plain local read, so ingest it as one.
+            // The Ruby emitter writes that read back in this form.
+            if method == "local_variable_get" && block.is_none() && args.len() == 1 {
+                let from_binding = recv.as_ref().is_some_and(|r| {
+                    matches!(&*r.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+                        if method.as_str() == "binding" && args.is_empty())
+                });
+                if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+                    if from_binding && crate::naming::is_reserved_local(value.as_str()) {
+                        return Ok(Expr::new(
+                            span,
+                            ExprNode::Var { id: crate::ident::VarId(0), name: value.clone() },
+                        ));
                     }
                 }
             }
@@ -401,9 +429,15 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 && block.is_none()
                 && recv.is_some()
                 && args.len() == 1
+                && !matches!(&*args[0].node, ExprNode::ForwardArgs)
             {
                 let r = recv.unwrap();
                 let mut defaults = args.into_iter().next().unwrap();
+                // The rewritten receiver is the value, not a call-argument
+                // keyword marker. Keep the existing reverse-merge semantics.
+                if let ExprNode::KeywordSplat { value } = &mut *defaults.node {
+                    defaults = std::mem::replace(value, nil_expr());
+                }
                 // `reverse_merge(a: 1, b: 2)` — the trailing kwargs parsed
                 // as a bare (`kwargs: true`) Hash; as the `.merge`
                 // RECEIVER it must render braced (`{ a: 1 }.merge(...)`),
@@ -433,10 +467,17 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 && block.is_none()
                 && recv.is_some()
                 && args.len() == 1
-                && matches!(&*args[0].node, ExprNode::Hash { .. })
+                && match &*args[0].node {
+                    ExprNode::Hash { .. } => true,
+                    ExprNode::KeywordSplat { value } => matches!(&*value.node, ExprNode::Hash { .. }),
+                    _ => false,
+                }
             {
                 let r = recv.unwrap();
-                let cond = args.into_iter().next().unwrap();
+                let mut cond = args.into_iter().next().unwrap();
+                if let ExprNode::KeywordSplat { value } = &mut *cond.node {
+                    cond = std::mem::replace(value, nil_expr());
+                }
                 let where_call = Expr::new(
                     span,
                     ExprNode::Send {
@@ -1387,11 +1428,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // `super(args)` / `super()` — args = Some(vec).
             let s = n.as_super_node().unwrap();
             let args = match s.arguments() {
-                Some(a) => a
-                    .arguments()
-                    .iter()
-                    .map(|arg| ingest_expr(&arg, file))
-                    .collect::<IngestResult<Vec<_>>>()?,
+                Some(a) => ingest_forwardable_arguments(&a, file)?,
                 None => vec![],
             };
             ExprNode::Super { args: Some(args) }
@@ -2113,6 +2150,39 @@ fn detect_leading_guard<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     Some(if_node.predicate())
 }
 
+/// The argument-list walk is adapted from Tim Tischler's F7 commit
+/// 013588ec. Preserve the marker instead of erasing keyword identity
+/// into a positional hash and synthesizing three user-visible bindings.
+fn ingest_forwardable_arguments(
+    a: &ruby_prism::ArgumentsNode<'_>,
+    file: &str,
+) -> IngestResult<Vec<Expr>> {
+    let mut args = Vec::new();
+    for arg in a.arguments().iter() {
+        if arg.as_forwarding_arguments_node().is_some() {
+            let loc = arg.location();
+            args.push(Expr::new(Span {
+                file: super::sources::file_id(file),
+                start: loc.start_offset() as u32,
+                end: loc.end_offset() as u32,
+            }, ExprNode::ForwardArgs));
+        } else {
+            let value = ingest_expr(&arg, file)?;
+            // Only a CALL's KeywordHashNode owns this fact. `{**h}`
+            // remains an ordinary positional hash/merge expression.
+            let has_keyword_splat = arg.as_keyword_hash_node().is_some_and(|hash| {
+                hash.elements().iter().any(|e| e.as_assoc_splat_node().is_some())
+            });
+            args.push(if has_keyword_splat {
+                Expr::new(value.span, ExprNode::KeywordSplat { value })
+            } else {
+                value
+            });
+        }
+    }
+    Ok(args)
+}
+
 /// Ingest a `CallNode`'s block — the `do |...| ... end` or `{ |...| ... }`
 /// attached to a method call. Represented as a `Lambda` expression.
 /// Returns `None` for block-argument nodes (`&block`) which aren't closures.
@@ -2121,6 +2191,17 @@ fn ingest_call_block(
     file: &str,
     enclosing_method: &str,
 ) -> IngestResult<Option<Expr>> {
+    if matches!(enclosing_method, "find_or_create_by" | "find_or_create_by!")
+        && node.as_block_argument_node().is_some()
+    {
+        // Inlining only claims a directly attached initialization block.
+        // Forwarded proc/lambda forms can lose their signature before
+        // the ordinary BlockNode admission below sees it.
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "scoped find-or-create cannot be lowered safely: forwarded initialization blocks are outside the directly attached block subset".into(),
+        });
+    }
     // `&:method_name` — symbol-to-proc shorthand. Ruby treats this as
     // `{ |x| x.method_name }`. Lower to an explicit Lambda so downstream
     // emitters see a real closure.
@@ -2208,15 +2289,57 @@ fn ingest_call_block(
                     },
                 )));
             }
-            // Other `&expr` shapes (`&method(:foo)`, `&proc { ... }`,
-            // `&self.bar`) are not yet supported. Filing this as
-            // unsupported keeps the error surface narrow — the local-
-            // variable case covers the `&block` forwarding idiom that
-            // motivates issue #25.
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "block-argument forms other than `&:symbol` and `&local_var` not yet supported".into(),
-            });
+            // `&method(:name)` / `&self.method(:name)` / `&recv.method(:name)`
+            // — a bound-method reference (Procore's dominant non-`&:sym`
+            // block-argument shape — `entities.map(&method(:name))`).
+            // `method` must be a bare, receiverless-or-not call to
+            // Kernel's `method`, taking exactly one Symbol argument;
+            // anything else falls through to the other shapes below.
+            if let Some(call) = expr.as_call_node() {
+                if constant_id_str(&call.name()) == "method" {
+                    if let Some(method_ref) = try_ingest_method_ref(&call, file)? {
+                        return Ok(Some(method_ref));
+                    }
+                }
+                // `&proc { ... }` / `&lambda { ... }` — Kernel's proc-
+                // construction methods. Semantics differ from a plain
+                // block only in `return`/arity strictness (a lambda's
+                // `return` exits the lambda, not the enclosing method);
+                // Roundhouse doesn't yet distinguish that, so desugaring
+                // to the same `Lambda` IR a literal block would produce
+                // is an approximation, not a mis-compile, for the
+                // common no-`return`-inside case.
+                if matches!(constant_id_str(&call.name()), "proc" | "lambda")
+                    && call.receiver().is_none()
+                    && call.arguments().is_none()
+                {
+                    if let Some(blk) = call.block() {
+                        if let Some(b) = blk.as_block_node() {
+                            return Ok(Some(ingest_block_node_as_lambda(&b, file)?));
+                        }
+                    }
+                }
+            }
+            // `&->(params) { body }` — a stabby lambda literal. Same
+            // params/body grammar as a plain block (`BlockParametersNode`
+            // either way), so it desugars identically; only the
+            // standalone-lambda-vs-attached-block distinction is lost,
+            // which is immaterial once it sits in block-argument position.
+            if let Some(lam) = expr.as_lambda_node() {
+                let params = block_param_names(lam.parameters());
+                let rest_param = block_rest_param(lam.parameters());
+                let body = match lam.body() {
+                    Some(body) => ingest_expr(&body, file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+                };
+                let block_style = block_style_from_opening(lam.opening_loc().as_slice());
+                return Ok(Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+                )));
+            }
+            // Any other proc-valued expression is evaluated once and passed as the block.
+            return Ok(Some(ingest_expr(&expr, file)?));
         }
         // Ruby 3.4 anonymous block forwarding (`fetch(key, &)`) —
         // reference the synthesized `__blk` binding the def-side
@@ -2234,16 +2357,76 @@ fn ingest_call_block(
             message: format!("unexpected block-position node: {node:?}"),
         });
     };
-    let params = block_param_names(&b);
-    let rest_param = block_rest_param(&b);
+    if matches!(enclosing_method, "find_or_create_by" | "find_or_create_by!")
+        && b.parameters().is_some_and(|node| {
+            node.as_block_parameters_node().is_some_and(|params| {
+                params.locals().iter().next().is_some()
+                    || params.parameters().is_some_and(|params| {
+                        params.requireds().iter().any(|node| node.as_required_parameter_node().is_none())
+                            || params.optionals().iter().next().is_some()
+                            || params.posts().iter().next().is_some()
+                            || params.keywords().iter().next().is_some()
+                            || params.keyword_rest().is_some()
+                            || params.block().is_some()
+                            || params.rest().is_some_and(|node| node.as_rest_parameter_node()
+                                .is_none_or(|param| param.name().is_none()))
+                    })
+            })
+        })
+    {
+        // These signature fields are absent from Lambda IR. Decline
+        // before ingest drops them; named rest remains represented and
+        // is rejected by the call-site lowering's existing arity gate.
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "scoped find-or-create cannot be lowered safely: block locals and optional, post, keyword, block or anonymous-rest parameters are not represented in initialization-block IR".into(),
+        });
+    }
+    Ok(Some(ingest_block_node_as_lambda(&b, file)?))
+}
+
+/// Ingest a literal block's params/body into a `Lambda` `Expr`. Shared
+/// by the ordinary `foo { ... }`/`foo do ... end` path above and the
+/// `&proc { ... }`/`&lambda { ... }` block-argument desugar, which
+/// hands this the same `BlockNode` shape one level deeper (inside the
+/// `proc`/`lambda` call's own block).
+fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
+    let params = block_param_names(b.parameters());
+    let rest_param = block_rest_param(b.parameters());
     let body = match b.body() {
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
-    Ok(Some(Expr::new(
+    Ok(Expr::new(
         Span::synthetic(),
         ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+    ))
+}
+
+/// `method(:name)` / `recv.method(:name)` → `ExprNode::MethodRef`.
+/// Returns `Ok(None)` when `call`'s shape doesn't match (wrong arg
+/// count, non-Symbol argument) so the caller falls through to the
+/// other block-argument forms rather than committing to a wrong
+/// desugar. `call.name()` (`== "method"`) is checked by the caller.
+fn try_ingest_method_ref(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+) -> IngestResult<Option<Expr>> {
+    let Some(args_node) = call.arguments() else { return Ok(None) };
+    let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
+    let [arg] = args.as_slice() else { return Ok(None) };
+    if arg.as_symbol_node().is_none() {
+        return Ok(None);
+    }
+    let name = symbol_value(arg).unwrap_or_default();
+    let recv = match call.receiver() {
+        Some(r) => Some(ingest_expr(&r, file)?),
+        None => None,
+    };
+    Ok(Some(Expr::new(
+        Span::synthetic(),
+        ExprNode::MethodRef { recv, name: Symbol::from(name) },
     )))
 }
 
@@ -2258,8 +2441,8 @@ fn block_style_from_opening(bytes: &[u8]) -> crate::expr::BlockStyle {
     }
 }
 
-fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
-    let Some(params_node) = b.parameters() else { return vec![] };
+fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
+    let Some(params_node) = params_node else { return vec![] };
     if params_node.as_it_parameters_node().is_some() {
         return vec![Symbol::from("it")];
     }
@@ -2287,8 +2470,8 @@ fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
 /// An ANONYMOUS rest (`|*|`) has no name to bind and no body reference
 /// to serve, so it stays absent. The trailing `**` in that same
 /// campfire block is likewise nameless.
-fn block_rest_param(b: &ruby_prism::BlockNode<'_>) -> Option<Symbol> {
-    let params_node = b.parameters()?;
+fn block_rest_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
+    let params_node = params_node?;
     let bpn = params_node.as_block_parameters_node()?;
     let pn = bpn.parameters()?;
     let rest = pn.rest()?;
@@ -2317,6 +2500,7 @@ fn nil_expr() -> Expr {
 fn starts_with_brace_literal(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Hash { kwargs, .. } => !*kwargs,
+        ExprNode::KeywordSplat { value } => starts_with_brace_literal(value),
         ExprNode::Send { recv: Some(recv), .. } => starts_with_brace_literal(recv),
         _ => false,
     }

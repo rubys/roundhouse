@@ -156,6 +156,11 @@ fn collect_var_reads(
             }
         }
         ExprNode::Lambda { body, .. } => collect_var_reads(body, seq, out),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                collect_var_reads(r, seq, out);
+            }
+        }
         ExprNode::Return { value } => collect_var_reads(value, seq, out),
         ExprNode::Raise { value } => collect_var_reads(value, seq, out),
         ExprNode::Yield { args } => {
@@ -168,7 +173,7 @@ fn collect_var_reads(
                 collect_var_reads(v, seq, out);
             }
         }
-        ExprNode::Splat { value } => collect_var_reads(value, seq, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_var_reads(value, seq, out),
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_ref() {
                 for a in arglist {
@@ -225,6 +230,7 @@ fn collect_var_reads(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }
@@ -348,6 +354,11 @@ fn stamp_var_reads(
             }
         }
         ExprNode::Lambda { body, .. } => stamp_var_reads(body, seq, counts, last_seq),
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv.as_mut() {
+                stamp_var_reads(r, seq, counts, last_seq);
+            }
+        }
         ExprNode::Return { value } => stamp_var_reads(value, seq, counts, last_seq),
         ExprNode::Raise { value } => stamp_var_reads(value, seq, counts, last_seq),
         ExprNode::Yield { args } => {
@@ -360,7 +371,9 @@ fn stamp_var_reads(
                 stamp_var_reads(v, seq, counts, last_seq);
             }
         }
-        ExprNode::Splat { value } => stamp_var_reads(value, seq, counts, last_seq),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            stamp_var_reads(value, seq, counts, last_seq)
+        }
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_mut() {
                 for a in arglist {
@@ -417,6 +430,7 @@ fn stamp_var_reads(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

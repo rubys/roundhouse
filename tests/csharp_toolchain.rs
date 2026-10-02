@@ -79,14 +79,46 @@ fn real_blog_dotnet_build_passes() {
 /// The **executed-count floor** is the point: `dotnet test` exits 0 when it
 /// discovers nothing, which is exactly how the csharp gate reported success
 /// while running zero assertions before this suite existed (#34 §0). Parsing
-/// the summary and asserting `>= 21` is what makes a silent regression —
-/// emit stops producing tests, or the xUnit runner package drops out — fail.
+/// the summary and asserting `>= 35` (the 21 app tests plus 14 formatted-count
+/// cases) makes silent test-discovery regressions fail.
 #[test]
 #[ignore]
 fn real_blog_csharp_tests_pass() {
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-tests");
     generate_project(fixture, &scratch);
+    // Execute the shared formatted-count seam, including the prefix and
+    // nonempty-suffix boundaries that a zero-removal shortcut can get wrong.
+    std::fs::write(
+        scratch.join("tests/FormattedPluralizeTest.cs"),
+        r#"
+using Xunit;
+namespace Roundhouse;
+public class FormattedPluralizeTest
+{
+    [Theory]
+    [InlineData("1", "1 word")]
+    [InlineData("1.0", "1.0 word")]
+    [InlineData("1.00", "1.00 word")]
+    [InlineData("01", "01 words")]
+    [InlineData("1.", "1. words")]
+    [InlineData("10.", "10. words")]
+    [InlineData("10.0", "10.0 words")]
+    [InlineData("1.01", "1.01 words")]
+    [InlineData("1.0002", "1.0002 words")]
+    [InlineData("1,001", "1,001 words")]
+    [InlineData("", " words")]
+    [InlineData("2\n1.0\n", "2\n1.0\n word")]
+    [InlineData("1\r\n", "1\r\n words")]
+    [InlineData("1.٠", "1.٠ words")]
+    public void FormattedCountLabels(string count, string expected)
+    {
+        Assert.Equal(expected, Inflector.PluralizeFormatted(count, "word"));
+    }
+}
+"#,
+    )
+    .expect("write formatted-count test");
 
     let output = Command::new("dotnet")
         .arg("test")
@@ -115,9 +147,10 @@ fn real_blog_csharp_tests_pass() {
         )
     });
     assert!(
-        passed >= 21,
+        passed >= 35,
         "expected at least 21 executed tests (ArticleTest 4 + CommentTest 5 + \
-         ArticlesControllerTest 9 + CommentsControllerTest 3), got {passed}:\n{stdout}"
+         ArticlesControllerTest 9 + CommentsControllerTest 3) plus 14 formatted-count \
+         cases, got {passed}:\n{stdout}"
     );
     eprintln!("csharp real-blog suite: {passed} tests passed");
 }
@@ -125,7 +158,9 @@ fn real_blog_csharp_tests_pass() {
 /// `Passed!  - Failed:     0, Passed:    21, …` → 21.
 fn parse_passed_count(stdout: &str) -> Option<usize> {
     for line in stdout.lines() {
-        let Some(idx) = line.find("Passed:") else { continue };
+        let Some(idx) = line.find("Passed:") else {
+            continue;
+        };
         let rest = line[idx + "Passed:".len()..].trim_start();
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(n) = digits.parse::<usize>() {

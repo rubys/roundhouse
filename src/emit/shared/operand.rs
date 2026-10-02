@@ -30,6 +30,8 @@ use crate::ty::Ty;
 pub fn is_gradual_operand(t: Option<&Ty>) -> bool {
     match t {
         None | Some(Ty::Var { .. }) | Some(Ty::Untyped) => true,
+        // Not `Incompatible`: a request-params value is whatever the request carried, so its operators are the native ones.
+        Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE => true,
         Some(Ty::Union { variants }) => {
             variants.iter().any(|v| is_gradual_operand(Some(v)))
         }

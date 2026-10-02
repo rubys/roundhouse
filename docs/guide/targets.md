@@ -36,8 +36,11 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 
 ## How far each is tested
 
-Every claim below is a CI job on every push to `main`, all of them
-against the blog fixture (`fixtures/real-blog`: articles, comments,
+The lanes below run across targets in full validation, scheduled every four
+hours or requested manually. Ordinary PRs/main pushes use a compact floor plus
+targeted additions; maintainers can request full PR coverage with `ci:full`.
+See [CI coverage](../ci-reuse.md). The lanes use the blog fixture
+(`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
 unless another app is named. A target's row in
 [`RELEASES.md`](../../RELEASES.md) records where these stood at the
@@ -62,8 +65,9 @@ that gap.
 
 ## The conformance bar
 
-A target is on the list above because it passes `compare` on the
-fixture on every push. A page that renders one node differently — an
+The conformance bar is a passing `compare` result against the fixture,
+not the assumption that every target was checked on an ordinary PR.
+A page that renders one node differently — an
 attribute missing, a whitespace text node — is red. That is
 deliberately a higher bar than "the tests pass": it means the emitted
 app is the same app, as a browser or a scraper would see it, not a

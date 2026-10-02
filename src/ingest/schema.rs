@@ -225,6 +225,7 @@ fn apply_migration_verb(
         "remove_column" => {
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    refuse_predicate_column(verb, table, &c, file)?;
                     table.columns.retain(|x| x.name.as_str() != c);
                 }
             }
@@ -232,6 +233,7 @@ fn apply_migration_verb(
         "rename_column" => {
             if let (Some(t), Some(old), Some(new)) = (arg_name(0), arg_name(1), arg_name(2)) {
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    refuse_predicate_column(verb, table, &old, file)?;
                     for col in &mut table.columns {
                         if col.name.as_str() == old {
                             col.name = Symbol::from(new.clone());
@@ -255,11 +257,11 @@ fn apply_migration_verb(
             }
         }
         "change_column_default" => {
-            // Positional literal or `from:`/`to:` kwargs; only string
-            // literals are retained (parity with the schema.rb parser).
+            // Positional literal or `from:`/`to:` kwargs; only literals
+            // are retained (parity with the schema.rb parser).
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
-                let positional = args.get(2).and_then(string_value);
-                let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| string_value(&v));
+                let positional = args.get(2).and_then(default_value);
+                let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| default_value(&v));
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
@@ -332,6 +334,93 @@ fn apply_migration_verb(
         _ => {}
     }
     Ok(())
+}
+
+/// A column a partial index's predicate names can't be renamed or
+/// removed by the fold. The database rewrites the predicate, or drops
+/// the index, and the fold has only the predicate's text, so it would
+/// render a `WHERE` naming a column that is gone. Erroring keeps the
+/// derived schema honest, like `UNSUPPORTED_VERBS`.
+fn refuse_predicate_column(
+    verb: &str,
+    table: &Table,
+    column: &str,
+    file: &str,
+) -> Result<(), IngestError> {
+    let Some(index) = table
+        .indexes
+        .iter()
+        .find(|i| i.predicate.as_deref().is_some_and(|p| predicate_names(p, column)))
+    else {
+        return Ok(());
+    };
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "migration verb `{verb}` on {}.{column}, which the `where:` of index `{}` names, \
+             is not supported by the schema fold — run `rails db:migrate` to materialize \
+             db/schema.rb",
+            table.name.as_str(),
+            index.name.as_str()
+        ),
+    })
+}
+
+/// Whether `predicate` names `column`: outside its string literals, a
+/// bare word equal to it (ignoring case, as Postgres folds an unquoted
+/// name) or a double-quoted identifier spelling it exactly, `""` being
+/// a quote inside one.
+fn predicate_names(predicate: &str, column: &str) -> bool {
+    let chars: Vec<char> = predicate.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => {
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\'' && chars.get(i + 1) == Some(&'\'') {
+                        i += 2;
+                    } else if chars[i] == '\'' {
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                i += 1;
+            }
+            '"' => {
+                let mut name = String::new();
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '"' && chars.get(i + 1) == Some(&'"') {
+                        name.push('"');
+                        i += 2;
+                    } else if chars[i] == '"' {
+                        break;
+                    } else {
+                        name.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                i += 1;
+                if name == column {
+                    return true;
+                }
+            }
+            c if c.is_alphanumeric() || c == '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                if word.eq_ignore_ascii_case(column) {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// schema.rb writes string literals (`create_table "clips"`); hand-
@@ -429,6 +518,7 @@ fn build_index<'pr>(
 ) -> Index {
     let mut explicit_name: Option<String> = None;
     let mut unique = false;
+    let mut predicate: Option<String> = None;
     for node in kwarg_nodes {
         let Some(kh) = node.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -438,6 +528,10 @@ fn build_index<'pr>(
             match key.as_str() {
                 "name" => explicit_name = string_value(value),
                 "unique" => unique = bool_value(value).unwrap_or(false),
+                // `where: "(archived_at IS NULL)"`: a partial index. On
+                // a unique one, dropping it widened the constraint to
+                // every row.
+                "where" => predicate = string_value(value),
                 _ => {}
             }
         }
@@ -446,7 +540,7 @@ fn build_index<'pr>(
         let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
         format!("index_{}_on_{}", table_name, cols.join("_and_"))
     });
-    Index { name: Symbol::from(name), columns, unique }
+    Index { name: Symbol::from(name), columns, unique, predicate }
 }
 
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
@@ -469,9 +563,21 @@ fn table_from_create_table(
     // `primary_key: "identifier"` its NAME. Both used to be ignored, so
     // the table got an `id INTEGER PRIMARY KEY AUTOINCREMENT` the app
     // never declared and lost the column it did (#83).
+    //
+    // When the key has options beyond its type and default, Rails'
+    // schema dumper writes them as a hash, `id: { type: :string, limit:
+    // 32 }`, and leaves out `type:` for the default key. The hash used
+    // to be read as no `id:` at all, so it always gave the default key.
+    // `create_table`'s own `limit:` and `default:` are the key's too
+    // (Rails merges the hash over them), so a hash's `limit:`, even
+    // `nil`, wins over the outer one.
     let mut has_id = true;
     let mut id_type: Option<String> = None;
+    let mut outer_limit: Option<u32> = None;
+    let mut hash_limit: Option<Option<u32>> = None;
+    let mut id_default = false;
     let mut id_name = "id".to_string();
+    let limit_of = |node: &Node<'_>| integer_value(node).and_then(|n| u32::try_from(n).ok());
     for arg in args.arguments().iter().skip(1) {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -479,12 +585,25 @@ fn table_from_create_table(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             match key.as_str() {
                 "id" => {
-                    if let Some(false) = bool_value(&assoc.value()) {
+                    let value = assoc.value();
+                    if let Some(false) = bool_value(&value) {
                         has_id = false;
-                    } else if let Some(t) = symbol_value(&assoc.value()) {
+                    } else if let Some(t) = symbol_value(&value) {
                         id_type = Some(t);
+                    } else if let Some(hash) = value.as_hash_node() {
+                        for el in hash.elements().iter() {
+                            let Some(opt) = el.as_assoc_node() else { continue };
+                            match symbol_value(&opt.key()).as_deref() {
+                                Some("type") => id_type = name_value(&opt.value()),
+                                Some("limit") => hash_limit = Some(limit_of(&opt.value())),
+                                Some("default") => id_default = true,
+                                _ => {}
+                            }
+                        }
                     }
                 }
+                "limit" => outer_limit = limit_of(&assoc.value()),
+                "default" => id_default = true,
                 "primary_key" => {
                     if let Some(n) = name_value(&assoc.value()) {
                         id_name = n;
@@ -498,8 +617,25 @@ fn table_from_create_table(
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
     if has_id {
-        let opts = ColumnOpts { nullable: Some(false), default: None, limit: None };
-        let key = match id_type.as_deref() {
+        let id_limit = hash_limit.unwrap_or(outer_limit);
+        let opts = ColumnOpts { nullable: Some(false), default: None, limit: id_limit };
+        // `serial` and `bigserial` are the integer keys Postgres fills
+        // from a sequence: Rails' PostgreSQL adapter makes `id: :integer`
+        // a `serial`, and dumps it as `id: :serial`. An integer key with
+        // no explicit `default:` is a `bigserial` when its `limit:` is 8
+        // and a `serial` otherwise; with one, it keeps its type, whose
+        // `limit:` 5 to 8 is a `bigint`.
+        let key_type = match id_type.as_deref() {
+            Some("serial") => Some("integer"),
+            Some("bigserial") => Some("bigint"),
+            Some("integer")
+                if id_limit == Some(8) || (id_default && matches!(id_limit, Some(5..=8))) =>
+            {
+                Some("bigint")
+            }
+            other => other,
+        };
+        let key = match key_type {
             None | Some("bigint") | Some("primary_key") => Ok(Column {
                 name: Symbol::from(id_name.as_str()),
                 col_type: ColumnType::BigInt,
@@ -788,6 +924,17 @@ struct ColumnOpts {
     limit: Option<u32>,
 }
 
+// Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
+fn default_value(node: &Node<'_>) -> Option<String> {
+    if let Some(n) = integer_value(node) {
+        return Some(n.to_string());
+    }
+    if let Some(f) = node.as_float_node() {
+        return Some(f.value().to_string());
+    }
+    bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
+}
+
 fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> ColumnOpts {
     let mut opts = ColumnOpts::default();
     for node in nodes {
@@ -798,7 +945,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
             let value = &assoc.value();
             match key.as_str() {
                 "null" => opts.nullable = bool_value(value),
-                "default" => opts.default = string_value(value),
+                "default" => opts.default = default_value(value),
                 "limit" => {
                     if let Some(n) = integer_value(value) {
                         if n >= 0 {
@@ -1068,6 +1215,81 @@ mod tests {
             end
         "#]);
         assert_eq!(col_names(&schema, "users"), ["id", "email"]);
+    }
+
+    /// `where:` makes a partial index, in `t.index` and `add_index`
+    /// alike; the predicate is kept as written.
+    #[test]
+    fn index_where_is_the_partial_predicate() {
+        let schema = fold(&[r#"
+            class CreateTokens < ActiveRecord::Migration[8.1]
+              def change
+                create_table :tokens do |t|
+                  t.bigint :user_id, null: false
+                  t.datetime :revoked_at
+                  t.index :user_id, unique: true, where: "revoked_at IS NULL", name: "live"
+                end
+                add_index :tokens, :revoked_at, where: "revoked_at IS NOT NULL"
+                add_index :tokens, [:user_id, :revoked_at]
+              end
+            end
+        "#]);
+        let indexes: Vec<(&str, bool, Option<&str>)> = schema.tables[&Symbol::from("tokens")]
+            .indexes
+            .iter()
+            .map(|i| (i.name.as_str(), i.unique, i.predicate.as_deref()))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                ("live", true, Some("revoked_at IS NULL")),
+                ("index_tokens_on_revoked_at", false, Some("revoked_at IS NOT NULL")),
+                ("index_tokens_on_user_id_and_revoked_at", false, None),
+            ]
+        );
+    }
+
+    /// The fold has only a predicate's text, so it refuses to rename or
+    /// remove a column the predicate names, rather than render a `WHERE`
+    /// naming a column that is gone. A column it doesn't name is fine.
+    #[test]
+    fn a_column_a_predicate_names_is_not_renamed_or_removed() {
+        let create = r#"
+            class CreateTokens < ActiveRecord::Migration[8.1]
+              def change
+                create_table :tokens do |t|
+                  t.bigint :user_id, null: false
+                  t.datetime :revoked_at
+                  t.string :label
+                  t.index :user_id, unique: true, where: "\"revoked_at\" IS NULL", name: "live"
+                end
+              end
+            end
+        "#;
+        for verb in ["rename_column :tokens, :revoked_at, :archived_at", "remove_column :tokens, :revoked_at"] {
+            let mut schema = Schema::default();
+            ingest_migration(create.as_bytes(), "1_create.rb", &mut schema).expect("create");
+            let change = format!(
+                "class Change < ActiveRecord::Migration[8.1]\n  def change\n    {verb}\n  end\nend\n"
+            );
+            let err = ingest_migration(change.as_bytes(), "2_change.rb", &mut schema).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("tokens.revoked_at") && msg.contains("index `live`"), "{msg}");
+            assert!(msg.contains("rails db:migrate"), "{msg}");
+        }
+        let schema = fold(&[
+            create,
+            "class Change < ActiveRecord::Migration[8.1]\n  def change\n    rename_column :tokens, :label, :title\n  end\nend\n",
+        ]);
+        assert_eq!(col_names(&schema, "tokens"), ["id", "user_id", "revoked_at", "title"]);
+
+        // A quoted name is one identifier, spaces and `""` included; a
+        // string literal's words are not names.
+        assert!(predicate_names("(\"revoked at\" IS NULL)", "revoked at"));
+        assert!(predicate_names("(\"say \"\"hi\"\"\" <> '')", "say \"hi\""));
+        assert!(!predicate_names("(\"revoked at\" IS NULL)", "revoked"));
+        assert!(!predicate_names("(state = 'revoked_at')", "revoked_at"));
+        assert!(predicate_names("(REVOKED_AT IS NULL)", "revoked_at"));
     }
 
     #[test]

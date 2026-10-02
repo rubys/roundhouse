@@ -46,10 +46,13 @@ attribute seeding) produce deterministic output.
   table — this is how `article.title : String` gets its type without
   any annotation in the model file.
 - **`src/emit/shared/schema_sql.rs::render_schema_statements`**
-  produces the `CREATE TABLE …` DDL statement list (SQLite dialect
-  today; the joined-string `render_schema_sql` survives for some
-  targets). The sibling `src/emit/shared/seed_sql.rs` renders
-  `db/seeds.rb` data to a `db/seed.sql` for text-only archives.
+  produces the `CREATE TABLE …` DDL statement list in the SQLite
+  dialect, which every caller uses today (the joined-string
+  `render_schema_sql` survives for some targets);
+  `render_schema_statements_for(schema, Dialect::Postgres)` renders
+  the same schema for Postgres (see the shape limits below). The
+  sibling `src/emit/shared/seed_sql.rs` renders `db/seeds.rb` data to
+  a `db/seed.sql` for text-only archives.
 - **`src/lower/persistence.rs`** uses the column list to build
   INSERT / UPDATE / DELETE / SELECT strings per model.
 
@@ -64,18 +67,52 @@ need a `Schema` artifact).
 `statements`. `main.ts` passes `schemaStatements:
 Schema.statements()` to the runtime's `startServer({ … })`.
 
-**Known shape limits.** SQLite-only today. When Postgres or MySQL
-demand per-engine DDL, a `Dialect` enum lands inside `schema_sql.rs`
-without changing the `Schema` IR itself (it's already dialect-
-neutral) or the lowerer. Postgres column types map to their SQLite
-storage at ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` →
-json, `citext` → text, `timestamptz` → datetime, `inet`/`cidr`/
-`macaddr`/`enum` → string); a type with no mapping is an ingest
-error (a ledger line under `--survey`), never a silent drop — its
-index would still be emitted and the DDL would not apply. A
-non-integer primary key (`create_table …, id: :uuid` /
-`primary_key: "identifier", id: :string`) renders as `TEXT PRIMARY
-KEY` and is carried end to end by the ruby-shape emit: the analyzer
+**Known shape limits.** Every emitter that renders this DDL uses the
+SQLite dialect. Per-engine DDL sits behind the `Dialect` enum in
+`schema_sql.rs`, without changing the `Schema` IR itself (it's already
+dialect-neutral) or the lowerer. `Dialect::Postgres` (stage (a) of
+#91; no target emits it yet) spells column types as Rails' PostgreSQL
+adapter creates them, quotes every identifier, and gives a key Rails'
+default convention for its type: `bigserial`, `serial` for an
+`integer` key, and `uuid … DEFAULT gen_random_uuid()` for a `uuid`
+one. Neither dialect reproduces source column defaults, foreign keys
+or CHECK constraints: Postgres synthesizes the key defaults above, so
+a custom or suppressed one is not reproduced, and the model layer
+applies supported literal defaults. A virtual table has no Postgres
+DDL, so that dialect returns an error for it. Postgres renders what
+ingest kept, so it shares the current ingest and IR limits.
+`schema.rb` ingest drops `array: true`; an index's `using:`, `order:`
+and `opclass:`, and expression indexes; precision on `numeric`,
+`datetime` and `time`; a `limit:` on an `integer` column (so no
+`smallint` or `bigint`); and schema qualifiers. The key forms the
+PostgreSQL dumper writes are read as the keys they name: `id: :serial`
+is an `integer` key, and a hash-valued `id: { type: :string, limit:
+32 }` keeps its type and limit. And the folds below
+apply (`jsonb` and `json` both render `jsonb`, `timestamptz` renders
+`timestamp`). A partial index's predicate (`t.index … where:`,
+`add_index … where:` in the migration fold, or `WHERE` in
+`structure.sql`) is kept as the source database wrote it. Postgres
+renders it on every index. SQLite renders it on a unique index, where
+it decides which rows must be distinct, and so do the `insert_all`
+conflict guard and `upsert_all`'s conflict target (`unique_by:` picks
+the first unique index by name with those columns, as Rails does).
+SQLite leaves it off a non-unique index, which then covers every row,
+and off a unique one whose predicate falls outside the syntax both
+engines read alike (`Dialect::index_predicate`: the table's columns,
+literals, boolean and comparison operators, a few shared functions).
+A Postgres dump's `::text` casts or `= ANY (ARRAY[…])` fall outside it;
+that index is unique over every row, and the transpile names it in a
+warning. The migration fold refuses to rename or remove a column a
+predicate names.
+Postgres column types map to their SQLite storage at
+ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` → json,
+`citext` → text, `timestamptz` → datetime, `inet`/`cidr`/`macaddr`/
+`enum` → string); a type with no mapping is an ingest error (a ledger
+line under `--survey`), never a silent drop — its index would still be
+emitted and the DDL would not apply. A non-integer primary key
+(`create_table …, id: :uuid` / `primary_key: "identifier", id:
+:string`) renders as `TEXT PRIMARY KEY` in SQLite and is carried end
+to end by the ruby-shape emit: the analyzer
 types `id`, `ids` and the key-taking finders from that column; the
 emitted `find`/`exists?`/`update`/`delete`/`reload` primitives
 compare it with the key's type; insert writes it (minting a blank
@@ -223,7 +260,14 @@ one process so this isn't an issue.
    the final shape is straightforward; replaying migrations to derive
    it is avoidable work.
 
-When `schema.rb` is absent (never migrated locally, or gitignored),
+When `schema.rb` is absent, Roundhouse next reads `db/structure.sql`
+(`src/ingest/structure_sql.rs`), the SQL dump Rails writes under
+`config.active_record.schema_format = :sql`. Its reader handles
+PostgreSQL's `pg_dump` format. It skips the `\restrict` and
+`\unrestrict` lines that pg_dump 18 (and the August 2025 minor
+releases) brackets a dump with and that Rails before 7.2.3/8.0.3 keeps;
+any other psql meta-command is ledgered as a statement it does not
+model. When there is neither (never migrated locally, or gitignored),
 the walk falls back to folding `db/migrate/*.rb` in filename order —
 `src/ingest/schema.rs::ingest_migration`, called from
 `src/ingest/app.rs`. Migration shapes it can't fold deterministically

@@ -14,6 +14,9 @@
 //! lowerings, because they consume source-shaped IR (previews, type
 //! checks, hovers), so pulling them through a lowering facade would
 //! change their behavior, not dedup it.
+//! Concern-accessor admission during ingest does inspect an isolated
+//! analyzed/lowered copy for generated ownership. It does not lower the
+//! returned App; source consumers still analyze its original shape.
 //!
 //! What the three emit-bound drivers (`roundhouse` transpile,
 //! `dump_ir`, `project::build_site`) genuinely share is the step right

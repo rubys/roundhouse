@@ -5,6 +5,11 @@
 //! missed irregular plural, fix the rule here rather than working around it
 //! in the caller.
 
+/// `Billing::Invoice` → `Invoice`, as `ActiveSupport::Inflector#demodulize`.
+pub fn demodulize(class_name: &str) -> &str {
+    class_name.rsplit("::").next().unwrap_or(class_name)
+}
+
 pub fn snake_case(class_name: &str) -> String {
     let mut s = String::with_capacity(class_name.len() + 4);
     for (i, c) in class_name.char_indices() {
@@ -98,6 +103,15 @@ pub fn safe_local(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// True when `name` is a reserved word that a Ruby local can still have.
+/// Only a keyword parameter can (`def badge(class: "badge")`), and the
+/// body reads it as `binding.local_variable_get(:class)`, because a bare
+/// `class` does not parse as a read. A pseudo-variable (`self`, `nil`,
+/// `true`, `false`) is never a local, so it is not included.
+pub fn is_reserved_local(name: &str) -> bool {
+    RESERVED_LOCALS.contains(&name) && !matches!(name, "self" | "nil" | "true" | "false")
 }
 
 /// Base (final) segment of a `/`-separated view-dir path or a
@@ -458,16 +472,23 @@ pub fn habtm_join_table(owner_class: &str, target_plural_sym: &str) -> String {
     if a < b { format!("{a}_{b}") } else { format!("{b}_{a}") }
 }
 
-/// A column name as it must appear in emitted DDL and DML: double-quoted
-/// when it is a SQLite keyword. A Rails schema may legally name a column
-/// `index` or `values` (Postgres accepts them quoted, and schema.rb quotes
-/// nothing), and SQLite refuses the bare word in `CREATE TABLE`, in a
-/// SELECT list and in `INSERT … (cols)` alike.
+/// One physical SQLite identifier in DDL or DML, preserving its spelling.
+/// Ordinary ASCII names stay bare; keywords and other names are double-
+/// quoted, with embedded quotes doubled. Qualification is composed by the
+/// caller from separate identifiers: `legacy.entries` here is one name,
+/// not a schema/table pair. Values and SQL expressions must not use this.
 pub fn sql_ident(name: &str) -> String {
-    if is_sqlite_keyword(name) { format!("\"{name}\"") } else { name.to_string() }
+    let mut chars = name.chars();
+    let bare = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if bare && !is_sqlite_keyword(name) {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
 }
 
-fn is_sqlite_keyword(name: &str) -> bool {
+pub(crate) fn is_sqlite_keyword(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "abort" | "action" | "add" | "after" | "all" | "alter" | "always" | "analyze" | "and" | "as"

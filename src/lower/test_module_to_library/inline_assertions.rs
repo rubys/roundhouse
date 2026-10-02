@@ -452,6 +452,17 @@ fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Optio
     };
     let raised_name = Symbol::from("__raised");
     let caught_name = Symbol::from("__caught");
+    // `assert_raises(K, match: "text")` (core's helper): the kwargs hash is
+    // not a rescue class. A String or Regex `match:` becomes a message check.
+    let classes: Vec<Expr> =
+        args.iter().filter(|a| !matches!(&*a.node, ExprNode::Hash { .. })).cloned().collect();
+    let matcher = args.iter().find_map(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => entries.iter().find_map(|(k, v)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "match" => Some(v.clone()),
+            _ => None,
+        }),
+        _ => None,
+    });
     let init = Expr::new(
         span,
         ExprNode::Assign {
@@ -475,7 +486,7 @@ fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Optio
         ExprNode::BeginRescue {
             body: block_body,
             rescues: vec![RescueClause {
-                classes: args.to_vec(),
+                classes,
                 binding: Some(caught_name),
                 body: capture,
             }],
@@ -494,6 +505,22 @@ fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Optio
         ),
         "assert_raises failed".to_string(),
     );
+    let message = || {
+        send_method(
+            span,
+            Expr::new(span, ExprNode::Var { id: VarId(0), name: raised_name.clone() }),
+            "message",
+            vec![],
+        )
+    };
+    let match_check = matcher.and_then(|m| {
+        let hit = match &*m.node {
+            ExprNode::Lit { value: Literal::Str { .. } } => send_method(span, message(), "include?", vec![m.clone()]),
+            ExprNode::Lit { value: Literal::Regex { .. } } => send_method(span, m.clone(), "match?", vec![message()]),
+            _ => return None,
+        };
+        Some(raise_if(span, send_method(span, hit, "!", vec![]), "assert_raises failed".to_string()))
+    });
     // Final expr in the Seq is the caught exception — gives the
     // surrounding `err = assert_raises(...) { ... }` its value.
     let yield_caught = Expr::new(
@@ -508,7 +535,12 @@ fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Optio
     // `err = ...` would silently swallow only the first statement.
     let body = Expr::new(
         span,
-        ExprNode::Seq { exprs: vec![init, begin_rescue, check, yield_caught] },
+        ExprNode::Seq {
+            exprs: [Some(init), Some(begin_rescue), Some(check), match_check, Some(yield_caught)]
+                .into_iter()
+                .flatten()
+                .collect(),
+        },
     );
     Some(Expr::new(
         span,

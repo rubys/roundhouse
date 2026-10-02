@@ -133,6 +133,9 @@ pub(crate) fn push_attachable_sgid(
     );
     body.ty = Some(Ty::Str);
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -409,6 +412,9 @@ pub(crate) fn push_attachment_delegation(methods: &mut Vec<MethodDef>, class: &C
             attachment_ty.clone(),
         );
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: sp,
             name: Symbol::from("attachment="),
             receiver: MethodReceiver::Instance,
@@ -417,6 +423,7 @@ pub(crate) fn push_attachment_delegation(methods: &mut Vec<MethodDef>, class: &C
                 default: None,
                 keyword: false,
                 rest: false,
+                forwarding: false,
                 from_keyword: false,
                 from_kwrest: false,
             }],
@@ -450,6 +457,9 @@ pub(crate) fn push_attachment_delegation(methods: &mut Vec<MethodDef>, class: &C
         let branch = typed(ExprNode::If { cond: is_nil, then_branch: nil, else_branch: call }, caption_ty.clone());
         let body = typed(ExprNode::Seq { exprs: vec![assign, branch] }, caption_ty.clone());
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: sp,
             name: Symbol::from("caption"),
             receiver: MethodReceiver::Instance,

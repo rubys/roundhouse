@@ -120,6 +120,26 @@ class ActionTextContentTest < Minitest::Test
     assert_equal "visible", ActionText::Content.new("<style>.x{}</style><div>visible</div>").to_plain_text
   end
 
+  # A `<` that opens no tag is TEXT (HTML5's tag-open rule). Every
+  # scanner here took any `<` for a tag, so `< 2 && 3 >` read as an
+  # element: its plain text lost the span, and campfire's SanitizeTags
+  # removed it and the rest of the message. Both answers are Rails',
+  # from once-campfire-rust's rich-text corpus ("plain text with markup
+  # characters", "malformed bogus comment") as our oracle recorded them.
+  def test_a_bare_less_than_is_text
+    assert_equal %(1 < 2 && 3 > 2 "quoted" 'single'),
+      ActionText::Content.new(%(1 < 2 && 3 > 2 "quoted" 'single')).to_plain_text
+  end
+
+  def test_declarations_and_bogus_end_tags_are_dropped
+    assert_equal "abcd", ActionText::Content.new("a<!x>b<?pi?>c</ >d").to_plain_text
+  end
+
+  def test_a_bare_less_than_neither_opens_nor_ends_an_element
+    fragment = ActionText::Content.new("1 < 2 && <b>a < b</b> c").fragment
+    assert_equal ["<b>a < b</b>"], fragment.find_all("b").map { |node| node.to_s }
+  end
+
   def test_entities_decode
     assert_equal "Tom & Jerry", ActionText::Content.new("<div>Tom &amp; Jerry</div>").to_plain_text
     assert_equal "nbsp here", ActionText::Content.new("<div>nbsp&nbsp;here</div>").to_plain_text

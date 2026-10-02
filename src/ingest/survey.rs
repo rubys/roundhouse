@@ -42,6 +42,17 @@ pub fn is_active() -> bool {
     SURVEY_STATE.with(|s| s.borrow().is_some())
 }
 
+/// Probe with the same strict/survey parsing semantics, without publishing
+/// duplicate errors. Preserve all entries recorded before the probe.
+pub(super) fn without_recording<T>(f: impl FnOnce() -> T) -> T {
+    let length = SURVEY_STATE.with(|s| s.borrow().as_ref().map(Vec::len));
+    let result = f();
+    if let Some(length) = length {
+        SURVEY_STATE.with(|s| s.borrow_mut().as_mut().unwrap().truncate(length));
+    }
+    result
+}
+
 /// Push an ingest error into the per-thread collector. No-op if
 /// survey mode isn't active (so callers can record unconditionally).
 pub fn record(err: &IngestError) {
@@ -96,6 +107,38 @@ pub fn unwrap_or_record<T>(result: super::IngestResult<T>) -> super::IngestResul
         }
         Err(err) => Err(err),
     }
+}
+
+/// Record a synthesized re-ingest's parse failure as a survey gap.
+///
+/// A lowering pass that expands a macro (`delegate`, `on_subscribe`,
+/// …) into real methods does so by rendering Ruby source and running
+/// it back through ingest. Prism is error-recovering, so a bug in that
+/// rendering doesn't fail the re-ingest outright — it silently hands
+/// back a malformed AST alongside parse diagnostics. Left alone, those
+/// diagnostics would render against whatever real file happens to
+/// share their `FileId` (see [`super::sources`]'s module doc); a
+/// synthesis failure is roundhouse's gap, not the app's, so it belongs
+/// on the survey ledger instead.
+///
+/// Call with the diagnostics collected by the caller's OWN
+/// `prism::scope` around the re-ingest (never the outer one that spans
+/// the whole app) — that is what keeps them from also leaking into the
+/// app's parse-error count. `what` names the construct being
+/// synthesized (e.g. `` "delegate forwarder for `behavior=`" ``);
+/// `file` is the real declaring file when the caller has it at hand,
+/// or the pass's own `"<label>"` otherwise — either way this never
+/// resolves through `App::sources`, so it can't misattribute.
+pub fn record_synthesis_failure(
+    file: impl Into<String>,
+    what: &str,
+    diags: &[crate::diagnostic::Diagnostic],
+) {
+    let message = match diags.first() {
+        Some(d) => format!("{what} could not be synthesized: {}", d.message),
+        None => format!("{what} could not be synthesized"),
+    };
+    record(&IngestError::Unsupported { file: file.into(), message });
 }
 
 /// Bucket key for aggregation: the message prefix up to the first `(`

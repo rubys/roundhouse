@@ -639,7 +639,12 @@ same read-then-write shape `increment!` below already carries, and under
 single-threaded dispatch the window it opens is not observable. A unique
 index over a NULLABLE column is skipped when building the guard:
 `where(col: nil)` asks whether a row holds SQL NULL, which is a
-different question, and in SQLite such rows never conflict anyway.
+different question, and in SQLite such rows never conflict anyway. A
+partial unique index (`where:`) adds its predicate to the check,
+`.where("(revoked_at IS NULL)")`, so only a row the index covers counts
+as a conflict. The check reads the existing row, not the new one, so a
+new row the predicate does not cover is still skipped when a covered row
+shares its key; Rails inserts it.
 
 **What it costs.** N statements instead of one, plus one SELECT per row
 for the conflict check, and callbacks Rails would not run — visible on
@@ -1468,13 +1473,51 @@ The receiver stays where it is — a relation is lazy, so reading
 `scope_attributes` off it runs no query — and the caller's own
 attributes ride on the OUTSIDE of the merge, which is Rails' order.
 
-**Still divergent:** the seed itself. Rails' `scope_for_create` is
-`where_values_hash`, so EVERY equality condition on the relation
-pre-fills the record; here only an association seed (`where_scope`)
-writes the create-seed slot, so a plain scope's conditions filter reads
-and do not seed writes. `User.active_bots.new` comes back without its
-`role`. An argument shape the rewrite does not admit — a positional
-value, a splat — is left alone and still raises.
+**Supported find-or-create subset:** a concrete model, or a chain of
+`Model.where(column: scalar_literal)` calls, followed by
+`find_or_create_by` / `find_or_create_by!` with a literal Symbol-keyed
+scalar conditions Hash, is expanded at the call site. Keys must be
+ordinary schema columns (not the primary key) and literal types must fit
+the column; this pass does not cast attributes. The lookup retains every
+predicate. On a miss, the concrete constructor receives a typed literal
+Hash of the scope defaults and the explicit conditions (which win), so
+supported constructor callbacks (block-form `after_initialize`, or an
+instance `after_initialize` method) see the initialized attributes. A
+directly attached single-parameter initialization block runs only for a
+new record, before validation/save; an existing match is returned
+without yielding. Supported positions are a statement, a local or
+instance-variable assignment, or the whole method body. Shadowing an
+outer local with the initialization parameter, or rebinding that
+parameter, still returns the original saved record.
+
+**Still divergent:** the general create seed. Rails' `scope_for_create`
+is `where_values_hash`, so EVERY equality condition on the relation
+pre-fills the record; the runtime still records only an association
+seed (`where_scope`). `User.active_bots.new` comes back without its
+`role`.
+
+Outside the find-or-create subset, each with an explicit error:
+
+- `find_or_create_by!` with nonliteral conditions — the runtime has no
+  bang form;
+- general relations, associations, and nonliteral, collection, OR or
+  range predicates (OR/removed predicates are not guessed from an old
+  create seed);
+- initialization blocks with control flow, compound or parallel
+  assignment, new local variables, rescue exception bindings, nested
+  blocks, or rest/block parameters;
+- block locals and optional, post, keyword, block and anonymous-rest
+  parameters, rejected at ingest before their unrepresented signature
+  fields are lost;
+- forwarded initialization blocks (`&proc`, `&lambda`, `&->` and other
+  block arguments);
+- effectful attribute or index assignment targets.
+
+Symbol-form `after_initialize` callbacks are not yet lowered and keep a
+model out of this path. Blockless non-bang lowering and the runtime
+association finders are unchanged. An argument shape the
+plain-constructor rewrite does not admit — a positional value, a splat —
+is left alone and still raises.
 
 ### A scope-INDIFFERENT class method runs unscoped
 
@@ -2939,6 +2982,64 @@ no separate harness where generation is byte-identical to Rails', which
 is every deterministic section above; it matters where randomness is
 involved (encryption IVs, CSRF masks), which is exactly what is not
 implemented.
+
+### Campfire's rich-text pipeline against Rails' corpus — BASELINE (2026-09-30)
+
+`scripts/campfire-richtext-corpus` renders once-campfire-rust's corpus of
+stored message bodies — 247 handwritten (fixtures, Lexxy and Trix
+mentions, figures, galleries, remote images and video, content
+attachments, opengraph embeds, sgids good / tampered / expired /
+cross-purpose / Rails-7 / deleted, autolinks, hostile markup), 400
+seeded fuzz, 400 seeded mutations — through campfire's own
+`message_presentation` and `body.to_plain_text`, served by Rails and by
+the emit from the same database, and compares case by case. Their
+generator, vendored and run by our oracle, reproduces their recorded
+answers byte for byte on all 647 cases the two corpora share, and the
+Rails-served page matches the generator on every case it serves (49
+bodies make Rails itself raise; the emit must raise on them too).
+
+| presentation, bytes / DOM | handwritten (247) | fuzz (400) | mutation (400) |
+|---|---|---|---|
+| ruby (the real sanitizer gems) | 152 / 209 | 147 / 216 | 242 / 277 |
+| spinel (the ported sanitizer) | 128 / 196 | 98 / 191 | 181 / 228 |
+
+`DOM` is their normalization (HTML5 fragment, whitespace-only text
+dropped, whitespace collapsed, attributes sorted). Plain text: ruby
+208 / 85 / 246, spinel 206 / 85 / 244.
+
+**Where the gap is.** At the DOM level 344 presentation failures are
+shared by both lanes and 88 are spinel's alone. The 88 are the ported
+sanitizer — what swapping in spinel-loofah under rails-html-sanitizer
+is for. The 344 are roundhouse's compilation of campfire's pipeline,
+whatever sanitizer runs under it; by cluster:
+
+- **A bare `<` truncated the message — FIXED 2026-09-30.** `1 < 2 && 3
+  > 2` rendered `1 `: Action Text's scanners (`next_element`,
+  `element_end`, `to_plain_text`, `scan_tags`) took any `<` for a tag,
+  and SanitizeTags removed `< 2 && 3 >` and everything after it. They
+  now ask `ActionView::ViewHelpers.tag_open_at?`, HTML5's tag-open rule
+  the sanitizer engine already used — corrected on the way for `</` +
+  non-letter, which is a bogus comment the tokenizer drops, not text.
+  Presentation DOM after: ruby 212 / 251 / 304, spinel 199 / 212 / 253;
+  plain text ruby 210 / 108 / 274. Two fuzz cases (278, 349) that
+  passed by accident — the misread `<` swallowed what Rails' tree
+  builder drops — fail now, exposing the real gap: the fragment scanner
+  is not an HTML5 tree builder (an unclosed `<textarea>` is RCDATA to
+  the end; table content foster-parents out of `<form>`).
+- **Trix figures** (`<figure data-trix-attachment=…>`, what older
+  installs stored) are not converted: a mention inside one renders as
+  its name, an image not at all.
+- **Remote image and video attachments, content attachments
+  (`text/html` with `content=`) and galleries** render empty.
+- **A mention's plain text** keeps the HTML in the user's name, where
+  Rails strips it.
+- Byte-level only, DOM-equivalent: a newline after each mention's
+  `</span>` and a blank line after each opengraph embed (a partial's
+  trailing newline Rails trims), `href` / `target` order and `'` versus
+  `&#39;` in autolinks.
+
+A report, not yet a gate: the floors above become a ratchet once the
+spinel lane runs the real sanitizer packages.
 
 ### Campfire's models write what Rails writes — MEASURED (2026-09-29)
 

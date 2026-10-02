@@ -18,10 +18,15 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+/// The source reference names a modeled class or module. The Ruby emitter
+/// uses its resolved `Ty::Class` when it changes lexical nesting.
+pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
-/// synthesizes a pattern it knows the target-specific name for;
-/// consumed by per-target emitters that want the idiomatic form.
+/// synthesizes a pattern it knows the target-specific name for (and by
+/// ingest for `+"literal"`, below); consumed by per-target emitters
+/// that want the idiomatic form.
 ///
 /// Currently covers the string-accumulator triple emitted by
 /// `view_to_library` (`io = String.new; io << "..."; io`):
@@ -36,6 +41,13 @@ use crate::ty::Ty;
 ///   `io.String()` — replaces O(n²) `io = io + x`.
 /// - TypeScript: `[]` / `.push(...)` / `.join("")` — V8 prefers
 ///   array+join over repeated string concat.
+///
+/// And one that ingest sets: `+"literal"`, the copy a
+/// frozen-string-literal file makes of a literal it will mutate
+/// (`buf = +""; buf << x`). The Ruby family writes the `+` back,
+/// because Spinel freezes string literals; every other target emits
+/// the plain literal, as it always has, since its strings have no
+/// frozen state to opt out of.
 ///
 /// `None` means "no hint" — emitters fall through to their default
 /// per-`ExprNode` handling. Adding a variant has zero effect on
@@ -52,6 +64,8 @@ pub enum IrHint {
     /// On the terminal `Var` reference returning a string accumulator
     /// at the tail of a view function body.
     StringBuilderResult,
+    /// On a string `Lit` ingested from `+"literal"` (an unfrozen copy).
+    MutableStringLiteral,
 }
 
 /// The core typed λ-calculus. Ruby's ~80 AST node kinds collapse into ~15 here;
@@ -91,14 +105,15 @@ pub struct Expr {
     pub diagnostic: Option<DiagnosticKind>,
     /// Cross-target intent annotation. Set by the lowerer when it
     /// synthesizes a canonical Ruby idiom whose optimal emit shape
-    /// differs per target. See `IrHint` for variants and per-target
-    /// consumption notes. `None` for nodes the lowerer didn't tag.
+    /// differs per target, and by ingest for `+"literal"`. See `IrHint`
+    /// for variants and per-target consumption notes. `None` for nodes
+    /// nothing tagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<IrHint>,
-    /// Bit-packed decisions stamped by per-target decide passes.
-    /// Bits 0–31 are reserved for cross-target concerns (e.g.
-    /// `NEEDS_PARENS`, `LAST_USE`) populated by shared analyses;
-    /// bits 32–63 are per-target-local (e.g. rust's `OWNED`,
+    /// Bit-packed source facts and target decisions. Bits 0–31 are
+    /// cross-target (`NEEDS_PARENS`, `LAST_USE`, `RESOLVED_CLASS_REF`);
+    /// the analyzer sets source facts and the decide passes set the rest.
+    /// Bits 32–63 are per-target-local (e.g. rust's `OWNED`,
     /// `CLONE_AT`). See `src/emit/rust/decide/bits.rs` for the
     /// rust bit allocation. Default `0` = "no decisions" — emitters
     /// that don't run a decide pass see no behavioral change.
@@ -303,6 +318,23 @@ pub enum ExprNode {
         #[serde(default)]
         block_style: BlockStyle,
     },
+    /// A bound-method value: `method(:name)` (`recv: None`, dispatches
+    /// on `self`), `self.method(:name)` / `recv.method(:name)`
+    /// (`recv: Some(...)`). Surfaces almost exclusively in block-
+    /// argument position (`&method(:name)`) — see `ingest_call_block`
+    /// — but is a general value-producing node, not block-slot-only.
+    ///
+    /// Distinct from `Lambda` because there is no body to desugar to
+    /// at ingest time: the callee's arity is a property of `name`'s
+    /// *definition*, unknown until the class registry resolves it (see
+    /// `BodyTyper`'s `MethodRef` arm, which types this like a Send with
+    /// no args — same registry lookup ordinary dispatch uses). Ruby/
+    /// Spinel emit this verbatim (`&method(:name)`); Spinel supports
+    /// `Method` objects natively (see `~/working/spinel/README.md`
+    /// and `docs/limitations.md`'s extensive `obj.method(:m)`
+    /// coverage). Strict targets emit an `unsupported` stub — see each
+    /// emitter's `MethodRef` arm.
+    MethodRef { recv: Option<Expr>, name: Symbol },
     Apply { fun: Expr, args: Vec<Expr>, block: Option<Expr> },
     Send {
         /// `None` means implicit self (bare method call in current scope).
@@ -385,6 +417,14 @@ pub enum ExprNode {
     /// argument lists / array literals; standalone Splat is a Ruby
     /// syntax error.
     Splat { value: Expr },
+    /// Full argument forwarding in a call or `super(...)`. Retains
+    /// positional/keyword/block provenance; never a user variable or
+    /// an ordinary positional hash. Requires a forwarding formal.
+    ForwardArgs,
+    /// Source keyword argument group containing `**expression`.
+    /// The one value child is the existing ordered hash merge expression;
+    /// it evaluates once. This is not a positional `{**hash}` literal.
+    KeywordSplat { value: Expr },
     /// Parallel assignment: `a, b = expr` — RHS evaluates once, then
     /// is destructured (Ruby array-like) across the targets. Limited
     /// to the no-rest, no-rights shape; `a, *b = c` is not yet
@@ -460,6 +500,7 @@ impl ExprNode {
             ExprNode::BoolOp { .. } => "BoolOp",
             ExprNode::Let { .. } => "Let",
             ExprNode::Lambda { .. } => "Lambda",
+            ExprNode::MethodRef { .. } => "MethodRef",
             ExprNode::Apply { .. } => "Apply",
             ExprNode::Send { .. } => "Send",
             ExprNode::If { .. } => "If",
@@ -478,6 +519,8 @@ impl ExprNode {
             ExprNode::Retry => "Retry",
             ExprNode::Redo => "Redo",
             ExprNode::Splat { .. } => "Splat",
+            ExprNode::ForwardArgs => "ForwardArgs",
+            ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
             ExprNode::While { .. } => "While",
             ExprNode::Range { .. } => "Range",
@@ -524,6 +567,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -552,6 +596,11 @@ impl ExprNode {
                 f(body);
             }
             ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 f(fun);
                 for a in args {
@@ -623,7 +672,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);
@@ -705,6 +754,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -733,6 +783,11 @@ impl ExprNode {
                 f(body);
             }
             ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::MethodRef { recv, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+            }
             ExprNode::Apply { fun, args, block } => {
                 f(fun);
                 for a in args {
@@ -804,7 +859,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);

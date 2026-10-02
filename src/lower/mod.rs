@@ -27,6 +27,7 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod fixtures;
+pub(crate) mod forwarding;
 pub mod functionalize;
 pub mod model_associations;
 pub mod persistence;
@@ -47,8 +48,10 @@ pub mod as_json_poro;
 pub mod active_model_model;
 pub mod enumerable_ext;
 pub mod time_calendar;
+pub mod boolean_cast;
 pub mod where_range_split;
 pub mod params_merge;
+pub mod csv_generate;
 pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
@@ -87,6 +90,9 @@ pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
 pub mod to_json;
+pub mod number_to_fs;
+pub mod string_inflections;
+pub mod attribute_aliases;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
@@ -117,6 +123,7 @@ pub mod route_url_options;
 pub mod route_helper_receiver;
 pub mod config_reader;
 pub mod symbolize_keys;
+pub mod enum_mapping_keys;
 pub mod exists_conditions;
 pub mod destroy_by;
 pub mod has_one_builder;
@@ -131,6 +138,8 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+pub mod params_residue;
+pub mod params_permit;
 pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -177,6 +186,7 @@ pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
+pub use number_to_fs::apply_number_to_fs_grounding;
 pub use presence_in::apply_presence_in_grounding;
 pub use relation_ivar_materialize::apply_relation_ivar_materialize;
 pub use defined_ivar_memo::apply_defined_ivar_memo_lowering;
@@ -272,6 +282,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Deletes provably-dead `false && …` tails before any pass can
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
+    // Preserve native full destinations; ordinary keyword producers
+    // rejoin the legacy projection before any argument-rewriting pass.
+    ("forwarding_keywords", &["bool_fold"]),
+    // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
+    ("params_residue", &["bool_fold"]),
+    // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
+    ("params_permit", &["params_residue"]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -311,12 +328,21 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const no pass produces and writes a name no pass consumes, so
     // no ordering constraints.
     ("random_formatter", &[]),
+    // `number.to_fs(:delimited)` → `ActiveSupport.number_delimited(number)`;
+    // a rewrite of a name no other pass produces or consumes.
+    ("number_to_fs", &[]),
+    // `str.humanize` → `ActiveSupport.humanize(str)`; a rewrite of a name no other pass produces or consumes.
+    ("string_inflections", &[]),
+    // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
+    ("attribute_aliases", &[]),
     // `hash.to_json` → `JSON.generate(hash)`; a receiver-shape rewrite
     // of a name no other pass produces or consumes.
     ("to_json", &[]),
     // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
     // list)`; a receiver-shape rewrite of a name no other pass produces
     // or consumes, so no ordering constraints.
+    // No runs_after: it rewrites a `CSV.generate` call's own arguments and block.
+    ("csv_generate", &[]),
     ("presence_in", &[]),
     // `list.index_by { … }` → `ActiveSupport.index_by(list) { … }`.
     // Same receiver-shape rewrite, same absence of constraints.
@@ -325,6 +351,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("time_calendar", &[]),
     // After time_calendar: `t.all_month` becomes the Range literal this splits out.
     ("where_range_split", &["time_calendar"]),
+    // No runs_after: it rewrites one constant-rooted shape no other pass produces.
+    ("boolean_cast", &[]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
     // every later pass already reads; consumes nothing any pass
@@ -457,6 +485,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // until that pass has rewritten the `config` chain and stamped its
     // type.
     ("symbolize_keys", &["config_reader"]),
+    // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
+    ("enum_mapping_keys", &[]),
     ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
@@ -606,6 +636,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // which only kwrest_forward rewrites — and that one leaves no
     // trailing kwargs Hash behind, so the two cannot both fire.
     ("helper_kwargs", &["kwrest_forward"]),
+    // Keep owner-local form attribute computations inside their helper before
+    // the view walker substitutes builder wrappers across module boundaries.
+    ("form_wrapper_owners", &["helper_kwargs"]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -692,6 +725,12 @@ pub fn apply_post_analyze_lowerings(
     ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
+    diags.extend(forwarding::apply(app));
+    ran!("forwarding_keywords");
+    diags.extend(params_residue::apply_params_residue_ledger(app));
+    ran!("params_residue");
+    params_permit::apply_params_permit_lowering(app);
+    ran!("params_permit");
     diags.extend(blank::apply_blank_lowering(app));
     ran!("blank");
     time_current::apply_time_current_lowering(app);
@@ -720,8 +759,16 @@ pub fn apply_post_analyze_lowerings(
     ran!("try_guard");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");
+    number_to_fs::apply_number_to_fs_grounding(app);
+    ran!("number_to_fs");
+    string_inflections::apply_string_inflection_grounding(app);
+    ran!("string_inflections");
+    attribute_aliases::apply_attribute_alias_lowering(app);
+    ran!("attribute_aliases");
     to_json::apply_to_json_lowering(app);
     ran!("to_json");
+    csv_generate::apply_csv_generate_lowering(app);
+    ran!("csv_generate");
     presence_in::apply_presence_in_grounding(app);
     ran!("presence_in");
     enumerable_ext::apply_enumerable_ext_grounding(app);
@@ -730,6 +777,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("time_calendar");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
+    boolean_cast::apply_boolean_cast_grounding(app);
+    ran!("boolean_cast");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
     relation_ivar_materialize::apply_relation_ivar_materialize(app);
@@ -794,6 +843,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("config_reader");
     symbolize_keys::apply_symbolize_keys_grounding(app);
     ran!("symbolize_keys");
+    enum_mapping_keys::apply_enum_mapping_keys(app);
+    ran!("enum_mapping_keys");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
@@ -822,7 +873,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("and_return");
     case_lambda::apply_case_lambda_lowering(app);
     ran!("case_lambda");
-    first_or_create::apply_first_or_create_lowering(app);
+    diags.extend(first_or_create::apply_first_or_create_lowering(app));
     ran!("first_or_create");
     attr_or_assign::apply_attr_or_assign_lowering(app);
     ran!("attr_or_assign");
@@ -892,6 +943,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
+    view_to_library::form_wrapper::preserve_argument_owners(app, registry);
+    ran!("form_wrapper_owners");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
@@ -1193,6 +1246,15 @@ pub(crate) fn for_each_hook_body_ref(
                     }
                 }
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension {
+                        visit_param_defaults(&m.params, f);
+                        f(&m.body);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1247,6 +1309,41 @@ pub(crate) fn for_each_hook_body_ref(
     if let Some(seeds) = &app.seeds {
         f(seeds);
     }
+}
+
+// One inventory for the extra emit-bound roots the hook walker intentionally
+// excludes. Keep the mutable projection and immutable survey in lockstep.
+macro_rules! forwarding_roots {
+    ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
+        for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
+        for tm in & $($mutable)? $app.test_modules {
+            if let Some(setup) = tm.setup.$option() { $f(setup); }
+            for test in & $($mutable)? tm.tests { $f(& $($mutable)? test.body); }
+            for (_, value) in & $($mutable)? tm.constants { $f(value); }
+            for method in & $($mutable)? tm.helpers {
+                $f(& $($mutable)? method.body);
+                for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+            }
+            for class in & $($mutable)? tm.inner_classes {
+                for method in & $($mutable)? class.methods {
+                    $f(& $($mutable)? method.body);
+                    for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                }
+                for (_, value) in & $($mutable)? class.constants { $f(value); }
+                for call in & $($mutable)? class.unknown_calls { $f(call); }
+            }
+        }
+    }
+}
+
+pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    for_each_hook_body(app, f);
+    forwarding_roots!(app, f, iter_mut, as_mut, mut);
+}
+
+pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+    for_each_hook_body_ref(app, f);
+    forwarding_roots!(app, f, iter, as_ref);
 }
 
 pub use associations::{
@@ -1336,6 +1433,9 @@ pub fn module_funcs_to_library_class(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
@@ -1360,6 +1460,7 @@ pub fn module_funcs_to_library_class(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

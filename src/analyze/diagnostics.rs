@@ -39,6 +39,9 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = Vec::new();
+    // Only validated synthesized Alba serializers, with per-constructor
+    // evidence; this does not widen the general library diagnostic policy.
+    out.extend(super::alba::diagnose(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -57,6 +60,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         for action in controller.actions() {
             diagnose_expr_in(&action.body, &mut out, !filter_targets.contains(&action.name));
         }
+        for method in controller.class_methods() {
+            diagnose_expr(&method.body, &mut out);
+        }
     }
     for model in &app.models {
         for scope in model.scopes() {
@@ -72,6 +78,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }
+    out.extend(super::forwarding::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
@@ -225,10 +232,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
     // walker is the natural place since every node's `.ty` already
     // carries the signal.
-    // A `Seq` has its tail's type; the tail reports itself.
+    // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
+    // an argument-packet marker, not a value escaping the type system.
     if value_used
         && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
-        && !matches!(&*expr.node, ExprNode::Seq { .. })
+        && !matches!(&*expr.node, ExprNode::Seq { .. } | ExprNode::ForwardArgs)
     {
         let kind = DiagnosticKind::GradualUntyped {
             expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
@@ -290,7 +298,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // is itself unresolved is reported on the receiver node when we
     // recurse, so the outer send is skipped here to avoid double-counting
     // the same root cause.
-    if is_unknown_ty(expr.ty.as_ref()) {
+    if is_unknown_ty(expr.ty.as_ref())
+        && !matches!(expr.diagnostic, Some(DiagnosticKind::Unsupported { .. }))
+    {
         let report = matches!(
             &*expr.node,
             ExprNode::Send { recv: None, .. }
@@ -376,6 +386,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Lambda { body, .. } => {
             diagnose_expr(body, out);
         }
+        ExprNode::MethodRef { recv, .. } => {
+            if let Some(r) = recv {
+                diagnose_expr(r, out);
+            }
+        }
         ExprNode::Apply { fun, args, block } => {
             diagnose_expr(fun, out);
             for a in args {
@@ -428,7 +443,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
-        ExprNode::Splat { value } => diagnose_expr(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => diagnose_expr(value, out),
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {
@@ -456,6 +471,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

@@ -319,8 +319,8 @@ fn push_preload_stmts(
         lit_str(format!(
             "SELECT {} FROM {} WHERE {} IN (",
             select_cols_csv(target_table),
-            target_table.name.as_str(),
-            directive.foreign_key.as_str(),
+            crate::naming::sql_ident(target_table.name.as_str()),
+            crate::naming::sql_ident(directive.foreign_key.as_str()),
         )),
         db_call(&db, "escape_int_list", vec![var_ref(&ids)]),
         lit_str(")".to_string()),
@@ -596,7 +596,7 @@ fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
 
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "SELECT COUNT(*) FROM {}",
-        table.name.as_str()
+        crate::naming::sql_ident(table.name.as_str())
     ))];
     let mut binds = Vec::new();
     push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
@@ -624,7 +624,7 @@ fn emit_exists(sel: &Select, table: &Table, param: bool) -> Expr {
     let db = ClassId(Symbol::from(DB_MOD));
 
     let mut segments: Vec<Expr> =
-        vec![lit_str(format!("SELECT 1 FROM {}", table.name.as_str()))];
+        vec![lit_str(format!("SELECT 1 FROM {}", crate::naming::sql_ident(table.name.as_str())))];
     let mut binds = Vec::new();
     push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
@@ -661,7 +661,7 @@ fn visit_insert(ins: &Insert, schema: &Schema) -> Expr {
 
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "INSERT INTO {} ({}) VALUES (",
-        ins.table.0.as_str(),
+        crate::naming::sql_ident(ins.table.0.as_str()),
         cols_csv
     ))];
     for (idx, a) in ins.assignments.iter().enumerate() {
@@ -684,12 +684,12 @@ fn visit_update(upd: &Update, schema: &Schema) -> Expr {
     let table = lookup_table(schema, &upd.table.0);
     let db = ClassId(Symbol::from(DB_MOD));
 
-    let mut segments: Vec<Expr> = vec![lit_str(format!("UPDATE {} SET ", upd.table.0.as_str()))];
+    let mut segments: Vec<Expr> = vec![lit_str(format!("UPDATE {} SET ", crate::naming::sql_ident(upd.table.0.as_str())))];
     for (idx, a) in upd.assignments.iter().enumerate() {
         let prefix = if idx == 0 {
-            format!("{} = ", a.column.as_str())
+            format!("{} = ", crate::naming::sql_ident(a.column.as_str()))
         } else {
-            format!(", {} = ", a.column.as_str())
+            format!(", {} = ", crate::naming::sql_ident(a.column.as_str()))
         };
         segments.push(lit_str(prefix));
         segments.push(escape_value(&db, &a.value));
@@ -705,7 +705,7 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
     let table = lookup_table(schema, &del.table.0);
     let db = ClassId(Symbol::from(DB_MOD));
 
-    let mut segments: Vec<Expr> = vec![lit_str(format!("DELETE FROM {}", del.table.0.as_str()))];
+    let mut segments: Vec<Expr> = vec![lit_str(format!("DELETE FROM {}", crate::naming::sql_ident(del.table.0.as_str())))];
     // Exec path — inline WHERE (see visit_update note); not cached.
     push_where_segments(&mut segments, del.conditions.as_ref(), table, false, &mut Vec::new());
     let delete_call = db_call(&db, "exec", vec![concat_chain(segments)]);
@@ -727,10 +727,11 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
         let reset = db_call(
             &db,
             "exec",
-            vec![lit_str(format!(
-                "DELETE FROM sqlite_sequence WHERE name = '{}'",
-                del.table.0.as_str()
-            ))],
+            // Here the physical name is a VALUE, not an identifier.
+            vec![concat_chain(vec![
+                lit_str("DELETE FROM sqlite_sequence WHERE name = ".to_string()),
+                escape_value(&db, &Value::LiteralStr(del.table.0.as_str().to_string())),
+            ])],
         );
         return seq(vec![delete_call, reset]);
     }
@@ -756,12 +757,12 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
         ColumnSpec::Pluck(col) => crate::naming::sql_ident(col.column.as_str()),
         // The grouped column is projected BESIDE the aggregate, in that
         // order — the hydrate reads key at index 0, count at index 1.
-        ColumnSpec::GroupCount(col) => format!("{}, COUNT(*)", col.column.as_str()),
+        ColumnSpec::GroupCount(col) => format!("{}, COUNT(*)", crate::naming::sql_ident(col.column.as_str())),
     };
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "SELECT {} FROM {}",
         cols_csv,
-        table.name.as_str()
+        crate::naming::sql_ident(table.name.as_str())
     ))];
     push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, binds);
     // GROUP BY sits between WHERE and ORDER BY. Read off the
@@ -769,9 +770,9 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
     // the projection here (see `ColumnSpec::GroupCount`), so one place
     // names it and the SELECT list and the GROUP BY cannot disagree.
     if let ColumnSpec::GroupCount(col) = &sel.columns {
-        segments.push(lit_str(format!(" GROUP BY {}", col.column.as_str())));
+        segments.push(lit_str(format!(" GROUP BY {}", crate::naming::sql_ident(col.column.as_str()))));
     }
-    push_order_segment(&mut segments, &sel.orders);
+    push_order_segment(&mut segments, &sel.orders, table);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));
     }
@@ -780,9 +781,9 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
 
 /// Append `" ORDER BY col1 ASC, col2 DESC"` to the SQL composition
 /// when at least one order is present. Empty orders → no segment.
-/// Column names emit verbatim (single-table SELECTs only today;
-/// joins / aliases land later with the same path).
-fn push_order_segment(segments: &mut Vec<Expr>, orders: &[super::ir::Order]) {
+/// Quote known physical columns. Other existing order spellings (such
+/// as `articles.title`) are SQL terms, not single physical identifiers.
+fn push_order_segment(segments: &mut Vec<Expr>, orders: &[super::ir::Order], table: &Table) {
     if orders.is_empty() {
         return;
     }
@@ -793,7 +794,12 @@ fn push_order_segment(segments: &mut Vec<Expr>, orders: &[super::ir::Order]) {
                 super::ir::Direction::Asc => "ASC",
                 super::ir::Direction::Desc => "DESC",
             };
-            format!("{} {}", o.column.column.as_str(), dir)
+            let column = if table.columns.iter().any(|c| c.name == o.column.column) {
+                crate::naming::sql_ident(o.column.column.as_str())
+            } else {
+                o.column.column.as_str().to_string()
+            };
+            format!("{} {}", column, dir)
         })
         .collect();
     segments.push(lit_str(format!(" ORDER BY {}", parts.join(", "))));
@@ -828,10 +834,10 @@ fn push_predicate_segments(
         // unknown, i.e. no rows); a literal-nil condition is the IS NULL
         // form, as Rails renders it.
         Predicate::Eq(col, Value::LiteralNull) => {
-            segments.push(lit_str(format!("{} IS NULL", col.column.as_str())));
+            segments.push(lit_str(format!("{} IS NULL", crate::naming::sql_ident(col.column.as_str()))));
         }
         Predicate::Eq(col, val) => {
-            segments.push(lit_str(format!("{} = ", col.column.as_str())));
+            segments.push(lit_str(format!("{} = ", crate::naming::sql_ident(col.column.as_str()))));
             push_value_segment(segments, val, param, binds);
         }
         Predicate::And(l, r) => {
@@ -1129,6 +1135,23 @@ mod tests {
 
     fn id_col() -> ColRef {
         ColRef { table: TableRef(Symbol::from("articles")), column: Symbol::from("id") }
+    }
+
+    #[test]
+    fn ordering_preserves_existing_qualified_terms() {
+        let (schema, _) = fixture_schema();
+        let table = schema.tables.get(&Symbol::from("articles")).unwrap();
+        let mut segments = vec![];
+        push_order_segment(&mut segments, &[super::super::ir::Order {
+            column: ColRef {
+                table: TableRef(Symbol::from("articles")),
+                column: Symbol::from("articles.title"),
+            },
+            direction: super::super::ir::Direction::Desc,
+        }], table);
+        assert!(matches!(segments[0].node.as_ref(),
+            ExprNode::Lit { value: Literal::Str { value } }
+                if value == " ORDER BY articles.title DESC"));
     }
 
     // Rough shape probe — confirms the visitor returns a Seq whose

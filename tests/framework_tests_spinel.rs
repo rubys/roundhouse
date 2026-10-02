@@ -24,7 +24,7 @@ use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::ruby;
-use roundhouse::ingest::ingest_test_file;
+use roundhouse::ingest::ingest_test_files;
 use roundhouse::App;
 
 fn scratch_dir(tag: &str) -> PathBuf {
@@ -197,12 +197,16 @@ end
 
     let source = std::fs::read(test_file)
         .unwrap_or_else(|e| panic!("read {}: {e}", test_file.display()));
-    let test_module = ingest_test_file(&source, &test_file.display().to_string())
-        .expect("ingest framework test file")
-        .expect("framework test file should contain a test class");
+    // EVERY test class in the file (`ingest_test_files`), each emitted,
+    // compiled and run as its own binary below: the one-class
+    // `ingest_test_file` kept the first, so action_text_test.rb's
+    // ActionTextFragmentTest and ActionTextLexxyTest never ran here.
+    let test_modules = ingest_test_files(&source, &test_file.display().to_string())
+        .expect("ingest framework test file");
+    assert!(!test_modules.is_empty(), "framework test file should contain a test class");
 
     let mut app = App::new();
-    app.test_modules.push(test_module);
+    app.test_modules.extend(test_modules);
     Analyzer::new(&app).analyze(&mut app);
 
     for file in ruby::emit_spinel(&app) {
@@ -220,72 +224,91 @@ end
     // `--rbs sig` flag walks sig/, not the file-adjacent layout.
     reroute_rbs_to_sig(&scratch);
 
-    // Locate the emitted test file (same logic as the ruby variant).
+    // Every emitted test file, one per class (same as the ruby variant).
     let test_dir = scratch.join("test/models");
-    let emitted_test = std::fs::read_dir(&test_dir)
+    let mut emitted_tests: Vec<PathBuf> = std::fs::read_dir(&test_dir)
         .unwrap_or_else(|e| panic!("readdir {}: {e}", test_dir.display()))
         .filter_map(|e| e.ok())
-        .find(|e| e.path().extension().is_some_and(|x| x == "rb"))
-        .expect("find emitted test file");
-    let test_rel = emitted_test
-        .path()
-        .strip_prefix(&scratch)
-        .expect("emitted path under scratch")
-        .to_string_lossy()
-        .into_owned();
-    let stem = emitted_test
-        .path()
-        .file_stem()
-        .expect("file stem")
-        .to_string_lossy()
-        .into_owned();
-    let bin_path = format!("build/{stem}");
-
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rb"))
+        .collect();
+    emitted_tests.sort();
+    assert!(!emitted_tests.is_empty(), "no emitted test file under {}", test_dir.display());
     std::fs::create_dir_all(scratch.join("build")).expect("mkdir build");
 
-    // Compile with spinel.
-    let compile = Command::new("spinel")
-        .arg("--rbs")
-        .arg("sig")
-        .arg(&test_rel)
-        .arg("-o")
-        .arg(&bin_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("spawn spinel");
+    for emitted_test in &emitted_tests {
+        let test_rel = emitted_test
+            .strip_prefix(&scratch)
+            .expect("emitted path under scratch")
+            .to_string_lossy()
+            .into_owned();
+        let stem = emitted_test.file_stem().expect("file stem").to_string_lossy().into_owned();
+        if let Some((_, why)) = NOT_COMPILED.iter().find(|(s, _)| *s == stem) {
+            eprintln!("skipped {stem} on spinel: {why}");
+            continue;
+        }
+        let bin_path = format!("build/{stem}");
 
-    assert!(
-        compile.status.success(),
-        "spinel compile failed: {} (emitted to {})\n\
-         === stdout ===\n{}\n\
-         === stderr ===\n{}",
-        test_file.display(),
-        emitted_test.path().display(),
-        String::from_utf8_lossy(&compile.stdout),
-        String::from_utf8_lossy(&compile.stderr),
-    );
+        // Compile with spinel.
+        let compile = Command::new("spinel")
+            .arg("--rbs")
+            .arg("sig")
+            .arg(&test_rel)
+            .arg("-o")
+            .arg(&bin_path)
+            .current_dir(&scratch)
+            .output()
+            .expect("spawn spinel");
 
-    // Execute the resulting binary.
-    let output = Command::new(format!("./{bin_path}"))
-        .current_dir(&scratch)
-        .output()
-        .expect("spawn test binary");
+        assert!(
+            compile.status.success(),
+            "spinel compile failed: {} (emitted to {})\n\
+             === stdout ===\n{}\n\
+             === stderr ===\n{}",
+            test_file.display(),
+            emitted_test.display(),
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr),
+        );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "framework test failed: {} (binary {})\n\
-         === stdout ===\n{}\n\
-         === stderr ===\n{}",
-        test_file.display(),
-        bin_path,
-        stdout,
-        stderr,
-    );
+        // Execute the resulting binary.
+        let output = Command::new(format!("./{bin_path}"))
+            .current_dir(&scratch)
+            .output()
+            .expect("spawn test binary");
 
-    assert_tests_ran(&stdout, test_file, &emitted_test.path());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "framework test failed: {} (binary {})\n\
+             === stdout ===\n{}\n\
+             === stderr ===\n{}",
+            test_file.display(),
+            bin_path,
+            stdout,
+            stderr,
+        );
+
+        assert_tests_ran(&stdout, test_file, emitted_test);
+    }
 }
+
+/// Test classes that ran on the ruby family only, because the harness
+/// used to run a file's FIRST class and these are not first. Each uses a
+/// CRuby idiom the class was never written to avoid; each stays listed
+/// until the class is ported, and is printed as skipped rather than
+/// silently absent.
+const NOT_COMPILED: &[(&str, &str)] = &[
+    (
+        "action_text_fragment_test",
+        "stubs the app with `Application.define_method`, which AOT cannot restructure",
+    ),
+    (
+        "record_invalid_test",
+        "passes a Recordlike stand-in where the typed runtime takes ActiveRecord::Base",
+    ),
+];
 
 /// Defense against issue #4: the spinel autorun shim prints
 /// `<ClassName>: <N> tests passed` after running every `test_*`

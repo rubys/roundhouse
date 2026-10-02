@@ -142,8 +142,25 @@ pub fn lower_channel_callbacks(app: &mut crate::App) {
             continue;
         }
         let src = synthesized_source(name, &chain);
-        let methods = match crate::ingest::ingest_library_classes(src.as_bytes(), "<channel>") {
-            Ok(classes) => classes.into_iter().flat_map(|c| c.methods).collect(),
+        // Isolated in its own `prism::scope` — never the outer one
+        // that spans the whole app's ingest — so a bug in
+        // `synthesized_source` can't render its parse errors against
+        // an unrelated real file (see `ingest::sources`'s module doc).
+        let (parsed, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::ingest_library_classes(src.as_bytes(), "<channel>")
+        });
+        let methods = match parsed {
+            Ok(classes) if diags.is_empty() => {
+                classes.into_iter().flat_map(|c| c.methods).collect()
+            }
+            Ok(_) => {
+                super::survey::record_synthesis_failure(
+                    "<channel>",
+                    &format!("channel callback chain for `{name}`"),
+                    &diags,
+                );
+                Vec::new()
+            }
             Err(err) => {
                 super::survey::record(&err);
                 Vec::new()
@@ -175,8 +192,20 @@ pub fn lower_channel_names(app: &mut crate::App) {
             "class {name}\n  def channel_name\n    \"{}\"\n  end\nend\n",
             channel_name_of(&name)
         );
-        match crate::ingest::ingest_library_classes(src.as_bytes(), "<channel>") {
-            Ok(classes) => lc.methods.extend(classes.into_iter().flat_map(|c| c.methods)),
+        // Isolated in its own `prism::scope` — see the sibling call
+        // above for why.
+        let (parsed, diags) = crate::ingest::prism::scope(|| {
+            crate::ingest::ingest_library_classes(src.as_bytes(), "<channel>")
+        });
+        match parsed {
+            Ok(classes) if diags.is_empty() => {
+                lc.methods.extend(classes.into_iter().flat_map(|c| c.methods))
+            }
+            Ok(_) => super::survey::record_synthesis_failure(
+                "<channel>",
+                &format!("channel_name for `{name}`"),
+                &diags,
+            ),
             Err(err) => super::survey::record(&err),
         }
     }

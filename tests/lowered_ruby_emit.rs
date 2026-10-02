@@ -1481,10 +1481,9 @@ fn lowered_article_partial_pluralize_uses_inflector() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
     // `<%= pluralize(article.comments.size, "comment") %>` →
-    // Inflector.pluralize (separate from ActiveSupport's string
-    // pluralization helpers; spinel-blog convention).
+    // Inflector's String label entry point, shared with app helpers.
     assert!(
-        src.contains("Inflector.pluralize(article.comments.size, \"comment\")"),
+        src.contains("Inflector.pluralize_formatted(article.comments.size.to_s, \"comment\")"),
         "expected Inflector.pluralize; got:\n{src}",
     );
 }
@@ -1797,11 +1796,11 @@ fn lowered_form_partial_pluralize_count_uses_inflector() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
     // `<%= pluralize(article.errors.count, "error") %>` →
-    // `Inflector.pluralize(article.errors.count, "error")`. (spinel-
+    // `Inflector.pluralize_formatted(article.errors.count.to_s, "error")`. (spinel-
     // blog uses `.length` instead of `.count` — both work in Ruby;
     // size/length/count normalization is a future slice.)
     assert!(
-        src.contains("Inflector.pluralize(article.errors.count, \"error\")"),
+        src.contains("Inflector.pluralize_formatted(article.errors.count.to_s, \"error\")"),
         "expected Inflector.pluralize on errors.count; got:\n{src}",
     );
 }
@@ -2491,6 +2490,38 @@ fn block_tag_helper_appends_through_an_open_half_and_an_inline_close() {
     assert!(open < body && body < close && close < after, "{view_src}");
 }
 
+/// A tag helper that takes only the block (`def search_results_tag(&)`)
+/// has no signature when the variant is built; its `_open_into` still
+/// declares `io` a `String`. Left unsigned, the sidecar said `untyped io`,
+/// spinel typed the buffer POLY, and the shared handle that forces
+/// spread to campfire's page wrappers as a copy: /rooms/1 served an
+/// empty body (matz/spinel#6065).
+#[test]
+fn block_only_tag_helper_open_half_declares_a_string_buffer() {
+    let mut app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        (
+            "app/helpers/results_helper.rb",
+            "module ResultsHelper\n  def results_tag(&)\n    tag.div id: \"results\", class: \"results\", data: { controller: \"results\" }, &\n  end\nend\n",
+        ),
+        (
+            "app/views/articles/index.html.erb",
+            "<%= results_tag do %>\n  <p>inside</p>\n<% end %>\n",
+        ),
+    ]);
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let files = ruby::emit_library(&app);
+    let rb = find(&files, "results_helper.rb");
+    assert!(rb.contains("def self.results_tag_open_into(io)"), "open half added:\n{rb}");
+    let rbs = find(&files, "results_helper.rbs");
+    assert!(
+        rbs.contains("def self.results_tag_open_into: (String io) -> nil"),
+        "io must be String, not untyped:\n{rbs}"
+    );
+}
+
 /// The layout's header is a per-process constant: every stylesheet link
 /// and the importmap script are hoisted (`HOISTABLE_TAG_HELPERS`,
 /// `HOISTABLE_CONST_READERS`), and the `+ "\n" +` chain joining the
@@ -2533,6 +2564,35 @@ fn layout_header_helpers_and_their_concat_chain_are_hoisted_once() {
     assert!(!body.contains("stylesheet_link_tag("), "{body}");
     assert!(!body.contains("javascript_importmap_tags("), "{body}");
     assert!(body.contains("HOISTED_JAVASCRIPT_IMPORTMAP_TAGS"), "{body}");
+}
+
+#[test]
+fn unsupported_expressions_raise_without_breaking_ruby_syntax() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::ident::Symbol;
+    use roundhouse::span::Span;
+
+    let mut expr = Expr::new(Span::synthetic(), ExprNode::Const {
+        path: vec![Symbol::from("Missing")],
+    });
+    expr.diagnostic = Some(DiagnosticKind::Unsupported {
+        target: None,
+        construct: Symbol::from("constant"),
+        detail: "Missing".into(),
+    });
+    let stub = ruby::emit_expr(&expr);
+    for context in [
+        format!("[1] + {stub}"),
+        format!("begin\n  raise ArgumentError\nrescue {stub}\nend"),
+    ] {
+        let script = format!(
+            "begin\n{context}\nraise 'stub did not raise'\nrescue RuntimeError => e\n\
+             raise e.message unless e.message == 'roundhouse: constant not supported (all targets)'\nend"
+        );
+        let result = std::process::Command::new("ruby").args(["-e", &script]).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
 }
 
 // ── lazy per-record state ───────────────────────────────────────

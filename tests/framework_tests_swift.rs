@@ -1,9 +1,9 @@
 //! Framework-test transpile gate (Swift target).
 //!
-//! Mirrors `framework_tests_kotlin.rs`: ingests one
-//! `runtime/ruby/test/**/*_test.rb` file as a TestModule, drops it onto an
-//! otherwise-empty App, runs `swift::emit`, and runs the emitted XCTest
-//! class under `swift test`.
+//! Ingests the five wired `runtime/ruby/test/**/*_test.rb` files as
+//! TestModules in an otherwise-empty App, runs `swift::emit`, and runs
+//! all emitted XCTest classes under one `swift test`. This compiles the
+//! shared runtime and SPM dependencies once rather than five times.
 //!
 //! What this catches that `swift_toolchain` (emit-then-compile of
 //! real-blog) doesn't: transpile-fidelity gaps in the Ruby→Swift lowering
@@ -25,10 +25,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::swift;
 use roundhouse::ingest::ingest_test_file;
-use roundhouse::App;
 
 /// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
 /// `app.rbs_signatures`. Without this the test body-typer can't dispatch
@@ -57,7 +57,10 @@ fn load_framework_rbs(app: &mut App) {
                 continue;
             };
             for (class_id, methods) in sigs {
-                app.rbs_signatures.entry(class_id).or_default().extend(methods);
+                app.rbs_signatures
+                    .entry(class_id)
+                    .or_default()
+                    .extend(methods);
             }
         }
     }
@@ -71,7 +74,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
     base.join("roundhouse-framework-tests-swift").join(tag)
 }
 
-fn build_and_run(test_file: &Path, tag: &str) {
+fn build_and_run(test_files: &[&str], tag: &str) {
     let scratch = scratch_dir(tag);
     // Keep `.build/` (the SPM dependency tree) across runs; regenerate
     // everything else — same policy as swift_toolchain.rs.
@@ -91,14 +94,14 @@ fn build_and_run(test_file: &Path, tag: &str) {
     }
     std::fs::create_dir_all(&scratch).expect("create scratch");
 
-    let source = std::fs::read(test_file)
-        .unwrap_or_else(|e| panic!("read {}: {e}", test_file.display()));
-    let test_module = ingest_test_file(&source, &test_file.display().to_string())
-        .expect("ingest framework test file")
-        .expect("framework test file should contain a test class");
-
     let mut app = App::new();
-    app.test_modules.push(test_module);
+    for test_file in test_files {
+        let source = std::fs::read(test_file).unwrap_or_else(|e| panic!("read {test_file}: {e}"));
+        let test_module = ingest_test_file(&source, test_file)
+            .expect("ingest framework test file")
+            .expect("framework test file should contain a test class");
+        app.test_modules.push(test_module);
+    }
     load_framework_rbs(&mut app);
     Analyzer::new(&app).analyze(&mut app);
 
@@ -121,62 +124,61 @@ fn build_and_run(test_file: &Path, tag: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "swift test failed for {} at {}:\n\
+        "swift framework tests failed at {}:\n\
          === stdout ===\n{}\n\
          === stderr ===\n{}",
-        test_file.display(),
         scratch.display(),
         stdout,
         stderr,
     );
 
-    assert_tests_ran(&stdout, &stderr, test_file);
+    for test_module in &app.test_modules {
+        assert_tests_ran(&stdout, &stderr, test_module.name.0.as_str());
+    }
 }
 
 /// Defense against issue #4: `swift test` exits 0 when zero XCTest
 /// methods are discovered — if emit-routing dropped the test class, the
-/// run would pass green having run nothing. Parse the XCTest summary
-/// (`Executed N tests`) and require at least one.
-fn assert_tests_ran(stdout: &str, stderr: &str, test_file: &Path) {
-    let executed = parse_executed_count(stdout).or_else(|| parse_executed_count(stderr));
+/// run would pass green. Require at least one test in EACH suite, not
+/// just a nonzero total that could hide a missing class.
+fn assert_tests_ran(stdout: &str, stderr: &str, suite: &str) {
+    let executed =
+        parse_executed_count(stdout, suite).or_else(|| parse_executed_count(stderr, suite));
     assert!(
         executed.map_or(false, |n| n >= 1),
-        "framework test for {} ran 0 tests — emit-routing likely dropped \
+        "framework suite {suite} ran 0 tests — emit-routing likely dropped \
          the test class (see issue #4).\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        test_file.display(),
     );
 }
 
-/// Extract N from XCTest's "Executed N test(s)" summary line.
-fn parse_executed_count(s: &str) -> Option<usize> {
-    let idx = s.rfind("Executed ")?;
-    let rest = &s[idx + "Executed ".len()..];
+/// Extract N from the summary immediately following this suite's result.
+fn parse_executed_count(s: &str, suite: &str) -> Option<usize> {
+    let marker = format!("Test Suite '{suite}' passed");
+    let summary = s
+        .lines()
+        .skip_while(|line| !line.starts_with(&marker))
+        .nth(1)?;
+    let rest = summary.trim().strip_prefix("Executed ")?;
     let end = rest.find(' ')?;
     rest[..end].parse::<usize>().ok()
 }
 
 #[test]
-#[ignore]
-fn inflector_test_passes_under_swift() {
-    build_and_run(Path::new("runtime/ruby/test/inflector_test.rb"), "inflector");
-}
-
-#[test]
-#[ignore]
-fn router_test_passes_under_swift() {
-    build_and_run(
-        Path::new("runtime/ruby/test/action_dispatch/router_test.rb"),
-        "router",
-    );
-}
-
-#[test]
-#[ignore]
-fn view_helpers_test_passes_under_swift() {
-    build_and_run(
-        Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
-        "view_helpers",
-    );
+fn xctest_counts_are_per_suite_not_the_total() {
+    let output = "Test Suite 'InflectorTest' passed at 2026-09-30\n\
+        \t Executed 4 tests, with 0 failures\n\
+        Test Suite 'RouterTest' passed at 2026-09-30\n\
+        \t Executed 0 tests, with 0 failures\n\
+        Test Suite 'All tests' passed at 2026-09-30\n\
+        \t Executed 4 tests, with 0 failures\n";
+    assert_eq!(parse_executed_count(output, "InflectorTest"), Some(4));
+    assert_eq!(parse_executed_count(output, "RouterTest"), Some(0));
+    assert_eq!(parse_executed_count(output, "ViewHelpersTest"), None);
+    assert_tests_ran(output, "", "InflectorTest");
+    assert_tests_ran("", output, "InflectorTest");
+    for suite in ["RouterTest", "ViewHelpersTest"] {
+        assert!(std::panic::catch_unwind(|| assert_tests_ran(output, "", suite)).is_err());
+    }
 }
 
 // errors + ac_base were the last deferred pair; both are green now and CI
@@ -205,18 +207,15 @@ fn view_helpers_test_passes_under_swift() {
 // support, not wiring.
 #[test]
 #[ignore]
-fn errors_test_passes_under_swift() {
+fn framework_tests_pass_under_swift() {
     build_and_run(
-        Path::new("runtime/ruby/test/active_record/errors_test.rb"),
-        "errors",
-    );
-}
-
-#[test]
-#[ignore]
-fn ac_base_test_passes_under_swift() {
-    build_and_run(
-        Path::new("runtime/ruby/test/action_controller/base_test.rb"),
-        "ac_base",
+        &[
+            "runtime/ruby/test/inflector_test.rb",
+            "runtime/ruby/test/action_dispatch/router_test.rb",
+            "runtime/ruby/test/action_view/view_helpers_test.rb",
+            "runtime/ruby/test/active_record/errors_test.rb",
+            "runtime/ruby/test/action_controller/base_test.rb",
+        ],
+        "all",
     );
 }

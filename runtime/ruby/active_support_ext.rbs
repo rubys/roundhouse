@@ -28,6 +28,8 @@ module ActiveSupport
   def self.many?: (untyped list) -> bool
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
+  def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
+  def self.cast_boolean: (untyped value) -> bool?
   def self.squish: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
@@ -95,4 +97,8 @@ module ActiveSupport
   def self.present_db: (Time? t) -> Time?
   def self.in_time_zone: (Time t, String? zone) -> Time
   def self.local_time: (Integer y, Integer mo, Integer d, Integer h, Integer mi, Integer s, Integer nsec) -> Time
+  def self.number_delimited: (Integer | Float number) -> String
+  def self.underscore: (String text) -> String
+  def self.humanize: (String text) -> String
+  def self.titleize: (String text) -> String
 end

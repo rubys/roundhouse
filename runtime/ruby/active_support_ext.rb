@@ -223,6 +223,20 @@ module ActiveSupport
     out
   end
 
+  def self.stringify_keys(hash)
+    out = {}
+    hash.each { |k, v| out[k.to_s] = v }
+    out
+  end
+
+  # Not `value == false || value == 0`: ActiveModel compares its FALSE_VALUES by string too, so :off and "0" answer false.
+  def self.cast_boolean(value)
+    return nil if value.nil?
+    text = value.to_s
+    return nil if text == ""
+    !%w[0 f F false FALSE off OFF].include?(text)
+  end
+
   # AS `Array#to_sentence`: "", "a", "a and b", "a, b, and c" with the
   # :en connectors, which `lower::enumerable_ext` passes when the call
   # site names none. Another core_ext reopen (`Array`) the transpiled
@@ -728,5 +742,69 @@ module ActiveSupport
     guess = Time.utc(y, mo, d, h, mi, s).to_i
     epoch = guess - zone.offset_at(guess - zone.offset_at(guess))
     Time.at(epoch, nsec, :nsec).getlocal(zone.offset_at(epoch))
+  end
+
+  # Not `number.to_s` with commas everywhere: only an all-digit integer part takes them, so `1.0e+20` and `Infinity` pass through.
+  def self.number_delimited(number)
+    text = number.to_s
+    dot_at = text.index(".")
+    int = dot_at.nil? ? text : text[0, dot_at].to_s
+    rest = dot_at.nil? ? "" : text[dot_at, text.length - dot_at].to_s
+    sign = int.start_with?("-") ? "-" : ""
+    digits = sign == "" ? int : int[1, int.length - 1].to_s
+    return text unless digits.match?(/\A\d+\z/)
+    out = +""
+    i = 0
+    n = digits.length
+    while i < n
+      out << "," if i > 0 && (n - i) % 3 == 0
+      out << digits[i]
+      i = i + 1
+    end
+    sign + out + rest
+  end
+  # Not ActiveSupport's regex pipeline: without its acronym and human tables the steps it runs are these string walks.
+  def self.underscore(text)
+    s = text.to_s
+    out = +""
+    n = s.length
+    i = 0
+    while i < n
+      c = s[i].to_s
+      if c >= "A" && c <= "Z" && i > 0
+        prev = s[i - 1].to_s
+        nxt = i + 1 < n ? s[i + 1].to_s : ""
+        prev_lower = (prev >= "a" && prev <= "z") || (prev >= "0" && prev <= "9")
+        prev_upper = prev >= "A" && prev <= "Z"
+        next_lower = nxt >= "a" && nxt <= "z"
+        out << "_" if prev_lower || (prev_upper && next_lower)
+      end
+      out << (c == "-" ? "_" : c)
+      i = i + 1
+    end
+    out.downcase
+  end
+
+  def self.humanize(text)
+    s = text.to_s.tr("_", " ").lstrip
+    s = s[0, s.length - 3].to_s if s.end_with?(" id")
+    s = s.downcase
+    return s if s.empty?
+    s[0].to_s.upcase + s[1, s.length - 1].to_s
+  end
+
+  def self.titleize(text)
+    s = humanize(underscore(text))
+    out = +""
+    n = s.length
+    i = 0
+    while i < n
+      c = s[i].to_s
+      prev = i > 0 ? s[i - 1].to_s : ""
+      word_prev = (prev >= "a" && prev <= "z") || (prev >= "A" && prev <= "Z") || (prev >= "0" && prev <= "9") || prev == "_"
+      out << (c >= "a" && c <= "z" && !word_prev ? c.upcase : c)
+      i = i + 1
+    end
+    out
   end
 end

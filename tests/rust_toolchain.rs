@@ -66,6 +66,29 @@ fn real_blog_cargo_test_passes() {
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
+    // Pin the shared Inflector's new String seam on the live backend,
+    // not the legacy emit_method extraction walker.
+    std::fs::create_dir_all(scratch.join("tests")).unwrap();
+    std::fs::write(
+        scratch.join("tests/formatted_pluralize.rs"),
+        r#"
+use app::inflector::Inflector;
+#[test]
+fn formatted_count_labels() {
+    for (count, expected) in [
+        ("1", "1 word"), ("1.0", "1.0 word"), ("1.00", "1.00 word"),
+        ("01", "01 words"), ("1.", "1. words"), ("10.", "10. words"),
+        ("10.0", "10.0 words"), ("1.01", "1.01 words"),
+        ("1.0002", "1.0002 words"), ("1,001", "1,001 words"), ("", " words"),
+        ("2\n1.0\n", "2\n1.0\n word"), ("1\r\n", "1\r\n words"),
+        ("1.٠", "1.٠ words"),
+    ] {
+        assert_eq!(Inflector::pluralize_formatted(count, "word"), expected);
+    }
+}
+"#,
+    )
+    .unwrap();
 
     let output = Command::new("cargo")
         .arg("test")

@@ -38,8 +38,7 @@ pub(super) fn string_value(node: &Node<'_>) -> Option<String> {
 
 pub(super) fn symbol_value(node: &Node<'_>) -> Option<String> {
     let s = node.as_symbol_node()?;
-    let loc = s.value_loc()?;
-    Some(String::from_utf8_lossy(loc.as_slice()).into_owned())
+    Some(String::from_utf8_lossy(s.unescaped()).into_owned())
 }
 
 /// A symbol OR a string literal, for the DSL slots Rails normalizes
@@ -209,6 +208,17 @@ pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<S
 pub(super) fn find_all_modules_with_scope<'pr>(
     node: &Node<'pr>,
 ) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
+    find_all_module_declarations_with_scope(node)
+        .into_iter()
+        .filter(|(_, module)| module_has_direct_def(module))
+        .collect()
+}
+
+/// Every source module declaration, including effect-only reopenings that
+/// do not produce library IR but can change a Concern's framework identity.
+pub(super) fn find_all_module_declarations_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
     let mut out = Vec::new();
     collect_modules(node, &[], &mut |scope, m| {
         out.push((scope.to_vec(), m));
@@ -228,9 +238,7 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
         if let Some(name_path) = module_name_path(&m) {
             inner.extend(name_path);
         }
-        if module_has_direct_def(&m) {
-            out(scope, m);
-        }
+        out(scope, m);
         if let Some(b) = body {
             collect_modules(&b, &inner, out);
         }
@@ -304,13 +312,18 @@ fn body_has_included_block(body: Option<Node<'_>>) -> bool {
 fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
     let Some(body) = body else { return false };
     for stmt in flatten_statements(body) {
-        if stmt.as_def_node().is_some() {
+        if super::visibility::definition(&stmt).is_some() {
             return true;
         }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());
-                if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor") {
+                // Not only `attr_*`: a module whose only content is `mattr_accessor` / `thread_mattr_accessor` is state the app reads.
+                if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor")
+                    || ["cattr_", "mattr_", "thread_mattr_", "thread_cattr_"].iter().any(|p| {
+                        kw.strip_prefix(p).is_some_and(|rest| matches!(rest, "reader" | "writer" | "accessor"))
+                    })
+                {
                     return true;
                 }
                 // ActiveSupport::Concern's `class_methods do … end`: its
@@ -380,6 +393,14 @@ pub(super) fn constant_path_segments(p: &ruby_prism::ConstantPathNode<'_>) -> Ve
         .into_iter()
         .map(Symbol::from)
         .collect()
+}
+
+/// The leading `::` belongs to the innermost path node in `::A::B`.
+pub(super) fn constant_path_is_rooted(p: &ruby_prism::ConstantPathNode<'_>) -> bool {
+    match p.parent() {
+        None => true,
+        Some(parent) => parent.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)),
+    }
 }
 
 // ---- Tree walkers ------------------------------------------------------

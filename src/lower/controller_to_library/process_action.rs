@@ -22,7 +22,20 @@ use super::util::method_name_for_action;
 /// controllers emit byte-identical dispatchers).
 pub(super) enum PreambleStmt {
     Call { filter: Filter, halt_check: bool },
-    Block { body: Expr, only: Vec<Symbol>, except: Vec<Symbol>, halt_check: bool },
+    Block {
+        body: Expr,
+        only: Vec<Symbol>,
+        except: Vec<Symbol>,
+        /// Same guard vocabulary a Symbol-target filter carries on
+        /// `Filter` — a lambda-target filter (`before_action -> { … },
+        /// if: :x` / `unless: -> { … }`) needs the same `if:`/`unless:`
+        /// a named one does; see `cond_from_guards`.
+        if_cond: Option<Symbol>,
+        unless_cond: Option<Symbol>,
+        if_cond_expr: Option<Expr>,
+        unless_cond_expr: Option<Expr>,
+        halt_check: bool,
+    },
 }
 
 /// Build the `process_action(action_name)` dispatcher:
@@ -85,15 +98,30 @@ pub(super) fn synthesize_process_action(
             PreambleStmt::Call { filter, halt_check } => {
                 (filter_dispatch_stmt(filter), *halt_check)
             }
-            PreambleStmt::Block { body, only, except, halt_check } => {
-                let stmt = if only.is_empty() && except.is_empty() {
-                    body.clone()
-                } else {
-                    syn(ExprNode::If {
-                        cond: include_check(only, except),
+            PreambleStmt::Block {
+                body,
+                only,
+                except,
+                if_cond,
+                unless_cond,
+                if_cond_expr,
+                unless_cond_expr,
+                halt_check,
+            } => {
+                let stmt = match cond_from_guards(
+                    only,
+                    except,
+                    if_cond,
+                    unless_cond,
+                    if_cond_expr,
+                    unless_cond_expr,
+                ) {
+                    Some(cond) => syn(ExprNode::If {
+                        cond,
                         then_branch: body.clone(),
                         else_branch: empty_seq(),
-                    })
+                    }),
+                    None => body.clone(),
                 };
                 (stmt, *halt_check)
             }
@@ -137,17 +165,30 @@ pub(super) fn synthesize_process_action(
         for a in wraps.after.iter().rev() {
             stmts.push(match a {
                 PreambleStmt::Call { filter, .. } => filter_dispatch_stmt(filter),
-                PreambleStmt::Block { body, only, except, .. } => {
-                    if only.is_empty() && except.is_empty() {
-                        body.clone()
-                    } else {
-                        syn(ExprNode::If {
-                            cond: include_check(only, except),
-                            then_branch: body.clone(),
-                            else_branch: empty_seq(),
-                        })
-                    }
-                }
+                PreambleStmt::Block {
+                    body,
+                    only,
+                    except,
+                    if_cond,
+                    unless_cond,
+                    if_cond_expr,
+                    unless_cond_expr,
+                    ..
+                } => match cond_from_guards(
+                    only,
+                    except,
+                    if_cond,
+                    unless_cond,
+                    if_cond_expr,
+                    unless_cond_expr,
+                ) {
+                    Some(cond) => syn(ExprNode::If {
+                        cond,
+                        then_branch: body.clone(),
+                        else_branch: empty_seq(),
+                    }),
+                    None => body.clone(),
+                },
             });
         }
     }
@@ -193,6 +234,9 @@ pub(super) fn synthesize_process_action(
 
     let action_name_param = Symbol::from("action_name");
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,
@@ -258,26 +302,50 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
 
 /// The guard a filter runs under, `None` when it always runs.
 fn filter_cond(f: &Filter) -> Option<Expr> {
-    // Guard conjunction, in Rails' own order: the only/except action
-    // check, then the `if:` / `unless:` conditions in BOTH spellings.
-    //
-    // The lambda spelling has been enforced since lobsters gated
-    // dev-only filters with `if: -> { Rails.env.development? }`. The
-    // SYMBOL spelling was carried and not enforced, which is a filter
-    // that runs when Rails would have skipped it — campfire's
-    // `before_action :reject_banned_ip, unless: :safe_request?` meant
-    // every GET from a banned IP got a 429 where the app allows it, and
-    // `block_banned_requests_test` said so in as many words: `expected
-    // response :success, got status=429`.
-    //
-    // A symbol guard is a zero-arg predicate on the controller — the
-    // same self-send the filter target itself is — so it builds the
-    // same shape the lambda branch builds from a body expression. If
-    // the predicate does not resolve, that is a real gap surfacing at
-    // the call Rails also makes, not a new one.
+    cond_from_guards(
+        &f.only,
+        &f.except,
+        &f.if_cond,
+        &f.unless_cond,
+        &f.if_cond_expr,
+        &f.unless_cond_expr,
+    )
+}
+
+/// The guard vocabulary a filter target runs under — shared between a
+/// Symbol-target `Filter` (`filter_cond`, above) and a lambda-target
+/// `PreambleStmt::Block` (`synthesize_process_action`), since Rails
+/// gives both the same `only:`/`except:`/`if:`/`unless:` options.
+/// `None` when the filter always runs.
+///
+/// Guard conjunction, in Rails' own order: the only/except action
+/// check, then the `if:` / `unless:` conditions in BOTH spellings.
+///
+/// The lambda spelling has been enforced since lobsters gated
+/// dev-only filters with `if: -> { Rails.env.development? }`. The
+/// SYMBOL spelling was carried and not enforced, which is a filter
+/// that runs when Rails would have skipped it — campfire's
+/// `before_action :reject_banned_ip, unless: :safe_request?` meant
+/// every GET from a banned IP got a 429 where the app allows it, and
+/// `block_banned_requests_test` said so in as many words: `expected
+/// response :success, got status=429`.
+///
+/// A symbol guard is a zero-arg predicate on the controller — the
+/// same self-send the filter target itself is — so it builds the
+/// same shape the lambda branch builds from a body expression. If
+/// the predicate does not resolve, that is a real gap surfacing at
+/// the call Rails also makes, not a new one.
+fn cond_from_guards(
+    only: &[Symbol],
+    except: &[Symbol],
+    if_cond: &Option<Symbol>,
+    unless_cond: &Option<Symbol>,
+    if_cond_expr: &Option<Expr>,
+    unless_cond_expr: &Option<Expr>,
+) -> Option<Expr> {
     let mut conds: Vec<Expr> = Vec::new();
-    if !(f.only.is_empty() && f.except.is_empty()) {
-        conds.push(include_check(&f.only, &f.except));
+    if !(only.is_empty() && except.is_empty()) {
+        conds.push(include_check(only, except));
     }
     let predicate = |name: &Symbol| {
         syn(ExprNode::Send {
@@ -297,16 +365,16 @@ fn filter_cond(f: &Filter) -> Option<Expr> {
             parenthesized: false,
         })
     };
-    if let Some(name) = &f.if_cond {
+    if let Some(name) = if_cond {
         conds.push(predicate(name));
     }
-    if let Some(name) = &f.unless_cond {
+    if let Some(name) = unless_cond {
         conds.push(negate(predicate(name)));
     }
-    if let Some(c) = &f.if_cond_expr {
+    if let Some(c) = if_cond_expr {
         conds.push(c.clone());
     }
-    if let Some(c) = &f.unless_cond_expr {
+    if let Some(c) = unless_cond_expr {
         conds.push(negate(c.clone()));
     }
     conds.into_iter().reduce(|l, r| {

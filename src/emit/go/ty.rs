@@ -35,15 +35,15 @@ pub fn go_zero_value(ty_str: &str) -> &'static str {
 
 pub fn go_ty_stub(ty: Option<&Ty>) -> String {
     match ty {
-        Some(Ty::Str) => "string".to_string(),
+        Some(ty) if ty.is_stringish() => "string".to_string(),
         Some(Ty::Int) => "int64".to_string(),
         Some(Ty::Float) => "float64".to_string(),
         Some(Ty::Bool) => "bool".to_string(),
-        Some(Ty::Sym) => "string".to_string(),
         // Native datetime seam: temporal readers return `time.Time`;
         // the zero Time stands in for nil (same empty-as-absent
         // convention as "" for nilable strings).
         Some(Ty::Time) => "time.Time".to_string(),
+        Some(Ty::Date) => crate::emit::diagnostics::unsupported_date_ty("go"),
         Some(Ty::Hash { key, value }) => {
             format!(
                 "map[{}]{}",
@@ -146,6 +146,7 @@ pub fn go_ty(ty: &Ty) -> String {
         // separate: it catches hand-written-rbs Time in the shared
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "time.Time".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("go"),
         Ty::Nil => "struct{}".to_string(),
         // A self type the analyzer should have substituted with the
         // receiving class (see `Ty::SelfInstance`). Reaching here is a
@@ -167,6 +168,7 @@ pub fn go_ty(ty: &Ty) -> String {
             "interface{}".to_string()
         }
         Ty::Record { .. } => "map[string]interface{}".to_string(),
+        Ty::Union { .. } if ty.is_stringish() => "string".to_string(),
         Ty::Union { variants } => option_shape(variants).unwrap_or_else(|| {
             // Arbitrary union -> empty interface; would be a sum type emit later.
             "interface{}".to_string()

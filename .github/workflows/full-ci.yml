@@ -1,0 +1,90 @@
+name: Full validation
+
+on:
+  schedule:
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish after the compact gate passes (canonical main only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Keep a started snapshot; replace obsolete pending requests. This literal
+# namespace is different from the reusable validation workflow's lock.
+concurrency:
+  group: full-background-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.event_name != 'schedule' || github.repository == 'rubys/roundhouse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      spinel: ${{ steps.inputs.outputs.spinel }}
+      publish: ${{ steps.inputs.outputs.publish }}
+    steps:
+      - name: Resolve the immutable inputs and publication boundary
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REQUEST_PUBLISH: ${{ inputs.publish || false }}
+        run: |
+          publish=false
+          if [ "$EVENT" = schedule ] || [ "$REQUEST_PUBLISH" = true ]; then
+            test "$GITHUB_REPOSITORY" = rubys/roundhouse
+            test "$GITHUB_REF" = refs/heads/main
+            publish=true
+          fi
+          spinel=$(gh api repos/matz/spinel/commits/master --jq .sha) || spinel=master
+          if ! [[ "$spinel" =~ ^[0-9a-f]{40}$ ]]; then spinel=master; fi
+          echo "spinel=$spinel" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - name: Report fresh validation inputs
+        env:
+          SPINEL: ${{ steps.inputs.outputs.spinel }}
+        run: |
+          printf 'Source snapshot: `%s`\n\nRequested Spinel: `%s`\n\nEvery cycle executes validation freshly, including floating Rails/package/system inputs. Actual Spinel revisions are recorded in the toolchain and archive evidence.\n' "$GITHUB_SHA" "$SPINEL" >> "$GITHUB_STEP_SUMMARY"
+
+  validation:
+    needs: preflight
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+      publish: ${{ needs.preflight.outputs.publish == 'true' }}
+      spinel_revision: ${{ needs.preflight.outputs.spinel }}
+
+  # No Pages/OIDC permissions are available to the reusable validator or any
+  # PR. Extra-target failures must not hide useful broken-emit repro archives.
+  deploy:
+    needs: [preflight, validation]
+    if: ${{ !cancelled() && needs.preflight.outputs.publish == 'true' && needs.validation.outputs.publication-ready == 'true' && github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Refuse to publish a superseded main snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATED_SHA: ${{ github.sha }}
+        run: test "$(gh api repos/rubys/roundhouse/git/ref/heads/main --jq .object.sha)" = "$VALIDATED_SHA"
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

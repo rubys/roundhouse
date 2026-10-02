@@ -251,6 +251,7 @@ fn ingest_column_stmt(
                 name: Symbol::from(name),
                 columns,
                 unique: opt_bool("unique").unwrap_or(false),
+                predicate: None,
             });
         }
         // Type-named column call: `String :title`, `DateTime :created_at`.

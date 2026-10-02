@@ -307,9 +307,9 @@ pub struct App {
     /// every construction site including a dozen in tests.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_actions: HashMap<ClassId, HashMap<Symbol, ClassId>>,
-    /// The MODEL twin of `concern_spliced_actions`: class-side concern
-    /// methods `splice_concern_class_methods_into_models` copied onto a
-    /// model, keyed model → method → the module the `def` came from.
+    /// The class-side twin of `concern_spliced_actions`: concern methods
+    /// `splice_concern_class_methods_into_includers` copied onto a model
+    /// or library class, keyed includer → method → the source module.
     ///
     /// The module keeps its own copy of that `def` (dead there, since
     /// `include` never carries a singleton method), so ONE method now
@@ -368,6 +368,10 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// Rubydex answers for `sources`, resolved while ingest finished.
+    /// The analyzer resolves the sources itself when this is absent.
+    #[serde(skip)]
+    pub const_resolver: crate::analyze::PreparedConstResolver,
     /// Per-controller resolved request machinery, computed once by
     /// analyze's parent-chain walk and persisted (the self-describing-IR
     /// move: `run_typing_passes` already built these to seed ivars, and
@@ -383,6 +387,14 @@ pub struct App {
     /// `sources` entries must not differ by ingest mode) strip it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub root: String,
+    /// App-layer roots ingest walked, relative to `root`: `["app"]` for
+    /// an ordinary Rails app, `["app", "packs/blog/app", …]` for a
+    /// Packwerk app whose packages carry their own `app/` tree
+    /// (`ingest::app::app_roots`). `app` is always first; the rest are
+    /// sorted. Exists so a consumer (today, `check`'s summary line) can
+    /// report what got walked without recomputing it from the VFS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_roots: Vec<String>,
 }
 
 /// One controller's resolved request machinery: the full filter chain
@@ -675,7 +687,9 @@ impl App {
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
+            const_resolver: Default::default(),
             root: String::new(),
+            app_roots: Vec::new(),
         }
     }
 }
