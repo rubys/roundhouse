@@ -70,6 +70,15 @@ Nonpublic model accessor macros that have not become local `MethodDef`s
 are still diagnosed rather than silently emitted as public. Existing
 model lowering's synthesized-name precedence is unchanged.
 
+Thin builder-yielding form wrappers retain owner-local `data:` computations
+through generated callable bridges when the expression is frame-independent
+and defaults are literal. The bridge has required typed parameters, while
+the original private helper methods remain private. Model/URL/namespace and
+id/class syntax is not hidden behind bridges; executable defaults, captures
+and shared wrapper-local frames are outside this correction. CRuby regression
+tests cover helper-name shadowing, private dispatch and single evaluation;
+this is not a general wrapper-inlining or compiled Spinel compatibility claim.
+
 ## Active Record
 
 | | Blog tier (all targets) | Campfire tier (ruby, spinel) |
