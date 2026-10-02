@@ -1254,6 +1254,7 @@ mod tests {
     }
     fn instance_method(name: &str, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -1484,6 +1485,7 @@ mod tests {
             ],
         });
         let init = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

@@ -17,6 +17,7 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
+use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
     find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
@@ -484,6 +485,7 @@ fn synth_sorbet_enum_methods(owner: &ClassId, members: &[SorbetEnumMember]) -> V
         name_span: Span::synthetic(),
         name: Symbol::from(name),
         receiver,
+        visibility: if name == "initialize" { crate::dialect::MethodVisibility::Private } else { crate::dialect::MethodVisibility::Public },
         params,
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -820,6 +822,7 @@ fn synth_sorbet_struct_methods(
         name_span: Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Private,
         params,
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -899,6 +902,7 @@ fn synth_struct_equality(owner: &ClassId, members: &[SorbetStructMember]) -> Met
         name_span: Span::synthetic(),
         name: Symbol::from("=="),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: vec![Param::positional(Symbol::from("other"))],
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -999,6 +1003,7 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Private,
         params,
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -1153,11 +1158,6 @@ const SORBET_ANNOTATIONS: &[&str] = &[
 ];
 
 const POSITION_SENSITIVE_MARKERS: &[&str] = &[
-    "private",
-    "public",
-    "protected",
-    "private_class_method",
-    "public_class_method",
     "private_constant",
     "public_constant",
     "require",
@@ -1187,7 +1187,7 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 /// singleton must open exactly that parameter (not a differently-named
 /// local or an ivar) — so this never mis-attributes unrelated method-
 /// body metaprogramming as includer class methods (invariant 6).
-fn included_hook_class_methods_body<'pr>(
+pub(super) fn included_hook_class_methods_body<'pr>(
     def: &ruby_prism::DefNode<'pr>,
 ) -> Option<ruby_prism::Node<'pr>> {
     let param_name = included_hook_parameter(def)?;
@@ -1254,6 +1254,17 @@ fn walk_decl_body<'pr>(
     file: &str,
     force_class_receiver: bool,
 ) -> IngestResult<DeclBody> {
+    let visibility = Visibility::resolve(body.as_ref(), file)?;
+    walk_decl_body_with_visibility(body, owner, file, force_class_receiver, &visibility)
+}
+
+fn walk_decl_body_with_visibility<'pr>(
+    body: Option<ruby_prism::Node<'pr>>,
+    owner: &ClassId,
+    file: &str,
+    force_class_receiver: bool,
+    visibility: &Visibility,
+) -> IngestResult<DeclBody> {
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
@@ -1265,6 +1276,9 @@ fn walk_decl_body<'pr>(
     // receiver to Class. Doesn't affect nested `class`/`module` bodies
     // — they get their own walk_decl_body recursion.
     let mut module_function_active = false;
+    // `extend self` exposes methods with their instance visibility; unlike
+    // module_function, it neither makes a public copy nor ends at `private`.
+    let mut extend_self_active = false;
     // Names from the `module_function :a, :b` form, plus the positions
     // of the direct `def`s in this body they may promote. Tracking
     // positions (rather than searching `methods` by name at the end)
@@ -1280,7 +1294,20 @@ fn walk_decl_body<'pr>(
     let statements = flatten_statements(b);
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
-    for stmt in statements {
+    for statement in statements {
+        let definition = visibility::definition(&statement).map(|d| d.as_node());
+        let stmt = definition.as_ref().unwrap_or(&statement);
+        if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
+            // Only bare instance-visibility markers end Ruby's module_function
+            // mode. Named and inline forms don't change that lexical mode.
+            let call = statement.as_call_node().unwrap();
+            if call.arguments().is_none()
+                && matches!(constant_id_str(&call.name()), "public" | "protected" | "private")
+            {
+                module_function_active = false;
+            }
+            continue;
+        }
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
         // declares its members inside a block, so the constants are one
         // level deeper than every other class-body constant. They are
@@ -1364,7 +1391,7 @@ fn walk_decl_body<'pr>(
             // `included` method of its own.
             if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                 let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                    walk_decl_body(Some(singleton_body), owner, file, true)?;
+                    walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
@@ -1375,7 +1402,14 @@ fn walk_decl_body<'pr>(
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
-            if force_class_receiver || module_function_active {
+            visibility.apply(&statement, &mut m);
+            if module_function_active && m.receiver == MethodReceiver::Instance {
+                // The retained singleton copy is public even if the original
+                // instance definition is private/protected. extend self shares
+                // the original method instead and must retain its visibility.
+                m.visibility = crate::dialect::MethodVisibility::Public;
+            }
+            if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
             direct_def_positions.push(methods.len());
@@ -1386,7 +1420,7 @@ fn walk_decl_body<'pr>(
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
             let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                walk_decl_body(sc.body(), owner, file, true)?;
+                walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?;
             includes.extend(inner_includes);
             methods.extend(inner_methods);
             constants.extend(inner_constants);
@@ -1405,7 +1439,7 @@ fn walk_decl_body<'pr>(
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
                 let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                    walk_decl_body(m.body(), owner, file, true)?;
+                    walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
@@ -1424,7 +1458,7 @@ fn walk_decl_body<'pr>(
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
                         let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                            walk_decl_body(block.body(), owner, file, true)?;
+                            walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?;
                         includes.extend(inner_includes);
                         methods.extend(inner_methods);
                         constants.extend(inner_constants);
@@ -1498,10 +1532,14 @@ fn walk_decl_body<'pr>(
                             let want_reader = kw.ends_with("_reader") || kw.ends_with("_accessor");
                             let want_writer = kw.ends_with("_writer") || kw.ends_with("_accessor");
                             if want_reader {
-                                methods.push(synth_attr_reader(owner, name, recv));
+                                let mut method = synth_attr_reader(owner, name, recv);
+                                visibility.apply(&statement, &mut method);
+                                methods.push(method);
                             }
                             if want_writer {
-                                methods.push(synth_attr_writer(owner, name, recv));
+                                let mut method = synth_attr_writer(owner, name, recv);
+                                visibility.apply(&statement, &mut method);
+                                methods.push(method);
                             }
                         }
                     }
@@ -1520,10 +1558,10 @@ fn walk_decl_body<'pr>(
                             alias_source(&call, &methods, force_class_receiver).unwrap();
                         let mut copy = methods[source].clone();
                         copy.name = Symbol::from(to.as_str());
+                        visibility.apply(&statement, &mut copy);
                         methods.push(copy);
                     }
-                    // `extend self` — the OTHER spelling of the same
-                    // idea, and the one campfire's
+                    // `extend self` — the spelling campfire's
                     // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
                     // makes every instance method a singleton method
                     // too, so `PrivateNetworkGuard.resolve(host)` reaches
@@ -1533,9 +1571,8 @@ fn walk_decl_body<'pr>(
                     // left `Opengraph::Metadata.from_url` fetching
                     // nothing at all.
                     //
-                    // Same treatment as bare `module_function`: our
-                    // targets call these as `Mod.x(...)`, so only the
-                    // class-method form is needed.
+                    // Our targets retain only the class-method form, but
+                    // unlike module_function, it keeps instance visibility.
                     "extend"
                         if call
                             .arguments()
@@ -1545,7 +1582,7 @@ fn walk_decl_body<'pr>(
                             })
                             .unwrap_or(false) =>
                     {
-                        module_function_active = true;
+                        extend_self_active = true;
                     }
                     "module_function" => {
                         // Bare `module_function` (no args) — flip the
@@ -1642,6 +1679,7 @@ fn walk_decl_body<'pr>(
                 .any(|n| n == methods[*pos].name.as_str())
             {
                 methods[*pos].receiver = MethodReceiver::Class;
+                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
                 promoted.push(methods[*pos].name.clone());
             }
         }
@@ -1743,6 +1781,7 @@ pub(crate) fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: Method
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: Vec::new(),
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -1803,6 +1842,7 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
         name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: vec![Param::positional(value_param)],
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -2012,6 +2052,7 @@ pub(super) fn ingest_library_method(
         name_span: super::util::def_name_span(def, file),
         name,
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params,
         unsupported_formals: formals.unsupported,
         has_anonymous_block: formals.has_anonymous_block,
@@ -2343,7 +2384,7 @@ pub fn ingest_concern_class_method_spans(
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
-            if let Some(def) = stmt.as_def_node() {
+            if let Some(def) = visibility::definition(&stmt) {
                 // The carrier's instance definitions become includer
                 // class methods. Its own singletons do not cross.
                 if def.receiver().is_none() {
@@ -2422,7 +2463,7 @@ pub fn ingest_concern_class_method_spans(
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
-            if let Some(def) = stmt.as_def_node() {
+            if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);
                 }

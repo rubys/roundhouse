@@ -41,6 +41,15 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
 /// `**params` → `.merge` desugar is a post-analyze pass, so a harness
 /// that skips those never sees the shape this fix is about.
 fn app_with(call_tail: &str) -> App {
+    app_with_helper(call_tail, r#"module ThingsHelper
+  def thing_form_with(model, **params, &)
+    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
+  end
+end
+"#)
+}
+
+fn app_with_helper(call_tail: &str, helper: &str) -> App {
     let template = format!(
         "<%= thing_form_with @thing{call_tail} do |form| %>\n  <p>hi</p>\n<% end %>\n"
     );
@@ -58,15 +67,7 @@ fn app_with(call_tail: &str) -> App {
             "app/controllers/things_controller.rb",
             "class ThingsController < ApplicationController\n  def show\n    @thing = Thing.first\n  end\nend\n",
         ),
-        (
-            "app/helpers/things_helper.rb",
-            r#"module ThingsHelper
-  def thing_form_with(model, **params, &)
-    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
-  end
-end
-"#,
-        ),
+        ("app/helpers/things_helper.rb", helper),
         ("app/views/things/show.html.erb", Box::leak(template.into_boxed_str())),
     ]))
     .expect("ingest wrapper app");
@@ -148,4 +149,127 @@ fn the_form_is_never_silently_dropped() {
             "the whole tag vanished for `{tail}`:\n{src}"
         );
     }
+}
+
+#[test]
+fn owner_bridges_keep_required_typed_parameters_and_source_spans() {
+    use roundhouse::dialect::{MethodReceiver, MethodVisibility};
+    use roundhouse::ty::{ParamKind, Ty};
+    let mut app = app_with_helper("", r#"module ThingsHelper
+  def thing_form_with(model, suffix = "!", &)
+    form_with model: model, url: thing_path(model), data: { label: own_data(model, suffix), count: Thing.count }, &
+  end
+  private
+  def own_data(model, suffix); model.name + suffix; end
+end
+"#);
+    let helper = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ThingsHelper").unwrap();
+    let bridge = helper.methods.iter().find(|m| m.name.as_str().starts_with("__rh_form_")).unwrap();
+    assert_eq!(bridge.receiver, MethodReceiver::Class);
+    assert_eq!(bridge.visibility, MethodVisibility::Public);
+    assert_eq!(bridge.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["model", "suffix"]);
+    assert!(bridge.params.iter().all(|p| p.default.is_none()));
+    assert!(bridge.block_param.is_none());
+    assert!(!bridge.has_anonymous_block, "the generated bridge is blockless");
+    assert!(bridge.unsupported_formals.is_none());
+    assert!(!bridge.body.span.is_synthetic());
+    let Some(Ty::Fn { params, block, ret, .. }) = &bridge.signature else { panic!("typed bridge") };
+    assert!(params.iter().all(|p| p.kind == ParamKind::Required));
+    assert_eq!(params[1].ty, Ty::Str);
+    assert_eq!(bridge.body.ty.as_ref(), Some(ret.as_ref()));
+    assert!(block.is_none());
+    assert!(!app.helper_method_index.contains_key(&bridge.name));
+    let wrapper = helper.methods.iter().find(|m| m.name.as_str() == "thing_form_with").unwrap();
+    assert!(wrapper.has_anonymous_block, "retain the source wrapper's declaration fact");
+    let body = match &*wrapper.body.node {
+        roundhouse::expr::ExprNode::Seq { exprs } => &exprs[0],
+        _ => &wrapper.body,
+    };
+    let roundhouse::expr::ExprNode::Send { args, .. } = &*body.node else { panic!("form call") };
+    let roundhouse::expr::ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("kwargs") };
+    let value = &entries.iter().find(|(k, _)| matches!(&*k.node,
+        roundhouse::expr::ExprNode::Lit { value: roundhouse::expr::Literal::Sym { value } } if value.as_str() == "data"
+    )).unwrap().1;
+    assert!(!bridge.effects.is_pure(), "the nested DB read is effectful");
+    assert_eq!(value.effects, bridge.effects, "the call must retain nested effects");
+    let roundhouse::expr::ExprNode::Send { recv: Some(recv), args, .. } = &*value.node else { panic!("bridge call") };
+    assert_eq!(recv.ty, Some(Ty::Class { id: helper.name.clone(), args: vec![] }),
+        "the synthesized receiver must be typed before downstream lowering");
+    assert_eq!(value.ty.as_ref(), Some(ret.as_ref()));
+    assert_eq!(args.iter().map(|a| a.ty.as_ref()).collect::<Vec<_>>(), params.iter().map(|p| Some(&p.ty)).collect::<Vec<_>>());
+    let before = app.library_classes.clone();
+    roundhouse::session::analyze_and_lower(&mut app);
+    let after = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ThingsHelper").unwrap();
+    let before = before.iter().find(|lc| lc.name == after.name).unwrap();
+    assert_eq!(after.methods.iter().filter(|m| m.name.as_str().starts_with("__rh_form_")).count(), 1);
+    assert_eq!(before.methods.len(), after.methods.len(), "do not synthesize bridges twice");
+}
+
+#[test]
+fn owner_extraction_does_not_hide_model_syntax_or_executable_defaults() {
+    for helper in [
+        r#"module ThingsHelper
+  def thing_form_with(model, &)
+    form_with model: [:admin, thing], url: thing_path(model), &
+  end
+  def thing; @thing; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, suffix = own_suffix, &)
+    form_with model: model, data: own_data(model, suffix), &
+  end
+  def own_suffix; "!"; end
+  def own_data(model, suffix); { label: model.name + suffix }; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, &)
+    form_with model: model, id: "form-#{own_label}", class: ["base", own_label], &
+  end
+  def own_label; "owner"; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, &)
+    form_with model: model, url: thing_path(tmp = model), data: { controller: own_label, label: tmp.name }, &
+  end
+  def own_label; "owner"; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, &)
+    form_with model: model, data: { controller: own_label, label: @thing.name }, &
+  end
+  def own_label; "owner"; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, **nil, &)
+    form_with model: model, data: own_data(model), &
+  end
+  def own_data(model); { label: model.name }; end
+end
+"#,
+    ] {
+        let app = app_with_helper("", helper);
+        assert!(app.library_classes.iter().flat_map(|lc| &lc.methods)
+            .all(|m| !m.name.as_str().starts_with("__rh_form_")));
+    }
+}
+
+#[test]
+fn a_same_named_non_helper_wrapper_cannot_claim_a_view_call() {
+    let mut app = app_with("");
+    let mut decoy = app.library_classes.iter()
+        .find(|lc| lc.name.0.as_str() == "ThingsHelper").unwrap().clone();
+    decoy.name = roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("UnrelatedLibrary"));
+    let wrapper = decoy.methods.iter_mut().find(|m| m.name.as_str() == "thing_form_with").unwrap();
+    // It looks like a wrapper, but has no binding for the view's argument.
+    wrapper.params.clear();
+    app.library_classes.push(decoy);
+    let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+    let show = files.iter().find(|f| f.path.to_string_lossy().ends_with("things/show.rb")).unwrap();
+    assert!(show.content.contains("<form"), "{}", show.content);
+    assert!(!show.content.contains("UnrelatedLibrary"), "{}", show.content);
 }

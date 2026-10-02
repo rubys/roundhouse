@@ -1711,6 +1711,7 @@ mod method_sig_tests {
     #[test]
     fn emit_method_renders_optional_default_and_block_param() {
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

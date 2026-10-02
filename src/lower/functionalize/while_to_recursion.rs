@@ -239,6 +239,7 @@ fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
     }
 
     let helper = MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -761,6 +762,7 @@ mod tests {
     }
     fn method(name: &str, receiver: MethodReceiver, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

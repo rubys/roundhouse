@@ -1252,6 +1252,7 @@ fn guard_app_methods(app: &mut App, stubbed: &BTreeMap<(String, String), BTreeSe
         // analysis: the slot is `MochaStub?`.
         let value = Symbol::from("value");
         let writer = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: sp(),

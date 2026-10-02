@@ -46,6 +46,7 @@ pub mod survey;
 pub mod test;
 pub mod util;
 pub mod view;
+mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use controller::ingest_controller;

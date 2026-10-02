@@ -58,6 +58,7 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: f.unsupported_formals,
             has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),

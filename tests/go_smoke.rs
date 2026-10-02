@@ -72,6 +72,7 @@ fn module_singleton_shape() {
         args: vec![],
     };
     let reader = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -97,6 +98,7 @@ fn module_singleton_shape() {
     };
     // `def self.adapter=(value); @adapter = value; end`.
     let writer = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -237,6 +239,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         args: vec![],
     };
     let reader = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -322,6 +325,7 @@ fn raise_panic_peephole() {
         },
     );
     let fail_method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -362,6 +366,7 @@ fn raise_panic_peephole() {
         },
     );
     let abort_method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -471,6 +476,7 @@ fn time_now_utc_iso8601_peephole() {
         },
     );
     let stamp = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -552,6 +558,7 @@ fn include_array_recv_routes_to_slices_contains() {
         },
     );
     let probe = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -631,6 +638,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         },
     );
     let last_method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -728,6 +736,7 @@ fn class_reflection_rewrites() {
         },
     );
     let lookup_cols = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -765,6 +774,7 @@ fn class_reflection_rewrites() {
         },
     );
     let lookup_name = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -801,6 +811,7 @@ fn class_reflection_rewrites() {
         },
     );
     let diag = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -876,6 +887,7 @@ fn class_reflection_rewrites() {
 fn bare_new_in_class_method_resolves_to_constructor() {
     // `def self.create(attrs); new(attrs); end`
     let create = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -955,6 +967,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
 #[test]
 fn implicit_self_method_call_resolution() {
     let status_reader = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -981,6 +994,7 @@ fn implicit_self_method_call_resolution() {
     // `def notify; end` — no-op real method. Becomes
     // `func (self *Worker) notify() {}` in emit.
     let notify = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1036,6 +1050,7 @@ fn implicit_self_method_call_resolution() {
         ExprNode::Var { id: VarId(0), name: Symbol::from("s") },
     );
     let tick = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1139,6 +1154,7 @@ fn each_array_block_shape() {
         },
     );
     let method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1224,6 +1240,7 @@ fn each_hash_block_shape() {
         },
     );
     let method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1306,6 +1323,7 @@ fn map_array_block_shape() {
         },
     );
     let method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1383,6 +1401,7 @@ fn map_array_block_shape() {
 #[test]
 fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
     let make_method = |name: &str, body: Expr, ret: Ty| MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1493,6 +1512,7 @@ fn typed_empty_literals_back_propagate() {
     // signature returns `Array[String]`. The literal's `.ty` carries
     // the elem; emit must produce `[]string{}` (not `[]interface{}{}`).
     let errors = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1516,6 +1536,7 @@ fn typed_empty_literals_back_propagate() {
     // `def lookup; {}; end` — same shape for Hash, against return
     // `Hash[String, String]`. Emit must produce `map[string]string{}`.
     let lookup = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1810,6 +1831,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
     let body_seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, if_expr] });
 
     let method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
@@ -1902,6 +1924,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
     let body_seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, if_expr] });
 
     let method = MethodDef {
+        visibility: roundhouse::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),

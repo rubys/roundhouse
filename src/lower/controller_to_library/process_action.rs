@@ -234,6 +234,7 @@ pub(super) fn synthesize_process_action(
 
     let action_name_param = Symbol::from("action_name");
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),

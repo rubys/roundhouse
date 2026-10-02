@@ -232,6 +232,7 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -262,6 +263,7 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -300,6 +302,7 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -902,6 +905,7 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

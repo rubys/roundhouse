@@ -36,6 +36,49 @@ along with Campfire's own test suite and its cable broadcasts. What
 Campfire uses beyond the blog is supported on those two lanes, and
 reaches the others as their emitters and runtimes catch up.
 
+## Local method visibility
+
+Model and library/concern ingest preserve statically known `public`,
+`protected`, and `private` on local definitions, including singleton
+blocks and inline `private def` forms. Named changes must follow an
+unambiguous local definition; forward references, inherited-only names,
+dynamic names/conditional declarations, and visibility-sensitive
+redefinitions remain unsupported. Concern class-method carriers have
+their own lexical scope, distinct from the concern's own singletons.
+`private_class_method`/`public_class_method` inside singleton blocks or
+concern class-method carriers address a further singleton level and
+remain unsupported, rather than changing the flattened methods.
+
+The retained singleton form of `module_function` is public even when
+the source instance method is private; `extend self` instead retains
+the source visibility. Bare instance-visibility markers end the
+`module_function` mode but not `extend self`. This does not add the
+separate private instance copy or copy/redefinition semantics to the
+existing one-method-per-name lowering.
+`module_function` inside singleton blocks or concern class-method
+carriers remains unsupported: its public copy belongs to the carrier,
+not the includer, so it must not make the includer's method public.
+
+The common Ruby/Spinel emitter writes named visibility immediately after
+each definition, not sticky sections. A plain `private` does not affect
+`def self.x`; constructors remain implicitly private unless explicitly
+made public. CRuby emit-and-run tests prove wrapper calls, `send`,
+`public_send`, and `respond_to?(name, include_private)` for model, library,
+and concern methods. This is not a strict-target visibility/reflective
+dispatch compatibility claim, nor a Spinel runtime verification.
+Nonpublic model accessor macros that have not become local `MethodDef`s
+are still diagnosed rather than silently emitted as public. Existing
+model lowering's synthesized-name precedence is unchanged.
+
+Thin builder-yielding form wrappers retain owner-local `data:` computations
+through generated callable bridges when the expression is frame-independent
+and defaults are literal. The bridge has required typed parameters, while
+the original private helper methods remain private. Model/URL/namespace and
+id/class syntax is not hidden behind bridges; executable defaults, captures
+and shared wrapper-local frames are outside this correction. CRuby regression
+tests cover helper-name shadowing, private dispatch and single evaluation;
+this is not a general wrapper-inlining or compiled Spinel compatibility claim.
+
 ## Active Record
 
 | | Blog tier (all targets) | Campfire tier (ruby, spinel) |

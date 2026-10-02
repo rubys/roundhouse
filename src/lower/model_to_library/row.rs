@@ -133,6 +133,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         col_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -165,6 +166,7 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         col_ty.clone(),
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -218,6 +220,7 @@ fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         ));
     }
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Private,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -355,6 +358,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),

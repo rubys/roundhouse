@@ -494,6 +494,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     });
     let attached_ty = Ty::Class { id: attached_class(), args: vec![] };
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -516,6 +517,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
     // proxy per record, row already known, and installs it here.
     let att = Symbol::from("att");
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -745,6 +747,7 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

@@ -636,6 +636,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // which only kwrest_forward rewrites — and that one leaves no
     // trailing kwargs Hash behind, so the two cannot both fire.
     ("helper_kwargs", &["kwrest_forward"]),
+    // Keep owner-local form attribute computations inside their helper before
+    // the view walker substitutes builder wrappers across module boundaries.
+    ("form_wrapper_owners", &["helper_kwargs"]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -940,6 +943,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
+    view_to_library::form_wrapper::preserve_argument_owners(app, registry);
+    ran!("form_wrapper_owners");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
@@ -1428,6 +1433,7 @@ pub fn module_funcs_to_library_class(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: f.unsupported_formals,
             has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),

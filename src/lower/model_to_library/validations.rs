@@ -93,6 +93,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     }
 
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -267,6 +268,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
         ]);
         let body = seq(body_stmts);
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -285,6 +287,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
     }
     if !defines("errors") {
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),

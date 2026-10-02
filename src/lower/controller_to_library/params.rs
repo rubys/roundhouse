@@ -1280,6 +1280,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Private,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1314,6 +1315,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1388,6 +1390,7 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1432,6 +1435,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         decisions: 0,
     };
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1578,6 +1582,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
     stmts.push(var(&instance, owner_ty.clone()));
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1685,6 +1690,7 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     stmts.push(attrs_var());
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1770,6 +1776,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
     );
 
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1862,6 +1869,7 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     };
     let ret_ty = hash_ty;
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),

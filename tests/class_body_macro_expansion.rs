@@ -450,8 +450,29 @@ fn a_module_singleton_is_not_a_concern_carrier() {
             .replace("class_methods do", declaration)
             .replace("def configure_window", "def self.configure_window")
             .replace("def window_options", "def self.window_options");
-        assert_configuration_stays_unknown(&concern);
+        let (carriers, _) = roundhouse::ingest::library_class::ingest_concern_class_method_spans(
+            concern.as_bytes(), "app/controllers/concerns/window_settings.rb",
+        );
+        assert!(carriers.iter().all(|carrier| carrier.methods.is_empty()));
+        let error = configuration_app(&concern, "configure_window mode: :month")
+            .expect_err("visibility ingestion refuses the unsupported nested singleton level");
+        assert!(error.to_string().contains("nested singleton"), "{error}");
     }
+}
+
+#[test]
+fn configuration_preserves_visibility_wrapped_definitions() {
+    use roundhouse::dialect::MethodVisibility;
+    let concern = WINDOW_SETTINGS
+        .replace("def configure_window", "private def configure_window")
+        .replace("def window_options", "public def window_options");
+    let mut app = configuration_app(&concern, "configure_window mode: :month").unwrap();
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error), "{diags:?}");
+    let methods: Vec<_> = app.controllers[0].class_methods().collect();
+    assert_eq!(methods.len(), 2);
+    assert_eq!(methods.iter().find(|m| m.name.as_str() == "configure_window").unwrap().visibility, MethodVisibility::Private);
+    assert_eq!(methods.iter().find(|m| m.name.as_str() == "window_options").unwrap().visibility, MethodVisibility::Public);
 }
 
 #[test]

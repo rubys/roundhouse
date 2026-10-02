@@ -195,6 +195,7 @@ fn synthesize_module_lc(
     let methods: Vec<crate::dialect::MethodDef> = funcs
         .iter()
         .map(|f| crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: f.unsupported_formals,
             has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
@@ -500,6 +501,7 @@ fn collect_imports_for_function(
         includes: Vec::new(),
         nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: func.unsupported_formals,
             has_anonymous_block: func.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),

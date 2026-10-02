@@ -31,6 +31,248 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A builder wrapper's private argument computation belongs to its helper,
+/// not to the view into which the form and builder body are spliced.
+#[test]
+fn a_form_wrapper_keeps_its_private_argument_computation_in_its_owner() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/articles_helper.rb",
+            r#"module ArticlesHelper
+  def article_form_with!(article, suffix = "!", &)
+    form_with model: article, class: "contents", data: private_options(article, suffix), &
+  end
+  def __rh_form_article_form_with_0; 91; end
+  def article_public_form_with(model, &)
+    form_with model: model, data: { controller: public_label, label: @article.title }, &
+  end
+  def public_label; "public-owner"; end
+  private
+  def private_options(article, suffix)
+    article.title = article.title + suffix
+    { controller: private_controller, label: article.title }
+  end
+  def private_controller; "owner-composer"; end
+end
+"#,
+        )
+        .write(
+            "app/helpers/zzz_helper.rb",
+            r#"module ZzzHelper
+  def private_options(article, suffix); { controller: "wrong-owner" }; end
+  def private_controller; "wrong-controller"; end
+end
+"#,
+        )
+        .edit(
+            "app/views/articles/_form.html.erb",
+            "form_with(model: article, class: \"contents\")",
+            "article_form_with!(article)",
+        )
+        .write(
+            "app/views/articles/_public_owner_form.html.erb",
+            "<%= article_public_form_with(article) do |form| %><%= form.text_field :title %><% end %>",
+        )
+        .run_ruby(r#"
+article = Article.new(title: "seed", body: "body")
+raise "unexpected controller context" unless ActionController::Current.controller.nil?
+public_html = Views::Articles.public_owner_form(article)
+raise "direct helper ivar lost view binding" unless public_html.include?('data-label="seed"')
+raise "public helper lost owner" unless public_html.include?('data-controller="public-owner"')
+html = Views::Articles.form(article)
+raise "missing form" unless html.include?("<form") && html.include?("</form>")
+raise "wrong helper owner" unless html.include?('data-controller="owner-composer"')
+raise "argument evaluated incorrectly" unless html.include?('data-label="seed!"') && article.title == "seed!"
+raise "builder lost record" unless html.include?('name="article[title]"') && html.include?('value="seed!"')
+raise "generated name collision" unless ArticlesHelper.__rh_form_article_form_with_0 == 91
+[:private_options, :private_controller].each do |name|
+  raise "private helper made public" if ArticlesHelper.respond_to?(name)
+  begin
+    name == :private_options ? ArticlesHelper.public_send(name, article, "?") : ArticlesHelper.public_send(name)
+    raise "public_send exposed private helper"
+  rescue NoMethodError
+  end
+end
+puts "form wrapper owner checks passed"
+"#)
+        .assert_passes();
+}
+
+/// Visibility is observable runtime behavior, not just an IR annotation.
+/// Cover models, POROs, and a concern's instance and copied class sides.
+#[test]
+fn local_method_visibility_survives_emission_and_reflective_dispatch() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            r#"class Article < ApplicationRecord
+  include VisibilityHelpers
+  def visibility_wrapper; visibility_helper; end
+  def visibility_helper; 41; end
+  private :visibility_helper
+  def visibility_later; 42; end
+  private
+  def self.visibility_public_class; 43; end
+  public
+  class << self
+    def visibility_class_wrapper; visibility_class_helper; end
+    private
+    def visibility_class_helper; 44; end
+  end
+  def self.visibility_class_later; 45; end
+"#,
+        )
+        .write(
+            "app/lib/visibility_probe.rb",
+            r#"class VisibilityProbe
+  def initialize; @value = 51; end
+  def visibility_wrapper; visibility_helper; end
+  private def visibility_helper; @value; end
+  def visibility_later; 52; end
+  protected def guarded; 53; end
+  class << self
+    protected
+    def guarded; 54; end
+  end
+end
+class PublicInitializeProbe
+  def initialize; @value = 71; end
+  public :initialize
+  def self.initialize; 72; end
+end
+"#,
+        )
+        .write(
+            "app/models/concerns/visibility_helpers.rb",
+            r#"module VisibilityHelpers
+  extend ActiveSupport::Concern
+  def concern_wrapper; concern_helper; end
+  private
+  def concern_helper; 61; end
+  class_methods do
+    def concern_class_wrapper; concern_class_helper; end
+    def concern_class_helper; 62; end
+    private :concern_class_helper
+    def concern_class_later; 63; end
+  end
+end
+"#,
+        )
+        .run_ruby(r#"
+def assert_equal(expected, actual)
+  raise "expected #{expected.inspect}, got #{actual.inspect}" unless expected == actual
+end
+def rejects_public_send(receiver, name)
+  begin
+    receiver.public_send(name)
+  rescue NoMethodError
+    return
+  end
+  raise "public_send reached #{name}"
+end
+article = Article.new
+probe = VisibilityProbe.new
+[
+  [article, :visibility_wrapper, :visibility_helper, 41],
+  [probe, :visibility_wrapper, :visibility_helper, 51],
+  [article, :concern_wrapper, :concern_helper, 61],
+  [Article, :visibility_class_wrapper, :visibility_class_helper, 44],
+  [Article, :concern_class_wrapper, :concern_class_helper, 62]
+].each do |receiver, wrapper, helper, expected|
+  assert_equal expected, receiver.public_send(wrapper)
+  assert_equal expected, receiver.send(helper)
+  rejects_public_send receiver, helper
+  assert_equal false, receiver.respond_to?(helper)
+  assert_equal false, receiver.respond_to?(helper, false)
+  assert_equal true, receiver.respond_to?(helper, true)
+end
+assert_equal 42, article.public_send(:visibility_later)
+assert_equal 52, probe.public_send(:visibility_later)
+assert_equal 43, Article.public_send(:visibility_public_class)
+assert_equal 45, Article.public_send(:visibility_class_later)
+assert_equal 63, Article.public_send(:concern_class_later)
+assert_equal false, article.respond_to?(:initialize)
+assert_equal true, article.respond_to?(:initialize, true)
+assert_equal false, probe.respond_to?(:initialize)
+rejects_public_send probe, :initialize
+assert_equal true, PublicInitializeProbe.new.respond_to?(:initialize)
+assert_equal 71, PublicInitializeProbe.new.public_send(:initialize)
+assert_equal 72, PublicInitializeProbe.public_send(:initialize)
+assert_equal true, VisibilityProbe.protected_instance_methods(false).include?(:guarded)
+assert_equal true, VisibilityProbe.singleton_class.protected_instance_methods(false).include?(:guarded)
+rejects_public_send probe, :guarded
+rejects_public_send VisibilityProbe, :guarded
+puts "visibility dispatch checks passed"
+"#)
+        .assert_passes();
+}
+
+/// Module-function promotion retains a public singleton copy; extend self
+/// instead retains the original visibility, even across bare markers.
+#[test]
+fn module_function_and_extend_self_have_distinct_runtime_visibility() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/module_visibility.rb",
+            r#"module NamedVisibility
+  private
+  def helper; 81; end
+  module_function :helper
+end
+module BareVisibility
+  private
+  module_function
+  def helper; 82; end
+  private :helper
+  private def inline_helper; 83; end
+  def later_copy; 84; end
+  public
+  def instance_later; 85; end
+end
+module ExtendedVisibility
+  extend self
+  private
+  def helper; 91; end
+  protected
+  def guarded; 92; end
+  public
+  def later; 93; end
+end
+"#,
+        )
+        .run_ruby(r#"
+def assert_equal(expected, actual)
+  raise "expected #{expected.inspect}, got #{actual.inspect}" unless expected == actual
+end
+[
+  [NamedVisibility, :helper, 81],
+  [BareVisibility, :helper, 82],
+  [BareVisibility, :inline_helper, 83],
+  [BareVisibility, :later_copy, 84],
+  [ExtendedVisibility, :later, 93]
+].each do |receiver, name, expected|
+  assert_equal expected, receiver.public_send(name)
+  assert_equal true, receiver.respond_to?(name)
+end
+assert_equal false, BareVisibility.respond_to?(:instance_later, true)
+assert_equal true, BareVisibility.public_instance_methods(false).include?(:instance_later)
+[[ExtendedVisibility, :helper, 91], [ExtendedVisibility, :guarded, 92]].each do |receiver, name, expected|
+  assert_equal expected, receiver.send(name)
+  assert_equal false, receiver.respond_to?(name)
+  assert_equal true, receiver.respond_to?(name, true)
+  begin
+    receiver.public_send(name)
+  rescue NoMethodError
+    next
+  end
+  raise "public_send reached #{name}"
+end
+puts "module visibility checks passed"
+"#)
+        .assert_passes();
+}
+
 /// A test class that a `module` wraps is emitted and runs. Ingest used
 /// to read only the top-level classes of a test file. It lost this
 /// class, and `check` reported nothing. The emit names the file after

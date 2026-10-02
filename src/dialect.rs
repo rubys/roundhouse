@@ -620,6 +620,16 @@ impl std::fmt::Display for Param {
     }
 }
 
+/// Statically resolved Ruby visibility. Strict targets do not yet enforce
+/// Ruby's reflective dispatch contract (`send`, `public_send`, `respond_to?`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MethodVisibility {
+    #[default]
+    Public,
+    Protected,
+    Private,
+}
+
 /// Source formal shapes whose binding/arity contract is not retained yet.
 /// This belongs to the declaration, independent of body rewrites or typing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,6 +654,10 @@ impl UnsupportedFormal {
 pub struct MethodDef {
     pub name: Symbol,
     pub receiver: MethodReceiver,
+    /// Defaults to public when reading older serialized IR. Source ingest
+    /// resolves lexical markers before model/concern bodies are flattened.
+    #[serde(default)]
+    pub visibility: MethodVisibility,
     pub params: Vec<Param>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported_formals: Option<UnsupportedFormal>,
