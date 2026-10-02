@@ -34,6 +34,10 @@ fn native_matches_preserve_expression_precedence_and_pattern_syntax() {
             "result = (case {\"hyphen-key\": 7}; in {\"hyphen-key\": n}; n; end)",
             "7",
         ),
+        (
+            "result = (case {\"ready?\": 7, \"go!\": 11, \"name=\": 19}; in {\"ready?\": a, \"go!\": b, \"name=\": c}; [a, b, c]; end)",
+            "[7, 11, 19]",
+        ),
         ("result = (case 2; in (1 | 2) => n; n; end)", "2"),
         ("result = (case 7; in (Integer => _n) | 1; _n; end)", "7"),
         ("result = (nil in ^(nil))", "true"),
@@ -123,6 +127,36 @@ fn pattern_locals_survive_guard_failure_predicates_and_required_matches() {
             expected,
             "{source}"
         );
+    }
+}
+
+#[test]
+fn hash_pattern_rest_is_a_hash_not_the_deconstructed_subject() {
+    let classes = Default::default();
+    let typer = BodyTyper::new(&classes);
+    let hash = Ty::Hash {
+        key: Box::new(Ty::Sym),
+        value: Box::new(Ty::Int),
+    };
+    let object = Ty::Class {
+        id: roundhouse::ClassId("PatternRecord".into()),
+        args: vec![],
+    };
+    let gradual_hash = Ty::Hash {
+        key: Box::new(Ty::Untyped),
+        value: Box::new(Ty::Untyped),
+    };
+    for (pattern, subject, expected) in [
+        ("{a:, **rest}", hash.clone(), hash),
+        ("{a:, **rest}", object.clone(), gradual_hash.clone()),
+        ("PatternRecord(a:, **rest)", object, gradual_hash),
+    ] {
+        let ctx = Ctx {
+            ivar_bindings: [("subject".into(), subject)].into_iter().collect(),
+            ..Ctx::default()
+        };
+        let mut expr = parse(&format!("@subject => {pattern}; rest"));
+        assert_eq!(typer.analyze_expr(&mut expr, &ctx), expected, "{pattern}");
     }
 }
 
@@ -298,6 +332,21 @@ fn structural_matching_runs_in_an_emitted_application() {
       -2
     end
   end
+  def self.object_rest(value)
+    case value
+    in {a:, **rest}
+      [a, rest["other"]]
+    end
+  end
+  def self.narrowed_object_rest(value)
+    value => PatternRecord(a:, **rest)
+    [a, rest["other"]]
+  end
+end
+class PatternRecord
+  def deconstruct_keys(keys)
+    {a: 29, "other" => 31}
+  end
 end
 "#,
         )
@@ -316,6 +365,8 @@ same(29, StructuralMatcher.dispatch({a: 29}))
 same([17, 19], StructuralMatcher.dispatch([2, 3, 13, 17, 19]))
 same(41, StructuralMatcher.ignore_keys({a: 29, extra: 1}))
 same(-2, StructuralMatcher.ignore_keys([29]))
+same([29, 31], StructuralMatcher.object_rest(PatternRecord.new))
+same([29, 31], StructuralMatcher.narrowed_object_rest(PatternRecord.new))
 begin
   StructuralMatcher.required([1])
   raise "required mismatch did not raise"

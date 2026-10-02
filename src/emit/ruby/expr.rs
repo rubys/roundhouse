@@ -789,7 +789,7 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
 
 /// Can `s` appear as a bareword hash key (`s: value`)? The bareword form
 /// requires a `[A-Za-z_][A-Za-z0-9_]*` identifier, optionally ending in
-/// `?`, `!`, or `=`. Anything else (hyphens, spaces, colons, digits-first)
+/// `?` or `!`. Anything else (hyphens, spaces, colons, digits-first, `=`)
 /// must be quoted: `"s": value`.
 fn is_simple_ident(s: &str) -> bool {
     let mut chars = s.chars();
@@ -805,7 +805,7 @@ fn is_simple_ident(s: &str) -> bool {
         if c.is_ascii_alphanumeric() || c == '_' {
             continue;
         }
-        if matches!(c, '?' | '!' | '=') {
+        if matches!(c, '?' | '!') {
             saw_suffix = true;
             continue;
         }

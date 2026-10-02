@@ -345,7 +345,14 @@ impl<'a> BodyTyper<'a> {
                     }
                 }
                 if let Some(HashRest::Collect { name }) = rest {
-                    out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped)));
+                    // The rest is a Hash returned by deconstruct_keys,
+                    // never the deconstructed object. Unmatched keys
+                    // need not be symbols, even though pattern keys are.
+                    let rest_ty = match subject_ty {
+                        Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
+                        _ => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+                    };
+                    out.push((name.clone(), rest_ty));
                 }
                 out
             }
