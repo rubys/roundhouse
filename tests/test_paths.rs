@@ -55,7 +55,7 @@ fn assert_modules(app: &App, expected: &[&str]) {
     assert_eq!(actual, expected);
 }
 
-fn default_tests() -> Vec<(PathBuf, String)> {
+fn default_and_custom_tests() -> Vec<(PathBuf, String)> {
     vec![
         ruby_file("test/models/model_default_test.rb", "ModelDefaultTest"),
         ruby_file(
@@ -68,8 +68,8 @@ fn default_tests() -> Vec<(PathBuf, String)> {
             "ChannelDefaultTest",
         ),
         ruby_file("test/lib/lib_default_test.rb", "LibDefaultTest"),
-        ruby_file("test/unit/unit_default_test.rb", "UnitDefaultTest"),
-        ruby_file("test/utils/utils_default_test.rb", "UtilsDefaultTest"),
+        ruby_file("test/unit/unit_custom_test.rb", "UnitCustomTest"),
+        ruby_file("test/utils/utils_custom_test.rb", "UtilsCustomTest"),
     ]
 }
 
@@ -79,8 +79,6 @@ const DEFAULT_MODULES: &[&str] = &[
     "HelperDefaultTest",
     "ChannelDefaultTest",
     "LibDefaultTest",
-    "UnitDefaultTest",
-    "UtilsDefaultTest",
 ];
 
 const ALL_STANDARD_MODULES: &[&str] = &[
@@ -89,22 +87,20 @@ const ALL_STANDARD_MODULES: &[&str] = &[
     "HelperDefaultTest",
     "ChannelDefaultTest",
     "LibDefaultTest",
-    "UnitDefaultTest",
-    "UtilsDefaultTest",
+    "UnitCustomTest",
+    "UtilsCustomTest",
     "QualitySpecsTest",
 ];
 
 #[test]
-fn rails_test_roots_preserve_existing_defaults() {
-    let mut files = default_tests();
-    files.push(ruby_file("quality/specs/probe.rb", "QualitySpecsTest"));
-    let app = ingest_files(files).expect("ingest tree");
+fn rails_test_roots_include_test_lib_by_default() {
+    let app = ingest_files(default_and_custom_tests()).expect("ingest tree");
     assert_modules(&app, DEFAULT_MODULES);
 }
 
 #[test]
 fn configured_roots_add_app_relative_test_folders() {
-    let mut files = default_tests();
+    let mut files = default_and_custom_tests();
     files.push(ruby_file(
         "quality/specs/nested/probe.rb",
         "QualitySpecsTest",
@@ -121,8 +117,7 @@ fn configured_roots_add_app_relative_test_folders() {
 #[test]
 fn empty_configuration_keeps_defaults_and_adds_no_custom_roots() {
     for config in ["", "{}\n", "test_paths: []\n"] {
-        let mut files = default_tests();
-        files.push(ruby_file("quality/specs/probe.rb", "QualitySpecsTest"));
+        let mut files = default_and_custom_tests();
         files.push(text_file("roundhouse.yml", config));
         let app = ingest_files(files).expect("ingest tree");
         assert_modules(&app, DEFAULT_MODULES);
@@ -154,7 +149,7 @@ fn overlapping_and_repeated_roots_do_not_duplicate_modules() {
 
 #[test]
 fn missing_directories_add_no_test_roots() {
-    let mut files = default_tests();
+    let mut files = default_and_custom_tests();
     files.push(ruby_file("test/not_a_directory.rb", "NotADirectoryTest"));
     files.push(text_file(
         "roundhouse.yml",

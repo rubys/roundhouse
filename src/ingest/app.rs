@@ -1259,8 +1259,6 @@ end
         "test/helpers",
         "test/channels",
         "test/lib",
-        "test/unit",
-        "test/utils",
     ]
     .into_iter()
     .map(PathBuf::from)
