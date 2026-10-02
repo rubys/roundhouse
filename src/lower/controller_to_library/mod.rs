@@ -499,10 +499,13 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             );
         }
         for method in &mut methods {
-            if method.receiver == MethodReceiver::Class {
+            if method.receiver == MethodReceiver::Class
+                && controller.class_methods().any(|m| m.name == method.name)
+            {
                 // The analyzer typed these against class-object state.
                 // Controller action rewrites and framework instance ivar
                 // seeding do not apply to this separate receiver domain.
+                // Class-side helper clones still need the instance pipeline.
                 continue;
             }
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);

@@ -954,7 +954,7 @@ pub fn target_files(
     ) {
         report_keyword_params(app, target.as_str());
     }
-    if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
         for controller in &app.controllers {
             if controller.class_methods().next().is_some() {
                 return Err(format!("finite class-side configuration is not supported ({})", target.as_str()));

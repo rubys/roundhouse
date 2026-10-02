@@ -19,8 +19,8 @@ use crate::{ClassId, Symbol};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
-    find_all_modules_with_scope, find_first_class, flatten_statements, module_name_path,
-    symbol_value,
+    find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
+    flatten_statements, module_name_path, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -2358,7 +2358,7 @@ pub fn ingest_concern_class_method_spans(
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();
-    for (scope, module) in find_all_modules_with_scope(&root) {
+    for (scope, module) in find_all_module_declarations_with_scope(&root) {
         let Some(name_path) = module_name_path(&module) else { continue };
         // A nested `ClassMethods` is reported under its PARENT, which is
         // the module an app actually includes.
@@ -2433,7 +2433,9 @@ pub fn ingest_concern_class_method_spans(
                 }
             }
         }
-        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier || !concern_extensions.is_empty() {
+        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier
+            || !concern_extensions.is_empty() || has_other_extensions
+        {
             out.push(ConcernClassMethodSpans {
                 owner: id,
                 methods: spans,

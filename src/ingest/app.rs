@@ -1590,7 +1590,7 @@ end
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
-    expand_class_body_macros(&mut app)?;
+    expand_class_body_macros(&mut app);
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It
@@ -2638,7 +2638,7 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// :redirect_signed_in_user_to_root` behind it — fails OPEN. So a macro
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
-fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
+fn expand_class_body_macros(app: &mut App) {
     use crate::dialect::{ControllerBodyItem, MethodReceiver};
     use crate::expr::ExprNode;
 
@@ -2663,7 +2663,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         }
     }
     if macros.is_empty() {
-        return Ok(());
+        return;
     }
 
     let surfaces = controller_concern_surfaces(app);
@@ -2710,21 +2710,20 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                     }
                 }
                 None => {
-                    unwrap_or_record::<()>(Err(IngestError::Unsupported {
+                    survey::record(&IngestError::Unsupported {
                         file: format!("{}", controller.name.0.as_str()),
                         message: format!(
                             "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
                             method.as_str(),
                             module.0.as_str()
                         ),
-                    }))?;
+                    });
                     expanded.push(item);
                 }
             }
         }
         controller.body = expanded;
     }
-    Ok(())
 }
 
 /// The macro's body with its parameters replaced by the call's

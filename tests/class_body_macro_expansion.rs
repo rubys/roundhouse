@@ -223,7 +223,7 @@ fn a_reopened_filter_macro_uses_its_latest_definition() {
 fn unsupported_filter_macro_keeps_its_inventory_identity_and_whole_body() {
     use roundhouse::ingest::survey;
 
-    let tree = [
+    let tree: std::collections::HashMap<_, _> = [
         (
             "app/controllers/concerns/authentication.rb",
             r#"
@@ -246,6 +246,9 @@ end
     .into_iter()
     .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
     .collect();
+    let strict_app = ingest_app_from_tree(tree.clone())
+        .expect("an unrecognized filter macro must not abort strict ingest");
+    assert!(filters(&strict_app).is_empty());
     survey::activate();
     let result = ingest_app_from_tree(tree);
     let gaps = survey::drain();
@@ -285,6 +288,26 @@ end
     .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
     .collect();
     ingest_app_from_tree(tree)
+}
+
+fn assert_configuration_stays_unknown(concern: &str) {
+    use roundhouse::expr::ExprNode;
+    use roundhouse::ingest::survey;
+
+    let strict = configuration_app(concern, "configure_window mode: :month")
+        .expect("unrecognized DSL preserves the legacy strict-ingest behavior");
+    assert_eq!(strict.controllers[0].class_methods().count(), 0);
+    survey::activate();
+    let result = configuration_app(concern, "configure_window mode: :month");
+    let gaps = survey::drain();
+    let app = result.expect("survey retains the unsupported call");
+    assert!(gaps.iter().any(|gap| gap.to_string().contains("configure_window")), "{gaps:?}");
+    assert!(!app.controllers[0].body.iter().any(|item| matches!(item,
+        ControllerBodyItem::ClassMethod { .. } | ControllerBodyItem::ClassIvarInit { .. })));
+    assert!(app.controllers[0].body.iter().any(|item| matches!(item,
+        ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
+            ExprNode::Send { method, args, .. }
+                if method.as_str() == "configure_window" && args.len() == 1))));
 }
 
 #[test]
@@ -356,7 +379,7 @@ fn configuration_does_not_drop_extra_macro_effects() {
         "@window_options = opts",
         "@window_options = opts\n      puts :effect",
     );
-    assert!(configuration_app(&concern, "configure_window mode: :month").is_err());
+    assert_configuration_stays_unknown(&concern);
 }
 
 #[test]
@@ -407,15 +430,13 @@ fn configuration_does_not_admit_class_body_reads_or_method_overrides() {
 #[test]
 fn a_module_singleton_is_not_a_concern_carrier() {
     let concern = WINDOW_SETTINGS.replace("class_methods do", "class << self");
-    assert!(configuration_app(&concern, "configure_window mode: :month").is_err());
+    assert_configuration_stays_unknown(&concern);
     for declaration in ["class_methods do", "module ClassMethods"] {
         let concern = WINDOW_SETTINGS
             .replace("class_methods do", declaration)
             .replace("def configure_window", "def self.configure_window")
             .replace("def window_options", "def self.window_options");
-        let error = configuration_app(&concern, "configure_window mode: :month")
-            .expect_err("carrier singletons do not extend includers");
-        assert!(error.to_string().contains("not expanded"), "{error}");
+        assert_configuration_stays_unknown(&concern);
     }
 }
 
@@ -434,7 +455,7 @@ fn configuration_obeys_carrier_spans_and_reopening_precedence() {
     let replaced = format!(
         "{WINDOW_SETTINGS}\nmodule WindowSettings\n class_methods do\n def window_options; {{mode: :wrong}}; end\n end\nend\n"
     );
-    assert!(configuration_app(&replaced, "configure_window mode: :month").is_err());
+    assert_configuration_stays_unknown(&replaced);
 }
 
 #[test]
@@ -576,6 +597,56 @@ fn configuration_requires_the_actual_unmodified_concern_api() {
                 .contains("unmodified ActiveSupport::Concern"),
             "wrong refusal: {error}"
         );
+    }
+}
+
+#[test]
+fn configuration_refuses_extension_only_reopenings() {
+    for separate_file in [false, true] {
+        for extension_first in [false, true] {
+            let extension = "module WindowSettings\n extend OtherDSL\nend\n";
+            let combined = if extension_first {
+                format!("{extension}{WINDOW_SETTINGS}")
+            } else {
+                format!("{WINDOW_SETTINGS}{extension}")
+            };
+            let mut files = vec![
+                ("app/controllers/concerns/window_settings.rb", if separate_file { WINDOW_SETTINGS } else { &combined }),
+                ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include WindowSettings\n configure_window mode: :month\nend\n"),
+            ];
+            if separate_file {
+                files.push((if extension_first {
+                    "app/controllers/concerns/a_extension.rb"
+                } else {
+                    "app/controllers/concerns/z_extension.rb"
+                }, extension));
+            }
+            let tree = files.into_iter()
+                .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+                .collect();
+            let error = ingest_app_from_tree(tree)
+                .expect_err("an extension-only reopen must invalidate framework identity");
+            assert!(error.to_string().contains("unmodified ActiveSupport::Concern"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn blog_target_copies_configuration_source_without_emitting_state() {
+    use roundhouse::project::{BuildTarget, target_files};
+
+    let mut app = configuration_app(WINDOW_SETTINGS, "configure_window mode: :month").unwrap();
+    roundhouse::session::analyze_and_lower(&mut app);
+    let root = std::env::temp_dir().join(format!("roundhouse-concern-blog-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("app/controllers/concerns")).unwrap();
+    std::fs::write(root.join("app/controllers/concerns/window_settings.rb"), WINDOW_SETTINGS).unwrap();
+    let result = target_files(&app, &root, BuildTarget::Blog);
+    std::fs::remove_dir_all(&root).unwrap();
+    let files = result.expect("Blog is a verbatim source target, not a transpiler");
+    assert_eq!(files.iter().find(|(path, _)| path == "app/controllers/concerns/window_settings.rb")
+        .map(|(_, source)| source.as_str()), Some(WINDOW_SETTINGS));
+    for target in [BuildTarget::Rust, BuildTarget::Roda] {
+        assert!(target_files(&app, std::path::Path::new("."), target).is_err());
     }
 }
 
