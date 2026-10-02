@@ -3293,6 +3293,7 @@ end
 fn class_variable_compound_writes_share_the_read_storage() {
     emit_and_run::real_blog()
         .write("app/services/counter_probe.rb", r#"class CounterProbe
+  @@count = nil
   def next_value
     @@count ||= 11
     @@count = @@count + 3
@@ -3306,6 +3307,7 @@ class CounterChild < CounterProbe
 end
 "#)
         .run_ruby(r#"
+raise "native nil initializer was dropped" unless CounterProbe.current.nil? && CounterChild.current.nil?
 raise "compound write and read used different storage" unless CounterChild.new.next_value == 14
 raise "class reader used per-class storage" unless CounterProbe.current == 14 && CounterChild.current == 14
 raise "class variable storage split across inheritance" unless CounterProbe.new.next_value == 17

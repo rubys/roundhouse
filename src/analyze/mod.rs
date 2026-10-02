@@ -2704,6 +2704,9 @@ impl Analyzer {
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false,
             };
 
+            for initializer in &mut lc.class_ivar_initializers {
+                self.body_typer().analyze_expr(initializer, &class_ctx);
+            }
             let lc_name = lc.name.clone();
             for method in &mut lc.methods {
                 // A default is an expression of the class body too, and

@@ -75,6 +75,11 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     for view in &app.views {
         diagnose_expr(&view.body, &mut out);
     }
+    for class in &app.library_classes {
+        for initializer in &class.class_ivar_initializers {
+            diagnose_expr(initializer, &mut out);
+        }
+    }
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }

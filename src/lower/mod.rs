@@ -1150,6 +1150,9 @@ pub(crate) fn for_each_hook_body(
         for call in &mut lc.unknown_calls {
             f(call);
         }
+        for initializer in &mut lc.class_ivar_initializers {
+            f(initializer);
+        }
     }
     // `config/application.rb`. `App::rails_application` is a
     // `LibraryClass` that EMITS but is not in `library_classes`, so
@@ -1168,6 +1171,9 @@ pub(crate) fn for_each_hook_body(
         }
         for call in &mut lc.unknown_calls {
             f(call);
+        }
+        for initializer in &mut lc.class_ivar_initializers {
+            f(initializer);
         }
     }
     for controller in &mut app.controllers {
@@ -1270,6 +1276,9 @@ pub(crate) fn for_each_hook_body_ref(
         for call in &lc.unknown_calls {
             f(call);
         }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
+        }
     }
     // Same set as the mutable twin — see the note there.
     if let Some(lc) = &app.rails_application {
@@ -1282,6 +1291,9 @@ pub(crate) fn for_each_hook_body_ref(
         }
         for call in &lc.unknown_calls {
             f(call);
+        }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
         }
     }
     for controller in &app.controllers {

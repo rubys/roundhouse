@@ -171,8 +171,14 @@ pub fn ingest_rails_application_singleton_methods(
         if path.join("::") != "Rails" {
             continue;
         }
-        let (_includes, methods, _constants, _unknown) =
+        let (_includes, methods, _constants, _unknown, initializers) =
             walk_decl_body(sc.body(), &owner, file, false)?;
+        if !initializers.is_empty() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "Rails application singleton class-variable initialization is not modeled".into(),
+            });
+        }
         out.extend(methods);
     }
     Ok(out)
@@ -227,7 +233,7 @@ pub(super) fn library_class_and_struct_base(
         None => parent,
     };
 
-    let (mut includes, mut methods, mut constants, mut unknown_calls) =
+    let (mut includes, mut methods, mut constants, mut unknown_calls, class_initializers) =
         walk_decl_body(class.body(), &owner, file, false)?;
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
@@ -299,7 +305,7 @@ pub(super) fn library_class_and_struct_base(
             origin: None,
             constants,
             unknown_calls,
-            class_ivar_initializers: Vec::new(),
+            class_ivar_initializers: class_initializers,
         },
         base,
     ))
@@ -1053,7 +1059,7 @@ fn library_class_from_module_node_with_scope(
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
     let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
-    let (includes, methods, constants, unknown_calls) =
+    let (includes, methods, constants, unknown_calls, class_initializers) =
         walk_decl_body_with_visibility(module.body(), &owner, file, false, &visibility)?;
     Ok(LibraryClass {
         name: owner,
@@ -1065,7 +1071,7 @@ fn library_class_from_module_node_with_scope(
         origin: None,
         constants,
         unknown_calls,
-        class_ivar_initializers: Vec::new(),
+        class_ivar_initializers: class_initializers,
     })
 }
 
@@ -1081,7 +1087,7 @@ fn library_class_from_module_node_with_scope(
 /// `class << self` block; it overrides every synthesized method's
 /// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
 /// `class << self` produces class-level getter/setter pairs.
-type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>, Vec<Expr>);
+type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>, Vec<Expr>, Vec<Expr>);
 
 /// Receiverless class-body calls that are NOT safe to capture into
 /// `unknown_calls`, because their meaning depends on where they sit
@@ -1270,6 +1276,7 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut methods: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     let mut unknown_calls: Vec<Expr> = Vec::new();
+    let mut class_initializers: Vec<Expr> = Vec::new();
     let mut class_attributes: HashSet<Symbol> = HashSet::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
@@ -1290,7 +1297,7 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut direct_def_positions: Vec<usize> = Vec::new();
 
     let Some(b) = body else {
-        return Ok((includes, methods, constants, unknown_calls));
+        return Ok((includes, methods, constants, unknown_calls, class_initializers));
     };
 
     let statements = flatten_statements(b);
@@ -1368,21 +1375,20 @@ fn walk_decl_body_with_visibility<'pr>(
             constants.push((name, value));
             continue;
         }
-        // `@@X = nil` class-body initializer. The corpus pairs these with
-        // `cattr_accessor` (extras/keybase, github, twitter) — class-var
-        // reads in class-method bodies normalize to class-level ivars
-        // (see below), and an unset class-level ivar already reads nil,
-        // so the nil form drops as semantically exact. A non-nil
-        // initializer would be silently lost; refuse it loudly until one
-        // exists.
-        if let Some(cvw) = stmt.as_class_variable_write_node() {
-            let value = ingest_expr(&cvw.value(), file)?;
-            if !matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+        // Retain native nil initialization in source order. Only a declared
+        // cattr/mattr storage approximation may drop it, after the whole body
+        // has been walked. Non-nil initializers remain outside this slice.
+        if stmt.as_class_variable_write_node().is_some() {
+            let initializer = ingest_expr(&stmt, file)?;
+            if !matches!(&*initializer.node, ExprNode::Assign { value, .. }
+                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }))
+            {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: "class-variable initializer with non-nil value".into(),
                 });
             }
+            class_initializers.push(initializer);
             continue;
         }
         if let Some(def) = stmt.as_def_node() {
@@ -1392,12 +1398,13 @@ fn walk_decl_body_with_visibility<'pr>(
             // / `module ClassMethods`, and (like those) contributes no
             // `included` method of its own.
             if let Some(singleton_body) = included_hook_class_methods_body(&def) {
-                let (inner_includes, inner_methods, inner_constants, inner_unknown) =
+                let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
                     walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
                 unknown_calls.extend(inner_unknown);
+                class_initializers.extend(inner_initializers);
                 continue;
             }
             if has_class_methods && is_class_methods_bridge(&def) {
@@ -1421,12 +1428,13 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            let (inner_includes, inner_methods, inner_constants, inner_unknown) =
+            let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
                 walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?;
             includes.extend(inner_includes);
             methods.extend(inner_methods);
             constants.extend(inner_constants);
             unknown_calls.extend(inner_unknown);
+            class_initializers.extend(inner_initializers);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -1440,12 +1448,13 @@ fn walk_decl_body_with_visibility<'pr>(
         // reason — otherwise the same defs would emit twice.
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
-                let (inner_includes, inner_methods, inner_constants, inner_unknown) =
+                let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
                     walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
                 unknown_calls.extend(inner_unknown);
+                class_initializers.extend(inner_initializers);
                 continue;
             }
         }
@@ -1459,12 +1468,13 @@ fn walk_decl_body_with_visibility<'pr>(
                 // registry's concern fold copies them onto includers.
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
-                        let (inner_includes, inner_methods, inner_constants, inner_unknown) =
+                        let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
                             walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?;
                         includes.extend(inner_includes);
                         methods.extend(inner_methods);
                         constants.extend(inner_constants);
                         unknown_calls.extend(inner_unknown);
+                        class_initializers.extend(inner_initializers);
                         continue;
                     }
                 }
@@ -1729,12 +1739,22 @@ fn walk_decl_body_with_visibility<'pr>(
             normalize_classvars_to_ivars(&mut m.body, &class_attributes);
         }
     }
+    class_initializers.retain(|expr| !matches!(&*expr.node,
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            if name.as_str().strip_prefix("@@").is_some_and(|bare|
+                class_attributes.iter().any(|attr| attr.as_str() == bare))));
 
-    Ok((includes, methods, constants, unknown_calls))
+    if !class_initializers.is_empty()
+        && (!unknown_calls.is_empty() || !constants.is_empty() || !includes.is_empty())
+    {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "native class-variable initialization alongside other class-body declarations requires source ordering".into(),
+        });
+    }
+    Ok((includes, methods, constants, unknown_calls, class_initializers))
 }
 
-/// Rewrite `@@X` (ingested as a sigil-verbatim `Var`) to `Ivar { X }`,
-/// both in read position and as an `Assign` target.
 /// Match the `Rails.application.routes.url_helpers` receiver chain (a
 /// nested CallNode ladder rooted at the `Rails` constant).
 fn is_rails_url_helpers_chain(node: &ruby_prism::Node<'_>) -> bool {
@@ -1764,6 +1784,8 @@ fn is_rails_url_helpers_chain(node: &ruby_prism::Node<'_>) -> bool {
     }
 }
 
+/// Only declared cattr/mattr reads use the existing class-ivar approximation.
+/// Ordinary class-variable reads retain native shared inheritance storage.
 fn normalize_classvars_to_ivars(e: &mut Expr, class_attributes: &HashSet<Symbol>) {
     match &mut *e.node {
         ExprNode::Var { name, .. } if name.as_str().starts_with("@@")

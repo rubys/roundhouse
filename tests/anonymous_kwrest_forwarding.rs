@@ -66,6 +66,7 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
         ("class Probe; def self.call; defined?(MissingPr197); end; end", "runtime defined? query"),
         ("class Probe; def call; @@count ||= 11; @@count; end; end", "class variable write"),
         ("class Probe; def self.call; @@count; end; end", "class variable read"),
+        ("class Probe; @@count = nil; end", "class variable write"),
     ] {
         let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).unwrap();
         roundhouse::session::analyze_and_lower(&mut app);

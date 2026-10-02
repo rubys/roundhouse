@@ -1713,3 +1713,19 @@ fn native_classvar_writes_cannot_split_modeled_cattr_storage() {
         assert!(err.to_string().contains("alongside cattr/mattr storage"), "{err}");
     }
 }
+
+#[test]
+fn native_classvar_initialization_uses_owned_initializer_ir() {
+    let classes = roundhouse::ingest::ingest_library_classes(
+        b"class Probe; @@count = nil; def self.current; @@count; end; end", "probe.rb",
+    ).unwrap();
+    assert!(classes[0].unknown_calls.is_empty());
+    assert!(matches!(&*classes[0].class_ivar_initializers[0].node,
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "@@count"));
+    for declaration in ["arbitrary_dsl", "INITIAL = @@count", "include Other"] {
+        let source = format!("class Probe; @@count = nil; {declaration}; end");
+        let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+            .expect_err("separate class-body buckets cannot preserve interleaving");
+        assert!(err.to_string().contains("requires source ordering"), "{err}");
+    }
+}
