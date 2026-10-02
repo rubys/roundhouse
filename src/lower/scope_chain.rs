@@ -1359,6 +1359,8 @@ pub fn all_scope_names(scopes: &ScopeRegistry) -> HashSet<Symbol> {
 /// surface must be visible to the ordinary relation-threading pass.
 /// Never erase reflection on arbitrary user methods: `send` can call a
 /// private helper where `public_send` and a direct receiver call cannot.
+/// Ingest refuses visibility changes on generated DSL methods without a
+/// local MethodDef; local overrides are vetoed by `app_method` below.
 pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: &AssocRegistry) {
     expr.node
         .for_each_child_mut(&mut |child| ground_literal_model_dispatch(child, app, assocs));

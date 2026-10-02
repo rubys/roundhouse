@@ -1437,7 +1437,20 @@ pub(crate) fn build_class_info(
         };
         method_map
             .entry(m.name.clone())
-            .or_insert_with(|| inferred.clone());
+            .or_insert_with(|| Ty::Fn {
+                // Retain the calling convention too: a positional Hash
+                // default must still normalize keyword syntax into a Hash.
+                // Unsigned methods retain default types, not call-site seeds.
+                params: m.params.iter().map(|p| crate::ty::Param {
+                    name: p.name.clone(),
+                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::Untyped),
+                    kind: p.ty_kind(),
+                }).collect(),
+                block: (m.block_param.is_some() || m.has_anonymous_block)
+                    .then(|| Box::new(Ty::Untyped)),
+                ret: Box::new(inferred.clone()),
+                effects: m.effects.clone(),
+            });
         kind_map.entry(m.name.clone()).or_insert(m.kind);
     }
 
@@ -2186,11 +2199,37 @@ mod tests {
         assert_eq!(
             info.instance_methods
                 .get(&Symbol::from("positioning_parent")),
-            Some(&Ty::Class {
+            Some(&fn_sig(vec![], Ty::Class {
                 id: ClassId(Symbol::from("Book")),
                 args: vec![]
-            })
+            }))
         );
+    }
+
+    #[test]
+    fn inferred_record_return_keeps_positional_hash_and_keyword_call_shapes() {
+        for (formal, positional) in [("options = {}", true), ("options: {}", false)] {
+            let app = app(&format!(
+                "  belongs_to :book\n  def parent_for({formal})\n    book\n  end\n  def probe\n    parent_for(title: 'asymmetric')\n  end"
+            ));
+            let mut methods = article_methods(&app);
+            let record = Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] };
+            let parent = methods.iter_mut().find(|m| m.name.as_str() == "parent_for").unwrap();
+            parent.body.ty = Some(record.clone());
+            parent.params[0].default.as_mut().unwrap().ty = Some(Ty::Hash {
+                key: Box::new(Ty::Sym), value: Box::new(Ty::Str),
+            });
+            let classes = HashMap::from([
+                (ClassId(Symbol::from("Article")), article_info(&app, &methods)),
+            ]);
+            let probe = methods.iter_mut().find(|m| m.name.as_str() == "probe").unwrap();
+            probe.enclosing_class = Some(Symbol::from("Article"));
+            type_method_body(probe, &classes, None, None);
+            assert_eq!(probe.body.ty, Some(record), "{formal}");
+            let ExprNode::Send { args, .. } = &*probe.body.node else { panic!("probe call") };
+            assert!(matches!(&*args[0].node, ExprNode::Hash { kwargs, .. } if *kwargs != positional),
+                "lost call convention for {formal}: {:?}", probe.body);
+        }
     }
 
     #[test]

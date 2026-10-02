@@ -213,6 +213,38 @@ fn generated_public_association_and_scope_form_a_threaded_direct_chain() {
 }
 
 #[test]
+fn generated_visibility_changes_are_refused_before_dispatch_grounding() {
+    for (declaration, visibility) in [
+        ("has_many :comments", "private :comments"),
+        ("scope :recent, -> { order(:id) }", "private_class_method :recent"),
+    ] {
+        let files = HashMap::from([
+            (PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n  create_table :articles do |t|; t.string :title; end\nend\n".to_vec()),
+            (PathBuf::from("app/models/article.rb"), format!(
+                "class Article < ApplicationRecord\n  {declaration}\n  {visibility}\nend\n"
+            ).into_bytes()),
+        ]);
+        let error = ingest_app_from_tree(files).expect_err("generated visibility is not modeled");
+        assert!(matches!(error, roundhouse::ingest::IngestError::Unsupported { message, .. }
+            if message.contains("requires an already defined local method")), "{visibility}");
+    }
+    let app = app();
+    let assocs = roundhouse::lower::scope_chain::build_assoc_registry(&app.models);
+    for dispatcher in ["send", "__send__", "public_send"] {
+        let source = format!("self.{dispatcher}(:comments)");
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let statement = parsed.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut body = roundhouse::ingest::ingest_expr(&statement, "probe.rb").unwrap();
+        let ExprNode::Send { recv: Some(recv), .. } = &mut *body.node else { panic!("dispatch call") };
+        recv.ty = Some(roundhouse::ty::Ty::Class {
+            id: roundhouse::ident::ClassId(roundhouse::Symbol::from("Article")), args: vec![],
+        });
+        roundhouse::lower::scope_chain::ground_literal_model_dispatch(&mut body, &app, &assocs);
+        assert_eq!(ruby::emit_expr(&body), "self.comments", "{dispatcher}");
+    }
+}
+
+#[test]
 fn custom_dispatcher_and_custom_association_reader_preserve_reflection() {
     let files = output();
     let dispatcher = emitted(&files, "app/models/dispatcher_post.rb");
