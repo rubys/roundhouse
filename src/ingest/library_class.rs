@@ -2508,11 +2508,15 @@ fn framework_shadow_scopes(
                 }
                 return;
             };
-            if let Some(index) = path.iter().position(|name| name == "ActiveSupport") {
-                let parent = path[..index].to_vec();
-                self.out.insert(parent.clone());
+            let parent = match path.as_slice() {
+                [parent @ .., name] if name == "ActiveSupport" => Some(parent),
+                [parent @ .., namespace, name] if namespace == "ActiveSupport" && name == "Concern" => Some(parent),
+                _ => None,
+            };
+            if let Some(parent) = parent {
+                self.out.insert(parent.to_vec());
                 let mut relative = self.scope.clone();
-                relative.extend(parent);
+                relative.extend_from_slice(parent);
                 self.out.insert(relative);
             }
         }

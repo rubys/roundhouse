@@ -3,6 +3,7 @@
 pub const CONCERN: &str = r#"
 module ActiveSupport
 end
+ActiveSupport::Unrelated = 1
 
 module WindowSettings
   extend ActiveSupport::Concern

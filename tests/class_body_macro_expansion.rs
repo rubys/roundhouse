@@ -678,6 +678,22 @@ fn configuration_refuses_lexically_shadowed_framework_constants() {
     assert_eq!(app.controllers[0].class_methods().count(), 2);
 
     for prefix in [
+        "ActiveSupport::Unrelated = 1",
+        "ActiveSupport::Unrelated ||= 1",
+        "ActiveSupport::Unrelated, other = 1, 2",
+        "ActiveSupport::Inflector::FOO = 1",
+        "module ActiveSupport; Unrelated = 1; end",
+    ] {
+        let tree = [
+            ("lib/framework_identity.rb", prefix),
+            ("app/controllers/concerns/window_settings.rb", WINDOW_SETTINGS),
+            ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include WindowSettings\n configure_window mode: :month\nend\n"),
+        ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+        let app = ingest_app_from_tree(tree).unwrap_or_else(|error| panic!("{prefix}: {error}"));
+        assert_eq!(app.controllers[0].class_methods().count(), 2, "{prefix}");
+    }
+
+    for prefix in [
         "ActiveSupport = String",
         "ActiveSupport ||= String",
         "ActiveSupport &&= String",
