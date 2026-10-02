@@ -32,6 +32,36 @@ roundhouse --target LANG [-o OUT] [INPUT] [--survey] [--allow-unsupported]
   files a previous run left behind are not removed, so regenerate into
   a clean directory when the app has lost files.
 
+## Test folders
+
+Roundhouse reads every `.rb` file recursively from these folders by default:
+
+- `test/models`
+- `test/controllers`
+- `test/helpers`
+- `test/channels`
+- `test/lib`
+- `test/unit`
+- `test/utils`
+
+The app root can contain a `roundhouse.yml` file that adds folders:
+
+```yaml
+test_paths:
+  - test/custom
+  - quality/specs
+```
+
+`test_paths` adds folders. It does not replace the default folders. Each
+value must name a literal directory relative to the app root. Roundhouse
+does not expand globs, environment variables, or `~`. A configuration
+error stops ingestion.
+Roundhouse rejects a configured path with a symbolic link. It does not
+follow symbolic links below selected folders.
+
+Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
+`test/fixtures/` outside this folder list.
+
 Transpilation is the analysis from [`check.md`](check.md) followed by
 lowering and emit. It requires zero analysis errors and a runtime for
 the modeled constructs on the selected target. A clean target-independent
@@ -150,8 +180,8 @@ then the target's build and run commands from its README — for Rust,
 Emitted code is meant to be read. Method names, file layout and the
 order of things follow the Ruby they came from; the runtime library is
 a few files of ordinary code in the target language, not a framework.
-The emitted tests are the app's own model and controller tests,
-translated the same way the app is.
+The emitted tests come from the default test folders and any additional
+folders in `roundhouse.yml`.
 
 ## Regenerating
 

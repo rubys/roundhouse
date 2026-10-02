@@ -33,6 +33,29 @@ fn a_directory_without_app_is_not_a_clean_app() {
 }
 
 #[test]
+fn malformed_test_path_configuration_is_not_a_clean_app() {
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse_bad_test_paths_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("app")).expect("create app directory");
+    std::fs::write(root.join("roundhouse.yml"), "test_paths: test/unit\n").expect("write config");
+    let app = root.to_str().expect("temporary path");
+
+    for mode in ["--strict", "--continue"] {
+        let (code, error) = check(&[mode, app]);
+        assert_eq!(code, 2, "{error}");
+        assert!(error.contains("roundhouse.yml"), "{error}");
+    }
+
+    std::fs::remove_dir_all(root).expect("remove temporary app");
+}
+
+#[test]
 fn the_store_fixture_checks_clean() {
     let store = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/store");
     let (code, err) = check(&[store]);
