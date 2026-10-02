@@ -156,6 +156,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::Const { .. }
         | N::Retry
         | N::Redo
+        | N::ForwardArgs
         | N::SelfRef => {}
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
@@ -231,7 +232,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         N::Next { value } | N::Break { value } => {
             if let Some(v) = value { count_gradual_recurse(v, total); }
         }
-        N::Splat { value } => count_gradual_recurse(value, total),
+        N::Splat { value } | N::KeywordSplat { value } => count_gradual_recurse(value, total),
         N::MultiAssign { value, .. } => count_gradual_recurse(value, total),
         N::While { cond, body, .. } => {
             count_gradual_recurse(cond, total);
@@ -257,6 +258,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
@@ -376,7 +378,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(v, &format!("{path}/next.value"), out);
             }
         }
-        ExprNode::Splat { value } => {
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
             collect_untyped(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
@@ -1479,7 +1481,14 @@ fn every_runtime_method_body_concretely_typed() {
     // error messages once @table holds the SQL spelling. These are
     // three additional gradual sites through the existing untyped
     // model contract, not new untyped signatures or relaxed Bar A.
-    const CEILING: usize = 510;
+    //
+    // 510 -> 519: Relation's array finder, NINE sites net (relation.rb
+    // 229 -> 238; original baseline 226 -> 235, MEASURED).
+    // Inputs are concrete Integer/String scalars
+    // or arrays, NOT untyped. The residual is the model-dependent keys
+    // and hydrated records read from the existing dynamic model seam,
+    // as in the set operators above. No parameter contract was erased.
+    const CEILING: usize = 519;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -485,10 +485,14 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // Explicit / Resources produce. Inside a namespace, `root`
             // maps the scope's own prefix (`GET /admin` →
             // `admin_root`).
+            // `camelize_path`: a namespaced target (`root to:
+            // "rails/health#show"`, the Rails 7.1+ health check) names
+            // `Rails::HealthController`; `camelize` kept the slash and
+            // the dispatch read `Rails/healthController.new`.
             let controller_class = format!(
                 "{}{}Controller",
                 ctx.module_prefix,
-                naming::camelize(&controller_name)
+                naming::camelize_path(&controller_name)
             );
             let path =
                 if ctx.ns_path.is_empty() { "/".to_string() } else { ctx.ns_path.clone() };

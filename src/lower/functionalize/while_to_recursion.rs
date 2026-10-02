@@ -240,6 +240,8 @@ fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
 
     let helper = MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: helper_name,
         // Same receiver as the entry: an instance-method loop's helper is
@@ -650,7 +652,10 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
             walk_lvalue(target, f);
             walk(value, f);
         }
-        ExprNode::Return { value } | ExprNode::Raise { value } | ExprNode::Splat { value } => {
+        ExprNode::Return { value }
+        | ExprNode::Raise { value }
+        | ExprNode::Splat { value }
+        | ExprNode::KeywordSplat { value } => {
             walk(value, f)
         }
         ExprNode::Next { value } | ExprNode::Break { value } => {
@@ -758,6 +763,8 @@ mod tests {
     fn method(name: &str, receiver: MethodReceiver, params: &[&str], body: Expr) -> MethodDef {
         MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: sym(name),
             receiver,

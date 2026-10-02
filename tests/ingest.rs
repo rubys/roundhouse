@@ -1542,24 +1542,17 @@ fn block_arg_stabby_lambda_and_proc_desugar_to_lambda() {
 }
 
 #[test]
-fn block_arg_ivar_and_call_result_have_specific_ledger_messages() {
-    fn parse_one_err(source: &[u8]) -> String {
+fn block_arg_ivar_and_call_result_preserve_the_forwarded_expression() {
+    for (source, is_ivar) in [(b"[1, 2].each(&@callback)".as_slice(), true), (b"[1, 2].each(&compute(1))".as_slice(), false)] {
         let result = ruby_prism::parse(source);
         let program = result.node();
-        let prog = program.as_program_node().unwrap();
-        let stmt = prog.statements().body().iter().next().unwrap();
-        match roundhouse::ingest::ingest_expr(&stmt, "<literal>") {
-            Err(roundhouse::ingest::IngestError::Unsupported { message, .. }) => message,
-            other => panic!("expected Unsupported, got {other:?}"),
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<literal>").expect("block operand ingests");
+        let ExprNode::Send { block: Some(block), .. } = &*expr.node else { panic!("missing block operand") };
+        if is_ivar {
+            assert!(matches!(&*block.node, ExprNode::Ivar { name } if name.as_str() == "callback"));
+        } else {
+            assert!(matches!(&*block.node, ExprNode::Send { method, args, .. } if method.as_str() == "compute" && args.len() == 1));
         }
     }
-
-    assert_eq!(
-        parse_one_err(b"[1, 2].each(&@callback)"),
-        "block argument is an instance variable"
-    );
-    assert_eq!(
-        parse_one_err(b"[1, 2].each(&compute(1))"),
-        "block argument is a call result"
-    );
 }

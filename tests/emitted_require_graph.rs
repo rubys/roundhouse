@@ -171,3 +171,138 @@ fn bundled_requires_are_written_for_every_target() {
         assert_no_missing_bundled_requires(&files, label);
     }
 }
+
+#[test]
+fn bundled_class_constants_are_ledgered_only_on_targets_without_them() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("app/controllers/probes_controller.rb", r#"class ProbesController < ActionController::Base
+  def index
+    [URI::HTTP, URI::InvalidURIError, Net::OpenTimeout, Net::ReadTimeout,
+     Net::HTTPRedirection, Net::HTTPOK, StringIO, OpenSSL::OpenSSLError,
+     Rails::HTML5::SafeListSanitizer, JSON]
+  end
+end
+"#),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [
+        BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel,
+        BuildTarget::Go, BuildTarget::Rust, BuildTarget::Typescript,
+        BuildTarget::TypescriptWorker, BuildTarget::Python, BuildTarget::Elixir,
+        BuildTarget::Crystal, BuildTarget::Kotlin, BuildTarget::Swift, BuildTarget::CSharp,
+    ] {
+        let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        files.expect("target files");
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "bundled_constant"
+        )).collect();
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Spinel) {
+            assert!(gaps.is_empty(), "{target:?}: {gaps:?}");
+        } else if target == BuildTarget::Jruby {
+            assert_eq!(gaps.len(), 1, "{gaps:?}");
+            assert!(gaps[0].message.contains("Rails::HTML5::SafeListSanitizer"));
+            assert_eq!(gaps[0].severity, roundhouse::diagnostic::Severity::Error);
+            assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
+        } else {
+            assert_eq!(gaps.len(), 10, "{target:?}: {gaps:?}");
+            for name in ["URI::HTTP", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+                "Net::HTTPRedirection", "Net::HTTPOK", "StringIO", "OpenSSL::OpenSSLError",
+                "Rails::HTML5::SafeListSanitizer", "JSON"] {
+                let gap = gaps.iter().find(|d| d.message.contains(name)).expect(name);
+                assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
+                assert!(!gap.span.is_synthetic(), "{gap:?}");
+                match &gap.kind {
+                    roundhouse::diagnostic::DiagnosticKind::Unsupported { target: Some(name), .. } => assert_eq!(name.as_str(), target.as_str()),
+                    other => panic!("wrong target on {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bundled_constant_gate_follows_aliases_but_not_app_defined_classes() {
+    for app_defines_class in [false, true] {
+        let source = "class ProbesController < ActionController::Base\n  Timeout = Net::OpenTimeout\n  def index\n    Timeout\n  end\nend\n";
+        let mut tree: std::collections::HashMap<_, _> = [
+            (PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+            (PathBuf::from("app/controllers/probes_controller.rb"), source.as_bytes().to_vec()),
+        ].into_iter().collect();
+        if app_defines_class {
+            tree.insert(PathBuf::from("app/models/net/open_timeout.rb"), b"module Net\n  class OpenTimeout\n  end\nend\n".to_vec());
+        }
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+        analysis.extend(roundhouse::analyze::diagnose(&app));
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), BuildTarget::Go).expect("target files")
+        });
+        let rejected = analysis.iter().chain(&diags).any(|d| {
+            d.severity == roundhouse::diagnostic::Severity::Error && matches!(
+                &d.kind,
+                roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                    if matches!(construct.as_str(), "constant" | "bundled_constant")
+            )
+        });
+        assert_eq!(rejected, !app_defines_class, "app-defined={app_defines_class}: {analysis:?}; {diags:?}");
+    }
+}
+
+#[test]
+fn an_app_model_is_not_mistaken_for_a_bundled_class() {
+    let tree = [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :open_timeouts do |t|\n    t.string :name\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("app/models/net/open_timeout.rb", "module Net\n  class OpenTimeout < ActiveRecord::Base\n  end\nend\n"),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    Net::OpenTimeout\n  end\nend\n"),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    assert!(app.models.iter().any(|model| model.name.0.as_str() == "Net::OpenTimeout"));
+    let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, Path::new("."), BuildTarget::Go).expect("target files")
+    });
+    assert!(!diags.iter().any(|d| matches!(
+        &d.kind,
+        roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "bundled_constant"
+    )), "{diags:?}");
+}
+
+#[test]
+fn mapped_json_receivers_do_not_hide_unsupported_arguments_or_methods() {
+    for (body, rejected) in [
+        ("JSON.generate(42)", false),
+        ("JSON.generate(Net::HTTPOK)", true),
+        ("JSON.parse(\"42\")", true),
+        ("JSON", true),
+    ] {
+        let tree = [
+            (PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+            (PathBuf::from("app/controllers/probes_controller.rb"), format!("class ProbesController < ActionController::Base\n  def index\n    {body}\n  end\nend\n").into_bytes()),
+        ].into_iter().collect();
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+        roundhouse::session::analyze_and_lower(&mut app);
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), BuildTarget::Go).expect("target files")
+        });
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "bundled_constant"
+        )).collect();
+        assert_eq!(!gaps.is_empty(), rejected, "{body}: {gaps:?}");
+        if body == "JSON.generate(Net::HTTPOK)" {
+            assert_eq!(gaps.len(), 1, "{gaps:?}");
+            assert!(gaps[0].message.contains("Net::HTTPOK"));
+        }
+    }
+}

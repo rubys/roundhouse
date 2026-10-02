@@ -594,6 +594,7 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => false,
         ExprNode::Hash { entries, .. } => entries
             .iter()
@@ -648,7 +649,7 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             value.as_ref().map_or(false, |v| walk_expr(v, pred))
         }
-        ExprNode::Splat { value } => walk_expr(value, pred),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk_expr(value, pred),
         ExprNode::MultiAssign { targets, value } => {
             targets.iter().any(|t| walk_lvalue(t, pred)) || walk_expr(value, pred)
         }
@@ -696,6 +697,8 @@ mod tests {
     fn synth_method(name: &str) -> MethodDef {
         MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Instance,
@@ -1103,6 +1106,8 @@ mod tests {
             module_path: vec![],
             name: Symbol::from(name),
             params: vec![],
+            unsupported_formals: None,
+            has_anonymous_block: false,
             body,
             signature: None,
             effects: crate::effect::EffectSet::default(),

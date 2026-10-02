@@ -86,6 +86,8 @@ fn build_direct_helper(
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
         params,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: None,
         effects: Default::default(),

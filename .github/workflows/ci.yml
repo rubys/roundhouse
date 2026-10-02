@@ -5,8 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `ready_for_review`: a draft runs `unit` alone, so leaving draft has to start the full run.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # Drafts run fixture + unit only. Leaving draft starts the full run;
+    # returning to draft cancels the superseded full run via concurrency.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # Not on `push`: every commit on main keeps a full run.
     paths-ignore: ['**.md', 'docs/**']
 
@@ -42,24 +43,37 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Fetch pinned Writebook source
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
           mkdir /tmp/writebook
           tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      - name: Look for an identical successful PR execution
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job writebook-inventory --input /tmp/writebook
       - name: Build Roundhouse and run inventory
+        id: inventory
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         env:
           WRITEBOOK_ROOT: /tmp/writebook
           WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
         run: |
-          cargo build --release --bin roundhouse
-          cargo test --test writebook --release -- --ignored --nocapture
+          cargo build --locked --release --bin roundhouse
+          cargo test --locked --test writebook --release -- --ignored --nocapture
       - name: Save complete check report
-        if: always()
+        id: report
+        if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
         env:
           WRITEBOOK_ROOT: /tmp/writebook
         run: |
@@ -84,6 +98,20 @@ jobs:
             writebook-check.txt
             writebook-inventory-current.json
             tests/fixtures/writebook-inventory.json
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.inventory.outcome == 'success' && steps.report.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job writebook-inventory --outcome '${{ steps.inventory.outcome }}' --outcome '${{ steps.report.outcome }}'
+      - name: Save execution receipt and reports
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-writebook-inventory-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Generate the real-blog fixture once, upload as artifact. Every
@@ -141,9 +169,12 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       # generate-fixture already builds the store and runs the guide's
       # Rails tests before uploading it; analyze that same source tree.
@@ -152,13 +183,38 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Look for an identical successful PR execution
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job store-check --input fixtures/store
       - name: cargo build
-        run: cargo build --release --bin roundhouse
+        id: build
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        run: cargo build --locked --release --bin roundhouse
       - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
+        id: check
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: |
           set -euo pipefail
           target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.build.outcome == 'success' && steps.check.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job store-check --outcome '${{ steps.build.outcome }}' --outcome '${{ steps.check.outcome }}'
+      - name: Save execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-store-check-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
@@ -184,7 +240,7 @@ jobs:
       WASI_SDK_VERSION: "33.0"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
@@ -260,10 +316,23 @@ jobs:
           ref: master
           path: spinel-src
       - name: Set up sccache
+        id: sccache
+        # A release-download outage must not prevent the compiler from building.
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
+          # Its post hook assumes installation succeeded; report stats below.
+          disable_annotations: true
+      - name: Build without compiler cache when installation fails
+        if: steps.sccache.outcome != 'success'
+        run: |
+          echo '::warning::sccache installation failed; building Spinel without compiler cache.'
+          echo 'sccache installation failed; Spinel will build without compiler cache. This is not a compiler failure or a skipped build.' >> "$GITHUB_STEP_SUMMARY"
+          # Explicitly bypass even a preinstalled or partially installed cache.
+          echo 'NO_CCACHE=1' >> "$GITHUB_ENV"
       - name: Restore Spinel compiler cache
+        if: steps.sccache.outcome == 'success'
         # Persist only sccache's C compilation store, not build outputs.
         # A new key saves refreshed entries as unpinned Spinel advances;
         # sccache validates compiler, flags, source and header contents.
@@ -273,12 +342,16 @@ jobs:
           key: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-
       - name: Start sccache server
+        if: steps.sccache.outcome == 'success'
         # Spinel's common.mk selects sccache automatically when on PATH.
         run: sccache --start-server
       - name: make deps (fetch vendored libprism)
         run: make -C spinel-src deps
       - name: make all
         run: make -C spinel-src all
+      - name: Show compiler cache statistics
+        if: steps.sccache.outcome == 'success'
+        run: sccache --show-stats
       - name: Stage artifact tree
         # `make all` now builds a single `spinel` binary (a top-level symlink
         # to bin/spinel) plus the `spinel_rbs_extract` sidecar under build/;
@@ -338,7 +411,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -366,6 +439,10 @@ jobs:
           ruby-version: '3.4'
       - name: Install the gem the overlay escape surface uses
         run: gem install rails-html-sanitizer --no-document
+      # The native Date reference uses ActiveRecord against in-memory
+      # SQLite. Fixture generation ships source, not its installed gems.
+      - name: Install ActiveRecord for the native Date reference
+        run: gem install activerecord -v '~> 8.1.0' --no-document
       # `tests/emit_and_run.rs` and `tests/relation_runtime_cruby.rs`
       # run the emitted Ruby tree, whose database layer is the sqlite3
       # gem. The second skipped without it and passed: before this step
@@ -426,9 +503,14 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Use an explicit browser payload directory
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -445,9 +527,34 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Run SharedWorker browser smoke (emit → vite build → drive)
-        run: npm test
+      - name: Emit and build current SharedWorker project
+        run: npm run prebuild
         working-directory: tests/browser_smoke
+      - name: Find successful execution for identical SharedWorker inputs
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job browser-smoke-typescript --input tests/browser_smoke/.emitted
+      - name: Run SharedWorker browser smoke (emit → vite build → drive)
+        id: browser
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        run: npm run test-only
+        working-directory: tests/browser_smoke
+      - name: Record actual SharedWorker validation
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.reuse.outcome == 'success' && steps.browser.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job browser-smoke-typescript --outcome '${{ steps.browser.outcome }}'
+      - name: Upload SharedWorker execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-browser-smoke-typescript-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -624,7 +731,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -718,7 +825,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -799,7 +906,7 @@ jobs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -945,7 +1052,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1006,7 +1113,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1044,7 +1151,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -1491,7 +1598,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1584,13 +1691,16 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
         target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1663,8 +1773,20 @@ jobs:
           working-directory: ./fixtures/real-blog
       # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
       - name: cargo test --test framework_tests_rust (green subset)
+        id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          ROUNDHOUSE_CI_REUSE: ${{ github.event_name == 'pull_request' && 'rust-inflector' || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
+      - name: Upload actual inflector execution receipt
+        if: success() && matrix.target == 'rust' && steps.inflector.outcome == 'success' && steps.inflector.outputs.recorded == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-rust-inflector-${{ github.run_attempt }}
+          path: ${{ steps.inflector.outputs.bundle }}
+          retention-days: 7
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
@@ -1720,7 +1842,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1766,7 +1888,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1811,7 +1933,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -1886,19 +2008,24 @@ jobs:
     needs: build-site
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
         target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python, ruby, jruby]
     steps:
       - uses: actions/checkout@v5
+      - name: Use an explicit browser payload directory
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: browse-archives
           path: browse
       - name: Install Rust
         if: matrix.target == 'rust'
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
       - name: Refresh apt index
         if: matrix.target == 'crystal'
         run: sudo apt-get update -qq
@@ -1970,8 +2097,37 @@ jobs:
           cd e2e
           npm install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
+      - name: Resolve and find successful execution for identical Rust archive inputs
+        id: reuse
+        if: github.event_name == 'pull_request' && matrix.target == 'rust'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job smoke-rust --input browse/rust.tgz
       - name: scripts/smoke ${{ matrix.target }}
-        run: scripts/smoke --tgz browse/${{ matrix.target }}.tgz ${{ matrix.target }}
+        id: smoke
+        if: matrix.target != 'rust' || steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$TARGET" = rust ]; then
+            scripts/smoke --keep --work-dir "$RUNNER_TEMP/ci-smoke-validation" --tgz browse/rust.tgz rust
+          else
+            scripts/smoke --tgz "browse/$TARGET.tgz" "$TARGET"
+          fi
+      - name: Record actual pristine Rust archive validation
+        id: execution
+        if: success() && matrix.target == 'rust' && steps.reuse.outcome == 'success' && steps.reuse.outputs.eligible == 'true' && steps.smoke.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job smoke-rust --validation-dir "$RUNNER_TEMP/ci-smoke-validation/rust" --outcome '${{ steps.smoke.outcome }}'
+      - name: Upload Rust archive execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-smoke-rust-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
@@ -2058,7 +2214,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
@@ -2213,7 +2369,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
         with:
@@ -2445,8 +2601,11 @@ jobs:
       # render step degrades gracefully: if Hetzner is unreachable, the
       # `_site/bench/` directory simply isn't created and the landing
       # page's link 404s until the next CI cycle picks up fresh data.
+      # These historical reports have no PR test consumer. Fetch them only
+      # for publication; PRs still build the demos and all smoke archives.
       - name: Fetch latest bench data
         id: fetch-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party
         run: |
@@ -2477,6 +2636,7 @@ jobs:
       # the bench box doesn't blank the page.
       - name: Fetch latest lobsters bench data
         id: fetch-lobsters-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/lobsters
         run: |
@@ -2548,6 +2708,7 @@ jobs:
       # having one.
       - name: Fetch latest lobsters conformance data
         id: fetch-lobsters-specs
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/lobsters-specs
         run: |
@@ -2572,6 +2733,7 @@ jobs:
       # comparison rather than two unrelated measurements.
       - name: Fetch latest campfire bench data
         id: fetch-campfire-bench
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/campfire
         run: |
@@ -2627,6 +2789,7 @@ jobs:
       # roundbench.showcase.party/campfire-suite/.
       - name: Fetch latest compiled campfire conformance data
         id: fetch-campfire-suite-spinel
+        if: github.ref == 'refs/heads/main'
         env:
           BENCH_URL: https://roundbench.showcase.party/campfire-suite
         run: |
@@ -2652,11 +2815,13 @@ jobs:
           path: _site/browse/*.tgz
 
       - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5
         with:
           name: site-base
           path: _site
 
+  # Publication only: PR smoke jobs consume browse-archives, not Pages.
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
   assemble-site:
     # campfire-conformance is here for ORDERING ONLY — its summary.json is
@@ -2668,7 +2833,7 @@ jobs:
     # artifact degrades to a skipped render and a warning, not a broken
     # site build.
     needs: [build-site, campfire-conformance, build-campfire-archive]
-    if: ${{ !cancelled() && needs.build-site.result == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2752,7 +2917,9 @@ jobs:
     needs:
       - assemble-site
       - unit
-    if: github.ref == 'refs/heads/main'
+    # Forks run the full build/test matrix but need no Pages configuration.
+    # Only the canonical repository publishes the project website.
+    if: github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'
     # Only one Pages deployment at a time. Scoped to this job, not the
     # workflow: at the workflow level the same group serialised every
     # run — a pull request queued behind a push to main and the next

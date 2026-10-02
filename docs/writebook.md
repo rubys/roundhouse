@@ -52,6 +52,14 @@ source can also reveal additional diagnostics; inspect those changes rather
 than hiding them to preserve a headline count. Changing the Writebook pin
 requires a reviewed baseline refresh as well.
 
+The logical-and typing correction in PR #286 adds two expression-level
+`gradual_untyped` warnings at `uploads_controller.rb:58:30` and `:58:51`.
+The calls at those positions already reported `untyped`; the enclosing
+safe-navigation expressions now carry that type too, rather than the
+incorrect `Book | untyped` union. The inventory admits exactly those two
+additional warnings, without dropping the call warnings, changing the
+Writebook pin, or relaxing error, gap, emission or corpus checks.
+
 ## Roadmap, not a support claim
 
 1. **Routes.** [PR #199](https://github.com/rubys/roundhouse/pull/199) owns the

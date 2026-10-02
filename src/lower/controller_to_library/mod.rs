@@ -978,6 +978,8 @@ fn subclass_template_hooks(
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 name_span: crate::span::Span::synthetic(),
                 name: hook.clone(),
                 receiver: MethodReceiver::Instance,
@@ -2479,12 +2481,14 @@ fn action_to_method(
             (p.name.clone(), ty)
         })
         .collect();
-    let signature = mark_optional(crate::lower::typing::fn_sig(sig_params, ret_ty), &params);
+    let signature = mark_param_kinds(crate::lower::typing::fn_sig(sig_params, ret_ty), &params);
     // All actions (public + private) are Method — bodies are
     // imperative and computed. AttributeReader is reserved for
     // pure ivar-backed reads that can lower to a TS field.
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
@@ -2535,15 +2539,16 @@ fn union_with(a: Ty, b: Ty) -> Ty {
     if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
 }
 
-/// A param with a default is OPTIONAL in the signature — rendered `?T
-/// name` in the RBS — or a caller that leaves it out does not bind.
-fn mark_optional(sig: Ty, params: &[Param]) -> Ty {
+/// Each signature slot takes the kind its `def` declares. A param with
+/// a default is OPTIONAL — rendered `?T name` in the RBS — or a caller
+/// that leaves it out does not bind; a keyword left `Required` is a
+/// positional in the `.rbs`, so the sidecar disagrees with the `def`
+/// beside it and spinel binds the call's kwargs Hash to the first slot.
+fn mark_param_kinds(sig: Ty, params: &[Param]) -> Ty {
     match sig {
         Ty::Fn { params: mut tps, block, ret, effects } => {
             for (tp, p) in tps.iter_mut().zip(params) {
-                if p.default.is_some() && !p.keyword && !p.rest {
-                    tp.kind = crate::ty::ParamKind::Optional;
-                }
+                tp.kind = p.ty_kind();
             }
             Ty::Fn { params: tps, block, ret, effects }
         }
@@ -2678,6 +2683,7 @@ fn lower_action_body(
         || variants.iter().any(|v| {
             view_ivars.contains_key(&(module_key.clone(), format!("{action_name}_{v}")))
         });
+    let html_exists = view_ivars.contains_key(&(module_key.clone(), action_name.to_string()));
     let base = if !is_public {
         unwrapped
     } else if defer_implicit_render || responds_via_helper {
@@ -2685,10 +2691,10 @@ fn lower_action_body(
         // Two reasons to want that: the tail is about to move to the
         // dispatcher because something else (a subclass past `super`) may
         // respond, or a private helper in this body already has.
-        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists)
+        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists, html_exists)
     } else {
         crate::lower::controller::body::synthesize_implicit_render_with_html(
-            &unwrapped, action_name, variants, any_template_exists,
+            &unwrapped, action_name, variants, any_template_exists, html_exists,
         )
     };
     let module_name = views_module_name(controller);

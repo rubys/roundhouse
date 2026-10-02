@@ -1056,6 +1056,7 @@ fn collect_untyped_lowered(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped_lowered(cond, &format!("{path}/if.cond"), out);
@@ -1175,7 +1176,7 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(v, &format!("{path}/next.value"), out);
             }
         }
-        ExprNode::Splat { value } => {
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
             collect_untyped_lowered(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
@@ -1407,6 +1408,69 @@ end
     );
 }
 
+#[test]
+fn unclaimed_model_class_writes_report_spanned_warnings() {
+    use roundhouse::diagnostic::{DiagnosticKind, Severity};
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    for (statement, setter) in [
+        ("self.probe_flag = true", "probe_flag="),
+        ("self.table_name_prefix = computed_prefix", "table_name_prefix="),
+        ("self.table_name_prefix = \"custom_\"", "table_name_prefix="),
+    ] {
+        let source = format!("class Widget < ApplicationRecord\n  {statement}\nend\n");
+        let model = ingest_model(
+            source.as_bytes(), "app/models/widget.rb", &Schema::default(), &Default::default(),
+        ).expect("ingest").expect("model");
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            lower_model_to_library_class(&model, &Schema::default())
+        });
+        assert_eq!(diags.len(), 1, "dropped class-body write must report: {diags:?}");
+        let d = &diags[0];
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == setter));
+        assert_eq!(&source[d.span.start as usize..d.span.end as usize], statement);
+        assert!(d.message.contains("Widget"), "{d:?}");
+    }
+}
+
+#[test]
+fn computed_model_table_names_fail_before_lowering() {
+    let source = b"class Widget < ApplicationRecord\n  self.table_name = computed_table\nend\n";
+    let error = roundhouse::ingest::ingest_model(
+        source, "app/models/widget.rb", &roundhouse::schema::Schema::default(), &Default::default(),
+    ).expect_err("a computed table must not bind Widget to a guessed schema");
+    assert!(error.to_string().contains("table_name binding"), "{error}");
+}
+
+#[test]
+fn claimed_model_settings_and_method_body_writes_do_not_warn() {
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    let source = br#"class Widget < ApplicationRecord
+  self.table_name = "custom_widgets"
+  self.primary_key = :uuid
+  FLAG = true
+
+  def update_flag
+    self.probe_flag = true
+  end
+end
+"#;
+    let model = ingest_model(source, "app/models/widget.rb", &Schema::default(), &Default::default())
+        .expect("ingest").expect("model");
+    let (lc, diags) = roundhouse::emit::diagnostics::scope(|| {
+        lower_model_to_library_class(&model, &Schema::default())
+    });
+    assert!(diags.is_empty(), "claimed declarations and emitted methods must not warn: {diags:?}");
+    assert_eq!(model.table.0.as_str(), "custom_widgets");
+    assert_eq!(model.primary_key.as_ref().unwrap().as_str(), "uuid");
+    assert!(lc.methods.iter().any(|m| m.name.as_str() == "update_flag"));
+}
+
 // ── to_param ─────────────────────────────────────────────────────────
 //
 // Rails gives every ActiveRecord::Base a `to_param` (`id&.to_s`); the
@@ -1455,6 +1519,8 @@ fn a_models_own_to_param_wins_over_the_synthesized_one() {
         .clone();
     let own = roundhouse::dialect::MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_param"),
         receiver: MethodReceiver::Instance,
@@ -1518,6 +1584,8 @@ fn a_models_own_to_key_feeds_dom_record_key() {
         .clone();
     let own = roundhouse::dialect::MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_key"),
         receiver: MethodReceiver::Instance,

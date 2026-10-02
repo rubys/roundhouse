@@ -62,7 +62,13 @@ end
 fn consumer_and_serializer_bodies_are_inferred_not_stamped() {
     let mut app = app(SOURCE);
     Analyzer::new(&app).analyze(&mut app);
-    let errors: Vec<_> = diagnose(&app)
+    let mut diags = diagnose(&app);
+    let raw = diags.clone();
+    let mut gaps = Vec::new();
+    roundhouse::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
+    assert!(gaps.is_empty(), "admitted declarations are not gaps: {gaps:?}");
+    assert_eq!(diags, raw);
+    let errors: Vec<_> = diags
         .into_iter()
         .filter(|d| d.severity == Severity::Error)
         .collect();

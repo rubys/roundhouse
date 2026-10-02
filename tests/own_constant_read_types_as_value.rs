@@ -116,3 +116,48 @@ fn a_model_reads_its_own_constant_as_its_value() {
     assert_eq!(m.body.ty, Some(Ty::Str), "got {:?}", m.body.ty);
     assert_eq!(library_ret(&app, "Labeller", "direct"), Ty::Int);
 }
+
+#[test]
+fn runtime_values_keep_their_owner_and_survive_a_source_roundtrip() {
+    let mut app = app_with(&[
+        ("app/services/runtime_value_probe.rb", r#"class RuntimeValueProbe
+  ATTRIBUTES = 17
+  def direct
+    ActionText::Attachment::ATTRIBUTES
+  end
+  def local
+    ATTRIBUTES
+  end
+end
+"#),
+    ]);
+    let expected = Ty::Array { elem: Box::new(Ty::Str) };
+    assert_eq!(library_ret(&app, "RuntimeValueProbe", "direct"), expected);
+    assert_eq!(library_ret(&app, "RuntimeValueProbe", "local"), Ty::Int);
+    app = serde_json::from_slice(&serde_json::to_vec(&app).expect("serialize")).expect("deserialize");
+    roundhouse::session::analyze_and_lower(&mut app);
+    assert_eq!(library_ret(&app, "RuntimeValueProbe", "direct"), expected);
+}
+
+#[test]
+fn an_app_runtime_constant_override_cannot_borrow_the_old_literal_type() {
+    let app = app_with(&[
+        ("app/services/attachment.rb", "class ActionText::Attachment\n  ATTRIBUTES = 17\nend\n"),
+        ("app/services/runtime_value_probe.rb", "class RuntimeValueProbe\n  def direct\n    ActionText::Attachment::ATTRIBUTES\n  end\nend\n"),
+    ]);
+    assert_eq!(library_ret(&app, "RuntimeValueProbe", "direct"), Ty::Int);
+}
+
+#[test]
+fn an_unresolved_app_override_does_not_regain_the_runtime_array_type() {
+    let app = app_with(&[
+        ("app/services/attachment.rb", "class ActionText::Attachment\n  ATTRIBUTES = MissingRuntimeBuilder.build\nend\n"),
+        ("app/controllers/gauges_controller.rb", "class GaugesController < ApplicationController\n  def index\n    ActionText::Attachment::ATTRIBUTES\n  end\nend\n"),
+    ]);
+    let probe = app.controllers.iter().find(|class| class.name.0.as_str() == "GaugesController").unwrap();
+    let method = probe.actions().find(|method| method.name.as_str() == "index").unwrap();
+    assert!(matches!(method.body.ty, Some(Ty::Var { .. })), "{:?}", method.body.ty);
+    let diags = roundhouse::analyze::diagnose(&app);
+    assert!(diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+        && d.message.contains("ActionText::Attachment::ATTRIBUTES")), "{diags:?}");
+}

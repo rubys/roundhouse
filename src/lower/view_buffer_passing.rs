@@ -146,6 +146,7 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
         default: None,
         keyword: false,
         rest: false,
+        forwarding: false,
         from_keyword: false,
         from_kwrest: false,
     }];

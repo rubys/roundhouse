@@ -463,7 +463,7 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
                 walk(v, defs, diags);
             }
         }
-        ExprNode::Splat { value } => walk(value, defs, diags),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk(value, defs, diags),
         ExprNode::While { cond, body, .. } => {
             walk(cond, defs, diags);
             walk(body, defs, diags);
@@ -498,6 +498,7 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
         | ExprNode::Const { .. }
         | ExprNode::SelfRef
         | ExprNode::Retry
+        | ExprNode::ForwardArgs
         | ExprNode::Redo => {}
     }
 

@@ -283,6 +283,181 @@ end
         .assert_passes();
 }
 
+/// Source inference must preserve Ruby parameter binding and the existing
+/// test lowering; inferred signatures are not permission to rewrite calls.
+#[test]
+fn original_test_helper_defaults_and_keyword_forwarding_run() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "test/models/source_helper_test.rb",
+            r#"require "test_helper"
+
+class SourceHelperTest < ActiveSupport::TestCase
+  setup { @prefix = "scope:" }
+
+  test "defaults and forwarding preserve original bindings" do
+    assert_equal ["FIRST"], normalized("first")
+    assert_equal ["chosen"], normalized("second", "chosen")
+    assert_equal ["explicit"], normalized("third", "unused", ["explicit"])
+    visited = 0
+    ["first", "last"].each do |value|
+      values_from(value: value).each do |inner|
+        assert_equal @prefix + value, inner
+        visited += 1
+      end
+    end
+    assert_equal 4, visited
+    assert_equal [13, "forwarded"], forwarding(13, value: "forwarded")
+    assert_equal [17, "direct"], target(17, value: "direct")
+    assert_equal({ value: "kept" }, whole_hash(19, value: "kept"))
+    puts "PASS original source helper assertions"
+  end
+
+  def normalized(value, upper = upper_for(value), values = [upper])
+    values
+  end
+
+  def upper_for(input)
+    input.upcase
+  end
+
+  def values_from(**details)
+    values_for(**details)
+  end
+
+  def values_for(value:)
+    [@prefix + value, @prefix + value]
+  end
+
+  def forwarding(number, **details)
+    target(number, **details)
+  end
+
+  def target(number, value:)
+    [number, value]
+  end
+
+  def whole_hash(*numbers, **details)
+    details
+  end
+end
+"#,
+        )
+        .run_test("test/models/source_helper_test.rb");
+    run.assert_passes();
+    assert!(run.stdout.contains("PASS original source helper assertions"));
+}
+
+#[test]
+fn native_date_column_crud_and_month_shifts() {
+    let output = std::process::Command::new("ruby")
+        .args(["tests/date_columns_runtime.rb", "native"])
+        .output()
+        .expect("native Ruby");
+    assert!(output.status.success(), "{}\n{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Date CRUD and month shifts OK"));
+}
+
+#[test]
+fn date_column_crud_and_month_shifts_run() {
+    date_blog()
+        .run_ruby(include_str!("date_columns_runtime.rb"))
+        .assert_passes();
+}
+
+#[test]
+fn date_storage_and_integer_enum_labels_coexist() {
+    date_blog()
+        .edit("db/schema.rb", "    t.date \"due_on\"", "    t.date \"due_on\"\n    t.integer \"state\"")
+        .edit("app/models/calendar_entry.rb", "class CalendarEntry < ApplicationRecord", "class CalendarEntry < ApplicationRecord\n  enum :state, { draft: 7, published: 42 }")
+        .run_ruby(r#"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), state: :published)
+entry.reload
+raise entry.due_on.inspect unless entry.due_on.class == Date && entry.due_on.iso8601 == "2024-01-31"
+raise entry.shifted(2).inspect unless entry.shifted(2).iso8601 == "2024-03-31"
+raise entry.state.inspect unless entry.state == "published"
+raise entry[:state].inspect unless entry[:state] == "published"
+raise entry.attributes.inspect unless entry.attributes["state"] == "published"
+raise "enum predicates changed" unless entry.published? && !entry.draft?
+stored = CalendarEntry.connection.select_all("SELECT due_on, state FROM calendar_entries WHERE id = #{entry.id}").first
+raise stored.inspect unless stored == {"due_on" => "2024-01-31", "state" => 42}
+actual = ActionController::JsonRender.encode(entry.as_json(only: [:due_on, :state]))
+raise actual.inspect unless actual == '{"due_on":"2024-01-31","state":"published"}'
+entry.update!(due_on: nil, state: nil)
+entry.reload
+raise "nullable readers changed" unless entry.due_on.nil? && entry.state.nil? && entry[:state].nil? && entry.attributes["state"].nil?
+stored = CalendarEntry.connection.select_all("SELECT due_on, state FROM calendar_entries WHERE id = #{entry.id}").first
+raise stored.inspect unless stored == {"due_on" => nil, "state" => nil}
+actual = ActionController::JsonRender.encode(entry.as_json(only: [:due_on, :state]))
+raise actual.inspect unless actual == '{"due_on":null,"state":null}'
+puts "Date storage and nullable sparse integer enum labels coexist"
+"#)
+        .assert_passes();
+}
+
+fn date_blog() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "  create_table \"articles\"", "  create_table \"calendar_entries\" do |t|\n    t.date \"due_on\"\n    t.datetime \"observed_at\"\n    t.time \"opens_at\"\n  end\n\n  create_table \"articles\"")
+        .write("app/models/calendar_entry.rb", include_str!("date_columns_model.rb"))
+}
+
+fn date_json_blog() -> emit_and_run::Overlay {
+    date_blog()
+        .edit("app/models/calendar_entry.rb", "\nend\n", "\n  def as_json(options = {})\n    attrs = [:due_on, :observed_at]\n    json = super(only: attrs)\n    json\n  end\nend\n")
+        .write("app/controllers/calendar_entries_controller.rb", "class CalendarEntriesController < ApplicationController\n  def show\n    entry = CalendarEntry.find(params[:id])\n    render json: entry\n  end\nend\n")
+        .edit("config/routes.rb", "  resources :articles do", "  resources :calendar_entries, only: [:show]\n  resources :articles do")
+}
+
+#[test]
+fn specialized_date_json_preserves_dates_and_zoned_timestamps() {
+    date_json_blog()
+        .run_ruby(r#"
+require_relative "app/controllers/calendar_entries_controller"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), observed_at: Time.utc(2024, 1, 31, 23, 47, 19, 123456))
+raise "specialization was not exercised" unless entry.respond_to?(:as_json_str)
+ActiveSupport.use_zone("Pacific/Auckland") do
+  controller = CalendarEntriesController.new
+  controller.params = {"id" => entry.id.to_s}
+  controller.process_action(:show)
+  expected = '{"due_on":"2024-01-31","observed_at":"2024-02-01T12:47:19.123+13:00"}'
+  raise controller.body.inspect unless controller.body == expected
+  raise controller.content_type.inspect unless controller.content_type == "application/json"
+  actual = ActionController::JsonRender.encode(entry.as_json)
+  raise actual.inspect unless actual == expected
+  entry.update!(due_on: nil)
+  controller = CalendarEntriesController.new
+  controller.params = {"id" => entry.id.to_s}
+  controller.process_action(:show)
+  expected = '{"due_on":null,"observed_at":"2024-02-01T12:47:19.123+13:00"}'
+  raise controller.body.inspect unless controller.body == expected
+  actual = ActionController::JsonRender.encode(entry.as_json)
+  raise actual.inspect unless actual == expected
+end
+puts "Specialized Date JSON and timestamp control OK"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn specialized_date_json_normalizes_unset_nonnullable_storage() {
+    date_json_blog()
+        .edit("db/schema.rb", "t.date \"due_on\"", "t.date \"due_on\", null: false")
+        .run_ruby(r#"
+entry = CalendarEntry.new
+raise entry.due_on_raw.inspect unless entry.due_on_raw == ""
+raise entry.due_on.inspect unless entry.due_on.nil?
+raise entry[:due_on].inspect unless entry[:due_on].nil?
+raise "unset Date alias changed" unless entry.shifted_attribute(1).nil?
+expected = '{"due_on":null,"observed_at":null}'
+raise entry.as_json_str.inspect unless entry.as_json_str == expected
+actual = ActionController::JsonRender.encode(entry.as_json)
+raise actual.inspect unless actual == expected
+puts "Unset nonnullable Date JSON is null in both paths"
+"#)
+        .assert_passes();
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
@@ -385,6 +560,381 @@ fn a_lambda_target_before_action_gates_the_action_it_guards() {
             "test \"a lambda-target before_action redirects when its guard fails\" do\n    get article_url(@article)\n    assert_redirected_to root_url\n  end",
         )
         .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// An inner class wins over another class with the same last segment.
+#[test]
+fn a_bare_inner_class_runs_after_resolution() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/ui/selector.rb",
+            "module UI\n  class Selector\n    class Mode\n      def self.value\n        \"selected\"\n      end\n    end\n    def self.value\n      Mode.value\n    end\n  end\n  class Other\n    class Mode\n    end\n  end\nend\n",
+        )
+        .run_ruby("raise 'wrong inner class' unless UI::Selector.value == 'selected'")
+        .assert_passes();
+}
+
+/// `class UI::ExplicitSelector` does not lexically include `UI`, even
+/// though emitted Ruby nests it there. Keep a top-level same-suffix class
+/// distinct from the one inside UI after source-backed resolution.
+#[test]
+fn a_compact_class_uses_its_source_lexical_constant() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/ui/explicit_selector.rb",
+            "class SourceScopeResolution\n  def self.value\n    \"top-level\"\n  end\nend\nmodule UI\n  class SourceScopeResolution\n    def self.value\n      \"nested\"\n    end\n  end\nend\nclass UI::ExplicitSelector\n  def self.value\n    SourceScopeResolution.value\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise 'wrong lexical constant' unless UI::ExplicitSelector.value == 'top-level'",
+        )
+        .assert_passes();
+}
+
+/// Array `find` is not a scalar lookup or a permissive `where(id: ids)`:
+/// it raises on a missing scoped row, and preserves requested order unless
+/// the relation carries an explicit order. The terminal cannot poison its
+/// receiver's WHERE, limit/offset, or loaded-record cache.
+#[test]
+fn relation_find_with_array_ids_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.find_titles(ids)
+    where("title != 'outside'").find(Array(ids)).map(&:title).join("|")
+  end"#,
+        )
+        .run_ruby(
+            r##"a = Article.create!(title: "zebra", body: "long enough body")
+b = Article.create!(title: "apple", body: "long enough body")
+c = Article.create!(title: "outside", body: "long enough body")
+raise "requested order" unless Article.find_titles([b.id.to_s, a.id.to_s, b.id.to_s]) == "apple|zebra"
+raise "integer ids" unless Article.find_titles([a.id, b.id]) == "zebra|apple"
+raise "mixed ids" unless Article.find_titles([b.id.to_s, a.id]) == "apple|zebra"
+raise "singleton array" unless Article.find_titles([b.id.to_s]) == "apple"
+raise "empty array" unless Article.find_titles([]) == ""
+raise "integer casting" unless Article.find_titles(["#{b.id}-slug", a.id.to_s]) == "apple|zebra"
+rel = ActiveRecord::Relation.new(Article).where("title != 'outside'")
+rel.to_a
+raise "loaded scalar" unless rel.find(b.id.to_s).title == "apple"
+raise "loaded array" unless rel.find([b.id, a.id]).map(&:title) == ["apple", "zebra"]
+begin
+  rel.find([a.id, c.id])
+  raise "a scoped-out id was accepted"
+rescue ActiveRecord::RecordNotFound
+end
+begin
+  rel.find([a.id, 987654321])
+  raise "a missing id was accepted"
+rescue ActiveRecord::RecordNotFound
+end
+begin
+  rel.find([b.id.to_s, "0#{b.id}"])
+  raise "ids were deduplicated after casting"
+rescue ActiveRecord::RecordNotFound
+end
+raise "scope/cache poisoned" unless rel.to_a.map(&:title) == ["zebra", "apple"]
+ordered = ActiveRecord::Relation.new(Article).where("title != 'outside'").order(:title)
+raise "relation order" unless ordered.find([a.id, b.id]).map(&:title) == ["apple", "zebra"]
+offset_only = ActiveRecord::Relation.new(Article).where("title != 'outside'").order(:title).offset(1)
+prior_sql = offset_only.to_sql
+raise "ordered offset only" unless offset_only.find([a.id, b.id]).map(&:title) == ["zebra"]
+raise "offset poisoned" unless offset_only.to_sql == prior_sql
+boundary = ActiveRecord::Relation.new(Article).order(:title).offset(2)
+raise "offset at size" unless boundary.find([a.id, b.id]) == []
+# Writebook's pinned Rails finder raises beyond size (negative expected
+# cardinality); newer Rails returns [] here instead.
+beyond = ActiveRecord::Relation.new(Article).order(:title).offset(3)
+prior_sql = beyond.to_sql
+begin
+  beyond.find([a.id, b.id])
+  raise "pinned Rails beyond-offset behavior changed"
+rescue ActiveRecord::RecordNotFound
+end
+raise "beyond-offset poisoned" unless beyond.to_sql == prior_sql
+paged = ActiveRecord::Relation.new(Article).where("title != 'outside'").limit(1).offset(1)
+raise "input slicing" unless paged.find([b.id, a.id]).map(&:title) == ["zebra"]
+raise "pagination poisoned" unless paged.to_a.map(&:title) == ["apple"]
+ordered.limit(1).offset(1)
+raise "ordered pagination" unless ordered.find([b.id, a.id]).map(&:title) == ["zebra"]
+selected = ActiveRecord::Relation.new(Article).select(:title)
+prior_sql = selected.to_sql
+raise "projected key" unless selected.find([b.id, a.id]).map(&:id) == [b.id, a.id]
+raise "projection poisoned" unless selected.to_sql == prior_sql
+puts "ok"
+"##,
+        )
+        .assert_passes();
+}
+
+/// The runtime defines this exception in `active_support_ext.rb`.
+#[test]
+fn framework_exception_resolves_from_real_runtime_source() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/signature_probe.rb",
+            "class SignatureProbe\n  def self.call\n    begin\n      raise ActiveSupport::MessageVerifier::InvalidSignature\n    rescue ActiveSupport::MessageVerifier::InvalidSignature\n      \"handled\"\n    end\n  end\nend\n",
+        )
+        .run_ruby("raise 'signature error was not caught' unless SignatureProbe.call == 'handled'")
+        .assert_passes();
+}
+
+/// Rubydex promotes `X = <call>` to a module once code calls a method
+/// on `X`. These are still values: `.freeze` and `.map` build a Hash, an
+/// Array, and a String, and each read must type and run as that value.
+#[test]
+fn a_constant_assigned_from_a_call_runs_as_its_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/frozen_table.rb",
+            "class FrozenTable\n  STATUSES = { processed: \"processed\" }.freeze\n  NAMES = [\"a\", \"b\"].freeze\n  LABEL = \"label\".freeze\n  DOUBLED = [1, 2].map { |n| n * 2 }\n  def self.summary\n    [STATUSES[:processed].upcase, NAMES.first, LABEL.upcase, DOUBLED.last.to_s].join(\",\")\n  end\nend\n",
+        )
+        .run_ruby("raise 'frozen constant' unless FrozenTable.summary == 'PROCESSED,a,LABEL,4'")
+        .assert_passes();
+}
+
+/// Ingest copies a concern's methods into the controller that includes
+/// it, and the emitted controller drops the `include`. A class that
+/// resolved inside the concern's module must still name that class
+/// after the move.
+#[test]
+fn a_concern_class_reference_survives_the_copy_into_its_controller() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/price_support.rb",
+            "module PriceSupport\n  class RateCalculator\n    def self.value\n      7\n    end\n  end\n\n  def price\n    RateCalculator.value\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/quotes_controller.rb",
+            "class QuotesController < ApplicationController\n  include PriceSupport\n\n  def show\n    @value = price\n  end\nend\n",
+        )
+        .run_ruby(
+            "require_relative 'app/controllers/quotes_controller'\nraise 'concern class reference' unless QuotesController.new.price == 7",
+        )
+        .assert_passes();
+}
+
+/// Integer serialization is not blindly String#to_i: nonnumeric labels
+/// must not alias an existing row zero. Invalid IDs still count toward the
+/// array finder's required cardinality, except when pagination excludes them.
+#[test]
+fn relation_find_rejects_nonnumeric_ids_without_aliasing_zero() {
+    emit_and_run::real_blog()
+        .run_ruby(r#"
+Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'long enough body', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (31, 'thirty-one', 'long enough body', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+rel = ActiveRecord::Relation.new(Article).where("id IN (0, 31)")
+prior_sql = rel.to_sql
+rel.to_a
+raise "valid zero" unless rel.find("0").id == 0
+raise "zero prefix" unless rel.find("0x").id == 0
+raise "numeric prefix" unless rel.find("31-sarah").id == 31
+raise "whitespace/sign" unless rel.find(" \t+31-slug").id == 31
+["bogus", "", " ", "+", "-", "٠"].each do |id|
+  [id, [id], [id, 31]].each do |input|
+    begin
+      rel.find(input)
+      raise "invalid id aliased a record: #{input.inspect}"
+    rescue ActiveRecord::RecordNotFound
+    end
+  end
+end
+raise "scope/cache poisoned" unless rel.to_sql == prior_sql && rel.to_a.map(&:id) == [0, 31]
+unordered = ActiveRecord::Relation.new(Article).offset(1)
+raise "excluded invalid input" unless unordered.find(["bogus", 31]).map(&:id) == [31]
+ordered = ActiveRecord::Relation.new(Article).order(:id).limit(1)
+raise "ordered limit cardinality" unless ordered.find(["bogus", 31]).map(&:id) == [31]
+ordered.offset(1)
+begin
+  ordered.find(["bogus", 31])
+  raise "invalid input dropped from expected size"
+rescue ActiveRecord::RecordNotFound
+end
+puts "ok"
+"#)
+        .assert_passes();
+}
+
+/// A custom String primary key must not take the default Integer cast.
+#[test]
+fn relation_find_with_string_keys_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"bookmarks\", id: { type: :string, limit: 32 }, primary_key: \"code\", force: :cascade do |t|\n    t.string \"title\", null: false\n    t.integer \"visits\", default: 0\n    t.datetime \"retired_at\"\n    t.index [\"title\"], name: \"index_bookmarks_on_live_title\", unique: true, where: \"(retired_at IS NULL)\"\n  end\n\n  create_table \"articles\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/bookmark.rb",
+            r#"class Bookmark < ApplicationRecord
+  self.primary_key = "code"
+
+  def self.find_titles
+    where("title != 'outside'").find(["2-apples", "z-9"]).map(&:title).join("|")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"Bookmark.create!(code: "z-9", title: "zebra")
+Bookmark.create!(code: "2-apples", title: "apple")
+raise "string array cast/order" unless Bookmark.find_titles == "apple|zebra"
+rel = ActiveRecord::Relation.new(Bookmark)
+raise "string scalar cast" unless rel.find("2-apples").title == "apple"
+raise "custom key" unless rel.find(["z-9"]).map(&:id) == ["z-9"]
+# The same model must retain both synthesized methods after merging:
+# String-key finders and partial-index upsert targets are independent.
+Bookmark.upsert_all([{ code: "2-apples", title: "apple", visits: 17 }], unique_by: :title)
+raise "partial upsert did not update" unless rel.find("2-apples").visits == 17
+raise "partial upsert duplicated the live row" unless Bookmark.where(title: "apple").count == 1
+Bookmark.where(code: "2-apples").update_all(retired_at: Time.now)
+Bookmark.upsert_all([{ code: "fresh-41", title: "apple", visits: 29 }], unique_by: :title)
+raise "partial upsert did not insert past retired row" unless Bookmark.where(title: "apple").count == 2
+raise "string keys or partial index lost" unless rel.find(["fresh-41", "2-apples"]).map(&:visits) == [29, 17]
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Ingest hoists a file-level constant into the first class of the
+/// file, but Ruby declares it on Object. The inferred value must belong
+/// to the declaration that the read resolves to.
+#[test]
+fn a_file_level_constant_runs_from_the_class_below_it() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/review_probe.rb",
+            "ROOT_LIMIT = 7\n\nclass LimitReader\n  def self.value\n    ROOT_LIMIT\n  end\nend\n",
+        )
+        .run_ruby("raise 'file-level constant' unless LimitReader.value == 7")
+        .assert_passes();
+}
+
+/// ERB views are not indexed. A qualified class read there must not
+/// take the value of an unrelated constant with the same last segment,
+/// and a qualified value read takes the value declared at its full name.
+#[test]
+fn a_qualified_class_in_a_view_ignores_a_same_named_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/archive.rb",
+            "module Marker\n  Item = 1\nend\n\nmodule Archive\n  class Item\n    def self.label\n      \"archive\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>",
+            "<% content_for :title, \"Articles\" %>\n<p id=\"archive-label\"><%= Archive::Item.label %></p>\n<p id=\"marker-item\"><%= Marker::Item + 1 %></p>",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1\", \"Articles\"\n    assert_select \"#archive-label\", \"archive\"\n    assert_select \"#marker-item\", \"2\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// Each constant in the chain reads the one before it. The value must
+/// reach the end of a chain longer than any fixed number of rounds.
+#[test]
+fn a_long_constant_chain_reaches_its_value() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/chain.rb",
+            "class Chain\n  A = 1\n  B = A\n  C = B\n  D = C\n  E = D\n  F = E\n\n  def self.value\n    F\n  end\nend\n",
+        )
+        .run_ruby("raise 'constant chain' unless Chain.value == 1")
+        .assert_passes();
+}
+
+/// Rubydex declares Object, BasicObject, Kernel, Module and Class
+/// itself. Those are Ruby's own classes, not unknown constants.
+#[test]
+fn object_new_runs_as_the_ruby_built_in() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/object_reader.rb",
+            "class ObjectReader\n  def self.value\n    Object.new\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/sentinels_controller.rb",
+            "class SentinelsController < ApplicationController\n  def show\n    @sentinel = Object.new\n  end\nend\n",
+        )
+        .run_ruby("raise 'Object.new' unless ObjectReader.value.instance_of?(Object)")
+        .assert_passes();
+}
+
+/// Writebook's `pluralize number_with_delimiter(content.split.size), "word"`:
+/// keep the formatted label, and recognize a textual one as singular.
+#[test]
+fn a_formatted_word_count_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/word_counts_helper.rb",
+            r#"module WordCountsHelper
+  def word_count(content)
+    pluralize number_with_delimiter(content.split.size), "word"
+  end
+
+  def label(count)
+    pluralize count, "word"
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_word_count.html.erb",
+            "<%= pluralize number_with_delimiter(1001), \"word\" %>",
+        )
+        .run_ruby(
+            r#"raise "singular" unless WordCountsHelper.word_count("only") == "1 word"
+raise "plural" unless WordCountsHelper.word_count("two words") == "2 words"
+raise "delimiter lost" unless WordCountsHelper.word_count((["w"] * 1001).join(" ")) == "1,001 words"
+raise "zero" unless WordCountsHelper.word_count("") == "0 words"
+raise "text one" unless WordCountsHelper.label("1") == "1 word"
+raise "decimal one" unless WordCountsHelper.label("1.00") == "1.00 word"
+raise "leading zero" unless WordCountsHelper.label("01") == "01 words"
+raise "fraction" unless WordCountsHelper.label("1.01") == "1.01 words"
+raise "empty string" unless WordCountsHelper.label("") == " words"
+raise "float one" unless WordCountsHelper.label(1.0) == "1.0 word"
+raise "view" unless Views::Articles.word_count(nil) == "1,001 words"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn an_app_pluralize_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  def pluralize(count, word)
+    "custom #{count}:#{word}"
+  end
+
+  def heading
+    pluralize(1, "person")
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_count.html.erb",
+            "<%= pluralize(1, \"person\") %>|<%= \"nested #{pluralize(2, 'person')}\" %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.heading == "custom 1:person"
+raise "view override lost" unless Views::Articles.custom_count(nil) == "custom 1:person|nested custom 2:person"
+puts "ok"
+"#,
+        )
         .assert_passes();
 }
 
@@ -1707,6 +2257,114 @@ end
         .assert_passes();
 }
 
+/// A Concern's enum must reach a concrete child's readers and query mapping,
+/// without replacing that child's own enum or leaking to an unrelated model.
+#[test]
+fn an_abstract_bases_concern_enum_runs_on_its_child() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .edit(
+            "db/schema.rb",
+            "create_table \"comments\", force: :cascade do |t|",
+            "create_table \"comments\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .write(
+            "app/models/concerns/publication_state.rb",
+            "module PublicationState\n  extend ActiveSupport::Concern\n  included { enum :state, { draft: 0, live: 3 } }\nend\n",
+        )
+        .write(
+            "app/models/concerns/local_state.rb",
+            "module LocalState\n  extend ActiveSupport::Concern\n  included { enum :state, { queued: 2, shipped: 7 } }\nend\n",
+        )
+        .write(
+            "app/models/content_base.rb",
+            "class ContentBase < ApplicationRecord\n  self.abstract_class = true\n  self.table_name = \"articles\"\n  include PublicationState\nend\n",
+        )
+        .write(
+            "app/models/direct_base.rb",
+            "class DirectBase < ApplicationRecord\n  self.abstract_class = true\n  self.table_name = \"articles\"\n  enum :state, { draft: 0, live: 3 }\nend\n",
+        )
+        .write(
+            "app/models/special_article.rb",
+            r#"class SpecialArticle < DirectBase
+  self.table_name = "articles"
+  include LocalState
+
+  def self.shipped_count(id)
+    where(state: :shipped).where(id: id).count
+  end
+
+  def self.queued_count(id)
+    where(state: :queued).where(id: id).count
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            r#"class Article < ContentBase
+  def self.live_count(id)
+    where(state: :live).where(id: id).count
+  end
+
+  def self.draft_count(id)
+    where(state: :draft).where(id: id).count
+  end"#,
+        )
+        // Query the app-owned methods: the global lowering deliberately
+        // cannot guess a test-side `state` label across conflicting maps.
+        .write(
+            "test/models/concern_enum_inheritance_test.rb",
+            r#"require "test_helper"
+
+class ConcernEnumInheritanceTest < ActiveSupport::TestCase
+  test "a base Concern supplies labels and stored query values to its child" do
+    article = articles(:one)
+    article.update(state: :live)
+    reloaded = Article.find(article.id)
+    assert_equal "live", reloaded.state
+    assert_equal "live", reloaded[:state]
+    assert_equal "live", reloaded.attributes["state"]
+    assert reloaded.live?
+    assert !reloaded.draft?
+    assert_equal 1, Article.live_count(article.id)
+    assert_equal 1, Article.where(state: 3).where(id: article.id).count
+    assert_equal 0, Article.draft_count(article.id)
+  end
+
+  test "a child Concern keeps its own asymmetric enum mapping" do
+    article = SpecialArticle.create!(title: "Override", body: "Long enough body", state: :shipped)
+    reloaded = SpecialArticle.find(article.id)
+    assert_equal "shipped", reloaded.state
+    assert_equal "shipped", reloaded[:state]
+    assert_equal "shipped", reloaded.attributes["state"]
+    assert reloaded.shipped?
+    assert !reloaded.queued?
+    assert_equal 1, SpecialArticle.shipped_count(article.id)
+    assert_equal 1, SpecialArticle.where(state: 7).where(id: article.id).count
+    assert_equal 0, SpecialArticle.queued_count(article.id)
+  end
+
+  test "an unrelated model keeps an ordinary integer reader" do
+    comment = Comment.new(state: 3)
+    assert_equal 3, comment.state
+    assert_equal 3, comment[:state]
+    assert_equal 3, comment.attributes["state"]
+    assert !comment.respond_to?(:live?)
+    assert !comment.respond_to?(:shipped?)
+  end
+end
+"#,
+        )
+        .run_test("test/models/concern_enum_inheritance_test.rb")
+        .assert_passes();
+}
+
 /// Not left on the String: `humanize` and `titleize` are ActiveSupport reopens, answered here as ActiveSupport does.
 #[test]
 fn string_humanize_and_titleize_run() {
@@ -1863,6 +2521,99 @@ end
         .assert_passes();
 }
 
+#[test]
+fn safe_navigation_comparisons_execute_for_nil_and_string_values() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def title_long?
+    ((title && title.length) || 0) > 1
+  end
+  def title_short?
+    (title&.length || 0) < 1
+  end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "long")
+raise "truthy chain" unless article.title_long? && !article.title_short?
+article.title = nil
+raise "nil chain" unless !article.title_long? && article.title_short?
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn forwarded_proc_expressions_execute_once_in_an_emitted_app() {
+    emit_and_run::real_blog()
+        .write("app/services/block_forward_probe.rb", r#"class BlockForwardProbe
+  def initialize
+    @calls = 0
+    @callback = ->(x) { x * 2 }
+  end
+  def compute(n)
+    @calls += 1
+    ->(x) { x + n }
+  end
+  def run
+    doubled = [1, 2].map(&@callback)
+    added = [1, 2].map(&compute(3))
+    [doubled, added, @calls]
+  end
+end
+"#)
+        .run_ruby("raise 'forwarded expression' unless BlockForwardProbe.new.run == [[2, 4], [4, 5], 1]")
+        .assert_passes();
+}
+
+#[test]
+fn typed_instance_keywords_bind_values_and_keep_positional_hashes() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_fetcher.rb", r##"
+class KeywordFetcher
+  def fetch(url, ip: url.upcase)
+    "#{url}@#{ip}"
+  end
+
+  def merge(url, opts = {})
+    "#{url}#{opts}"
+  end
+end
+"##)
+        .write("app/services/keyword_locator.rb", r#"
+class KeywordLocator
+  def locate(url)
+    KeywordFetcher.new.fetch(url, ip: "192.0.2.1")
+  end
+
+  def merged(url)
+    KeywordFetcher.new.merge(url, opts: 1)
+  end
+end
+"#)
+        .run_ruby(r#"
+locator = KeywordLocator.new
+raise "keyword bound to hash" unless locator.locate("host") == "host@192.0.2.1"
+raise "positional hash rewritten" unless locator.merged("host") == 'host{opts: 1}'
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn multiple_erb_openers_execute_inside_an_output_block() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
+<% [1, 2].each do |number|
+       unless number.nil? %><%= number %><% end %><% end %><% end %></span>"#,
+        "    assert_select \"span.multi-opener\", \"12\"\n")
+        .assert_passes();
+}
+
+#[test]
+fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="commented-title"><%= capture do %>
+<% [1, 2].each do |number| %><%= "n: #{number}" #@label %><% end #$numbers %><% end #{capture} %></span>"#,
+        "    assert_select \"span.commented-title\", \"n: 1n: 2\"\n")
+        .assert_passes();
+}
+
 /// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
 #[test]
 fn an_app_with_no_views_boots() {
@@ -1893,6 +2644,108 @@ fn an_app_with_no_views_boots() {
 raise "GET /widgets answered #{status}" unless status == 204
 "#,
         )
+        .assert_passes();
+}
+
+#[test]
+fn bundled_uri_and_http_exception_constants_run() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/services/http_constant_probe.rb",
+            r#"class HttpConstantProbe
+  def self.http?(url)
+    URI.parse(url).is_a?(URI::HTTP)
+  end
+
+  def self.invalid_uri
+    begin
+      URI.parse("https://bad host/")
+    rescue URI::InvalidURIError
+      "invalid"
+    end
+  end
+
+  def self.construct
+    URI::HTTP.new("http", nil, "example.test", 80, nil, "/", nil, nil, nil).to_s
+  end
+
+  def self.invalid_constructor
+    begin
+      URI::HTTP.new
+    rescue ArgumentError
+      "arity"
+    end
+  end
+
+  def self.timeout(kind)
+    begin
+      if kind == "open"
+        raise Net::OpenTimeout
+      else
+        raise Net::ReadTimeout
+      end
+    rescue Net::OpenTimeout
+      "open"
+    rescue Net::ReadTimeout
+      "read"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise unless HttpConstantProbe.http?("https://example.test/")
+raise if HttpConstantProbe.http?("ftp://example.test/")
+raise unless HttpConstantProbe.invalid_uri == "invalid"
+raise unless HttpConstantProbe.construct == "http://example.test/"
+raise unless HttpConstantProbe.invalid_constructor == "arity"
+raise unless HttpConstantProbe.timeout("open") == "open"
+raise unless HttpConstantProbe.timeout("read") == "read"
+"#,
+        );
+    let probe = std::fs::read_to_string(run.emitted.join("app/models/http_constant_probe.rb")).unwrap();
+    assert!(probe.lines().any(|line| line == "require \"uri\""), "{probe}");
+    run.assert_passes();
+}
+
+#[test]
+fn bundled_response_io_json_and_runtime_value_constants_run() {
+    emit_and_run::real_blog()
+        .write("app/services/bundled_value_probe.rb", r#"class BundledValueProbe
+  def self.responses
+    [Net::HTTPOK.new("1.1", "200", "OK").is_a?(Net::HTTPOK),
+     Net::HTTPRedirection.new("1.1", "302", "Found").is_a?(Net::HTTPRedirection)]
+  end
+  def self.buffer
+    io = StringIO.new
+    io << "abc"
+    io.string
+  end
+  def self.encode
+    JSON.generate([17, "hello"])
+  end
+  def self.ssl_error
+    begin
+      raise OpenSSL::OpenSSLError
+    rescue OpenSSL::OpenSSLError
+      "ssl"
+    end
+  end
+  def self.attributes
+    ActionText::Attachment::ATTRIBUTES.include?("sgid")
+  end
+  def self.allowed_tags
+    Rails::HTML5::SafeListSanitizer.allowed_tags.include?("a")
+  end
+end
+"#)
+        .run_ruby(r#"raise unless BundledValueProbe.responses == [true, true]
+raise unless BundledValueProbe.buffer == "abc"
+raise unless BundledValueProbe.encode == '[17,"hello"]'
+raise unless BundledValueProbe.ssl_error == "ssl"
+raise unless BundledValueProbe.attributes
+raise unless BundledValueProbe.allowed_tags
+"#)
         .assert_passes();
 }
 
@@ -2145,5 +2998,82 @@ end
 "#,
         )
         .run_test("test/models/upsert_target_test.rb")
+        .assert_passes();
+}
+
+/// The blog with its schema as a `db/structure.sql` from pg_dump 18 runs.
+/// The dump opens with `\restrict <key>` and closes with `\unrestrict
+/// <key>`, psql meta-commands pg_dump writes since 18 and the August 2025
+/// minor releases; Rails before 7.2.3 and 8.0.3 keeps them. Ingest read
+/// each as the head of an unmodeled statement and stopped. The dump is
+/// the blog's `db/schema.rb` loaded into PostgreSQL 18.3 and dumped with
+/// Rails' flags (`--schema-only --no-privileges --no-owner`), with the
+/// `SET search_path` and `schema_migrations` lines Rails appends.
+#[test]
+fn a_structure_sql_from_pg_dump_18_runs() {
+    emit_and_run::real_blog()
+        .remove("db/schema.rb")
+        .write("db/structure.sql", include_str!("support/real_blog_structure.sql"))
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// An app that declares no `root` boots and dispatches (#165). `main.rb`
+/// composed its route table as `[RouteTable.root] + RouteTable.table`,
+/// and the routes emit defines `RouteTable.root` only for a route at
+/// `/`, so the first request raised NoMethodError. `/` itself answers
+/// 404, as it does in Rails when no route matches.
+#[test]
+fn an_app_with_no_root_route_dispatches() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  before_action :set_widget, only: :show
+
+  def index
+    head :no_content
+  end
+
+  def show
+    head :not_found unless @widget
+  end
+
+  private
+
+  def set_widget
+    @widget = Widget.find_by(id: params[:id])
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: %i[index show]\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"def get(path)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  status
+end
+{ "/widgets" => 204, "/widgets/1" => 404, "/" => 404 }.each do |path, want|
+  got = get(path)
+  raise "GET #{path} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
         .assert_passes();
 }

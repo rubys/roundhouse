@@ -75,6 +75,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }
+    out.extend(super::forwarding::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
@@ -228,10 +229,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
     // walker is the natural place since every node's `.ty` already
     // carries the signal.
-    // A `Seq` has its tail's type; the tail reports itself.
+    // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
+    // an argument-packet marker, not a value escaping the type system.
     if value_used
         && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
-        && !matches!(&*expr.node, ExprNode::Seq { .. })
+        && !matches!(&*expr.node, ExprNode::Seq { .. } | ExprNode::ForwardArgs)
     {
         let kind = DiagnosticKind::GradualUntyped {
             expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
@@ -293,7 +295,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // is itself unresolved is reported on the receiver node when we
     // recurse, so the outer send is skipped here to avoid double-counting
     // the same root cause.
-    if is_unknown_ty(expr.ty.as_ref()) {
+    if is_unknown_ty(expr.ty.as_ref())
+        && !matches!(expr.diagnostic, Some(DiagnosticKind::Unsupported { .. }))
+    {
         let report = matches!(
             &*expr.node,
             ExprNode::Send { recv: None, .. }
@@ -436,7 +440,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
-        ExprNode::Splat { value } => diagnose_expr(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => diagnose_expr(value, out),
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {
@@ -464,6 +468,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

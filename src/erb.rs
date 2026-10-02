@@ -239,7 +239,10 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                 // alone, so `<% x -%>` mid-line keeps its newline.
                 let had_tail_dash = body.ends_with('-');
                 let body = body.strip_suffix('-').unwrap_or(body);
-                let ruby = body.trim();
+                // A trailing Ruby comment (`<% end # card.section %>`) is
+                // not part of the code: it would swallow the `).to_s` an
+                // output tag closes with, and stop `end` being read as one.
+                let ruby = strip_trailing_comment(body.trim());
 
                 // Erubi's `rspace`: the optional `[ \t]*\r?\n` right
                 // after `%>`. Absent (None) when the tag has trailing
@@ -366,7 +369,7 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                     record_code(&mut map, out.len(), ruby, body_start, body);
                     out.push_str(ruby);
                     out.push('\n');
-                    if opens_passthrough_block(ruby) {
+                    for _ in 0..passthrough_blocks_opened(ruby) {
                         stack.push(BlockKind::Pass);
                     }
                 }
@@ -414,6 +417,63 @@ pub(crate) fn is_block_expr(code: &str) -> bool {
         return matches!(last, Some(c) if c.is_whitespace() || c == ')');
     }
     false
+}
+
+/// `code` without a trailing `# comment`. Asked of Prism rather than
+/// scanned for, because a `#` opens a comment only outside a string,
+/// regexp or interpolation (`"#{x}"`, `?#`).
+fn strip_trailing_comment(code: &str) -> &str {
+    let bytes = code.as_bytes();
+    // Interpolation-like prefixes only interpolate in suitable literals.
+    // Outside one they start comments; let Prism distinguish the contexts.
+    if !bytes.contains(&b'#') {
+        return code;
+    }
+    let result = ruby_prism::parse(bytes);
+    let start = result
+        .comments()
+        .map(|c| c.location())
+        .filter(|l| code[l.end_offset()..].trim().is_empty())
+        .map(|l| l.start_offset())
+        .min();
+    match start {
+        Some(start) => code[..start].trim_end(),
+        None => code,
+    }
+}
+
+/// How many blocks a `<% code %>` tag leaves open, i.e. how many `<% end %>`
+/// tags it will take to close them.
+///
+/// A one-line tag opens at most the block its head names, which
+/// [`opens_passthrough_block`] reads off the text. A multi-statement tag
+/// can open several:
+///
+/// ```erb
+/// <% items.each do |item|
+///      unless item.nil? %>
+///   …
+///   <% end %>
+/// <% end %>
+/// ```
+///
+/// The head test sees `unless item.nil?`, not an opener, so the first
+/// `<% end %>` popped whichever output block enclosed the tag and closed
+/// it with `end).to_s` — the compiled Ruby no longer parsed. The exact
+/// count is the number of `end`s that make the tag parse on its own.
+/// `None`-fallback keeps the head test for tags that never parse alone
+/// (`else`, `elsif`, `when`, `rescue` continuations).
+fn passthrough_blocks_opened(code: &str) -> usize {
+    if code.contains('\n') || code.contains(';') {
+        let mut src = code.to_string();
+        for opened in 0..=8 {
+            if ruby_prism::parse(src.as_bytes()).errors().next().is_none() {
+                return opened;
+            }
+            src.push_str("\nend");
+        }
+    }
+    usize::from(opens_passthrough_block(code))
 }
 
 /// Does `code` (inside a `<% code %>` tag) open a block whose `end` we
@@ -645,6 +705,20 @@ mod tests {
         let out = compile_erb("Total: <%= count %>\n");
         assert!(out.contains(r#"_buf = _buf + "Total: ""#));
         assert!(out.contains("_buf = _buf + (count).to_s"));
+    }
+
+    #[test]
+    fn prism_identifies_comment_prefixes_that_resemble_interpolation() {
+        assert_eq!(strip_trailing_comment("end #@note"), "end");
+        assert_eq!(strip_trailing_comment("end #$note"), "end");
+        assert_eq!(strip_trailing_comment("end #{note}"), "end");
+    }
+
+    #[test]
+    fn interpolation_like_hashes_inside_literals_are_not_comments() {
+        for code in [r#""value #{@note} #$global #{local}""#, r#"/#{pattern}/"#] {
+            assert_eq!(strip_trailing_comment(code), code);
+        }
     }
 
     #[test]

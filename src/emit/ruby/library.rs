@@ -17,6 +17,7 @@ use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Meth
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
+use crate::ty::Ty;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
@@ -1008,7 +1009,12 @@ fn push_assoc_scope_skip(model: &crate::ident::ClassId, method: &Symbol, reason:
 /// method every call site now passes a relation to. Placement is before
 /// the first keyword in both, since `def f(__rel = …, k:)` is the only
 /// legal ordering.
-fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
+fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bool {
+    if m.params.iter().any(|p| p.forwarding) {
+        crate::emit::diagnostics::report_unsupported(m.name_span, "ruby", "full argument forwarding",
+            "full forwarding cannot use the relation-threading argument ABI");
+        return false;
+    }
     let insert_at = m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
     m.params.insert(
         insert_at,
@@ -1031,6 +1037,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
             },
         );
     }
+    true
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
@@ -1206,7 +1213,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     // scope's __rel is not last.
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    insert_rel_param(m, &rel_param);
+                    if !insert_rel_param(m, &rel_param) { continue; }
                     crate::lower::scope_chain::rewrite_scope_body(
                         &mut m.body,
                         &lc.name,
@@ -1245,7 +1252,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 {
                     continue;
                 }
-                insert_rel_param(m, &rel_param);
+                if !insert_rel_param(m, &rel_param) { continue; }
                 if creates {
                     crate::lower::scope_chain::merge_scope_attributes(
                         &mut m.body,
@@ -1802,6 +1809,8 @@ fn autosave_method(
         else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
     });
     crate::dialect::MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("_autosave_{}", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1849,6 +1858,8 @@ fn fold_before_validation(
         return;
     }
     methods.push(crate::dialect::MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: hook,
         receiver: MethodReceiver::Instance,
@@ -2481,6 +2492,8 @@ fn push_helper_ivar_writers(
         }
         let span = Span::synthetic();
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: setter,
             receiver: MethodReceiver::Instance,
@@ -2518,6 +2531,8 @@ fn push_helper_ivar_readers(
             continue;
         }
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: name.clone(),
             receiver: MethodReceiver::Instance,
@@ -3450,6 +3465,13 @@ fn rewrite_helper_calls(
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
         let ExprNode::Send { method, mut args, block, .. } = node else { unreachable!() };
+        if path.len() == 1 && path[0].as_str() == "Inflector"
+            && method.as_str() == "pluralize" && args.len() == 2 && !index.contains_key(&method)
+        {
+            let word = args.pop().unwrap();
+            *expr = crate::lower::view::pluralize_helper_call(args.pop().unwrap(), word);
+            return;
+        }
         // `link_to(37, url)` — Rails stringifies the text arg; the runtime
         // link_to is deliberately monomorphic (String text), so coercion
         // belongs here at the call boundary. Literal strings stay bare.
@@ -4822,7 +4844,9 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                     if temporal.contains(&m.name)
                         && is_plain_ivar_read(&m.body, &m.name) =>
                 {
-                    m.body = temporal_reader_body(&m.name);
+                    let column = table.columns.iter().find(|c| c.name == m.name).unwrap();
+                    let (_, parser, _) = crate::lower::model_to_library::schema::temporal_seam(column);
+                    m.body = temporal_reader_body(&m.name, parser);
                 }
                 // Hand-written temporal writers only, same reasoning:
                 // synthesized models write storage via `<col>_raw=`
@@ -4834,7 +4858,12 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                     let col = Symbol::from(m.name.as_str().trim_end_matches('='));
                     if temporal.contains(&col) {
                         if let Some(param) = m.params.first() {
-                            m.body = temporal_writer_body(&col, &param.name);
+                            let column = table.columns.iter().find(|c| c.name == col).unwrap();
+                            let (ty, _, formatter) = crate::lower::model_to_library::schema::temporal_seam(column);
+                            // Date uses the shared date-only formatter.
+                            // Keep the pre-existing legacy timestamp
+                            // iso8601 policy, not a Time storage refactor.
+                            m.body = temporal_writer_body(&col, &param.name, (ty == Ty::Date).then_some(formatter));
                         }
                     }
                     // The synthesized `<col>_raw=` writer's own store
@@ -5381,6 +5410,24 @@ fn root_shadowed_constants(
     if head.as_str().starts_with("::") {
         return;
     }
+    // Emission nests compact declarations such as `class UI::Explicit`
+    // under `module UI`. Rubydex already resolved the source reference.
+    // Root its actual class when the new nesting would bind the head to
+    // another class; a typed VALUE constant never carries this mark.
+    if expr.decisions & crate::expr::RESOLVED_CLASS_REF != 0 {
+        if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+            let resolved = id.0.as_str();
+            for prefix in prefixes.iter().rev() {
+                if known(&format!("{prefix}::{}", head.as_str())) {
+                    if format!("{prefix}::{joined}") != resolved {
+                        *path = resolved.split("::").map(Symbol::from).collect();
+                        path[0] = Symbol::from(format!("::{}", path[0].as_str()));
+                    }
+                    return;
+                }
+            }
+        }
+    }
     // Either the name's OWN segments shadow it (the pre-existing rule:
     // `Views::Stats` referencing `Stats`, `Message::Broadcasts`
     // referencing the runtime's `Broadcasts`) …
@@ -5520,7 +5567,7 @@ fn datetime_var(name: &Symbol) -> Expr {
 }
 
 /// `@col && ActiveSupport.parse_db_time(@col)`.
-fn temporal_reader_body(col: &Symbol) -> Expr {
+fn temporal_reader_body(col: &Symbol, parser: &str) -> Expr {
     // `ActiveSupport.parse_db_time` (not bare `Time.parse`) — a stored
     // column with no zone marker is always implicitly UTC (Rails/sqlite3
     // convention), but `Time.parse` defaults an absent zone to the
@@ -5532,7 +5579,7 @@ fn temporal_reader_body(col: &Symbol) -> Expr {
                 Span::synthetic(),
                 ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
             )),
-            method: Symbol::from("parse_db_time"),
+            method: Symbol::from(parser),
             args: vec![datetime_ivar(col)],
             block: None,
             parenthesized: true,
@@ -5550,7 +5597,24 @@ fn temporal_reader_body(col: &Symbol) -> Expr {
 }
 
 /// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)`.
-fn temporal_writer_body(col: &Symbol, value_param: &Symbol) -> Expr {
+fn temporal_writer_body(col: &Symbol, value_param: &Symbol, date_formatter: Option<&str>) -> Expr {
+    if let Some(formatter) = date_formatter {
+        return Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col.clone() },
+                value: Expr::new(Span::synthetic(), ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const {
+                        path: vec![Symbol::from("ActiveSupport")],
+                    })),
+                    method: Symbol::from(formatter),
+                    args: vec![datetime_var(value_param)],
+                    block: None,
+                    parenthesized: true,
+                }),
+            },
+        );
+    }
     let responds = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -5707,6 +5771,8 @@ fn synthesize_module_lc(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
@@ -5733,6 +5799,18 @@ fn synthesize_module_lc(
         constants: Vec::new(),
         unknown_calls: Vec::new(),
     }
+}
+
+#[test]
+fn module_adapter_preserves_parameter_declaration_facts() {
+    let source = crate::ingest::ingest_library_class(
+        b"class Probe; def self.call((a,b)); 7; end; end",
+        "probe.rb",
+    ).unwrap().unwrap();
+    let functions = crate::lower::view_to_library::flatten_lcs_to_functions(&[source]);
+    let restored = synthesize_module_lc(&functions);
+    assert_eq!(restored.methods[0].unsupported_formals,
+        Some(crate::dialect::UnsupportedFormal::Destructured));
 }
 
 /// Emit a single library-shape file. `out_path` is the project-root-relative

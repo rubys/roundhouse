@@ -2101,7 +2101,7 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             value.as_ref().is_some_and(body_contains_yield)
         }
-        ExprNode::Splat { value } => body_contains_yield(value),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => body_contains_yield(value),
         ExprNode::Super { args } => args
             .as_ref()
             .is_some_and(|v| v.iter().any(body_contains_yield)),
@@ -2693,7 +2693,9 @@ fn collect_ivar_assignments(
                 collect_ivar_assignments(v, out);
             }
         }
-        ExprNode::Splat { value } => collect_ivar_assignments(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            collect_ivar_assignments(value, out)
+        }
         ExprNode::MultiAssign { value, .. } => collect_ivar_assignments(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_ivar_assignments(cond, out);
@@ -2721,6 +2723,7 @@ fn collect_ivar_assignments(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

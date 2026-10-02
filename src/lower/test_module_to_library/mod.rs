@@ -19,7 +19,6 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use crate::naming::{camelize, singularize};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -78,18 +77,9 @@ pub fn lower_test_modules_with_inner(
     for (id, info) in extras {
         classes.insert(id, info);
     }
-    // Every app model is at least PRESENT under its bare name, whether
-    // or not the caller supplied a registry entry for it. The
-    // bare-const expander resolves a bare `Session` to a qualified
-    // `…::Session` only when nothing is registered bare (see
-    // `analyze::body::expand_bare_const`), so a missing model here is
-    // not a typing gap — it silently retargets the call. campfire
-    // defines `Session < ApplicationRecord`, and the framework stub
-    // `ActionDispatch::Session` claimed every `Session.count` /
-    // `.create!` / `.find_by` in its test suite. `or_insert` so a
-    // caller's real ClassInfo still wins; this only closes the hole.
-    // Ahead of the framework stubs, which is where the collision comes
-    // from.
+    // A standalone test body has no Ruby source index. Register every
+    // app model under its exact name so class-method dispatch resolves
+    // even when the caller omits it from `extras`. Preserve real entries.
     for model in models {
         classes.entry(model.name.clone()).or_default();
     }
@@ -150,7 +140,9 @@ pub fn lower_test_modules_with_inner(
     // Class(<Model>)` on every test class. Self-describing: derive
     // from app.fixtures + app.models so the registry knows what
     // `articles(:one)` returns.
-    let fixture_helpers = build_fixture_helpers(fixtures, models);
+    let fixture_helpers: Vec<_> = fixtures.iter()
+        .map(|fixture| (fixture.name.clone(), fixture.accessor_signature(models)))
+        .collect();
 
     // Rewrite fixture calls — `articles(:one)` → `ArticlesFixtures.one()` —
     // so each call lands at concrete dispatch instead of relying on a
@@ -733,6 +725,8 @@ fn test_to_method_def(
     );
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Instance,
@@ -763,31 +757,6 @@ fn prepend_setup(setup: &Expr, body: &Expr) -> Expr {
         _ => stmts.push(body.clone()),
     }
     Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts })
-}
-
-/// Map fixture file names to (helper_name, signature) pairs.
-/// Rails's fixture helper convention: `<table_name>(name: Sym) ->
-/// Class(<SingularModel>)`. Falls back to Untyped when the
-/// corresponding model isn't registered (the helper still types as
-/// callable, just less precisely).
-fn build_fixture_helpers(fixtures: &[Fixture], models: &[Model]) -> Vec<(Symbol, Ty)> {
-    let mut out: Vec<(Symbol, Ty)> = Vec::new();
-    for f in fixtures {
-        let plural_snake = f.name.as_str();
-        let singular_snake = singularize(plural_snake);
-        let class_name = camelize(&singular_snake);
-        let resolved_class = models
-            .iter()
-            .find(|m| m.name.0.as_str() == class_name)
-            .map(|_| Ty::Class { id: ClassId(Symbol::from(class_name)), args: vec![] })
-            .unwrap_or(Ty::Untyped);
-        let sig = crate::lower::typing::fn_sig(
-            vec![(Symbol::from("name"), Ty::Sym)],
-            resolved_class,
-        );
-        out.push((Symbol::from(plural_snake), sig));
-    }
-    out
 }
 
 /// `"creates an article with valid attributes"` →

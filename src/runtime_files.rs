@@ -1,21 +1,14 @@
-//! The `runtime/ruby/` and `runtime/spinel/` trees, embedded.
+//! Embedded Ruby declarations for constant resolution on every target.
 //!
-//! The ruby and spinel targets compose their output from a scaffold
-//! and a runtime overlay that live in the repository. `project.rs` read
-//! them from disk relative to the working directory, so the shipped
-//! binary could emit Go from anywhere (its runtime is `include_str!`'d
-//! in the emitter) but ruby and spinel only from inside a checkout.
-//! `build.rs` now generates a table of every text file under the two
-//! trees, and the walkers here answer the same questions the disk
-//! walkers did — recursive, extension-partitioned, flat — with the same
-//! admission rules (dotfiles and `SKIP_DIRS` directories skipped), so
-//! the file set a target emits is unchanged and independent of where
-//! the binary runs.
-//!
-//! Host-only: the wasm build never emits these targets.
+//! Host emitters also use the full Ruby and Spinel runtime table.
+//! The wasm build embeds only Ruby implementations that declare
+//! framework or Spinel shim constants.
 
 /// `(path relative to the repository root, content)`, sorted by path.
+#[cfg(not(target_arch = "wasm32"))]
 static FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
+#[cfg(target_arch = "wasm32")]
+static FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_const_sources.rs"));
 
 /// Directories no walk descends into — the same list the app-directory
 /// walkers in `project.rs` apply, so a scaffold's `static/` or the
@@ -57,6 +50,20 @@ fn under(dir: &str) -> impl Iterator<Item = (&'static str, &'static str)> {
         }
         Some((rel, *c))
     })
+}
+
+/// Real framework and shim declarations, without tests or emit scaffolds.
+pub(crate) fn ruby_sources() -> impl Iterator<Item = (&'static str, &'static str)> {
+    FILES
+        .iter()
+        .filter(|(path, _)| {
+            (path.starts_with("runtime/ruby/") || path.starts_with("runtime/spinel/"))
+                && path.ends_with(".rb")
+                && !path
+                    .split('/')
+                    .any(|part| part == "test" || part == "scaffold")
+        })
+        .map(|(path, text)| (*path, *text))
 }
 
 fn require_dir(dir: &str) -> Result<(), String> {

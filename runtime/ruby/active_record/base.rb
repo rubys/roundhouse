@@ -32,7 +32,7 @@ module ActiveRecord
     found = -1
     i = 0
     while i < values.length
-      found = i if values[i] == value
+      found = i if found == -1 && values[i] == value
       i += 1
     end
     found == -1 ? nil : labels[found]
@@ -82,7 +82,7 @@ module ActiveRecord
     found = -1
     i = 0
     while i < values.length
-      found = i if values[i] == value
+      found = i if found == -1 && values[i] == value
       i += 1
     end
     found == -1 ? nil : labels[found]
@@ -233,6 +233,17 @@ module ActiveRecord
     # Read by the upsert builder to name its conflict target.
     def self.primary_key
       "id"
+    end
+
+    # Finder casting runs in connection.rb (Relation is ruby-family
+    # only). Keep the typed contract here without transpiling a union
+    # receiver's conversion into strict targets.
+    def self._cast_primary_key(_id)
+      raise NotImplementedError, "finder casting requires the Relation runtime"
+    end
+
+    def self._string_primary_key
+      false
     end
 
     # The temporal subset of `schema_columns`. Unlike its siblings this

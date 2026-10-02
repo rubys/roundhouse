@@ -176,7 +176,7 @@ module ActionDispatch
         if route.verb.to_s == method_upcase
           params = match_parts(route.pattern_parts, path_parts, route.int_params, format)
           unless params.nil?
-            return MatchResult.new(route.controller, route.action, params, route.req_format)
+            return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
           end
         end
         i += 1

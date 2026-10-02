@@ -84,9 +84,10 @@ impl EnumConstants {
     pub(in crate::ingest) fn validate_consumed_sources(
         &mut self,
         app: &crate::App,
+        sources: &[crate::span::SourceFile],
         input_files: &std::collections::HashSet<std::path::PathBuf>,
     ) -> super::super::IngestResult<()> {
-        for source in &app.sources {
+        for source in sources {
             let path = std::path::Path::new(&source.path);
             if path.extension().is_some_and(|extension| extension == "rb")
                 && !input_files.contains(path)
@@ -97,7 +98,7 @@ impl EnumConstants {
         self.finish();
         for model in app.models.iter().filter(|model| !model.enums.is_empty()) {
             if let Some(source) = model.span.file.0.checked_sub(1)
-                .and_then(|index| app.sources.get(index as usize))
+                .and_then(|index| sources.get(index as usize))
             {
                 super::validate_sorbet_enum_mappings(model, source, self)?;
             }

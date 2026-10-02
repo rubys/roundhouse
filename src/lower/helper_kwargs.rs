@@ -57,6 +57,9 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
+    // Refused/native markers remain intact for diagnosis; only ordinary
+    // producers rejoin this pass's established positional normalization.
+    let _ = super::forwarding::apply(app);
     apply_to_test_modules(app);
     apply_to_library_class_calls(app);
     apply_to_instance_calls(app);
@@ -86,14 +89,20 @@ fn apply_to_library_class_calls(app: &mut App) {
     let mut params: HashMap<(String, Symbol), Vec<Slot>> = HashMap::new();
     for lc in &app.library_classes {
         for m in &lc.methods {
-            if m.receiver != crate::dialect::MethodReceiver::Class
-                || m.params.iter().any(|p| p.rest || p.keyword)
+            if m.receiver != crate::dialect::MethodReceiver::Class {
+                continue;
+            }
+            let key = (lc.name.0.as_str().to_string(), m.name.clone());
+            // Ruby uses the last definition, including one that cannot
+            // be flattened. Never normalize against its earlier override.
+            params.remove(&key);
+            if m.params.iter().any(|p| p.rest || p.keyword || p.forwarding)
                 || !m.params.iter().any(|p| p.from_keyword)
             {
                 continue;
             }
             params.insert(
-                (lc.name.0.as_str().to_string(), m.name.clone()),
+                key,
                 m.params.iter().map(slot_of).collect(),
             );
         }
@@ -133,14 +142,20 @@ fn apply_to_instance_calls(app: &mut App) {
     let mut params: HashMap<(String, Symbol), Vec<Slot>> = HashMap::new();
     for lc in &app.library_classes {
         for m in &lc.methods {
-            if m.receiver != crate::dialect::MethodReceiver::Instance
-                || m.params.iter().any(|p| p.rest || p.keyword)
+            if m.receiver != crate::dialect::MethodReceiver::Instance {
+                continue;
+            }
+            let key = (lc.name.0.as_str().to_string(), m.name.clone());
+            // A later native definition replaces the earlier flattened ABI,
+            // just as it does for class-method keyword normalization above.
+            params.remove(&key);
+            if m.params.iter().any(|p| p.rest || p.keyword || p.forwarding)
                 || !m.params.iter().any(|p| p.from_keyword)
             {
                 continue;
             }
             params.insert(
-                (lc.name.0.as_str().to_string(), m.name.clone()),
+                key,
                 m.params.iter().map(slot_of).collect(),
             );
         }
@@ -190,7 +205,7 @@ fn apply_to_test_modules(app: &mut App) {
             // Same two exclusions as the module path: a `rest` parameter
             // ends the simple positional story, and one that SURVIVED as
             // a keyword is already bound correctly.
-            if m.params.iter().any(|p| p.rest || p.keyword) {
+            if m.params.iter().any(|p| p.rest || p.keyword || p.forwarding) {
                 continue;
             }
             let names: Vec<Slot> = m.params.iter().map(slot_of).collect();
@@ -250,7 +265,7 @@ fn helper_param_names(app: &App) -> HashMap<Symbol, Vec<Slot>> {
         // call site and must not be moved — a signature mixing the two
         // is the one case where the name rule cannot tell which is
         // which, so the whole helper is skipped.
-        if m.params.iter().any(|p| p.rest || p.keyword) {
+        if m.params.iter().any(|p| p.rest || p.keyword || p.forwarding) {
             continue;
         }
         let names: Vec<Slot> = m.params.iter().map(slot_of).collect();

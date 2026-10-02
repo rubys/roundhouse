@@ -7,8 +7,9 @@
 //! SELECT against it. campfire's own tests call the same method with
 //! `[ users(:david), users(:kevin) ]`. Ruby does not care: an Array
 //! `pluck`s too (activesupport reopens it). A typed emit has to pick,
-//! and the analyzer never sees a test body, so nothing widened the
-//! parameter — the compiled test handed an `sp_PolyArray *` where an
+//! and production parameters keep their production callers' shape,
+//! even when original test bodies are typed. Before this rewrite the
+//! compiled test handed an `sp_PolyArray *` where an
 //! `sp_Relation *` was declared and the file never linked; the CRuby
 //! lane ran and raised `undefined method 'pluck' for an instance of
 //! Array` (rooms_direct_test, 3 tests, both lanes).

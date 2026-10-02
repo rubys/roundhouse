@@ -513,6 +513,7 @@ pub enum CallbackHook {
 /// future gap (see `project_lowered_ir_gaps_for_runnability`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Param {
+    /// Empty for nameless `**` or `...`; neither introduces a local binding.
     pub name: Symbol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Expr>,
@@ -529,6 +530,11 @@ pub struct Param {
     /// correct only while no transpiled call site passes extra args).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rest: bool,
+    /// Anonymous full forwarding (`...`), not a named rest binding.
+    /// Paired with ExprNode::ForwardArgs; preserves keyword and block
+    /// identity without introducing locals that can capture user names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forwarding: bool,
     /// Ingest flattened a source OPTIONAL KEYWORD (`style: :time`) into
     /// this positional-with-default. See `keeps_keywords` in
     /// `ingest::library_class` for when it does and does not.
@@ -564,7 +570,11 @@ impl Param {
     /// binaries from one sentence being said twice.
     pub fn ty_kind(&self) -> crate::ty::ParamKind {
         use crate::ty::ParamKind;
-        if self.keyword && self.rest {
+        if self.forwarding {
+            // Gradual inference fallback, not a named Array binding.
+            // Only the native Ruby carrier is supported by emission.
+            ParamKind::Rest
+        } else if self.keyword && self.rest {
             ParamKind::KeywordRest
         } else if self.rest {
             ParamKind::Rest
@@ -578,19 +588,25 @@ impl Param {
     }
 
     pub fn positional(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default: None, keyword: false, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn with_default(name: Symbol, default: Expr) -> Self {
-        Self { name, default: Some(default), keyword: false, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default: Some(default), keyword: false, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn keyword(name: Symbol, default: Option<Expr>) -> Self {
-        Self { name, default, keyword: true, rest: false, from_keyword: false, from_kwrest: false }
+        Self { name, default, keyword: true, rest: false, forwarding: false, from_keyword: false, from_kwrest: false }
     }
 
     pub fn rest(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false, rest: true, from_keyword: false, from_kwrest: false }
+        Self { name, default: None, keyword: false, rest: true, forwarding: false, from_keyword: false, from_kwrest: false }
+    }
+
+    pub fn forwarding() -> Self {
+        let mut param = Self::positional(Symbol::from(""));
+        param.forwarding = true;
+        param
     }
 
     pub fn as_str(&self) -> &str {
@@ -614,6 +630,26 @@ pub enum MethodVisibility {
     Private,
 }
 
+/// Source formal shapes whose binding/arity contract is not retained yet.
+/// This belongs to the declaration, independent of body rewrites or typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsupportedFormal {
+    Destructured,
+    AnonymousRest,
+    NoKeywords,
+}
+
+impl UnsupportedFormal {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Destructured => "destructured positional parameters are not retained",
+            Self::AnonymousRest => "anonymous positional rest is not retained",
+            Self::NoKeywords => "the no-keywords constraint is not retained",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MethodDef {
     pub name: Symbol,
@@ -623,6 +659,12 @@ pub struct MethodDef {
     #[serde(default)]
     pub visibility: MethodVisibility,
     pub params: Vec<Param>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_formals: Option<UnsupportedFormal>,
+    /// Reject-only source fact for full-forwarding destination admission.
+    /// Legacy anonymous `&` ingestion remains separate and unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_anonymous_block: bool,
     /// Block parameter declared at the `def` site (`def foo(x, &block)`).
     /// Distinct from `params` because it occupies the call-site `block:`
     /// slot, never `args:`. Present only when the method binds an
@@ -870,6 +912,11 @@ pub struct LibraryFunction {
     /// (`Views::Articles.article`).
     pub name: crate::ident::Symbol,
     pub params: Vec<Param>,
+    /// Preserve declaration facts when adapting a source MethodDef.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_formals: Option<UnsupportedFormal>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_anonymous_block: bool,
     pub body: Expr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<crate::ty::Ty>,
@@ -1608,6 +1655,36 @@ pub struct Fixture {
     /// `_fixture: model_class:` — the class the rows load, for a set
     /// whose path doesn't name it. `None` derives it from `path`.
     pub model_class: Option<Symbol>,
+}
+
+impl Fixture {
+    /// The loader and fixture-accessor typing must name the same model.
+    pub(crate) fn class_id(&self) -> ClassId {
+        let name = match &self.model_class {
+            Some(class) => class.as_str().trim_start_matches("::").to_string(),
+            None => crate::naming::classify_path(self.path.as_str()),
+        };
+        ClassId(Symbol::from(name.as_str()))
+    }
+
+    /// Fixture accessors and row loading share this model identity. Unknown
+    /// models stay gradual instead of claiming a nonexistent class.
+    pub(crate) fn accessor_signature(&self, models: &[Model]) -> Ty {
+        let class = self.class_id();
+        let ret = models.iter().find(|model| model.name == class)
+            .map(|model| Ty::Class { id: model.name.clone(), args: vec![] })
+            .unwrap_or(Ty::Untyped);
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("name"),
+                ty: Ty::Sym,
+                kind: crate::ty::ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::pure(),
+        }
+    }
 }
 
 /// An enum whose every stored value is an integer: its reader answers the label.

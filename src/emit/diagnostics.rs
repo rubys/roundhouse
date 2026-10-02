@@ -120,6 +120,17 @@ pub fn unsupported_time_ty(target: &str) -> String {
     "RoundhouseUnsupportedTime".to_string()
 }
 
+/// Date-only values must not fall through to a timestamp or gradual type.
+pub fn unsupported_date_ty(target: &str) -> String {
+    push(Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(Symbol::from(target)),
+        "Date",
+        "no date-only runtime wired for this target yet (native Ruby is supported)",
+    ));
+    "RoundhouseUnsupportedDate".to_string()
+}
+
 /// Report that a `Ty::Relation` reached a target's type renderer.
 /// Relations are analysis-time types erased by query specialization
 /// (`lower/arel` folds statically-visible chains into direct SQL), so

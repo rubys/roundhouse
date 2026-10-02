@@ -18,6 +18,10 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+/// The source reference names a modeled class or module. The Ruby emitter
+/// uses its resolved `Ty::Class` when it changes lexical nesting.
+pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by
@@ -106,10 +110,10 @@ pub struct Expr {
     /// nothing tagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<IrHint>,
-    /// Bit-packed decisions stamped by per-target decide passes.
-    /// Bits 0–31 are reserved for cross-target concerns (e.g.
-    /// `NEEDS_PARENS`, `LAST_USE`) populated by shared analyses;
-    /// bits 32–63 are per-target-local (e.g. rust's `OWNED`,
+    /// Bit-packed source facts and target decisions. Bits 0–31 are
+    /// cross-target (`NEEDS_PARENS`, `LAST_USE`, `RESOLVED_CLASS_REF`);
+    /// the analyzer sets source facts and the decide passes set the rest.
+    /// Bits 32–63 are per-target-local (e.g. rust's `OWNED`,
     /// `CLONE_AT`). See `src/emit/rust/decide/bits.rs` for the
     /// rust bit allocation. Default `0` = "no decisions" — emitters
     /// that don't run a decide pass see no behavioral change.
@@ -413,6 +417,14 @@ pub enum ExprNode {
     /// argument lists / array literals; standalone Splat is a Ruby
     /// syntax error.
     Splat { value: Expr },
+    /// Full argument forwarding in a call or `super(...)`. Retains
+    /// positional/keyword/block provenance; never a user variable or
+    /// an ordinary positional hash. Requires a forwarding formal.
+    ForwardArgs,
+    /// Source keyword argument group containing `**expression`.
+    /// The one value child is the existing ordered hash merge expression;
+    /// it evaluates once. This is not a positional `{**hash}` literal.
+    KeywordSplat { value: Expr },
     /// Parallel assignment: `a, b = expr` — RHS evaluates once, then
     /// is destructured (Ruby array-like) across the targets. Limited
     /// to the no-rest, no-rights shape; `a, *b = c` is not yet
@@ -507,6 +519,8 @@ impl ExprNode {
             ExprNode::Retry => "Retry",
             ExprNode::Redo => "Redo",
             ExprNode::Splat { .. } => "Splat",
+            ExprNode::ForwardArgs => "ForwardArgs",
+            ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
             ExprNode::While { .. } => "While",
             ExprNode::Range { .. } => "Range",
@@ -553,6 +567,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -657,7 +672,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);
@@ -739,6 +754,7 @@ impl ExprNode {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -843,7 +859,7 @@ impl ExprNode {
                     f(v);
                 }
             }
-            ExprNode::Splat { value } => f(value),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => f(value),
             ExprNode::MultiAssign { targets, value } => {
                 for t in targets {
                     lvalue_children(t, f);

@@ -42,8 +42,11 @@ pub fn emit_expr(e: &Expr) -> String {
     // `Unsupported` kind: an `IncompatibleBinop` the analyzer stamps is
     // left to Ruby itself, which raises at the same site on its own.
     if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic {
-        return crate::emit::diagnostics::StubStyle::Raise
+        // This is an expression, including in a rescue list or a binary
+        // operand. A bare command-style `raise` is not valid there.
+        let stub = crate::emit::diagnostics::StubStyle::Raise
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
+        return format!("({stub})");
     }
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));
@@ -299,6 +302,8 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Retry => "retry".to_string(),
         ExprNode::Redo => "redo".to_string(),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
+        ExprNode::ForwardArgs => "...".to_string(),
+        ExprNode::KeywordSplat { value } => format!("**{}", paren_multiline(emit_arg(value))),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
             format!("{} = {}", lhs.join(", "), emit_expr(value))
@@ -995,6 +1000,19 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_arg).collect();
     let m = method.as_str();
+    // `...` is a send argument packet, never an index or infix operand.
+    // Preserve explicit call syntax even for operator/setter method names
+    // and `self`, before any surface-syntax prettification below.
+    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. })) {
+        return match recv {
+            Some(r) => {
+                let receiver = emit_expr(r);
+                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
+                format!("{receiver}.{method}({})", args_s.join(", "))
+            }
+            None => format!("{method}({})", args_s.join(", ")),
+        };
+    }
     // Indexing a statically string-keyed hash (`Hash[String, _]`, e.g.
     // request `params`) with a Ruby symbol/dynamic key: coerce the key to
     // a string here, the single emit chokepoint, so no `h[:sym]` survives

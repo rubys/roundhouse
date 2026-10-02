@@ -193,6 +193,11 @@ module Main
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
     controller.request_format = request_format
+    # Rails' "any format": a bare `*/*` Accept (see the spinel
+    # dispatcher's `Main.accepts_any_format?`); a browser's list with a
+    # comma is read as html.
+    accept = request.fetch(:accept, "").to_s
+    controller.accepts_any_format = !accept.include?(",") && accept.split(";", 2)[0].to_s.strip == "*/*"
     # The full request object (CRuby overlay class) — filters read
     # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
     # detaches a plain mutable Hash (callers write scratch keys the real

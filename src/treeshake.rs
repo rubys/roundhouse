@@ -381,7 +381,7 @@ where
                 walk_sends(v, visit);
             }
         }
-        ExprNode::Splat { value } => walk_sends(value, visit),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk_sends(value, visit),
         ExprNode::MultiAssign { value, .. } => walk_sends(value, visit),
         ExprNode::While { cond, body, .. } => {
             walk_sends(cond, visit);
@@ -411,6 +411,7 @@ where
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

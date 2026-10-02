@@ -9,7 +9,7 @@
 //! convenience wrapper for the disk case.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ruby_prism::Node;
 
@@ -171,7 +171,12 @@ pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming
 /// into `rails dbconsole`) out of the tree. Core classes and framework
 /// roots are never taken from here: a top-level definition of one is a
 /// reopen of something the runtime already provides.
-fn keep_initializer_defined(app: &mut App, dir: &Path, candidates: Vec<LibraryClass>) {
+fn keep_initializer_defined(
+    app: &mut App,
+    dir: &Path,
+    sources: &[crate::span::SourceFile],
+    candidates: Vec<LibraryClass>,
+) {
     const FRAMEWORK_ROOTS: &[&str] = &[
         "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
         "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
@@ -187,7 +192,7 @@ fn keep_initializer_defined(app: &mut App, dir: &Path, candidates: Vec<LibraryCl
     let root = dir.display().to_string();
     let root = root.trim_end_matches('/');
     let referenced = |name: &str| {
-        app.sources.iter().any(|f| {
+        sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
             (rel.starts_with("app/") || rel.starts_with("lib/"))
                 && f.text.match_indices(name).any(|(i, _)| {
@@ -222,6 +227,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    let additional_test_paths = additional_test_paths(vfs, dir)?;
+    validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
@@ -1244,41 +1251,43 @@ end
         }
     };
 
-    // Test files — every `test/<dir>/**/*_test.rb` that runs in
-    // process. System tests under `test/system/` need a browser
-    // driver and stay out of scope; `test/performance/` is a
-    // benchmark, not a suite.
-    //
-    // This list was `models` and `controllers` for a long time, and
-    // that was the whole reason campfire's `test/lib`, `test/channels`
-    // and `test/helpers` — twelve files, ninety-seven tests — were
-    // never in any tally: not a gap in what they exercise, just never
-    // read. The subjects those dirs test (the private-network guard,
-    // the channels, the content filters) were already emitted.
-    // `test/mailers` (the store fixture has one, against
-    // `ActionMailer::TestCase`) and `test/jobs` are the next two, and
-    // each is a harness the runtime does not have yet.
-    // `test/unit` and `test/utils` are plain `ActiveSupport::TestCase`
-    // lanes in larger apps (Shopify core keeps most unit tests there).
-    for subdir in [
-        "test/models", "test/controllers", "test/helpers", "test/channels", "test/lib", "test/unit",
-        "test/utils",
-    ] {
-        let tests_dir = dir.join(subdir);
-        if vfs.is_dir(&tests_dir) {
-            for entry in read_rb_files(vfs, &tests_dir)? {
-                let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
-                if let Some(tms) =
-                    unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
-                {
-                    for mut tm in tms {
-                        splice_test_helpers(&mut tm, &shared_test_helpers);
-                        if let Some(case_setup) = &test_case_setup {
-                            splice_test_case_setup(&mut tm, case_setup);
-                        }
-                        app.test_modules.push(tm);
-                    }
+    // Test files under the Rails defaults and the additional roots from
+    // `roundhouse.yml`. Select every Ruby file recursively.
+    let mut test_roots: Vec<PathBuf> = [
+        "test/models",
+        "test/controllers",
+        "test/helpers",
+        "test/channels",
+        "test/lib",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    test_roots.extend(additional_test_paths);
+    test_roots.sort();
+    test_roots.dedup();
+
+    let mut test_files = Vec::new();
+    for root in test_roots {
+        let tests_dir = dir.join(root);
+        if !path_has_symlink_component(vfs, dir, &tests_dir) && vfs.is_dir(&tests_dir) {
+            test_files.extend(read_test_rb_files(vfs, dir, &tests_dir)?);
+        }
+    }
+    test_files.sort();
+    test_files.dedup();
+
+    for entry in test_files {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        if let Some(tms) =
+            unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
+        {
+            for mut tm in tms {
+                splice_test_helpers(&mut tm, &shared_test_helpers);
+                if let Some(case_setup) = &test_case_setup {
+                    splice_test_case_setup(&mut tm, case_setup);
                 }
+                app.test_modules.push(tm);
             }
         }
     }
@@ -1340,6 +1349,19 @@ end
             }
         }
     }
+
+    // Every app source is registered by here. Rubydex resolves a
+    // SNAPSHOT on another thread while the passes below run, and those
+    // passes read the same snapshot. It is not the real `drain`: the
+    // passes below re-ingest generated Ruby and look up the `FileId`s of
+    // real files again, so the registry must stay live until they have
+    // run. Draining here and letting the registry start over at
+    // `FileId(1)` is how a synthesized parse failure once rendered
+    // against an unrelated real file (see `ingest::sources`'s module
+    // doc). The real drain runs after them, below.
+    let sources = std::sync::Arc::new(super::sources::snapshot());
+    let const_resolver =
+        crate::analyze::ConstResolverTask::start(std::sync::Arc::clone(&sources));
 
     // Logical stylesheets — file stems of `.css` files found in
     // `app/assets/stylesheets/` and `app/assets/builds/`. Rails'
@@ -1509,24 +1531,11 @@ end
         }
     }
 
-    // A SNAPSHOT, not the real `drain`: `keep_initializer_defined` just
-    // below needs to read the app's real source text right now, but
-    // the real files' `FileId`s must stay live (not reset to empty)
-    // through every synthesizing pass below — `current_attributes`,
-    // `delegate`, `channel_callbacks`, `allow_browser`, `rate_limit` —
-    // each of which re-ingests generated Ruby of its own. Draining here
-    // and letting the registry start over at `FileId(1)` mid-pipeline
-    // is exactly how a synthesized parse failure once rendered against
-    // an unrelated real file that happened to share the reused id (see
-    // `ingest::sources`'s module doc). The real `drain` — the one that
-    // actually clears the registry and becomes `app.sources` for
-    // good — runs after all of them, below.
-    app.sources = super::sources::snapshot();
-    enum_constants.validate_consumed_sources(&app, &enum_input_files)?;
-    keep_initializer_defined(&mut app, dir, initializer_defined);
+    enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
+    keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
-    let concern_class_method_spans: Vec<_> = app.sources.iter()
+    let concern_class_method_spans: Vec<_> = sources.iter()
         .filter(|source| source.path.ends_with(".rb"))
         .flat_map(|source| ingest_concern_class_method_spans(source.text.as_bytes(), &source.path))
         .collect();
@@ -1535,7 +1544,6 @@ end
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     resolve_polymorphic_targets(&mut app);
-    inherit_enums(&mut app.models);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
@@ -1545,7 +1553,8 @@ end
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
-    super::alba::lower_alba_resources(&mut app)?;
+    // Rejected declarations still fail ingest, but survey must ledger them.
+    super::alba::lower_alba_resources(&mut app, &sources).inspect_err(survey::record)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -1567,13 +1576,17 @@ end
     super::allow_browser::lower_allow_browser(&mut app);
     super::rate_limit::lower_rate_limit(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
-    // Ruby has run — see the snapshot comment above. `app.sources`
-    // held the pre-synthesis snapshot until now; this replaces it with
-    // the complete, contiguously-numbered table (each synthesized
-    // pass's own `"<label>"` re-ingest never took a slot in it at all —
-    // `sources::register` refuses a label starting with `<` — so this
-    // is the same real-file list the snapshot already had).
+    // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
+    // slot (`sources::register` refuses a label starting with `<`), so
+    // this is the same real-file list that Rubydex indexes, and its
+    // answers use these `FileId`s.
     app.sources = super::sources::drain();
+    debug_assert_eq!(
+        app.sources.len(),
+        sources.len(),
+        "a pass registered a source after Rubydex took its snapshot"
+    );
+    drop(sources);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
@@ -1596,6 +1609,9 @@ end
     // are resolved to their literal here.
     app.content_helper_allowed_attributes = content_helper_attribute_additions(vfs, dir, &app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
+    // Include each base's Concern maps, and retain a child's own maps
+    // (direct or Concern-declared) before filling inherited columns.
+    inherit_enums(&mut app.models);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
@@ -1607,6 +1623,11 @@ end
 
     collect_binary_assets(vfs, dir, &mut app);
 
+    debug_assert!(
+        super::sources::drain().is_empty(),
+        "a pass registered a source after ingest drained the registry"
+    );
+    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     Ok(app)
 }
 
@@ -2671,9 +2692,9 @@ fn expand_class_body_macros(app: &mut App) {
 
 /// The macro's body with its parameters replaced by the call's
 /// arguments. Positional binding, which is all these macros need: the
-/// `**options` a concern macro forwards arrives here as a trailing
-/// positional (see `ingest_hash_literal`), so the substitution is a
-/// straight variable replacement.
+/// `**options` a concern macro forwards binds its trailing value. Consume
+/// any call-site keyword producer before substituting that value into
+/// the body; an argument marker is not part of the options Hash itself.
 ///
 /// A parameter the call site does NOT supply still has to bind, or the
 /// body keeps a free variable and `filters_from_macro_body` rejects the
@@ -2716,7 +2737,10 @@ fn substitute_params(
         .enumerate()
         .map(|(i, p)| {
             let value = match args.get(i) {
-                Some(a) => a.clone(),
+                Some(a) => match &*a.node {
+                    ExprNode::KeywordSplat { value } => value.clone(),
+                    _ => a.clone(),
+                },
                 None if p.default.is_some() => p.default.clone().expect("checked"),
                 None if p.rest => crate::expr::Expr::new(
                     span,
@@ -2794,6 +2818,12 @@ fn filter_from_send(
             targets.push((sym, arg.span));
             continue;
         }
+        // Macro substitution has already bound this keyword producer. Keep
+        // the existing literal-options contract without guessing dynamic data.
+        let arg = match &*arg.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => arg,
+        };
         let ExprNode::Hash { entries, .. } = &*arg.node else {
             // An argument that is neither a target nor an options hash
             // (a forwarded parameter the call site never supplied, say)
@@ -3580,6 +3610,149 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
     Ok(out)
 }
 
+/// Check configured roots before directory checks, which follow symbolic links.
+fn validate_additional_test_paths<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    paths: &[PathBuf],
+) -> IngestResult<()> {
+    let config_path = dir.join("roundhouse.yml");
+    for path in paths {
+        let tests_dir = dir.join(path);
+        if path_has_symlink_component(vfs, dir, &tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!(
+                    "test_paths entries must not contain symbolic links: {path:?}"
+                ),
+            });
+        }
+        if vfs.exists(&tests_dir) && !vfs.is_dir(&tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!("test_paths entries must name directories: {path:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Return true when a path component below `root` is a symbolic link.
+fn path_has_symlink_component<V: Vfs + ?Sized>(vfs: &V, root: &Path, path: &Path) -> bool {
+    let relative = if root.as_os_str().is_empty() {
+        path
+    } else if let Ok(relative) = path.strip_prefix(root) {
+        relative
+    } else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => {
+                current.push(segment);
+                if vfs.is_symlink(&current) {
+                    return true;
+                }
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
+}
+
+/// Collect Ruby test files without following symbolic links.
+fn read_test_rb_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    app_root: &Path,
+    test_root: &Path,
+) -> IngestResult<Vec<PathBuf>> {
+    fn collect<V: Vfs + ?Sized>(
+        vfs: &V,
+        app_root: &Path,
+        dir: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> IngestResult<()> {
+        if path_has_symlink_component(vfs, app_root, dir) {
+            return Ok(());
+        }
+        for entry in vfs.read_dir(dir)? {
+            if path_has_symlink_component(vfs, app_root, &entry) {
+                continue;
+            }
+            if vfs.is_dir(&entry) {
+                collect(vfs, app_root, &entry, out)?;
+            } else if entry.extension().and_then(|extension| extension.to_str()) == Some("rb") {
+                out.push(entry);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(vfs, app_root, test_root, &mut files)?;
+    Ok(files)
+}
+
+/// Additional test roots from the app's `roundhouse.yml`.
+fn additional_test_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct RoundhouseConfig {
+        test_paths: Vec<PathBuf>,
+    }
+
+    let config_path = dir.join("roundhouse.yml");
+    let text = match vfs.read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(IngestError::Io(std::io::Error::new(
+                error.kind(),
+                format!("{}: {error}", config_path.display()),
+            )));
+        }
+    };
+    let config: Option<RoundhouseConfig> = serde_yaml_ng::from_str(&text).map_err(|error| {
+        IngestError::Parse {
+            file: config_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+
+    let mut paths = Vec::new();
+    for path in config.into_iter().flat_map(|config| config.test_paths) {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(segment) => normalized.push(segment),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(IngestError::Parse {
+                        file: config_path.display().to_string(),
+                        message: format!(
+                            "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
+                        ),
+                    });
+                }
+            }
+        }
+        if normalized.as_os_str().is_empty() {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!(
+                    "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
+                ),
+            });
+        }
+        paths.push(normalized);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// The classes from `classes` that are NESTED under `outer` — the ones
 /// a model's or controller's own body walk skipped. The outer class
 /// itself is ingested by its own pass and must not be registered twice.
@@ -4200,8 +4373,8 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
 /// it — the same discipline `extract_config_assignments` draws below.
 /// `ActiveSupport::DateFormats` is a SEPARATE registry whose strings
 /// differ for the same names (`:number` is `"%Y%m%d"` there against
-/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in: our
-/// `Ty::Time` covers Date and DateTime too, and sharing one table would
+/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in:
+/// Date's format registry is not modeled, and sharing Time's table would
 /// render a full timestamp where Rails renders eight digits.
 fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
     let result = super::prism::parse(source, file);

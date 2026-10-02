@@ -382,6 +382,17 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
     end
 
+    # Finder inputs cast according to the schema's primary-key type,
+    # not the caller's Ruby type. This conversion belongs beside the
+    # ruby-family Relation; strict runtimes don't ship that class.
+    def self._cast_primary_key(id)
+      return id.to_s if _string_primary_key
+      # ActiveModel::Type::Integer serializes nonnumeric Strings as nil,
+      # not zero. Numeric prefixes ("0x", "31-slug") still use to_i.
+      return nil if id.is_a?(String) && !id.match?(/\A\s*[+-]?\d/)
+      id.to_i
+    end
+
     # Rails' `update_attribute`: one writer, then save WITHOUT
     # validations (validation callbacks skipped too) — save callbacks
     # still run. Specs use it to construct records a validation would

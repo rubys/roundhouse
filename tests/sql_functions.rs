@@ -63,7 +63,11 @@ end
 "#;
 
 fn fixture() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-sql-functions-{}", std::process::id()));
+    // Tests run in parallel, so each call must clear only its own tree.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join(format!("roundhouse-sql-functions-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n"),
@@ -79,6 +83,24 @@ fn fixture() -> PathBuf {
     dir
 }
 
+#[test]
+fn creating_another_fixture_preserves_an_in_use_fixture() {
+    let first = fixture();
+    let note = first.join("app/models/note.rb");
+    let in_use = "class Note < ApplicationRecord\n  validates :body, presence: true\nend\n";
+    std::fs::write(&note, in_use).unwrap();
+
+    // Force the problematic interleaving without depending on thread timing:
+    // another test creates its fixture before this one finishes reading.
+    let second = fixture();
+    assert_ne!(first, second, "each fixture call needs its own directory");
+    assert_eq!(std::fs::read_to_string(note).unwrap(), in_use);
+    assert_eq!(std::fs::read_to_string(second.join("app/models/note.rb")).unwrap(),
+        "class Note < ApplicationRecord\nend\n");
+    std::fs::remove_dir_all(first).unwrap();
+    std::fs::remove_dir_all(second).unwrap();
+}
+
 fn installer() -> String {
     let dir = fixture();
     let mut app = ingest_app(&dir).expect("ingest");
@@ -87,6 +109,7 @@ fn installer() -> String {
         app.sql_functions.iter().map(|f| (f.name.as_str(), f.arity)).collect();
     assert_eq!(names, [("regexp", 2), ("if", 3), ("stddev", 1)]);
     let files = roundhouse::project::target_files(&app, &dir, BuildTarget::Ruby).expect("files");
+    std::fs::remove_dir_all(&dir).expect("clean up fixture");
     let db = files.iter().find(|(p, _)| p == "runtime/db.rb").expect("db.rb");
     assert!(db.1.starts_with("require_relative \"sql_functions\""), "db.rb loads it");
     files
