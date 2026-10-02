@@ -1641,10 +1641,12 @@ fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
         let program = result.node();
         roundhouse::ingest::ingest_expr(&program.as_program_node().unwrap().statements().as_node(), "<snippet>").unwrap()
     };
-    let emitted = emit_expr(&parse("a, *b, c = [1, 2, 3, 4]"));
+    let expr = parse("a, *b, c = [1, 2, 3, 4]");
+    let emitted = emit_expr(&expr);
     assert!(emitted.contains("a = "), "{emitted}");
     assert!(emitted.contains(".drop(1).take("), "{emitted}");
     assert!(emitted.contains("[-1]"), "{emitted}");
+    assert_eq!(expr, parse(&emitted), "round-trip IR, not only emitted text, must be stable");
     assert_eq!(emit_expr(&parse(&emitted)), emitted);
 }
 

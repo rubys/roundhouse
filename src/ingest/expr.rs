@@ -129,6 +129,7 @@ fn ingest_multi_write(
         Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } })
     };
     let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        let parenthesized = !args.is_empty() && !matches!(method, "<" | "-");
         Expr::new(
             span,
             ExprNode::Send {
@@ -136,7 +137,7 @@ fn ingest_multi_write(
                 method: Symbol::from(method),
                 args,
                 block: None,
-                parenthesized: true,
+                parenthesized,
             },
         )
     };
