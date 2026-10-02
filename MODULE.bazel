@@ -1,0 +1,54 @@
+module(name = "roundhouse")
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
+bazel_dep(name = "toolchains_llvm", version = "1.10.0")
+
+# BuildBuddy's executor platforms and the C toolchain matching their image.
+buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
+
+# libclang for bindgen in the -sys crates; its C toolchain is not registered.
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(llvm_version = "19.1.7")
+use_repo(llvm, "llvm_toolchain", "llvm_toolchain_llvm")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.98.1"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+# These crates' build scripts read their vendored trees through a compile-time
+# CARGO_MANIFEST_DIR, which is the compile sandbox under Bazel; the patches
+# read it at run time instead.
+[crate.annotation(
+    build_script_data = ["@@//bazel:libclang", "@@//bazel:clang", "@@//bazel:clang_includes"] if name.endswith("-sys") else [],
+    build_script_data_glob = ["**"],
+    # Not the host's libclang: a remote executor's image has none.
+    build_script_env = {"LIBCLANG_PATH": "$(execpath @@//bazel:libclang)"} if name.endswith("-sys") else {},
+    build_script_env_files = ["@@//bazel:bindgen_env"] if name.endswith("-sys") else [],
+    compile_data_glob = ["**"],
+    crate = name,
+    repositories = ["crates"],
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:%s-build.patch" % name],
+) for name in ["ruby-rbs", "ruby-rbs-sys", "ruby-prism", "ruby-prism-sys"]]
+
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+)
+crate.from_cargo(
+    name = "compare_crates",
+    cargo_lockfile = "//tools/compare:Cargo.lock",
+    manifests = ["//tools/compare:Cargo.toml"],
+)
+use_repo(crate, "compare_crates", "crates")

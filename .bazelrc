@@ -1,0 +1,60 @@
+common --enable_bzlmod
+build --incompatible_strict_action_env
+
+# BuildBuddy: `--config=bb` with BUILDBUDDY_API_KEY in the environment.
+build:bb --bes_results_url=https://app.buildbuddy.io/invocation/
+build:bb --bes_backend=grpcs://remote.buildbuddy.io
+build:bb --remote_cache=grpcs://remote.buildbuddy.io
+build:bb --remote_timeout=10m
+build:bb --remote_download_minimal
+build:bb --build_metadata=ROLE=CI
+
+# Locally, the emitted projects' tests run the host's toolchains (`--config=local`).
+# and the fixture's generator runs the host's Ruby.
+build:local --action_env=PATH
+test:local --test_env=PATH --test_env=HOME --test_env=CARGO_HOME --test_env=RUSTUP_HOME --test_env=RUSTUP_TOOLCHAIN --test_env=JAVA_HOME --test_env=GRADLE_USER_HOME
+
+# A pull request reads the cache with a read-only key and never writes to it,
+# as a fork's pull request must (it sees no secrets).
+build:bb-ro --remote_cache=grpcs://remote.buildbuddy.io
+build:bb-ro --remote_timeout=10m
+build:bb-ro --remote_download_minimal
+build:bb-ro --noremote_upload_local_results
+
+# bazel/images/all/Dockerfile's ENV (and ruby:3.4's), declared: a remote executor has them from the image,
+# a fork's local run would not, and declaring them in both keeps their action keys equal.
+# Keep in step with the Dockerfile.
+common:image-env --action_env=LANG=C.UTF-8 --test_env=LANG=C.UTF-8
+common:image-env --action_env=GEM_HOME=/usr/local/bundle --test_env=GEM_HOME=/usr/local/bundle
+common:image-env --action_env=BUNDLE_APP_CONFIG=/usr/local/bundle --test_env=BUNDLE_APP_CONFIG=/usr/local/bundle
+common:image-env --action_env=BUNDLE_SILENCE_ROOT_WARNING=1 --test_env=BUNDLE_SILENCE_ROOT_WARNING=1
+common:image-env --action_env=RUSTUP_HOME=/usr/local/rustup --test_env=RUSTUP_HOME=/usr/local/rustup
+common:image-env --action_env=CARGO_HOME=/usr/local/cargo --test_env=CARGO_HOME=/usr/local/cargo
+common:image-env --action_env=WASI_SDK_PATH=/opt/wasi-sdk --test_env=WASI_SDK_PATH=/opt/wasi-sdk
+common:image-env --action_env=UV_PYTHON_INSTALL_DIR=/opt/uv-python --test_env=UV_PYTHON_INSTALL_DIR=/opt/uv-python
+common:image-env --action_env=JAVA_HOME=/opt/java --test_env=JAVA_HOME=/opt/java
+common:image-env --action_env=DOTNET_ROOT=/opt/dotnet --test_env=DOTNET_ROOT=/opt/dotnet
+common:image-env --action_env=DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 --test_env=DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+common:image-env --action_env=DOTNET_NOLOGO=1 --test_env=DOTNET_NOLOGO=1
+common:image-env --action_env=DOTNET_CLI_TELEMETRY_OPTOUT=1 --test_env=DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# Remote execution on BuildBuddy's Linux executors (Ubuntu 22.04 image).
+build:rbe --config=bb
+build:rbe --config=image-env
+build:rbe --remote_executor=grpcs://remote.buildbuddy.io
+build:rbe --platforms=@toolchains_buildbuddy//platforms:linux_x86_64
+build:rbe --extra_execution_platforms=@toolchains_buildbuddy//platforms:linux_x86_64
+build:rbe --jobs=50
+# Not the client's autodetected C toolchain: its paths and flags enter every action key, so a run from another
+# machine (a fork's job in the executors' image) would miss the whole cache.
+build:rbe --extra_toolchains=@llvm_toolchain//:all
+# A fork's pull request: the executors' platform declared, so its action keys match the cache main fills,
+# but run here (`container:` is the executors' image); unsandboxed, as a container cannot nest namespaces.
+build:fork --config=bb-ro
+build:fork --config=image-env
+build:fork --platforms=@toolchains_buildbuddy//platforms:linux_x86_64
+build:fork --extra_execution_platforms=@toolchains_buildbuddy//platforms:linux_x86_64
+build:fork --spawn_strategy=local
+build:fork --extra_toolchains=@llvm_toolchain//:all
+
+build --define=SPINEL_SHA=master

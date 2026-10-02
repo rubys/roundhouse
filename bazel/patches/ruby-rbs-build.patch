@@ -1,0 +1,11 @@
+--- a/build.rs	2026-10-02 10:57:26
++++ b/build.rs	2026-10-02 10:57:26
+@@ -70,7 +70,7 @@
+ }
+ 
+ fn main() -> Result<(), Box<dyn Error>> {
+-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
++    let manifest_dir_owned = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()); let manifest_dir = manifest_dir_owned.as_path();
+     let config_path = manifest_dir.join("vendor/rbs/config.yml");
+ 
+     let config_path = config_path

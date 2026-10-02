@@ -1,0 +1,517 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:lanes.bzl", "repo_lane")
+load("//bazel:images.bzl", "CAMPFIRE_SHA", "CI_IMAGE", "DIND_IMAGE", "MASTODON_SHA", "RUBY_BENCH_SHA", "WRITEBOOK_SHA")
+
+exports_files(["Cargo.toml", "Cargo.lock"])
+
+# The files src/ embeds with include_str!/include_bytes!.
+EMBEDDED = glob([
+    "runtime/**",
+    "e2e/*.js",
+    "e2e/package-lock.json",
+])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    data = glob(["runtime/ruby/**", "runtime/spinel/**"]),
+    edition = "2024",
+)
+
+rust_library(
+    name = "roundhouse_lib",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/bin/**"]),
+    compile_data = EMBEDDED,
+    crate_name = "roundhouse",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = all_crate_deps(normal = True) + [":build_script"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+rust_binary(
+    name = "roundhouse",
+    srcs = ["src/bin/roundhouse.rs"],
+    compile_data = EMBEDDED,
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [":roundhouse_lib"] + all_crate_deps(normal = True),
+)
+
+# The blog fixture generated in Bazel from a pinned Rails: cached until the
+# script or the pin changes, so every lane downstream sees the same bytes.
+RAILS_VERSION = "8.1.4"
+
+genrule(
+    name = "real_blog_fixture",
+    outs = ["real-blog-fixture.tar"],
+    cmd = " && ".join([
+        "export HOME=$$PWD/$(RULEDIR)/home",
+        # Not on Bazel's PATH: the ruby image installs gem executables under /usr/local/bundle/bin.
+        "export PATH=/usr/local/bundle/bin:$$PATH",
+        "gem install rails -v %s --no-document >/dev/null" % RAILS_VERSION,
+        "RAILS_NEW_VERSION=%s $(location scripts/create-blog) $(RULEDIR)/fx/real-blog >/dev/null" % RAILS_VERSION,
+        "(cd $(RULEDIR)/fx/real-blog && bundle install --quiet && bin/rails db:prepare >/dev/null)",
+        "rm -rf $(RULEDIR)/fx/real-blog/tmp $(RULEDIR)/fx/real-blog/log $(RULEDIR)/fx/real-blog/node_modules",
+        "python3 $(location //bazel:pack.py) $(RULEDIR)/fx/real-blog $@",
+    ]),
+    exec_properties = {
+        "container-image": CI_IMAGE,
+        "network": "external",
+    },
+    tags = ["requires-network"],
+    tools = ["scripts/create-blog", "//bazel:pack.py"],
+)
+
+genrule(
+    name = "store_fixture",
+    outs = ["store-fixture.tar"],
+    cmd = " && ".join([
+        "export HOME=$$PWD/$(RULEDIR)/home",
+        "export PATH=/usr/local/bundle/bin:$$PATH",
+        "gem install rails -v %s --no-document >/dev/null" % RAILS_VERSION,
+        "mkdir -p $(RULEDIR)/fx",
+        "(cd $(RULEDIR)/fx && RAILS_NEW_VERSION=%s $$OLDPWD/$(location scripts/create-store) store >/dev/null)" % RAILS_VERSION,
+        "rm -rf $(RULEDIR)/fx/store/tmp $(RULEDIR)/fx/store/log $(RULEDIR)/fx/store/storage $(RULEDIR)/fx/store/node_modules",
+        "python3 $(location //bazel:pack.py) $(RULEDIR)/fx/store $@",
+    ]),
+    exec_properties = {
+        "container-image": CI_IMAGE,
+        "network": "external",
+    },
+    tags = ["requires-network"],
+    tools = ["scripts/create-store", "//bazel:pack.py"],
+)
+
+# What the test suites read from the repository, relative to its root.
+TEST_DATA = glob(
+    [
+        "*",
+        ".github/**",
+        ".cargo/**",
+        "src/**",
+        "fixtures/**",
+        "tests/**",
+        "runtime/**",
+        "e2e/**",
+        "docs/**",
+        "scripts/**",
+        "bin/**",
+        "assets/**",
+        "site/**",
+        "wasm/**",
+        "tools/**",
+        "editors/**",
+        "bench/**",
+        "kotlin-reference/**",
+        "swift-reference/**",
+    ],
+    exclude = [
+        "**/node_modules/**",
+        "**/tmp/**",
+        "**/log/**",
+        "**/target/**",
+        "**/.bundle/**",
+        "**/* *",
+        "bazel-*/**",
+        # Not inputs of any suite: an edit to the Bazel setup alone would otherwise re-run every test.
+        "**/BUILD.bazel",
+        "MODULE.bazel*",
+        ".bazel*",
+        ".github/workflows/bazel.yml",
+    ],
+    allow_empty = True,
+)
+
+# .cargo/config.toml's [env]: the analyzer's recursive walkers need more than a test thread's default stack.
+TEST_ENV = {"RUST_MIN_STACK": "33554432"}
+
+# Remotely, the suites run in an image with Ruby: some drive the emitted Ruby tree.
+# `test.`: the image is for running the suite; compiling it stays on the C toolchain's platform.
+UNIT_EXEC = {"test.container-image": CI_IMAGE}
+
+rust_test(
+    name = "lib_test",
+    crate = ":roundhouse_lib",
+    data = TEST_DATA,
+    env = TEST_ENV,
+    exec_properties = UNIT_EXEC,
+    tags = ["unit"],
+)
+
+[rust_test(
+    name = "test_" + f[len("tests/"):-len(".rs")],
+    # Not every tests/**/*.rs: an edit to one suite would recompile all of them.
+    srcs = [f] + glob(["tests/support/**/*.rs"]),
+    crate_root = f,
+    data = TEST_DATA + [":roundhouse", "//tools/compare:all_files"],
+    edition = "2024",
+    rustc_env = {
+        "CARGO_BIN_EXE_roundhouse": "$(rootpath :roundhouse)",
+        # Not the compile sandbox: the suites join repo paths onto this, and they run from the runfiles root.
+        "CARGO_MANIFEST_DIR": ".",
+        "CARGO": "cargo",
+    },
+    # The checked-in files suites include at compile time; not the generated fixtures, which only the runs read.
+    compile_data = EMBEDDED + glob(["tests/**"], exclude = ["tests/**/*.rs"]) + ["build.rs"] + glob(
+        ["fixtures/**"],
+        exclude = ["fixtures/real-blog/**", "fixtures/store/**", "**/* *"],
+    ),
+    env = TEST_ENV,
+    exec_properties = UNIT_EXEC,
+    tags = ["unit"],
+    deps = [":roundhouse_lib"] + all_crate_deps(normal = True, normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+) for f in glob(["tests/*.rs"])]
+
+genrule(
+    name = "asset_graph",
+    srcs = [
+        ":real_blog_fixture",
+        "e2e/package.json",
+        "e2e/package-lock.json",
+        "runtime/spinel/scaffold/Gemfile",
+        "runtime/spinel/scaffold/Gemfile.lock",
+    ],
+    outs = ["assets.tar"],
+    cmd = "$(location //bazel:asset_graph.sh) $(location :real_blog_fixture) e2e runtime/spinel/scaffold $@ $(location //bazel:pack.py)",
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+    tools = ["//bazel:asset_graph.sh", "//bazel:pack.py"],
+)
+
+
+
+# matz/spinel at the commit `--define=SPINEL_SHA=…` names (the workflow resolves master).
+genrule(
+    name = "spinel_dist",
+    outs = ["spinel-dist.tar"],
+    cmd = "$(location //bazel:spinel_dist.sh) $(SPINEL_SHA) $@ $(location //bazel:pack.py)",
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+    tools = ["//bazel:spinel_dist.sh", "//bazel:pack.py"],
+)
+
+
+genrule(
+    name = "campfire_src",
+    outs = ["once-campfire.tar.gz"],
+    cmd = "curl -fsSL https://codeload.github.com/basecamp/once-campfire/tar.gz/%s -o $@" % CAMPFIRE_SHA,
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+)
+
+genrule(
+    name = "campfire_emit_ruby",
+    srcs = [":campfire_src"],
+    outs = ["campfire-ruby.tar"],
+    cmd = ("mkdir -p $(RULEDIR)/campfire-src && tar -xzf $(location :campfire_src) -C $(RULEDIR)/campfire-src --strip-components=1 && " +
+           "$(location :roundhouse) --target ruby $(RULEDIR)/campfire-src -o $(RULEDIR)/campfire-ruby --allow-unsupported >/dev/null 2>&1 && " +
+           "python3 $(location //bazel:pack.py) $(RULEDIR)/campfire-ruby $@"),
+    exec_properties = {"container-image": CI_IMAGE},
+    tools = [":roundhouse", "//bazel:pack.py"],
+)
+
+sh_test(
+    name = "campfire_compare_test",
+    srcs = ["//bazel:campfire_compare.sh"],
+    args = ["$(rootpath :campfire_src)", "$(rootpath :campfire_emit_ruby)"],
+    data = [":campfire_src", ":campfire_emit_ruby"] + glob(["scripts/**", "runtime/**"]),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+    timeout = "eternal",
+)
+
+genrule(
+    name = "campfire_spinel_build",
+    srcs = [":campfire_src", ":spinel_dist"],
+    outs = ["campfire-spinel.tar"],
+    cmd = ("$(location //bazel:campfire_spinel_build.sh) $(location :roundhouse) $(location :campfire_src) " +
+           "$(location :spinel_dist) $@ $(location //bazel:pack.py)"),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+    tools = [":roundhouse", "//bazel:campfire_spinel_build.sh", "//bazel:pack.py"],
+)
+
+CAMPFIRE_SPINEL_LEGS = {"default": [], "minor_gc": ["--minor-gc"], "verify_gen": ["--verify-gen"]}
+
+[sh_test(
+    name = "campfire_compare_spinel_test" if leg == "default" else "campfire_compare_spinel_%s_test" % leg,
+    srcs = ["//bazel:campfire_compare.sh"],
+    args = ["$(rootpath :campfire_src)", "$(rootpath :campfire_spinel_build)", "--spinel"] + flags,
+    data = [":campfire_src", ":campfire_spinel_build"] + glob(["scripts/**", "runtime/**"]),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network", "advisory"],
+    timeout = "eternal",
+) for leg, flags in CAMPFIRE_SPINEL_LEGS.items()]
+
+rust_binary(
+    name = "emit_preview",
+    srcs = ["src/bin/emit_preview.rs"],
+    compile_data = EMBEDDED,
+    edition = "2024",
+    deps = [":roundhouse_lib"] + all_crate_deps(normal = True),
+)
+
+OTHER_BINS = [
+    f[len("src/bin/"):-len(".rs")]
+    for f in glob(["src/bin/*.rs"])
+    if f not in ["src/bin/roundhouse.rs", "src/bin/emit_preview.rs"]
+]
+
+[rust_binary(
+    name = b,
+    srcs = ["src/bin/%s.rs" % b],
+    compile_data = EMBEDDED,
+    edition = "2024",
+    deps = [":roundhouse_lib"] + all_crate_deps(normal = True),
+) for b in OTHER_BINS]
+
+# Not bare binaries: the gating run's --build_tests_only would skip them, and ci.yml's --all-targets compiles every bin.
+build_test(
+    name = "bins_build_test",
+    targets = [":%s" % b for b in OTHER_BINS],
+)
+
+# ---- compare: every target, as `scripts/compare --skip-emit` ----
+
+# emit_preview's tree for the compiled targets; `roundhouse --target` for the
+# ruby family, as `bin/rh transpile` writes it.
+PREVIEW_TARGETS = ["typescript", "crystal", "rust", "python", "elixir", "go", "kotlin", "swift", "csharp"]
+
+COMPARE_TARGETS = PREVIEW_TARGETS + ["ruby", "jruby", "spinel"]
+
+[genrule(
+    name = "compare_emit_%s" % t,
+    srcs = [":real_blog_fixture"],
+    outs = ["compare-emit-%s.tar" % t],
+    cmd = ("mkdir -p $(RULEDIR)/cmp-src-%s/real-blog && tar -xf $(location :real_blog_fixture) -C $(RULEDIR)/cmp-src-%s/real-blog && " % (t, t) +
+           ("$(location :emit_preview) --target %s --out $(RULEDIR)/cmp-%s $(RULEDIR)/cmp-src-%s/real-blog >/dev/null && " % (t, t, t)
+            if t in PREVIEW_TARGETS else
+            "$(location :roundhouse) --target %s -o $(RULEDIR)/cmp-%s $(RULEDIR)/cmp-src-%s/real-blog >/dev/null && " % (t, t, t)) +
+           "python3 $(location //bazel:pack.py) $(RULEDIR)/cmp-%s $@" % t),
+    exec_properties = {"container-image": CI_IMAGE},
+    tools = [":emit_preview", ":roundhouse", "//bazel:pack.py"],
+) for t in COMPARE_TARGETS]
+
+[sh_test(
+    name = "compare_%s_test" % t,
+    srcs = ["//bazel:compare.sh"],
+    args = [
+        t,
+        "$(rootpath :real_blog_fixture)",
+        "$(rootpath :compare_emit_%s)" % t,
+        "$(rootpath //tools/compare:roundhouse-compare)",
+    ] + (["$(rootpath :spinel_dist)"] if t == "spinel" else []),
+    data = [":real_blog_fixture", ":compare_emit_%s" % t, "//tools/compare:roundhouse-compare"] +
+           glob(["scripts/**", "bin/**", "runtime/**"]) + ([":spinel_dist"] if t == "spinel" else []),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network", "lane"] + (["advisory"] if t == "spinel" else []),
+    timeout = "eternal",
+) for t in COMPARE_TARGETS]
+
+# ---- smoke: every published archive, as `scripts/smoke` ----
+
+SMOKE_TARGETS = ["rust", "crystal", "kotlin", "swift", "csharp", "typescript", "go", "elixir", "python", "ruby", "jruby", "spinel"]
+
+genrule(
+    name = "site_archives",
+    srcs = [":real_blog_fixture", ":asset_graph"] + glob(["site/**", "docs/guide/**"]) + [
+        "RELEASES.md",
+        "scripts/create-blog",
+    ],
+    outs = ["browse/%s.tgz" % t for t in SMOKE_TARGETS],
+    cmd = "$(location //bazel:site_archives.sh) $(location :roundhouse) " +
+          "$(location :real_blog_fixture) $(location :asset_graph) $(RULEDIR)/browse " + " ".join(SMOKE_TARGETS),
+    exec_properties = {"container-image": CI_IMAGE},
+    tools = [":roundhouse", "//bazel:site_archives.sh"],
+)
+
+[sh_test(
+    name = "smoke_%s_test" % t,
+    srcs = ["//bazel:smoke.sh"],
+    args = [t, "$(rootpath :browse/%s.tgz)" % t] + (["$(rootpath :spinel_dist)"] if t == "spinel" else []),
+    data = [":browse/%s.tgz" % t] + glob(["scripts/**"]) + ([":spinel_dist"] if t == "spinel" else []),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network", "lane"] + (["advisory"] if t == "spinel" else []),
+    timeout = "eternal",
+) for t in SMOKE_TARGETS]
+
+# ---- the toolchain and framework-test lanes: `cargo test --test X -- --ignored [FILTER]` ----
+
+IGNORED_LANES = {
+    "framework_tests_rust": ["inflector"],
+    "framework_tests_swift": [],
+    "framework_tests_typescript": [],
+    "framework_tests_crystal": [],
+    "framework_tests_kotlin": [],
+    "framework_tests_ruby": [],
+    "uuid_key_ruby": [],
+    "crystal_toolchain": [],
+    "typescript_toolchain": ["real_blog"],
+    "elixir_toolchain": [],
+    "python_toolchain": [],
+    "csharp_toolchain": ["--test-threads=1"],
+}
+
+SPINEL_IGNORED_LANES = {
+    "framework_tests_spinel": [],
+    "spinel_web_push_crypto": [],
+    "spinel_db_lease": [],
+    "spinel_toolchain": [],
+    "spinel_param_builder": [],
+    "rails_compat_vectors_spinel": [],
+}
+
+[sh_test(
+    name = "lane_%s" % name,
+    srcs = ["//bazel:run_ignored.sh"],
+    args = ["$(rootpath :test_%s)" % name] + filters,
+    data = [":test_%s" % name],
+    env = TEST_ENV,
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network", "lane", "needs-source-fixtures"],
+    timeout = "eternal",
+) for name, filters in IGNORED_LANES.items()]
+
+[sh_test(
+    name = "lane_%s" % name,
+    srcs = ["//bazel:run_ignored.sh"],
+    args = ["--spinel", "$(rootpath :spinel_dist)", "$(rootpath :test_%s)" % name] + filters,
+    data = [":spinel_dist", ":test_%s" % name],
+    env = TEST_ENV,
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network", "lane", "needs-source-fixtures", "advisory"],
+    timeout = "eternal",
+) for name, filters in SPINEL_IGNORED_LANES.items()]
+
+# ---- the remaining lanes: ci.yml's steps, run from a writable copy of the repository ----
+
+REPO_LANE_DATA = TEST_DATA + ["//bazel:shim", ":roundhouse", ":emit_preview", "//tools/compare:all_files"]
+
+LANE = {"data": REPO_LANE_DATA, "env": TEST_ENV}
+
+# What the campfire archive lanes read: a Firecracker VM syncs every input, so the whole test data set times out.
+LANE_SMALL = {
+    "data": glob(["scripts/**", "runtime/**", "e2e/**", "bin/**"], exclude = ["**/node_modules/**"]) + [
+        "//bazel:shim",
+        ":roundhouse",
+    ],
+    "env": TEST_ENV,
+}
+
+repo_lane(base = LANE, name = "lane_store_check", script = "store_check")
+
+repo_lane(base = LANE, name = "lane_browser_smoke_typescript", script = "browser_smoke_typescript")
+
+genrule(
+    name = "writebook_src",
+    outs = ["writebook.tar.gz"],
+    cmd = "curl -fsSL https://codeload.github.com/basecamp/writebook/tar.gz/%s -o $@" % WRITEBOOK_SHA,
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+)
+
+sh_test(
+    name = "lane_writebook_inventory",
+    srcs = ["//bazel:run_ignored.sh"],
+    args = ["--writebook", "$(rootpath :writebook_src)", "$(rootpath :test_writebook)"],
+    data = [":writebook_src", ":test_writebook"],
+    env = TEST_ENV,
+    exec_properties = {"container-image": CI_IMAGE},
+    tags = ["lane", "needs-source-fixtures"],
+    timeout = "eternal",
+)
+
+sh_test(
+    name = "lane_writebook_check",
+    srcs = ["//bazel:writebook_check.sh"],
+    args = ["$(rootpath :roundhouse)", "$(rootpath :writebook_src)"],
+    data = [":roundhouse", ":writebook_src"],
+    env = TEST_ENV,
+    exec_properties = {"container-image": CI_IMAGE},
+    tags = ["lane"],
+)
+
+# The wasm build is its own cargo workspace (wasm/Cargo.toml) on the WASI SDK.
+genrule(
+    name = "roundhouse_wasm",
+    srcs = glob(["wasm/**", "src/**"], exclude = ["wasm/target/**", "wasm/**/node_modules/**"]) + EMBEDDED + [
+        ".cargo/config.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+    ],
+    outs = ["roundhouse_wasm.wasm"],
+    cmd = ("export CARGO_HOME=$$(mktemp -d) CARGO_TARGET_DIR=$$(mktemp -d) && " +
+           "cargo build --quiet --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml && " +
+           "cp $$CARGO_TARGET_DIR/wasm32-wasip1/release/roundhouse_wasm.wasm $@"),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+)
+
+repo_lane(base = LANE, name = "lane_browser_smoke_ide",
+    script = "browser_smoke_ide",
+    args = ["$(rootpath :roundhouse_wasm)", MASTODON_SHA, RUBY_BENCH_SHA, CAMPFIRE_SHA],
+    data = [":roundhouse_wasm"],
+    # Alone on a fork's four-core runner: beside other tests, the in-browser mastodon transpile passes its 60s limit.
+    tags = ["cpu:4"],
+)
+
+repo_lane(base = LANE, name = "lane_campfire_conformance",
+    script = "campfire_conformance",
+    campfire = True,
+    env = {"FLOOR_TESTS": "392", "FLOOR_FILES": "66"},
+)
+
+repo_lane(base = LANE, name = "lane_campfire_db_differential", script = "campfire_db_differential", campfire = True)
+
+repo_lane(base = LANE, name = "lane_campfire_db_differential_spinel", script = "campfire_db_differential", campfire = True, spinel = True,
+    args = ["--spinel"],
+    tags = ["advisory"],
+)
+
+# campfire/spinel.tgz and campfire/docker.tgz, as ci.yml's build-campfire-archive builds them.
+genrule(
+    name = "campfire_archives",
+    srcs = [":spinel_dist", ":campfire_src", ":roundhouse", "//bazel:shim"] +
+           glob(["scripts/**", "runtime/**", "e2e/**", "bin/**"], exclude = ["**/node_modules/**"]),
+    outs = ["campfire/spinel.tgz", "campfire/docker.tgz"],
+    cmd = ("out=$$PWD/$(RULEDIR)/campfire && mkdir -p $$out && " +
+           "$(location //bazel:with_repo.sh) --bin $(location :roundhouse) --spinel $(location :spinel_dist) " +
+           "--campfire $(location :campfire_src) -- " +
+           "'scripts/build-campfire-archive --out _site \"$$CAMPFIRE_APP\" && cp _site/campfire/spinel.tgz _site/campfire/docker.tgz '$$out/"),
+    exec_properties = {"container-image": CI_IMAGE, "network": "external"},
+    tags = ["requires-network"],
+    tools = ["//bazel:with_repo.sh"],
+)
+
+repo_lane(base = LANE, name = "lane_smoke_campfire", script = "smoke_campfire", spinel = True,
+    args = ["$(rootpath :campfire/spinel.tgz)"],
+    data = [":campfire/spinel.tgz"],
+    tags = ["advisory"],
+)
+
+# Docker inside the executor: BuildBuddy starts dockerd in a Firecracker microVM,
+# booted from Docker's own small image (the all-toolchains one takes too long to boot).
+sh_test(
+    name = "lane_smoke_campfire_docker",
+    srcs = ["//bazel:lanes/docker_smoke.sh"],
+    args = ["$(rootpath :campfire/docker.tgz)"],
+    data = [":campfire/docker.tgz"],
+    exec_properties = {
+        "container-image": DIND_IMAGE,
+        "workload-isolation-type": "firecracker",
+        "init-dockerd": "true",
+        "network": "external",
+        "EstimatedMemory": "8GB",
+        "EstimatedFreeDiskBytes": "20GB",
+    },
+    tags = ["requires-network", "lane", "advisory", "rbe-only"],
+    timeout = "long",
+)

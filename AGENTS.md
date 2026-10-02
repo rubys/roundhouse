@@ -114,6 +114,16 @@ defect even if the build is green.
   The ~5 `continue-on-error: true` jobs track upstream Spinel and other moving
   toolchains on purpose — **red there is a signal to read, not a regression to
   shim away.** Don't add workarounds just to make an advisory job green.
+- **CI also runs on Bazel + BuildBuddy** (`.github/workflows/bazel.yml`,
+  `BUILD.bazel`). Every ci.yml lane is a Bazel test, cached by its inputs, so
+  a change re-tests only what it reaches; ci.yml's `continue-on-error` lanes
+  carry the `advisory` tag. A pull request from a fork cannot see secrets: it
+  reads the cache read-only and runs the rest on Actions, so a wide change can
+  take tens of minutes, where a push to `main` or a branch in this repository
+  runs remotely in minutes. Cargo stays the source of truth. Bazel needs an
+  edit for a new crate with a build script, a new lane, or a tool in
+  `bazel/images/all/Dockerfile` (bump its tag in `bazel/images.bzl`, and keep
+  `.bazelrc`'s `image-env` in step with its `ENV`).
 
 ## The actual goal
 

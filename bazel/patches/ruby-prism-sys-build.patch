@@ -1,0 +1,11 @@
+--- a/build/vendored.rs	2026-10-02 10:57:56
++++ b/build/vendored.rs	2026-10-02 10:57:56
+@@ -81,7 +81,7 @@
+ /// ```
+ fn vendor_dir() -> PathBuf {
+     let prism_dir = format!("prism-{}", version());
+-    Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor").join(prism_dir)
++    std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor").join(prism_dir)
+ }
+ 
+ fn src_dir() -> PathBuf {

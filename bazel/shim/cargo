@@ -1,0 +1,15 @@
+#!/bin/bash
+# Stands in for `cargo run [--quiet] [--release] --bin NAME -- ARGS` inside a
+# Bazel test: the scripts the lanes run build roundhouse with cargo, and the
+# Bazel-built binary in $ROUNDHOUSE_BINS is that build. Anything else goes to
+# the real cargo.
+if [[ "${1:-}" == run ]]; then
+  shift; bin=""
+  while [[ $# -gt 0 && "$1" != -- ]]; do
+    case "$1" in --bin) bin="$2"; shift 2 ;; *) shift ;; esac
+  done
+  [[ "${1:-}" == -- ]] && shift
+  if [[ -n "$bin" && -x "$ROUNDHOUSE_BINS/$bin" ]]; then exec "$ROUNDHOUSE_BINS/$bin" "$@"; fi
+  echo "cargo shim: no prebuilt $bin" >&2; exit 127
+fi
+exec /usr/local/bin/cargo "$@"

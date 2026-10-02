@@ -82,7 +82,9 @@ fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
 /// skipped, non-UTF-8 files skipped. Directory filtering (`SKIP_DIRS`)
 /// stays with the walkers, which apply it per query.
 fn embed_runtime_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Not `env!`: under Bazel the script compiles and runs in different sandboxes, so the root has to be the one it runs in.
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let root = root.as_path();
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     for top in ["runtime/ruby", "runtime/spinel"] {
         let dir = root.join(top);
@@ -108,10 +110,10 @@ fn embed_runtime_files() {
 
 fn runtime_table<'a>(entries: impl Iterator<Item = &'a (String, PathBuf)>) -> String {
     let mut out = String::from("&[\n");
-    for (rel, abs) in entries {
+    // Not the absolute path: the crate compiles in another sandbox than the one this script walked.
+    for (rel, _) in entries {
         out.push_str(&format!(
-            "    ({rel:?}, include_str!({:?})),\n",
-            abs.display().to_string()
+            "    ({rel:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{rel}\"))),\n"
         ));
     }
     out.push_str("]\n");

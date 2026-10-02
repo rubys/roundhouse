@@ -29,8 +29,10 @@ load "#{root}/runtime/ruby/action_controller/cookies.rb"
 load "#{root}/runtime/spinel/cgi_io.rb"
 
 # action_cable.rb's one require; the transport half is not under test.
-$LOADED_FEATURES << File.expand_path(
-  "#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/broadcasts.rb"
+# Not expand_path: require_relative resolves symlinks, so under a symlinked tree (Bazel's runfiles) the paths differ.
+$LOADED_FEATURES << File.join(
+  File.dirname(File.realpath("#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/action_cable.rb")),
+  "broadcasts.rb"
 )
 module Broadcasts
   LOG = []

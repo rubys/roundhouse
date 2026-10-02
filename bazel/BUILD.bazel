@@ -1,0 +1,40 @@
+exports_files(glob(["*.py", "*.sh", "lanes/*.sh"]))
+
+filegroup(
+    name = "shim",
+    srcs = ["shim/cargo", "with_repo.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# Re-exported under the main repository so the -sys crates' build scripts can name them.
+alias(
+    name = "libclang",
+    actual = "@llvm_toolchain_llvm//:libclang",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "clang",
+    actual = "@llvm_toolchain_llvm//:bin/clang",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "clang_includes",
+    actual = "@llvm_toolchain_llvm//:include",
+    visibility = ["//visibility:public"],
+)
+
+# Linux only: bindgen asks a `clang` for the header search path, and a remote executor has none;
+# on macOS the host's clang pairs with the SDK.
+# `$${pwd}` is left for rules_rust, which expands it to the execroot when it reads the file.
+genrule(
+    name = "bindgen_env",
+    srcs = [":clang"],
+    outs = ["bindgen.env"],
+    cmd = select({
+        "@platforms//os:linux": "echo 'CLANG_PATH=$${pwd}/$(execpath :clang)' > $@",
+        "//conditions:default": "touch $@",
+    }),
+    visibility = ["//visibility:public"],
+)

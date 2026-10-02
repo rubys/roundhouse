@@ -1,0 +1,11 @@
+--- a/build.rs	2026-10-02 10:57:27
++++ b/build.rs	2026-10-02 10:57:27
+@@ -117,7 +117,7 @@
+ ///
+ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let prism_dir = format!("prism-{}", env!("CARGO_PKG_VERSION"));
+-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor").join(prism_dir).join("config.json");
++    let config_path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor").join(prism_dir).join("config.json");
+ 
+     let config_file = std::fs::File::open(&config_path)?;
+     println!("cargo:rerun-if-changed={}", config_path.to_str().unwrap());

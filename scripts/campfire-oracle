@@ -236,12 +236,15 @@ cmd_prepare() {
     [[ -d "$APP" ]] || die "no campfire checkout at $APP"
     command -v sqlite3 >/dev/null || die "sqlite3 not on PATH"
 
-    local sha
-    sha="$(git -C "$APP" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local sha=unknown tracked=
+    # Not a bare rev-parse: a tarball checkout inside another repository (Bazel's execroot links .git) would archive that one.
+    if [[ "$(git -C "$APP" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$APP" && pwd -P)" ]]; then
+        tracked=1; sha="$(git -C "$APP" rev-parse HEAD)"
+    fi
 
     step "exporting $APP @ ${sha:0:12} -> $OUT"
     rm -rf "$OUT"; mkdir -p "$OUT"
-    if git -C "$APP" rev-parse HEAD >/dev/null 2>&1; then
+    if [[ -n "$tracked" ]]; then
         # git archive: tracked files only, no local litter.
         (cd "$APP" && git archive HEAD) | tar -x -C "$OUT"
     else
