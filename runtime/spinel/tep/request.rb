@@ -1,3 +1,4 @@
+require "json"
 # Tep::Request -- what the handler reads off the wire.
 module Tep
   class Request
@@ -93,6 +94,14 @@ module Tep
       @req_headers["content-type"].downcase.start_with?("multipart/form-data")
     end
 
+    # True for a JSON body — what `@rails/request.js` sends when a
+    # controller asks for `contentType: "application/json"` (campfire's
+    # link unfurl posts `{"url": …}` this way). Rails parses it into
+    # params; `parse_body_params` does the same below.
+    def json?
+      @req_headers["content-type"].downcase.start_with?("application/json")
+    end
+
     # ---- Rack::Request-style accessors (reads only, no .ip yet) ----
     # These are convenience getters over headers we already parse;
     # `.ip` would need a sphttp_accept_with_peer C helper before it
@@ -162,6 +171,42 @@ module Tep
         form.files.each do |k, v|
           @uploads[k] = v
         end
+      elsif json? && @raw_body.length > 0
+        # Rails answers a malformed body 400 before the action runs;
+        # here the params stay empty and the action's own `require`
+        # refuses it.
+        begin
+          parsed = JSON.parse(@raw_body)
+          if parsed.is_a?(Hash)
+            flatten_json(parsed, "")
+          end
+        rescue JSON::ParserError
+          nil
+        end
+      end
+      nil
+    end
+
+    # A parsed JSON object into @req_params and @body_fields, spelled
+    # the way a form posts it: `{"blob": {"filename": "a.png"}}` becomes
+    # `blob[filename]`, which is the key shape `Main.request_params`
+    # already nests from a multipart body's fields. Scalars arrive as their `to_s`, null as "". Arrays are
+    # skipped: @req_params holds one value per key, so a form's
+    # repeated `k[]` has no slot here either.
+    def flatten_json(value, prefix)
+      if value.is_a?(Hash)
+        value.each do |k, v|
+          key = prefix.length == 0 ? k.to_s : prefix + "[" + k.to_s + "]"
+          flatten_json(v, key)
+        end
+      elsif value.is_a?(Array)
+        nil
+      elsif value.nil?
+        @req_params[prefix] = +""
+        @body_fields[prefix] = +""
+      else
+        @req_params[prefix] = value.to_s
+        @body_fields[prefix] = value.to_s
       end
       nil
     end

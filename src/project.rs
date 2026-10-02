@@ -2689,7 +2689,9 @@ fn strip_cable_from_config_ru(content: &str) -> Result<String, String> {
 /// list partials (`_name`) before templates and otherwise sort, purely for
 /// a stable, legible file. For the blog the emitted view set matches the
 /// scaffold's, so the generated aggregator loads the same modules the
-/// hand-written one did.
+/// hand-written one did. An app with no views at all (an API app that
+/// only renders JSON) gets an aggregator that requires nothing: keeping
+/// the scaffold's copy would require blog views the tree does not have.
 fn apply_views_aggregator(files: &mut [(String, String)]) {
     use std::fmt::Write;
 
@@ -2698,9 +2700,6 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
         .map(|(p, _)| p.as_str())
         .filter(|p| p.starts_with("app/views/") && p.ends_with(".rb"))
         .collect();
-    if views.is_empty() {
-        return;
-    }
     // Partials (`_foo.rb`) first, then alphabetical — deterministic.
     views.sort_by_key(|p| {
         let is_partial = Path::new(p)
@@ -3246,6 +3245,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
         ));
+    }
+
+    // Schema-less json/jsonb column seam. The flat walk emits the Ruby
+    // implementation; this sidecar preserves its gradual logical value
+    // while keeping the database slot String-typed.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/json_column.rbs")
+            .map_err(|e| format!("read runtime/spinel/json_column.rbs: {e}"))?;
+        files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
 
     // Duration sidecar — pins @seconds Integer so ago/from_now stay

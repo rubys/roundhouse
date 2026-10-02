@@ -165,3 +165,29 @@ fn a_class_nested_in_a_model_keeps_its_file() {
         files.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_class_nested_in_a_controller_reopens_the_controller_as_a_class() {
+    // A controller is emitted by its own pipeline too, so a class nested
+    // in one keeps its own file, like a model's. That file reopened the
+    // controller as `module ApplicationController`, which cannot load
+    // after (or before) `class ApplicationController`: "is not a module".
+    let files = emitted(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  class Failure < StandardError\n    def initialize(status)\n      @status = status\n      super(\"failed\")\n    end\n  end\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  class Missing < StandardError\n  end\n\n  def index\n    raise Missing if params[:q]\n    raise ApplicationController::Failure.new(404)\n  end\nend\n",
+        ),
+    ]);
+    for (stem, header) in [
+        ("application_controller/failure.rb", "class ApplicationController < ActionController::Base\n"),
+        ("posts_controller/missing.rb", "class PostsController < ApplicationController\n"),
+    ] {
+        let nested = file(&files, stem);
+        assert!(nested.contains(header), "{stem}:\n{nested}");
+        assert!(!nested.contains("module "), "{stem}:\n{nested}");
+    }
+}

@@ -431,6 +431,26 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("kredis", &["kredis_string", "kredis_integer", "kredis_boolean", "kredis_list", "kredis_unique_list", "kredis_set", "kredis_hash", "kredis_flag", "kredis_counter", "kredis_json", "kredis_datetime"]),
 ];
 
+/// Class-body DSLs whose methods are named by the author's own
+/// arguments (`event :publish` → `publish!`, `may_publish?`), so no
+/// fixed `SURFACES` list can name them. Attribution reads the names off
+/// the declaration instead (`analyze::attribution::generated_methods`).
+/// Each DSL lists the gems that provide it, most specific first.
+pub(crate) const GENERATING_DSLS: &[(&str, &[&str])] = &[
+    ("aasm", &["aasm"]),
+    ("state_machine", &["state_machines-activerecord", "state_machines", "state_machine"]),
+];
+
+/// The gem in `lock` that provides a generating DSL, if any does.
+pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static str> {
+    GENERATING_DSLS
+        .iter()
+        .filter(|(name, _)| *name == dsl)
+        .flat_map(|(_, gems)| gems.iter())
+        .find(|gem| lock.has(gem))
+        .copied()
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).

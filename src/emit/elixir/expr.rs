@@ -414,6 +414,7 @@ fn emit_stmts(stmts: &[Expr]) -> String {
 /// three tagged sites, so nothing else observes its iolist shape.
 fn try_string_builder(e: &Expr) -> Option<String> {
     match e.hint? {
+        IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => match &*e.node {
             ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(format!("{name} = []")),
             _ => None,

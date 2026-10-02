@@ -671,12 +671,70 @@ fn field_storage_setter(table: &Table, field: &Symbol) -> Symbol {
     }
 }
 
+/// A typed params DTO holds form Strings, while a schema writer takes
+/// the column's scalar type. Convert in the shared model lowering: a
+/// target's type cast is not necessarily a String parse (Spinel can
+/// otherwise pass a String pointer into an Integer slot).
+///
+/// Presence stays in the caller's `<field>_provided` guard. A supplied
+/// blank clears a nullable scalar; it is not the same as an omitted key.
+/// Enums use their label mapping before numeric conversion, and virtual
+/// typed-store fields retain their existing conversion path.
+fn typed_param_value(model: &Model, table: &Table, field: &Symbol, value: Expr) -> Expr {
+    let Some(col) = table.columns.iter().find(|c| c.name == *field) else {
+        return typed_store_param_value(model, field, value);
+    };
+    let ty = ty_of_column(&col.col_type);
+    if !matches!(ty, Ty::Int | Ty::Float | Ty::Bool) {
+        return value;
+    }
+    let value = with_ty(value, Ty::Str);
+    if let Some(mapped) = enum_label_cast(model, col, value.clone()) {
+        return mapped;
+    }
+    let converted = match ty {
+        Ty::Int => with_ty(no_arg_send(value.clone(), "to_i"), Ty::Int),
+        Ty::Float => with_ty(no_arg_send(value.clone(), "to_f"), Ty::Float),
+        Ty::Bool => {
+            // Rails' Boolean false spellings. Comparisons rather than a
+            // literal Array#include? keep this shared IR target-neutral.
+            ["", "0", "f", "F", "false", "FALSE", "off", "OFF"]
+                .into_iter()
+                .map(|text| bool_send(value.clone(), "!=", lit_str(text.to_string())))
+                .reduce(and_bool)
+                .expect("Boolean false spellings")
+        }
+        _ => return value,
+    };
+    if !col.nullable || col.primary_key {
+        return converted;
+    }
+    let blank = if ty == Ty::Bool {
+        value
+    } else {
+        // Numeric types consider whitespace blank; Boolean treats it as
+        // true and only the empty String as nil, as ActiveModel does.
+        with_ty(no_arg_send(value, "strip"), Ty::Str)
+    };
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: with_ty(no_arg_send(blank, "empty?"), Ty::Bool),
+                then_branch: with_ty(nil_lit(), Ty::Nil),
+                else_branch: converted,
+            },
+        ),
+        super::ty_of_column_slot(col),
+    )
+}
+
 /// A permitted param is a String; a `typed_store` scalar's writer takes
 /// its DECLARED type (`s.integer :avatar_source` → `avatar_source=:
 /// (Integer)`). The gem casts on write the way ActiveModel does, so the
 /// typed factory casts here — handing the String through is what spinel
 /// refused as a contradicted `--rbs` seed on upstream lobsters' User.
-/// Column writers need nothing: their write side is String-shaped.
+/// This remains the fallback for virtual fields absent from the schema.
 fn typed_store_param_value(model: &crate::dialect::Model, field: &Symbol, value: Expr) -> Expr {
     let attr_ty = crate::lower::typed_store::typed_store_decls(&model.body)
         .into_iter()
@@ -767,6 +825,8 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
             temporal_reader_body(col),
             Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
         )
+    } else if is_generic_json_col(col, model) {
+        (json_reader_body(col), Ty::Untyped)
     } else {
         // The slot type, not the bare column type: a nullable column
         // reads back nil until something sets it.
@@ -794,6 +854,58 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
             mutates_self: false,
             block_param: None,
     }
+}
+
+/// A schema-less JSON/JSONB column. `has_json` columns keep their
+/// declaration-driven scalar accessors and serialized storage reader;
+/// every other JSON column exposes the decoded Ruby value.
+fn is_generic_json_col(col: &Column, model: &Model) -> bool {
+    matches!(col.col_type, crate::schema::ColumnType::Json)
+        && !crate::lower::has_json::has_json_decls(&model.body)
+            .iter()
+            .any(|decl| decl.column == col.name)
+}
+
+/// `JsonColumn.load(@<col>)` — decode serialized DB text at the public
+/// accessor boundary. JSON is schema-less, so the logical value is the
+/// deliberate gradual type while the backing slot remains String.
+fn json_reader_body(col: &Column) -> Expr {
+    let stored = col_ivar(col, super::ty_of_column_slot(col));
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("JsonColumn")] },
+                )),
+                method: Symbol::from("load"),
+                args: vec![stored],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Untyped,
+    )
+}
+
+fn json_dump_value(col: &Column, value: Expr) -> Expr {
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("JsonColumn")] },
+                )),
+                method: Symbol::from("dump"),
+                args: vec![value],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        super::ty_of_column_slot(col),
+    )
 }
 
 // Not the assigned input: Rails answers the label an unsaved write was given, but a saved or loaded record answers the stored value, which is what this holds.
@@ -1032,13 +1144,19 @@ fn synth_key_alias_writer(owner: &ClassId, key: &Column) -> MethodDef {
 
 fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
     let value_param = Symbol::from("value");
-    // Writers always take the STORAGE type and write the storage ivar:
+    // Writers normally take the STORAGE type and write the storage ivar:
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
-    // for a temporal column. Every synthesized hydration path assigns
-    // stored text, so this keeps the whole write side String-shaped.
+    // for a temporal column. Schema-less JSON is the exception: its public
+    // writer takes the decoded value and serializes it into the String slot;
+    // hydration's already-serialized String passes through unchanged.
     let col_ty = super::ty_of_column_slot(col);
-    let rhs = enum_setter_value(model, col, with_ty(var_ref(value_param.clone()), col_ty.clone()))
-        .unwrap_or_else(|| with_ty(var_ref(value_param.clone()), col_ty.clone()));
+    let value_ty = if is_generic_json_col(col, model) { Ty::Untyped } else { col_ty.clone() };
+    let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
+    let rhs = if is_generic_json_col(col, model) {
+        json_dump_value(col, value)
+    } else {
+        enum_setter_value(model, col, value.clone()).unwrap_or(value)
+    };
     // Assign expression evaluates to the RHS in Ruby; same in TS.
     let body = with_ty(
         Expr::new(
@@ -1057,7 +1175,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value_param.clone())],
         body,
-        signature: Some(fn_sig(vec![(value_param, col_ty.clone())], col_ty)),
+        signature: Some(fn_sig(vec![(value_param, value_ty)], col_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeWriter,
@@ -1227,7 +1345,7 @@ pub(super) fn push_from_params_method(
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
                 method: field_storage_setter(table, field),
-                args: vec![typed_store_param_value(model, field, p_field.clone())],
+                args: vec![typed_param_value(model, table, field, p_field.clone())],
                 block: None,
                 parenthesized: false,
             },
@@ -2166,6 +2284,20 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             let json_assign_is_none = json_assign.is_none();
             let value = if let Some(assign) = json_assign {
                 assign
+            } else if is_generic_json_col(col, model) {
+                if nullable {
+                    lookup
+                } else {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::BoolOp {
+                            op: crate::expr::BoolOpKind::Or,
+                            surface: crate::expr::BoolOpSurface::Symbol,
+                            left: lookup,
+                            right: default,
+                        },
+                    )
+                }
             } else if nullable {
                 // A nullable string column casts as its non-nullable
                 // sibling below does (Rails' String type), and the
@@ -2579,15 +2711,22 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // ([[feedback_monomorphize_polymorphic_apis]]), and a String call
     // site coerces at the lowering.
     //
-    // Values read the storage ivar (`@col_raw` for temporal columns), so
-    // `attributes` carries the stored-text form.
+    // Values normally read the storage ivar (`@col_raw` for temporal
+    // columns). JSON/JSONB reads through its decode boundary because Rails'
+    // public `attributes` hash contains the decoded value.
     let entries: Vec<(Expr, Expr)> = table
         .columns
         .iter()
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
-            let value = enum_label_read(model, c).unwrap_or_else(|| col_ivar(c, col_ty));
+            let value = enum_label_read(model, c).unwrap_or_else(|| {
+                if is_generic_json_col(c, model) {
+                    json_reader_body(c)
+                } else {
+                    col_ivar(c, col_ty)
+                }
+            });
             (super::lit_str(c.name.as_str().to_string()), value)
         })
         .collect();
@@ -2626,9 +2765,9 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
 
     // Patterns match the PUBLIC column symbol; bodies read the storage
     // ivar (`@col_raw` for temporal) — `record[:created_at]` yields the
-    // stored text, same as `attributes`. A `has_json` column is the one
-    // exception: Rails answers the decoded object there, so its arm is
-    // the Hash the flat readers build (`has_json::column_hash_read`).
+    // stored text, same as `attributes`. JSON columns are the exception: a
+    // `has_json` declaration builds its typed Hash from the flat readers; a
+    // schema-less column decodes through `JsonColumn.load`.
     let arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()
@@ -2646,6 +2785,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // `&self`.
             body: crate::lower::has_json::column_hash_read(model, &c.name)
                 .or_else(|| enum_label_read(model, c))
+                .or_else(|| is_generic_json_col(c, model).then(|| json_reader_body(c)))
                 .unwrap_or_else(|| {
                 let read = Expr::new(
                     Span::synthetic(),
@@ -2877,6 +3017,10 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
                 col_ty.clone(),
             )
             .or_else(|| enum_label_cast(model, c, var_ref(value.clone())))
+            .or_else(|| {
+                is_generic_json_col(c, model)
+                    .then(|| json_dump_value(c, var_ref(value.clone())))
+            })
             .unwrap_or_else(|| {
                     Expr::new(
                         Span::synthetic(),
@@ -3193,7 +3337,7 @@ fn synth_update_typed(
             ExprNode::Send {
                 recv: Some(self_ref()),
                 method: field_storage_setter(table, field),
-                args: vec![typed_store_param_value(model, field, p_field)],
+                args: vec![typed_param_value(model, table, field, p_field)],
                 block: None,
                 parenthesized: false,
             },
@@ -3348,6 +3492,7 @@ fn synth_update_hash(
             slot_ty.clone(),
         )
         .or_else(|| enum_label_cast(model, col, lookup(&col.name)))
+        .or_else(|| is_generic_json_col(col, model).then(|| lookup(&col.name)))
         .unwrap_or_else(|| {
             Expr::new(
                 Span::synthetic(),

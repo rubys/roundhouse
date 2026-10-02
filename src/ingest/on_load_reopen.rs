@@ -37,6 +37,12 @@
 //! than dropped in silence. That is the contract the route ingest
 //! took for `to: redirect(…)`: a hole nobody can see is how a gap
 //! stays open.
+//!
+//! Direct receiverless `include` calls are also reported: Writebook's
+//! `:active_record` hook installs `ActionText::HasMarkdown` this way,
+//! without reopening a class. Reporting does not install the mixin or
+//! execute the hook. This is not an exhaustive ledger of hook bodies;
+//! nested/conditional calls and other executable statements remain gaps.
 
 use ruby_prism::Node;
 
@@ -58,7 +64,7 @@ const ENVELOPE_KEY: &str = "_rails";
 
 /// Scan one file's top-level `ActiveSupport.on_load` blocks. Records
 /// the tolerant-sgid list on `app` when the fingerprint matches, and a
-/// survey line for every other declaration inside such a block.
+/// survey line for other reopens and direct includes inside such a block.
 pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -81,6 +87,24 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
         let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) else {
             continue;
         };
+
+        if let Some(statements) = body.as_statements_node() {
+            for stmt in statements.body().iter() {
+                let Some(include) = stmt.as_call_node() else { continue };
+                if include.receiver().is_some() || constant_id_str(&include.name()) != "include" {
+                    continue;
+                }
+                let loc = include.location();
+                let declaration = String::from_utf8_lossy(loc.as_slice());
+                survey::record(&IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "`ActiveSupport.on_load(:{hook})` contains `{declaration}`, which is not carried: \
+                         load-hook mixin installation is unsupported"
+                    ),
+                });
+            }
+        }
 
         for (scope, class) in find_all_classes_with_scope(&body) {
             let mut path = scope.clone();

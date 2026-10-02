@@ -54,8 +54,8 @@ module Main
   # `user_ids[]=2&user_ids[]=3` reached the controller as `{"" => "3"}`.
   #
   # A multipart body's text fields arrive by name from its parser
-  # (`Tep::Request#body_fields`), so a repeated multipart field still
-  # keeps its last value; the urlencoded body and the query string are
+  # (`Tep::Request#body_fields`), and a JSON body's flattened the same
+  # way, so a repeated multipart field still keeps its last value; the urlencoded body and the query string are
   # parsed from their raw bytes and keep every one.
   def self.request_params(req, path_params)
     query = ParamBuilder.from_query_string(req.raw_query)
@@ -63,7 +63,7 @@ module Main
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
-    elsif req.multipart?
+    elsif req.multipart? || req.json?
       keys = []
       values = []
       present = []

@@ -469,9 +469,21 @@ fn table_from_create_table(
     // `primary_key: "identifier"` its NAME. Both used to be ignored, so
     // the table got an `id INTEGER PRIMARY KEY AUTOINCREMENT` the app
     // never declared and lost the column it did (#83).
+    //
+    // When the key has options beyond its type and default, Rails'
+    // schema dumper writes them as a hash, `id: { type: :string, limit:
+    // 32 }`, and leaves out `type:` for the default key. The hash used
+    // to be read as no `id:` at all, so it always gave the default key.
+    // `create_table`'s own `limit:` and `default:` are the key's too
+    // (Rails merges the hash over them), so a hash's `limit:`, even
+    // `nil`, wins over the outer one.
     let mut has_id = true;
     let mut id_type: Option<String> = None;
+    let mut outer_limit: Option<u32> = None;
+    let mut hash_limit: Option<Option<u32>> = None;
+    let mut id_default = false;
     let mut id_name = "id".to_string();
+    let limit_of = |node: &Node<'_>| integer_value(node).and_then(|n| u32::try_from(n).ok());
     for arg in args.arguments().iter().skip(1) {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -479,12 +491,25 @@ fn table_from_create_table(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             match key.as_str() {
                 "id" => {
-                    if let Some(false) = bool_value(&assoc.value()) {
+                    let value = assoc.value();
+                    if let Some(false) = bool_value(&value) {
                         has_id = false;
-                    } else if let Some(t) = symbol_value(&assoc.value()) {
+                    } else if let Some(t) = symbol_value(&value) {
                         id_type = Some(t);
+                    } else if let Some(hash) = value.as_hash_node() {
+                        for el in hash.elements().iter() {
+                            let Some(opt) = el.as_assoc_node() else { continue };
+                            match symbol_value(&opt.key()).as_deref() {
+                                Some("type") => id_type = name_value(&opt.value()),
+                                Some("limit") => hash_limit = Some(limit_of(&opt.value())),
+                                Some("default") => id_default = true,
+                                _ => {}
+                            }
+                        }
                     }
                 }
+                "limit" => outer_limit = limit_of(&assoc.value()),
+                "default" => id_default = true,
                 "primary_key" => {
                     if let Some(n) = name_value(&assoc.value()) {
                         id_name = n;
@@ -498,8 +523,25 @@ fn table_from_create_table(
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
     if has_id {
-        let opts = ColumnOpts { nullable: Some(false), default: None, limit: None };
-        let key = match id_type.as_deref() {
+        let id_limit = hash_limit.unwrap_or(outer_limit);
+        let opts = ColumnOpts { nullable: Some(false), default: None, limit: id_limit };
+        // `serial` and `bigserial` are the integer keys Postgres fills
+        // from a sequence: Rails' PostgreSQL adapter makes `id: :integer`
+        // a `serial`, and dumps it as `id: :serial`. An integer key with
+        // no explicit `default:` is a `bigserial` when its `limit:` is 8
+        // and a `serial` otherwise; with one, it keeps its type, whose
+        // `limit:` 5 to 8 is a `bigint`.
+        let key_type = match id_type.as_deref() {
+            Some("serial") => Some("integer"),
+            Some("bigserial") => Some("bigint"),
+            Some("integer")
+                if id_limit == Some(8) || (id_default && matches!(id_limit, Some(5..=8))) =>
+            {
+                Some("bigint")
+            }
+            other => other,
+        };
+        let key = match key_type {
             None | Some("bigint") | Some("primary_key") => Ok(Column {
                 name: Symbol::from(id_name.as_str()),
                 col_type: ColumnType::BigInt,

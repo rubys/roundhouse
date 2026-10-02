@@ -81,3 +81,46 @@ requires a reviewed baseline refresh as well.
    Rails/output scenarios: create/edit/read a page, reorder, publish and upload.
    Keep upstream-master toolchain tracking advisory, separate from reproducible
    gates. Broaden to other emitters only after executable behavior is proven.
+
+## Markdown prerequisite: visible load-hook installation gaps
+
+At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, the installer in
+`lib/rails_ext/action_text_has_markdown.rb` is a direct
+`include ActionText::HasMarkdown` inside `ActiveSupport.on_load :active_record`.
+The survey now reports that dropped installation with its hook and source file.
+This is a reporting milestone, **not Markdown support**: no mixin is installed,
+no string `class_eval` is expanded, and `has_markdown` remains unclaimed.
+Coverage is bounded to direct receiverless includes in the top-level hooks
+already scanned; conditional/nested includes and other hook execution remain
+unsupported. `tests/on_load_includes.rs` proves unchanged IR/emission and executes
+the negative boundary against emitted Ruby; `tests/attachable_locate.rs` proves
+that a recognized reopen in the same hook does not hide the include gap.
+
+The next record-storage prerequisite is ordinary model ingestion for
+`ActionText::Markdown < Record` under `module ActionText` in `lib/rails_ext`,
+including lexical superclass resolution and the framework's `action_text_`
+table prefix. Its table is `action_text_markdowns` and its raw attribute is
+`content`; neither is the RichText table/body coder. Preserve lexical shadowing,
+explicit table names and the abstract-base/STI distinction. Recognition alone
+must not count as storage support: prove construction, save and reload through
+an emitted database test before claiming it.
+
+Declaration support still requires owner-type/id/name isolation, inverse identity
+on unsaved owners, owner-id propagation, autosave/failure/touch behavior,
+reload/cache invalidation, scoped destruction and both preload scopes. Do not
+inherit RichText's intentional suppression of new blank rows: Writebook declares
+ordinary autosave, including empty content and read-materialized children.
+Renderer/Redcarpet, `safe_markdown_attribute`, embeds/uploads (including
+authorization), strict loading and load-hook notifications remain separate gaps.
+A named semantic replacement for this macro needs an explicit clarification of
+[issue #30](https://github.com/rubys/roundhouse/issues/30); generic string eval
+must stay unsupported.
+
+The original Page tests were emitted with `--target ruby --survey
+--allow-unsupported` and attempted with `ruby -Itest -I. test/models/page_test.rb`.
+Boot failed at the emitted `ActionText::Markdown < Record` with
+`NameError: uninitialized constant Record`, before any test ran. The four cases
+remain **blocked**, not individually failing or passing: `html preview`,
+`markable returns raw markdown content`, `markable returns empty string when body
+is empty`, and `searchable_content re-encodes HTML entities decoded by
+to_plain_text`. No native Spinel compilation or execution is claimed.

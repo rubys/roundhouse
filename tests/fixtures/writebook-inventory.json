@@ -1147,6 +1147,7 @@
     "app/views/books/show.md.erb|view template not ingested: erb (non-html format)": 1,
     "app/views/leafables/show.md.erb|view template not ingested: erb (non-html format)": 1,
     "config/routes.rb|resources :pages `only:` is not a literal list of actions": 1,
+    "lib/rails_ext/action_text_has_markdown.rb|`ActiveSupport.on_load(:active_record)` contains `include ActionText::HasMarkdown`, which is not carried: load-hook mixin installation is unsupported": 1,
     "lib/rails_ext/action_text_has_markdown.rb|unsupported expression node: SourceFileNode([])": 1,
     "lib/rails_ext/action_text_has_markdown.rb|unsupported expression node: SourceLineNode()": 1,
     "lib/rails_ext/action_text_markdown.rb|`ActiveSupport.on_load(:active_storage_attachment)` reopens `ActionText::Markdown`, which is not carried: a reopen of a framework class inside a load hook is dropped (the tolerant-sgid `ActionText::Attachment.from_node` shape is the one read)": 1,

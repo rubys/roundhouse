@@ -46,10 +46,13 @@ attribute seeding) produce deterministic output.
   table — this is how `article.title : String` gets its type without
   any annotation in the model file.
 - **`src/emit/shared/schema_sql.rs::render_schema_statements`**
-  produces the `CREATE TABLE …` DDL statement list (SQLite dialect
-  today; the joined-string `render_schema_sql` survives for some
-  targets). The sibling `src/emit/shared/seed_sql.rs` renders
-  `db/seeds.rb` data to a `db/seed.sql` for text-only archives.
+  produces the `CREATE TABLE …` DDL statement list in the SQLite
+  dialect, which every caller uses today (the joined-string
+  `render_schema_sql` survives for some targets);
+  `render_schema_statements_for(schema, Dialect::Postgres)` renders
+  the same schema for Postgres (see the shape limits below). The
+  sibling `src/emit/shared/seed_sql.rs` renders `db/seeds.rb` data to
+  a `db/seed.sql` for text-only archives.
 - **`src/lower/persistence.rs`** uses the column list to build
   INSERT / UPDATE / DELETE / SELECT strings per model.
 
@@ -64,18 +67,38 @@ need a `Schema` artifact).
 `statements`. `main.ts` passes `schemaStatements:
 Schema.statements()` to the runtime's `startServer({ … })`.
 
-**Known shape limits.** SQLite-only today. When Postgres or MySQL
-demand per-engine DDL, a `Dialect` enum lands inside `schema_sql.rs`
-without changing the `Schema` IR itself (it's already dialect-
-neutral) or the lowerer. Postgres column types map to their SQLite
-storage at ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` →
-json, `citext` → text, `timestamptz` → datetime, `inet`/`cidr`/
-`macaddr`/`enum` → string); a type with no mapping is an ingest
-error (a ledger line under `--survey`), never a silent drop — its
-index would still be emitted and the DDL would not apply. A
-non-integer primary key (`create_table …, id: :uuid` /
-`primary_key: "identifier", id: :string`) renders as `TEXT PRIMARY
-KEY` and is carried end to end by the ruby-shape emit: the analyzer
+**Known shape limits.** Every emitter that renders this DDL uses the
+SQLite dialect. Per-engine DDL sits behind the `Dialect` enum in
+`schema_sql.rs`, without changing the `Schema` IR itself (it's already
+dialect-neutral) or the lowerer. `Dialect::Postgres` (stage (a) of
+#91; no target emits it yet) spells column types as Rails' PostgreSQL
+adapter creates them, quotes every identifier, and gives a key Rails'
+default convention for its type: `bigserial`, `serial` for an
+`integer` key, and `uuid … DEFAULT gen_random_uuid()` for a `uuid`
+one. Neither dialect reproduces source column defaults, foreign keys
+or CHECK constraints: Postgres synthesizes the key defaults above, so
+a custom or suppressed one is not reproduced, and the model layer
+applies supported literal defaults. A virtual table has no Postgres
+DDL, so that dialect returns an error for it. Postgres renders what
+ingest kept, so it shares the current ingest and IR limits.
+`schema.rb` ingest drops `array: true`; an index's `where:`, `using:`
+and `order:`, and expression indexes; precision on `numeric`,
+`datetime` and `time`; a `limit:` on an `integer` column (so no
+`smallint` or `bigint`); and schema qualifiers. The key forms the
+PostgreSQL dumper writes are read as the keys they name: `id: :serial`
+is an `integer` key, and a hash-valued `id: { type: :string, limit:
+32 }` keeps its type and limit. And the folds below
+apply (`jsonb` and `json` both render `jsonb`, `timestamptz` renders
+`timestamp`).
+Postgres column types map to their SQLite storage at
+ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` → json,
+`citext` → text, `timestamptz` → datetime, `inet`/`cidr`/`macaddr`/
+`enum` → string); a type with no mapping is an ingest error (a ledger
+line under `--survey`), never a silent drop — its index would still be
+emitted and the DDL would not apply. A non-integer primary key
+(`create_table …, id: :uuid` / `primary_key: "identifier", id:
+:string`) renders as `TEXT PRIMARY KEY` in SQLite and is carried end
+to end by the ruby-shape emit: the analyzer
 types `id`, `ids` and the key-taking finders from that column; the
 emitted `find`/`exists?`/`update`/`delete`/`reload` primitives
 compare it with the key's type; insert writes it (minting a blank

@@ -1,0 +1,4 @@
+module JsonColumn
+  def self.load: (String? serialized) -> untyped
+  def self.dump: (untyped value) -> String?
+end
