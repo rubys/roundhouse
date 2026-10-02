@@ -2789,3 +2789,63 @@ fn a_structure_sql_from_pg_dump_18_runs() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// An app that declares no `root` boots and dispatches (#165). `main.rb`
+/// composed its route table as `[RouteTable.root] + RouteTable.table`,
+/// and the routes emit defines `RouteTable.root` only for a route at
+/// `/`, so the first request raised NoMethodError. `/` itself answers
+/// 404, as it does in Rails when no route matches.
+#[test]
+fn an_app_with_no_root_route_dispatches() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  before_action :set_widget, only: :show
+
+  def index
+    head :no_content
+  end
+
+  def show
+    head :not_found unless @widget
+  end
+
+  private
+
+  def set_widget
+    @widget = Widget.find_by(id: params[:id])
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: %i[index show]\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"def get(path)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  status
+end
+{ "/widgets" => 204, "/widgets/1" => 404, "/" => 404 }.each do |path, want|
+  got = get(path)
+  raise "GET #{path} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
+        .assert_passes();
+}

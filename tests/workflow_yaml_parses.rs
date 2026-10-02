@@ -16,6 +16,148 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(unix)]
+#[test]
+fn spinel_cache_download_failure_falls_back_without_hiding_build_failures() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &workflow["jobs"]["build-spinel"];
+    assert_eq!(job["continue-on-error"].as_bool(), Some(true));
+    let steps = job["steps"].as_sequence().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let setup = step("Set up sccache");
+    assert_eq!(setup["id"].as_str(), Some("sccache"));
+    assert_eq!(setup["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(setup["with"]["disable_annotations"].as_bool(), Some(true));
+    let fallback = step("Build without compiler cache when installation fails");
+    // outcome, not conclusion: continue-on-error makes conclusion 'success'.
+    assert_eq!(
+        fallback["if"].as_str(),
+        Some("steps.sccache.outcome != 'success'")
+    );
+    for name in [
+        "Restore Spinel compiler cache",
+        "Start sccache server",
+        "Show compiler cache statistics",
+    ] {
+        assert_eq!(
+            step(name)["if"].as_str(),
+            Some("steps.sccache.outcome == 'success'")
+        );
+    }
+    let deps = step("make deps (fetch vendored libprism)");
+    let build = step("make all");
+    for required in [
+        deps,
+        build,
+        step("Stage artifact tree"),
+        step("Upload spinel toolchain"),
+    ] {
+        assert!(required.get("continue-on-error").is_none());
+        assert!(
+            required.get("if").is_none(),
+            "cache failure must not skip the build"
+        );
+    }
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("spinel-cache-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let env_file = root.join("github-env");
+    let summary = root.join("summary");
+    let output = Command::new("bash")
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            fallback["run"].as_str().unwrap(),
+        ])
+        .env("GITHUB_ENV", &env_file)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(&env_file).unwrap(), "NO_CCACHE=1\n");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("::warning::")
+    );
+    assert!(
+        fs::read_to_string(summary)
+            .unwrap()
+            .contains("without compiler cache")
+    );
+
+    // Execute the actual build bodies with controlled make exits, both with
+    // caching enabled and after sourcing the fallback's exported environment.
+    let make = root.join("make");
+    fs::write(
+        &make,
+        r#"#!/bin/sh
+[ "$1 $2" = '-C spinel-src' ] || exit 99
+printf '%s:%s\n' "$3" "${NO_CCACHE:-cached}" >> "$MAKE_LOG"
+case "$3" in
+  deps) exit "$DEPS_EXIT" ;;
+  all) exit "$BUILD_EXIT" ;;
+  *) exit 98 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&make, fs::Permissions::from_mode(0o755)).unwrap();
+    for cached in [true, false] {
+        for (deps_exit, build_exit, expected_exit) in [(0, 0, 0), (31, 0, 31), (0, 47, 47)] {
+            let log = root.join("make.log");
+            fs::write(&log, "").unwrap();
+            let body = format!(
+                "{}\n{}\n{}",
+                if cached {
+                    ""
+                } else {
+                    "set -a; source \"$GITHUB_ENV\"; set +a"
+                },
+                deps["run"].as_str().unwrap(),
+                build["run"].as_str().unwrap()
+            );
+            let output = Command::new("bash")
+                .args(["-e", "-o", "pipefail", "-c", &body])
+                .env(
+                    "PATH",
+                    format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
+                )
+                .env_remove("NO_CCACHE")
+                .env("GITHUB_ENV", &env_file)
+                .env("MAKE_LOG", &log)
+                .env("DEPS_EXIT", deps_exit.to_string())
+                .env("BUILD_EXIT", build_exit.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(expected_exit), "{output:?}");
+            let mode = if cached { "cached" } else { "1" };
+            let expected = if deps_exit == 0 {
+                format!("deps:{mode}\nall:{mode}\n")
+            } else {
+                format!("deps:{mode}\n")
+            };
+            assert_eq!(fs::read_to_string(log).unwrap(), expected);
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 #[cfg(unix)]
 fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {

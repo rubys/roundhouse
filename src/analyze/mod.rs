@@ -2145,7 +2145,7 @@ impl Analyzer {
                 // helper that itself calls another ivar-writing helper is
                 // not chased (the direct-call case is what recurs). Own
                 // and before_action assignments already present win.
-                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
                 // Only own-class sites are consumed below, so helper
                 // attribution is irrelevant — an empty index keeps
                 // this walk exactly as before.
@@ -3794,7 +3794,7 @@ impl Analyzer {
         // description of the argument list that disagrees with the
         // `def`. campfire's `next_involvement_for` emitted exactly
         // that, and spinel gave the param an `sp_SymPolyHash *`.
-        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
         let params_by_method = Self::param_shapes(app);
         for model in &app.models {
             for method in model.methods() {
@@ -4001,11 +4001,13 @@ impl Analyzer {
     /// POISONED rather than picked: placing keywords from the wrong
     /// `def` is worse than leaving the hash where it sits, which is the
     /// behaviour that stood before this table existed.
-    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, ParamKind)>> {
-        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, ParamKind)>>> = HashMap::new();
+    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), ParamShape> {
+        let mut out: HashMap<(ClassId, Symbol), Option<ParamShape>> = HashMap::new();
         let mut record = |class: &ClassId, m: &crate::dialect::MethodDef| {
-            let shape: Vec<(Symbol, ParamKind)> =
-                m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect();
+            let shape = ParamShape {
+                slots: m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect(),
+                keywords_by_kind: false,
+            };
             out.entry((class.clone(), m.name.clone()))
                 .and_modify(|slot| {
                     if slot.as_ref() != Some(&shape) {
@@ -4027,6 +4029,34 @@ impl Analyzer {
         for module in &app.test_modules {
             for method in &module.helpers {
                 record(&module.name, method);
+            }
+        }
+        // A controller helper's keywords are call-site evidence too:
+        // without its shape, `describe(name: "gear", count: 2)` against
+        // `def describe(name:, count:)` typed the first slot with the
+        // whole kwargs Hash. Same slot order the controller lowering
+        // builds: positionals, optionals, keywords, `**rest`.
+        for controller in &app.controllers {
+            for a in controller.actions() {
+                let mut shape: Vec<(Symbol, ParamKind)> =
+                    a.params.fields.iter().map(|(n, _)| (n.clone(), ParamKind::Required)).collect();
+                shape.extend(a.opt_params.iter().map(|(n, _)| (n.clone(), ParamKind::Optional)));
+                shape.extend(
+                    a.kw_params.iter().map(|(n, d)| (n.clone(), ParamKind::Keyword { required: d.is_none() })),
+                );
+                if let Some(n) = &a.kwrest_param {
+                    shape.push((n.clone(), ParamKind::KeywordRest));
+                }
+                // Controller lowering keeps every keyword a keyword, so a
+                // key binds by kind here, never to a same-named positional.
+                let shape = ParamShape { slots: shape, keywords_by_kind: true };
+                out.entry((controller.name.clone(), a.name.clone()))
+                    .and_modify(|slot| {
+                        if slot.as_ref() != Some(&shape) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(shape));
             }
         }
         out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
@@ -4054,18 +4084,26 @@ impl Analyzer {
     /// not pass an optional keyword is no evidence about its type, and
     /// `unify_param_ty` reads `Var` as exactly that.
     fn place_keyword_args(
-        shape: Option<&Vec<(Symbol, ParamKind)>>,
+        shape: Option<&ParamShape>,
         mut arg_tys: Vec<Ty>,
-        kw_tys: Vec<(Symbol, Ty)>,
+        kw: SiteKeywords,
     ) -> Vec<Ty> {
+        if let Some(shape) = shape.filter(|s| s.keywords_by_kind) {
+            if kw.group {
+                if let Some(placed) = Self::bind_keyword_group(shape, &arg_tys, &kw.keys) {
+                    return placed;
+                }
+            }
+        }
+        let kw_tys = kw.keys;
         if kw_tys.is_empty() {
             // Ingest erases ** forwarding to the Hash expression itself.
             // A whole bundle cannot prove an individual named keyword's
             // value. Mask only those slots, without moving observations:
             // keyword-rest DOES bind the Hash, and positional/default/rest
             // parameters keep their existing inference contract.
-            if let Some(params) = shape {
-                for (observed, (_, kind)) in arg_tys.iter_mut().zip(params) {
+            if let Some(shape) = shape {
+                for (observed, (_, kind)) in arg_tys.iter_mut().zip(&shape.slots) {
                     if matches!(kind, ParamKind::Keyword { .. }) {
                         *observed = Ty::Var { var: crate::ident::TyVar(0) };
                     }
@@ -4073,11 +4111,36 @@ impl Analyzer {
             }
             return arg_tys;
         }
-        let Some(params) = shape else {
+        let Some(shape) = shape else {
             return arg_tys;
         };
-        let slot_of = |key: &Symbol| params.iter().position(|(n, _kind)| n == key);
-        if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
+        let params = &shape.slots;
+        // Where a shape keeps its keywords as keywords (a controller
+        // helper's), Ruby binds a key only to a keyword slot:
+        // `h("text", a: 2)` against `def h(a, **opts)` is `a = "text"`,
+        // `opts = {a: 2}`. Positional slots still count for the index.
+        let slot_of = |key: &Symbol| {
+            params.iter().position(|(n, kind)| {
+                n == key && (!shape.keywords_by_kind || matches!(kind, ParamKind::Keyword { .. }))
+            })
+        };
+        // A key no parameter names still leaves the hash alone, unless
+        // the slot it would land on is a named keyword: Ruby never binds
+        // a kwargs hash to one, so `tagged(label: x, tone: y)` against
+        // `def tagged(label:, **rest)` types `label` from `x` and leaves
+        // `tone` to the `**rest` it binds to. `**rest` itself is not
+        // such a slot: when the hash lands there (`h(1, x: 2)` against
+        // `def h(a, **opts)`), Ruby binds `opts` to exactly that hash,
+        // so the observation stays where it is. Every slot from the
+        // hash's own position on counts, not just that one: with no
+        // positional passed, `h(label: 1, tone: 2)` against `def h(prefix
+        // = nil, label:, **rest)` binds `label`, never `prefix`.
+        let supplied_positionals = arg_tys.len().saturating_sub(1);
+        let lands_on_keyword = params
+            .iter()
+            .skip(supplied_positionals)
+            .any(|(_, kind)| matches!(kind, ParamKind::Keyword { .. }));
+        if !lands_on_keyword && !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
             return arg_tys;
         }
         arg_tys.pop();
@@ -4092,6 +4155,62 @@ impl Analyzer {
         arg_tys
     }
 
+    /// A controller helper's call whose last argument is its keyword
+    /// group, placed the way Ruby binds it: the positionals fill the
+    /// positional slots in order, a key fills the keyword slot that
+    /// names it, and the group as a whole never fills a positional.
+    /// `spread(1, x: 2)` against `def spread(a, b = nil, **rest)` is
+    /// `b = nil`, `rest = {x: 2}`; `forwarded(**opts)` against `def
+    /// forwarded(prefix = nil, label:, **rest)` leaves `prefix` at its
+    /// default. The Hash goes to `**rest` only when no named keyword
+    /// can take part of it, so `**rest` binds exactly that hash, as in
+    /// `h(1, x: 2)` against `def h(a, **opts)`; a `**splat`'s unknown
+    /// keys leave every named keyword `Var`.
+    ///
+    /// `None` when the shape takes no keywords at all: Ruby then passes
+    /// the group as one positional Hash (`def p(a, b = nil)` called
+    /// `p(1, x: 2)` is `b = {x: 2}`), the rule the caller already has.
+    fn bind_keyword_group(
+        shape: &ParamShape,
+        arg_tys: &[Ty],
+        keys: &[(Symbol, Ty)],
+    ) -> Option<Vec<Ty>> {
+        let params = &shape.slots;
+        let is_named = |kind: &ParamKind| matches!(kind, ParamKind::Keyword { .. });
+        let has_named = params.iter().any(|(_, kind)| is_named(kind));
+        let rest = params
+            .iter()
+            .position(|(_, kind)| matches!(kind, ParamKind::KeywordRest));
+        if rest.is_none() && !has_named {
+            return None;
+        }
+        let (hash, positionals) = arg_tys.split_last()?;
+        let unseen = Ty::Var {
+            var: crate::ident::TyVar(0),
+        };
+        let mut out = vec![unseen; params.len()];
+        let positional_slots = params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, kind))| matches!(kind, ParamKind::Required | ParamKind::Optional))
+            .map(|(i, _)| i);
+        for (i, t) in positional_slots.zip(positionals) {
+            out[i] = t.clone();
+        }
+        for (key, t) in keys {
+            if let Some(i) = params
+                .iter()
+                .position(|(n, kind)| n == key && is_named(kind))
+            {
+                out[i] = t.clone();
+            }
+        }
+        if let (Some(i), false) = (rest, has_named) {
+            out[i] = hash.clone();
+        }
+        Some(out)
+    }
+
     /// Walk one expression tree, collecting (class_id, method, arg_tys)
     /// for every Send whose receiver type is known. Used by
     /// `unify_params_from_call_sites`. The receiver's type was set by
@@ -4103,7 +4222,7 @@ impl Analyzer {
         expr: &Expr,
         self_class: Option<&ClassId>,
         helpers: &HashMap<Symbol, ClassId>,
-        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)>,
+        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)>,
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
@@ -4157,7 +4276,7 @@ impl Analyzer {
                     // the value binds to, and one such key disqualifies
                     // the whole hash (an incomplete map would place
                     // some keywords and silently drop the rest).
-                    let kw_tys = match args.last().map(|a| &*a.node) {
+                    let keys = match args.last().map(|a| &*a.node) {
                         Some(ExprNode::Hash { entries, kwargs: true }) => {
                             let mut pairs = Vec::with_capacity(entries.len());
                             let mut all_sym = true;
@@ -4185,6 +4304,14 @@ impl Analyzer {
                         }
                         _ => Vec::new(),
                     };
+                    // Whether the last argument is the call's keyword
+                    // group at all: a `k: v` list or one with a
+                    // `**splat`, never a positional `{…}` literal.
+                    let group = matches!(
+                        args.last().map(|a| &*a.node),
+                        Some(ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })
+                    );
+                    let kw_tys = SiteKeywords { group, keys };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -5423,6 +5550,28 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
         }
     }
     out
+}
+
+/// A call's trailing keyword arguments as `collect_send_sites` saw them.
+#[derive(Clone, Debug)]
+struct SiteKeywords {
+    /// The last argument is the keyword group (`k: v` or `**splat`).
+    group: bool,
+    /// Its `key: value` pairs, by name; empty when any key is not a
+    /// literal symbol (a `**splat` included).
+    keys: Vec<(Symbol, Ty)>,
+}
+
+/// A method's declared parameter slots, in declaration order, as
+/// `place_keyword_args` reads them.
+#[derive(Debug, PartialEq)]
+struct ParamShape {
+    slots: Vec<(Symbol, ParamKind)>,
+    /// True when every keyword in `slots` is still declared a keyword,
+    /// so a call's key binds only to a `ParamKind::Keyword` slot. False
+    /// for shapes whose optional keywords ingest may have lowered to
+    /// positionals-with-default, which a key must still find by name.
+    keywords_by_kind: bool,
 }
 
 /// A parameter's type from what the call sites passed AND what its

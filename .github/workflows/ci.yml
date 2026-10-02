@@ -316,10 +316,23 @@ jobs:
           ref: master
           path: spinel-src
       - name: Set up sccache
+        id: sccache
+        # A release-download outage must not prevent the compiler from building.
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
+          # Its post hook assumes installation succeeded; report stats below.
+          disable_annotations: true
+      - name: Build without compiler cache when installation fails
+        if: steps.sccache.outcome != 'success'
+        run: |
+          echo '::warning::sccache installation failed; building Spinel without compiler cache.'
+          echo 'sccache installation failed; Spinel will build without compiler cache. This is not a compiler failure or a skipped build.' >> "$GITHUB_STEP_SUMMARY"
+          # Explicitly bypass even a preinstalled or partially installed cache.
+          echo 'NO_CCACHE=1' >> "$GITHUB_ENV"
       - name: Restore Spinel compiler cache
+        if: steps.sccache.outcome == 'success'
         # Persist only sccache's C compilation store, not build outputs.
         # A new key saves refreshed entries as unpinned Spinel advances;
         # sccache validates compiler, flags, source and header contents.
@@ -329,12 +342,16 @@ jobs:
           key: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-
       - name: Start sccache server
+        if: steps.sccache.outcome == 'success'
         # Spinel's common.mk selects sccache automatically when on PATH.
         run: sccache --start-server
       - name: make deps (fetch vendored libprism)
         run: make -C spinel-src deps
       - name: make all
         run: make -C spinel-src all
+      - name: Show compiler cache statistics
+        if: steps.sccache.outcome == 'success'
+        run: sccache --show-stats
       - name: Stage artifact tree
         # `make all` now builds a single `spinel` binary (a top-level symlink
         # to bin/spinel) plus the `spinel_rbs_extract` sidecar under build/;
