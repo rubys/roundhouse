@@ -112,4 +112,25 @@ class CgiIoTest < Minitest::Test
     CgiIo.parse_form_into("room%5Bname%5D=Designers&user_ids%5B%5D=1&user_ids%5B%5D=2&id=7&a%5Bb%5D%5Bc%5D=x&bad%5B=1", into)
     assert_equal({ "room" => { "name" => "Designers" }, "user_ids" => ["1", "2"], "id" => "7", "a" => { "b" => { "c" => "x" } } }, into)
   end
+
+  # A JSON body — `@rails/request.js` with `contentType:
+  # "application/json"`, campfire's link unfurl — is params too, nested
+  # and typed as Rails parses it. Malformed JSON leaves the params alone.
+  def test_parse_request_reads_a_json_body
+    body = '{"url":"https://a.example/","blob":{"filename":"a.png","byte_size":12}}'
+    env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/unfurl_link", "QUERY_STRING" => "q=1",
+            "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s }
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal "https://a.example/", req[:params]["url"]
+    assert_equal({ "filename" => "a.png", "byte_size" => 12 }, req[:params]["blob"])
+    assert_equal "1", req[:params]["q"]
+  end
+
+  def test_parse_request_ignores_a_malformed_json_body
+    body = "{not json"
+    env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/unfurl_link",
+            "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s }
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal({}, req[:params])
+  end
 end

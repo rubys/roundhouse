@@ -20,8 +20,9 @@ use crate::ty::Ty;
 
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
-/// synthesizes a pattern it knows the target-specific name for;
-/// consumed by per-target emitters that want the idiomatic form.
+/// synthesizes a pattern it knows the target-specific name for (and by
+/// ingest for `+"literal"`, below); consumed by per-target emitters
+/// that want the idiomatic form.
 ///
 /// Currently covers the string-accumulator triple emitted by
 /// `view_to_library` (`io = String.new; io << "..."; io`):
@@ -36,6 +37,13 @@ use crate::ty::Ty;
 ///   `io.String()` — replaces O(n²) `io = io + x`.
 /// - TypeScript: `[]` / `.push(...)` / `.join("")` — V8 prefers
 ///   array+join over repeated string concat.
+///
+/// And one that ingest sets: `+"literal"`, the copy a
+/// frozen-string-literal file makes of a literal it will mutate
+/// (`buf = +""; buf << x`). The Ruby family writes the `+` back,
+/// because Spinel freezes string literals; every other target emits
+/// the plain literal, as it always has, since its strings have no
+/// frozen state to opt out of.
 ///
 /// `None` means "no hint" — emitters fall through to their default
 /// per-`ExprNode` handling. Adding a variant has zero effect on
@@ -52,6 +60,8 @@ pub enum IrHint {
     /// On the terminal `Var` reference returning a string accumulator
     /// at the tail of a view function body.
     StringBuilderResult,
+    /// On a string `Lit` ingested from `+"literal"` (an unfrozen copy).
+    MutableStringLiteral,
 }
 
 /// The core typed λ-calculus. Ruby's ~80 AST node kinds collapse into ~15 here;
@@ -91,8 +101,9 @@ pub struct Expr {
     pub diagnostic: Option<DiagnosticKind>,
     /// Cross-target intent annotation. Set by the lowerer when it
     /// synthesizes a canonical Ruby idiom whose optimal emit shape
-    /// differs per target. See `IrHint` for variants and per-target
-    /// consumption notes. `None` for nodes the lowerer didn't tag.
+    /// differs per target, and by ingest for `+"literal"`. See `IrHint`
+    /// for variants and per-target consumption notes. `None` for nodes
+    /// nothing tagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<IrHint>,
     /// Bit-packed decisions stamped by per-target decide passes.

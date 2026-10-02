@@ -718,12 +718,52 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
+/// A unique index whose `where:` SQLite can't be trusted to run as
+/// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
+/// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
+/// it was before predicates were kept (`Dialect::index_predicate`). It
+/// rejects rows Rails accepts, so each one is named. A warning, not an
+/// error: the tree still runs, with a stricter index than the app's.
+fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
+    // The Roda conversion writes Sequel migrations, which carry no
+    // predicate at all.
+    if target == BuildTarget::Roda {
+        return;
+    }
+    for table in app.schema.tables.values() {
+        for index in &table.indexes {
+            let Some(predicate) = index.predicate.as_deref() else { continue };
+            if !index.unique
+                || crate::emit::shared::schema_sql::Dialect::Sqlite
+                    .index_predicate(table, index)
+                    .is_some()
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
+                None,
+                "partial_unique_index",
+                format!(
+                    "table {}: `{predicate}`, the `where:` of unique index `{}`, is not \
+                     one SQLite reads alike, so its SQLite index is unique over every row",
+                    table.name.as_str(),
+                    index.name.as_str()
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+        }
+    }
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     report_unsupported_keys(app, target);
+    report_sqlite_index_predicates(app, target);
     // A keyword parameter is carried by the ruby family and by nothing
     // else yet. No other emitter reads `Param::keyword`, so a `def`
     // that declares one renders POSITIONALLY while its call site
@@ -2689,7 +2729,9 @@ fn strip_cable_from_config_ru(content: &str) -> Result<String, String> {
 /// list partials (`_name`) before templates and otherwise sort, purely for
 /// a stable, legible file. For the blog the emitted view set matches the
 /// scaffold's, so the generated aggregator loads the same modules the
-/// hand-written one did.
+/// hand-written one did. An app with no views at all (an API app that
+/// only renders JSON) gets an aggregator that requires nothing: keeping
+/// the scaffold's copy would require blog views the tree does not have.
 fn apply_views_aggregator(files: &mut [(String, String)]) {
     use std::fmt::Write;
 
@@ -2698,9 +2740,6 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
         .map(|(p, _)| p.as_str())
         .filter(|p| p.starts_with("app/views/") && p.ends_with(".rb"))
         .collect();
-    if views.is_empty() {
-        return;
-    }
     // Partials (`_foo.rb`) first, then alphabetical — deterministic.
     views.sort_by_key(|p| {
         let is_partial = Path::new(p)

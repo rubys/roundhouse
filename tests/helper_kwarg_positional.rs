@@ -215,3 +215,60 @@ end
         "a default that reads the callee's context is not moved to the call site:\n{src}"
     );
 }
+
+fn emit_models(files: &[(&str, &str)], keep: &str) -> String {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    for (path, src) in files {
+        tree.insert(PathBuf::from(path), src.as_bytes().to_vec());
+    }
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = ruby::emit_library(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains(keep))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!src.is_empty(), "harness emitted no {keep} — every assertion below would be vacuous");
+    src
+}
+
+/// campfire's `Opengraph::Fetch.new.fetch_content_type(parsed_url, ip:
+/// resolved_ip)`, reduced: an INSTANCE method's flattened keyword,
+/// passed by name on a receiver typed as the class. The Hash used to
+/// bind to `ip` whole, and the unfurl connected to `{ip: "…"}`.
+#[test]
+fn an_instance_methods_keyword_moves_into_its_positional_slot() {
+    let src = emit_models(
+        &[
+            (
+                "app/models/fetcher.rb",
+                "class Fetcher\n  def fetch(url, ip: url.upcase)\n    \"#{url}@#{ip}\"\n  end\n\n  \
+                 def merge(url, opts = {})\n    \"#{url}#{opts}\"\n  end\nend\n",
+            ),
+            (
+                "app/models/locator.rb",
+                "class Locator\n  def locate(url)\n    Fetcher.new.fetch(url, ip: \"192.0.2.1\")\n  end\n\n  \
+                 def merged(url)\n    Fetcher.new.merge(url, opts: 1)\n  end\nend\n",
+            ),
+        ],
+        "locator",
+    );
+    assert!(
+        src.contains(r#"Fetcher.new.fetch(url, "192.0.2.1")"#),
+        "the keyword must bind the flattened `ip` slot positionally:\n{src}"
+    );
+    assert!(
+        src.contains("Fetcher.new.merge(url, opts: 1)"),
+        "a genuine optional positional keeps the Hash Ruby hands it:\n{src}"
+    );
+}

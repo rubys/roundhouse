@@ -81,6 +81,12 @@ pub struct Index {
     pub name: Symbol,
     pub columns: Vec<Symbol>,
     pub unique: bool,
+    /// A partial index's predicate, the SQL of `t.index …, where:` (or
+    /// of `CREATE INDEX … WHERE` in `structure.sql`) as the source
+    /// database's dumper wrote it. On a unique index it decides which
+    /// rows the uniqueness applies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

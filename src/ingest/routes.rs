@@ -1191,9 +1191,15 @@ fn ingest_resources_route(
                     // nests routes under a parent with no routes of its
                     // own. The expander reads an empty `only` as "all
                     // seven", so an empty literal becomes an `except:` of
-                    // every action. `except: []` restricts nothing.
+                    // every action. `except: []` restricts nothing. Ruby
+                    // keeps the last of duplicate keys, so each `only:` or
+                    // `except:` replaces the earlier value of the same key.
                     if empty_literal {
-                        only_none |= key.as_str() == "only";
+                        if key.as_str() == "only" {
+                            only_none = true;
+                        } else {
+                            except.clear();
+                        }
                         continue;
                     }
                     if list.is_empty() {
@@ -1206,6 +1212,7 @@ fn ingest_resources_route(
                     }
                     if key.as_str() == "only" {
                         only = list;
+                        only_none = false;
                     } else {
                         except = list;
                     }

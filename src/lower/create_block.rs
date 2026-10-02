@@ -151,7 +151,7 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.ty = None;
 }
 
-fn find_var_id(e: &Expr, name: &Symbol) -> Option<crate::ident::VarId> {
+pub(crate) fn find_var_id(e: &Expr, name: &Symbol) -> Option<crate::ident::VarId> {
     if let ExprNode::Var { id, name: n } = &*e.node {
         if n == name {
             return Some(*id);

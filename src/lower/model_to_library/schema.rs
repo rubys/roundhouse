@@ -188,6 +188,73 @@ pub(super) fn push_schema_methods(
         });
     }
 
+    // def self._conflict_predicate(columns) — the predicate of the
+    // unique index `upsert_all(unique_by:)` names, else "". `columns` is
+    // the target's column names, sorted and joined with ", ". Like
+    // Rails' `InsertAll`, the target is the first unique index by name
+    // with those columns, in any order, and a partial one adds its
+    // `WHERE`, without which SQLite matches no partial index. Emitted
+    // only when some target has a predicate; the runtime's default
+    // answers "" for everyone else. The predicate is the one the SQLite
+    // DDL renders.
+    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
+    unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    let mut targets: Vec<(String, Option<String>)> = Vec::new();
+    for i in unique {
+        let mut cols: Vec<&str> = i.columns.iter().map(|c| c.as_str()).collect();
+        cols.sort_unstable();
+        let cols = cols.join(", ");
+        if targets.iter().any(|(c, _)| *c == cols) {
+            continue;
+        }
+        let predicate = crate::emit::shared::schema_sql::Dialect::Sqlite
+            .index_predicate(table, i)
+            .map(str::to_string);
+        targets.push((cols, predicate));
+    }
+    let partial: Vec<(String, String)> =
+        targets.into_iter().filter_map(|(cols, p)| p.map(|p| (cols, p))).collect();
+    if !partial.is_empty() {
+        let columns = Symbol::from("columns");
+        let mut body = lit_str(String::new());
+        for (cols, predicate) in partial.into_iter().rev() {
+            let cond = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(var_ref(columns.clone())),
+                        method: Symbol::from("=="),
+                        args: vec![lit_str(cols)],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Bool,
+            );
+            body = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: lit_str(predicate), else_branch: body },
+                ),
+                Ty::Str,
+            );
+        }
+        methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("_conflict_predicate"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(columns.clone())],
+            body,
+            signature: Some(fn_sig(vec![(columns, Ty::Str)], Ty::Str)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // def self.schema_columns
     let column_array = with_ty(
         Expr::new(
@@ -665,12 +732,70 @@ fn field_storage_setter(table: &Table, field: &Symbol) -> Symbol {
     }
 }
 
+/// A typed params DTO holds form Strings, while a schema writer takes
+/// the column's scalar type. Convert in the shared model lowering: a
+/// target's type cast is not necessarily a String parse (Spinel can
+/// otherwise pass a String pointer into an Integer slot).
+///
+/// Presence stays in the caller's `<field>_provided` guard. A supplied
+/// blank clears a nullable scalar; it is not the same as an omitted key.
+/// Enums use their label mapping before numeric conversion, and virtual
+/// typed-store fields retain their existing conversion path.
+fn typed_param_value(model: &Model, table: &Table, field: &Symbol, value: Expr) -> Expr {
+    let Some(col) = table.columns.iter().find(|c| c.name == *field) else {
+        return typed_store_param_value(model, field, value);
+    };
+    let ty = ty_of_column(&col.col_type);
+    if !matches!(ty, Ty::Int | Ty::Float | Ty::Bool) {
+        return value;
+    }
+    let value = with_ty(value, Ty::Str);
+    if let Some(mapped) = enum_label_cast(model, col, value.clone()) {
+        return mapped;
+    }
+    let converted = match ty {
+        Ty::Int => with_ty(no_arg_send(value.clone(), "to_i"), Ty::Int),
+        Ty::Float => with_ty(no_arg_send(value.clone(), "to_f"), Ty::Float),
+        Ty::Bool => {
+            // Rails' Boolean false spellings. Comparisons rather than a
+            // literal Array#include? keep this shared IR target-neutral.
+            ["", "0", "f", "F", "false", "FALSE", "off", "OFF"]
+                .into_iter()
+                .map(|text| bool_send(value.clone(), "!=", lit_str(text.to_string())))
+                .reduce(and_bool)
+                .expect("Boolean false spellings")
+        }
+        _ => return value,
+    };
+    if !col.nullable || col.primary_key {
+        return converted;
+    }
+    let blank = if ty == Ty::Bool {
+        value
+    } else {
+        // Numeric types consider whitespace blank; Boolean treats it as
+        // true and only the empty String as nil, as ActiveModel does.
+        with_ty(no_arg_send(value, "strip"), Ty::Str)
+    };
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: with_ty(no_arg_send(blank, "empty?"), Ty::Bool),
+                then_branch: with_ty(nil_lit(), Ty::Nil),
+                else_branch: converted,
+            },
+        ),
+        super::ty_of_column_slot(col),
+    )
+}
+
 /// A permitted param is a String; a `typed_store` scalar's writer takes
 /// its DECLARED type (`s.integer :avatar_source` → `avatar_source=:
 /// (Integer)`). The gem casts on write the way ActiveModel does, so the
 /// typed factory casts here — handing the String through is what spinel
 /// refused as a contradicted `--rbs` seed on upstream lobsters' User.
-/// Column writers need nothing: their write side is String-shaped.
+/// This remains the fallback for virtual fields absent from the schema.
 fn typed_store_param_value(model: &crate::dialect::Model, field: &Symbol, value: Expr) -> Expr {
     let attr_ty = crate::lower::typed_store::typed_store_decls(&model.body)
         .into_iter()
@@ -1273,7 +1398,7 @@ pub(super) fn push_from_params_method(
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
                 method: field_storage_setter(table, field),
-                args: vec![typed_store_param_value(model, field, p_field.clone())],
+                args: vec![typed_param_value(model, table, field, p_field.clone())],
                 block: None,
                 parenthesized: false,
             },
@@ -3254,7 +3379,7 @@ fn synth_update_typed(
             ExprNode::Send {
                 recv: Some(self_ref()),
                 method: field_storage_setter(table, field),
-                args: vec![typed_store_param_value(model, field, p_field)],
+                args: vec![typed_param_value(model, table, field, p_field)],
                 block: None,
                 parenthesized: false,
             },
