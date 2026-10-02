@@ -17,6 +17,20 @@ use std::fs;
 use std::path::Path;
 
 #[test]
+fn pages_deployment_requires_the_canonical_repository_main_branch() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let deploy = &workflow["jobs"]["deploy"];
+    assert_eq!(
+        deploy["if"].as_str(),
+        Some("github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'")
+    );
+    assert!(deploy.get("continue-on-error").is_none(), "production deployment failures must remain visible");
+    assert_eq!(deploy["needs"][0].as_str(), Some("assemble-site"));
+    assert_eq!(deploy["needs"][1].as_str(), Some("unit"));
+}
+
+#[test]
 fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();

@@ -2752,7 +2752,9 @@ jobs:
     needs:
       - assemble-site
       - unit
-    if: github.ref == 'refs/heads/main'
+    # Forks run the full build/test matrix but need no Pages configuration.
+    # Only the canonical repository publishes the project website.
+    if: github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'
     # Only one Pages deployment at a time. Scoped to this job, not the
     # workflow: at the workflow level the same group serialised every
     # run — a pull request queued behind a push to main and the next
