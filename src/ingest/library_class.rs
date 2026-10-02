@@ -2470,6 +2470,9 @@ fn framework_shadow_scopes(
         if constant_id_str(&write.name()) == "ActiveSupport" {
             out.insert(scope.to_vec());
         }
+        if scope == ["ActiveSupport"] && constant_id_str(&write.name()) == "Concern" {
+            out.insert(Vec::new());
+        }
     } else if let Some(write) = node.as_constant_path_write_node() {
         if let Some(path) = constant_path_of(&write.target().as_node()) {
             if let Some(index) = path.iter().position(|name| name == "ActiveSupport") {
@@ -2491,7 +2494,11 @@ fn framework_shadow_scopes(
         if let Some((path, body)) = declaration {
             let mut inner = scope.to_vec();
             inner.extend(path);
-            if inner.last().is_some_and(|name| name == "ActiveSupport") {
+            // Only a root module reopening preserves the framework identity;
+            // nested declarations and class declarations remain barriers.
+            if inner.last().is_some_and(|name| name == "ActiveSupport")
+                && (inner.len() > 1 || node.as_class_node().is_some())
+            {
                 out.insert(inner[..inner.len() - 1].to_vec());
             }
             if inner.as_slice() == ["ActiveSupport", "Concern"] {

@@ -669,16 +669,33 @@ fn configuration_refuses_lexically_shadowed_framework_constants() {
     let unrelated = format!("module Unrelated\n ActiveSupport = String\nend\n{WINDOW_SETTINGS}");
     assert!(configuration_app(&unrelated, "configure_window mode: :month").is_ok());
 
+    // A root module reopening preserves the framework identity.
+    let reopened = format!("module ActiveSupport; end\n{WINDOW_SETTINGS}");
+    let app = configuration_app(&reopened, "configure_window mode: :month").unwrap();
+    assert_eq!(app.controllers[0].class_methods().count(), 2);
+
     for prefix in [
         "ActiveSupport = String",
-        "module ActiveSupport; end",
+        "class ActiveSupport; end",
         "module ActiveSupport::Concern; end",
+        "module ActiveSupport; module Concern; end; end",
+        "module ActiveSupport; class Concern; end; end",
+        "module ActiveSupport; Concern = String; end",
         "WindowSettings::ActiveSupport = String",
+        "module WindowSettings; module ActiveSupport; end; end",
         "ActiveSupport::Concern = String",
     ] {
-        let concern = format!("{prefix}\n{WINDOW_SETTINGS}");
+        // Keep the carrier in its own file: a leading class declaration in
+        // a controller concern file selects the controller-ingest path.
+        let tree = [
+            ("lib/framework_identity.rb", prefix),
+            ("app/controllers/concerns/window_settings.rb", WINDOW_SETTINGS),
+            ("app/controllers/window_controller.rb", "class WindowController < ActionController::Base\n include WindowSettings\n configure_window mode: :month\nend\n"),
+        ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+        let result = ingest_app_from_tree(tree);
         assert!(
-            configuration_app(&concern, "configure_window mode: :month").is_err(),
+            matches!(result, Err(roundhouse::ingest::IngestError::Unsupported { ref message, .. })
+                if message.contains("unmodified ActiveSupport::Concern")),
             "identity barrier {prefix}"
         );
     }

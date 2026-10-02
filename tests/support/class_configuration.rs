@@ -1,6 +1,9 @@
 //! One synthetic contract shared by the interpreted and native output lanes.
 
 pub const CONCERN: &str = r#"
+module ActiveSupport
+end
+
 module WindowSettings
   extend ActiveSupport::Concern
   class_methods do
