@@ -1343,6 +1343,7 @@ macro_rules! emit_roots {
                 }
                 for (_, value) in & $($mutable)? class.constants { $f(value); }
                 for call in & $($mutable)? class.unknown_calls { $f(call); }
+                for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
             }
         }
     }

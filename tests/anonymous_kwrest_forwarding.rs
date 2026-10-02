@@ -98,3 +98,28 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
         }
     }
 }
+
+#[test]
+fn native_initializers_in_test_inner_classes_keep_the_target_boundary() {
+    use roundhouse::diagnostic::{DiagnosticKind, Severity};
+    use roundhouse::project::{BuildTarget, target_files};
+    let mut app = ingest_app_from_tree(tree(&[(
+        "test/models/probe_test.rb",
+        "class ProbeTest < ActiveSupport::TestCase\n  class Counter\n    @@count = nil\n  end\n  def test_probe\n    assert_equal 1, 1\n  end\nend\n",
+    )])).unwrap();
+    assert_eq!(app.test_modules[0].inner_classes[0].class_ivar_initializers.len(), 1);
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in BuildTarget::ALL.iter().copied().filter(|t| !matches!(t, BuildTarget::Blog)) {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, roundhouse::fixtures::real_blog(), target)
+        });
+        let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "class variable write")).collect();
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+            assert!(gates.is_empty(), "{target:?}: {diags:?}");
+        } else {
+            assert!(!gates.is_empty(), "{target:?}: {diags:?}");
+            assert!(gates.iter().all(|d| d.severity == Severity::Error && !d.span.is_synthetic()));
+        }
+    }
+}
