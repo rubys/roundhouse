@@ -1351,6 +1351,13 @@ pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(
 /// children themselves, so each root is visited exactly once.
 pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
     for_each_forwarding_body_ref(app, f);
+    for association in app.models.iter().flat_map(|model| model.associations()) {
+        match association {
+            crate::dialect::Association::BelongsTo { default: Some(e), .. }
+            | crate::dialect::Association::HasMany { scope: Some(e), .. } => f(e),
+            _ => {}
+        }
+    }
     for action in app.controllers.iter().flat_map(|c| c.actions()) {
         for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) { f(default); }
     }

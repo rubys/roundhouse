@@ -172,6 +172,14 @@ fn unsupported_matches_in_defaults_and_fixtures_are_not_missed() {
             "class MatchersController < ActionController::Base\n  def index(matched: (5 in Integer))\n    matched\n  end\nend\n",
         ),
         (
+            "app/models/matcher.rb",
+            "class Matcher < ApplicationRecord\n  belongs_to :owner, default: -> { 5 in Integer }\nend\n",
+        ),
+        (
+            "app/models/matcher.rb",
+            "class Matcher < ApplicationRecord\n  has_many :items, -> { 5 in Integer }\nend\n",
+        ),
+        (
             "test/fixtures/matchers.yml",
             "one:\n  matched: <%= 5 in Integer %>\n",
         ),
