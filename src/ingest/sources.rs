@@ -69,8 +69,17 @@ pub fn reset() {
 
 /// Whole-app ingest supplies the real root once; source identities and
 /// diagnostic spans stay unchanged, while `__FILE__` can be relocatable.
-pub(super) fn set_root(root: &Path) {
+/// Hold the guard through ingest so early errors cannot leak its root.
+#[must_use]
+pub(super) fn set_root(root: &Path) -> impl Drop {
+    struct ClearRoot;
+    impl Drop for ClearRoot {
+        fn drop(&mut self) {
+            SOURCES.with(|s| s.borrow_mut().root = None);
+        }
+    }
     SOURCES.with(|s| s.borrow_mut().root = Some(root.to_path_buf()));
+    ClearRoot
 }
 
 pub(super) fn relative_path(path: &str) -> String {

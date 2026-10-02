@@ -110,3 +110,20 @@ fn repeated_standalone_ingest_uses_the_current_parse_for_line_literals() {
     assert_eq!(registered.len(), 1);
     assert_eq!(registered[0].text, first);
 }
+
+#[test]
+fn failed_app_ingest_does_not_relocate_a_later_standalone_file_literal() {
+    use roundhouse::ingest::{ingest_app_with_vfs, ingest_library_classes, sources};
+    use roundhouse::vfs::MapVfs;
+    let root = PathBuf::from("/tmp/failed_app");
+    let vfs = MapVfs::new([(root.join("roundhouse.yml"),
+        b"test_paths: [../outside]".to_vec())].into());
+    let error = ingest_app_with_vfs(&vfs, &root).expect_err("invalid app-relative test root");
+    assert!(error.to_string().contains("test_paths"));
+    let path = root.join("app/services/fresh.rb");
+    let file = path.to_string_lossy();
+    let classes = ingest_library_classes(b"class Fresh; FILE=__FILE__; end", &file).unwrap();
+    assert!(matches!(&*classes[0].constants[0].1.node,
+        ExprNode::Lit { value: Literal::Str { value } } if value == file.as_ref()));
+    sources::drain();
+}
