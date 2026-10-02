@@ -63,6 +63,8 @@ module ActiveRecord
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
   class Base
+    def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
 

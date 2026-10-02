@@ -59,6 +59,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             base.class_methods.insert(Symbol::from(m), Ty::Untyped);
         }
         base.class_methods.insert(Symbol::from("connection"), connection_ty());
+        base.class_methods.insert(Symbol::from("sanitize_sql_like"), Ty::Str);
         classes
             .entry(ClassId(Symbol::from("ActiveRecord::Base")))
             .or_insert(base);

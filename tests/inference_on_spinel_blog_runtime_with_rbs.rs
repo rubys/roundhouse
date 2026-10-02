@@ -895,7 +895,10 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // the method is typed `(String) -> String` in connection.rbs. What
     // it buys: `upsert_all(unique_by:)` names a partial unique index
     // with its `WHERE`, as Rails does, which SQLite needs to match it.
-    const CEILING: usize = 1130;
+    // 1130 -> 1204, +74 measured in Base#sanitize_sql_like. This probe
+    // keys RBS by short class names, so nested Base params remain unseeded.
+    // The full-context runtime Bar A and Bar B gates remain unchanged.
+    const CEILING: usize = 1204;
 
     assert!(
         all_untyped.len() <= CEILING,
