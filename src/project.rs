@@ -2285,6 +2285,7 @@ fn ruby_family_runtime_files(
     // base's eagerly-rewritten one at dedupe) and strips routes.rb's eager
     // controller-require header.
     apply_controller_dispatch(&mut files, app, true);
+    apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
     apply_runtime_gem_wiring(&mut files);
@@ -3385,6 +3386,37 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     }
 }
 
+/// Leave `RouteTable.root` out of the dispatch table when the app
+/// declares no root.
+///
+/// `main.rb` and the test harness compose the table as
+/// `[RouteTable.root] + RouteTable.table + …`, but the routes emit
+/// defines `RouteTable.root` only for a route at `/` (`root "c#a"`).
+/// An API app often has none, and then the spinel build refused the
+/// call (`unsupported call … CallNode root`) and the ruby tree raised
+/// NoMethodError on its first request (#165). Without a root the table
+/// starts at `RouteTable.table`, which is what the Crystal, TypeScript
+/// and Python mains already do on the same test.
+///
+/// Runs wherever `apply_controller_dispatch` does, for the same reason:
+/// the CRuby/JRuby trees replace the base's main.rb with the
+/// ruby_overlay one at dedupe, so the second pass rewrites that one.
+/// The harness it already rewrote has nothing left to match. Exact
+/// paths, not `ends_with`: an app's own `app/models/domain.rb` ends in
+/// `main.rb` too.
+fn apply_route_table_root(files: &mut [(String, String)], app: &App) {
+    const WITH_ROOT: &str = "[RouteTable.root] + RouteTable.table";
+    let has_root = crate::lower::flatten_routes(app).iter().any(|r| r.path == "/");
+    if has_root {
+        return;
+    }
+    for (path, content) in files.iter_mut() {
+        if path == "main.rb" || path == "test/test_helper.rb" {
+            *content = content.replace(WITH_ROOT, "RouteTable.table");
+        }
+    }
+}
+
 /// The scaffold targets (spinel/ruby/jruby) ship the scaffold's
 /// comprehensive README as `SPECIMEN.md`, freeing `README.md` for the
 /// generated machine-runnable quick-start (`target_readme` via
@@ -4065,6 +4097,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // CRuby/JRuby trees re-apply the dispatch in lazy flavor to the
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
+    apply_route_table_root(&mut files, app);
     // Identity for the `/cable` handshake, in the shared base like the
     // dispatch above. Only the SPINEL tree runs the result: the
     // CRuby/JRuby trees carry this `runtime/cable.rb` too but never
@@ -7095,6 +7128,56 @@ mod tests {
         )];
         apply_controller_dispatch(&mut plain, &app, false);
         assert!(!plain[0].1.contains("Current.reset"));
+    }
+
+    /// Reads the REAL scaffold files, so a reworded `route_table` in
+    /// any of the three fails here rather than leaving a `RouteTable.root`
+    /// call in a root-less app's tree.
+    #[test]
+    fn a_route_table_without_a_root_route_leaves_route_table_root_out() {
+        let scaffold = || {
+            [
+                "runtime/spinel/scaffold/main.rb",
+                "runtime/spinel/scaffold/ruby_overlay/main.rb",
+                "runtime/spinel/test/test_helper.rb",
+            ]
+            .iter()
+            .map(|p| {
+                let path = if p.ends_with("test_helper.rb") { "test/test_helper.rb" } else { "main.rb" };
+                (path.to_string(), crate::runtime_files::read_to_string(p).unwrap())
+            })
+            .collect::<Vec<_>>()
+        };
+        let mut app = App::new();
+        app.routes.entries.push(crate::dialect::RouteSpec::Explicit {
+            method: crate::dialect::HttpMethod::Get,
+            path: "/widgets".to_string(),
+            controller: crate::ident::ClassId(crate::ident::Symbol::from("WidgetsController")),
+            action: crate::ident::Symbol::from("index"),
+            as_name: None,
+            constraints: Default::default(),
+            scope: Default::default(),
+        });
+
+        // An app file whose name merely ends in `main.rb` is the app's.
+        let domain = ("app/models/domain.rb".to_string(), "ROUTES = \"[RouteTable.root] + RouteTable.table\"\n".to_string());
+        let mut files = scaffold();
+        files.push(domain.clone());
+        apply_route_table_root(&mut files, &app);
+        let domain_after = files.pop().unwrap();
+        assert_eq!(domain_after, domain, "an app file is not the dispatcher");
+        for (path, content) in &files {
+            assert!(!content.contains("RouteTable.root"), "{path} still calls RouteTable.root");
+            assert!(content.contains("RouteTable.table + ActiveStorage::Routes.table"), "{path}");
+        }
+
+        // With a root the table keeps it, first.
+        app.routes.entries.push(crate::dialect::RouteSpec::Root { target: "widgets#index".to_string() });
+        let mut files = scaffold();
+        apply_route_table_root(&mut files, &app);
+        for (path, content) in &files {
+            assert!(content.contains("[RouteTable.root] + RouteTable.table"), "{path}");
+        }
     }
 
     #[test]
