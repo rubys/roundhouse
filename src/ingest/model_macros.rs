@@ -15,9 +15,9 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
 
-pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) {
+pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> super::IngestResult<()> {
     if app.concern_spliced_class_methods.is_empty() {
-        return;
+        return Ok(());
     }
     let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
@@ -191,12 +191,12 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) {
                     .and_then(|i| sources.get(i as usize))
                     .map(|s| s.path.clone())
                     .unwrap_or_else(|| model.name.to_string());
-                super::survey::record(&super::IngestError::Unsupported {
+                super::survey::unwrap_or_record::<()>(Err(super::IngestError::Unsupported {
                     file,
                     message: format!(
                         "model macro `{name}` not expanded: requires distinct parameterless definitions, symbol bindings and named visibility on those definitions"
                     ),
-                });
+                }))?;
             }
         }
         if expansions.is_empty() {
@@ -228,6 +228,7 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) {
         }
         model.body = body;
     }
+    Ok(())
 }
 
 fn include_closure(app: &App, id: ClassId, included: &mut HashSet<ClassId>) {

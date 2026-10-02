@@ -93,6 +93,8 @@ repeated/nested invocations, synthesized/inherited method collisions,
 overridden macro primitives, mutable captures, splats/destructuring,
 block parameters, constant references with unproven lexical binding,
 control flow, and effects outside definitions remain unsupported.
+Recognized but unrepresentable macros fail strict ingestion; survey mode
+records the gap and retains the original model body without partial expansion.
 Literal reflection is grounded only on public generated association/scope
 APIs without app-owned dispatcher/target/reader overrides. The shared
 Ruby/Spinel emission path then threads these calls through Relations.

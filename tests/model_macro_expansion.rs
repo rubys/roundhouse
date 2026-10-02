@@ -47,13 +47,22 @@ fn app_with_prefix(
         ("app/models/leaf.rb", format!("class Leaf < ApplicationRecord\n{prefix}\n  include Positionable\n{leaf_body}\nend\n")),
         ("app/models/book.rb", format!("class Book < ApplicationRecord\n{other_body}\nend\n")),
     ];
-    ingest_app_from_tree(
+    // Boundary tests inspect rejected source bodies as well as generated
+    // methods. Preserve an explicit caller's survey collector if present.
+    let own_survey = !survey::is_active();
+    if own_survey {
+        survey::activate();
+    }
+    let result = ingest_app_from_tree(
         files
             .into_iter()
             .map(|(path, text)| (PathBuf::from(path), text.into_bytes()))
             .collect::<HashMap<_, _>>(),
-    )
-    .expect("ingest")
+    );
+    if own_survey {
+        survey::drain();
+    }
+    result.expect("survey ingest")
 }
 
 fn model<'a>(app: &'a roundhouse::App, name: &str) -> &'a roundhouse::dialect::Model {
@@ -79,6 +88,39 @@ fn unexpanded(app: &roundhouse::App, name: &str) -> usize {
             if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == name))
         })
         .count()
+}
+
+#[test]
+fn rejected_recognized_macro_is_strict_error_but_survey_retains_source_body() {
+    let files = HashMap::from([
+        (PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n  create_table :leaves do |t|; t.string :title; end\nend\n".to_vec()),
+        (PathBuf::from("app/models/concerns/positionable.rb"), POSITIONABLE.as_bytes().to_vec()),
+        (PathBuf::from("app/models/leaf.rb"), b"class Leaf < ApplicationRecord\n  include Positionable\n  positioned_within :book, association: :leaves\nend\n".to_vec()),
+    ]);
+    assert!(!survey::is_active());
+    let error = ingest_app_from_tree(files.clone()).expect_err("missing required filter must refuse strict ingest");
+    assert!(matches!(error, roundhouse::ingest::IngestError::Unsupported { file, message }
+        if file == "app/models/leaf.rb" && message.contains("model macro `positioned_within` not expanded")));
+    assert!(!survey::is_active());
+
+    survey::activate();
+    let surveyed = ingest_app_from_tree(files).expect("survey must retain the model");
+    let gaps = survey::drain();
+    assert_eq!(gaps.len(), 1);
+    assert!(matches!(&gaps[0], roundhouse::ingest::IngestError::Unsupported { file, message }
+        if file == "app/models/leaf.rb" && message.contains("model macro `positioned_within` not expanded")));
+    assert_eq!(unexpanded(&surveyed, "positioned_within"), 1);
+    assert!(instances(&surveyed, "Leaf").is_empty());
+    assert!(!survey::is_active());
+
+    let valid = HashMap::from([
+        (PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n  create_table :leaves do |t|; t.string :title; end\nend\n".to_vec()),
+        (PathBuf::from("app/models/concerns/positionable.rb"), POSITIONABLE.as_bytes().to_vec()),
+        (PathBuf::from("app/models/leaf.rb"), b"class Leaf < ApplicationRecord\n  include Positionable\n  positioned_within :book, association: :leaves, filter: :active\nend\n".to_vec()),
+    ]);
+    let supported = ingest_app_from_tree(valid).expect("valid strict macro must still expand");
+    assert_eq!(unexpanded(&supported, "positioned_within"), 0);
+    assert_eq!(instances(&supported, "Leaf").len(), 3);
 }
 
 #[test]
