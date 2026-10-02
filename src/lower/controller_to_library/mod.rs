@@ -978,6 +978,8 @@ fn subclass_template_hooks(
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 name_span: crate::span::Span::synthetic(),
                 name: hook.clone(),
                 receiver: MethodReceiver::Instance,
@@ -2485,6 +2487,8 @@ fn action_to_method(
     // pure ivar-backed reads that can lower to a TS field.
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,

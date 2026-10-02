@@ -725,6 +725,8 @@ fn test_to_method_def(
     );
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Instance,

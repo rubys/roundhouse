@@ -198,6 +198,8 @@ mod tests {
         let block_sig = typed_callee_block_sig();
         MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("each"),
             receiver: MethodReceiver::Instance,
@@ -240,6 +242,8 @@ mod tests {
         );
         MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("forwarder"),
             receiver: MethodReceiver::Instance,

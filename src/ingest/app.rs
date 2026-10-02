@@ -2687,9 +2687,9 @@ fn expand_class_body_macros(app: &mut App) {
 
 /// The macro's body with its parameters replaced by the call's
 /// arguments. Positional binding, which is all these macros need: the
-/// `**options` a concern macro forwards arrives here as a trailing
-/// positional (see `ingest_hash_literal`), so the substitution is a
-/// straight variable replacement.
+/// `**options` a concern macro forwards binds its trailing value. Consume
+/// any call-site keyword producer before substituting that value into
+/// the body; an argument marker is not part of the options Hash itself.
 ///
 /// A parameter the call site does NOT supply still has to bind, or the
 /// body keeps a free variable and `filters_from_macro_body` rejects the
@@ -2732,7 +2732,10 @@ fn substitute_params(
         .enumerate()
         .map(|(i, p)| {
             let value = match args.get(i) {
-                Some(a) => a.clone(),
+                Some(a) => match &*a.node {
+                    ExprNode::KeywordSplat { value } => value.clone(),
+                    _ => a.clone(),
+                },
                 None if p.default.is_some() => p.default.clone().expect("checked"),
                 None if p.rest => crate::expr::Expr::new(
                     span,
@@ -2810,6 +2813,12 @@ fn filter_from_send(
             targets.push((sym, arg.span));
             continue;
         }
+        // Macro substitution has already bound this keyword producer. Keep
+        // the existing literal-options contract without guessing dynamic data.
+        let arg = match &*arg.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => arg,
+        };
         let ExprNode::Hash { entries, .. } = &*arg.node else {
             // An argument that is neither a target nor an options hash
             // (a forwarded parameter the call site never supplied, say)

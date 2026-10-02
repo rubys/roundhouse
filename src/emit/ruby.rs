@@ -48,6 +48,7 @@ pub fn emit_method(m: &MethodDef) -> String {
         .params
         .iter()
         .map(|p| match (&p.default, p.keyword) {
+            _ if p.forwarding => "...".to_string(),
             (Some(default), false) => {
                 format!("{} = {}", p.name.as_str(), emit_default(default))
             }
@@ -1711,6 +1712,8 @@ mod method_sig_tests {
     fn emit_method_renders_optional_default_and_block_param() {
         let m = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("get_from_cache"),
             receiver: MethodReceiver::Instance,

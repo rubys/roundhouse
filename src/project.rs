@@ -938,6 +938,43 @@ pub fn target_files(
     report_unsupported_keys(app, target);
     report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
+    // Full forwarding currently has a native Ruby contract only. A
+    // declaration must be gated even when its body never forwards.
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+            if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
+                let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
+                    ("keyword splat in ordinary super",
+                     "super destination's native or lowered argument ABI cannot be verified")
+                } else {
+                    ("keyword splat into full argument forwarding",
+                     "native Ruby keyword provenance has no verified carrier on this target")
+                };
+                crate::emit::diagnostics::report_unsupported(span, target.as_str(),
+                    construct, detail);
+            }
+        }
+    }
+    for (_, method) in crate::analyze::forwarding::methods(app) {
+        if target != BuildTarget::Blog && let Some(formal) = method.unsupported_formals {
+            crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
+        }
+        if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+            let construct = if method.params.iter().any(|p| p.forwarding) {
+                "full argument forwarding"
+            } else if method.params.iter().any(|p| p.keyword && p.rest) {
+                "keyword rest declaration"
+            } else {
+                continue;
+            };
+            crate::emit::diagnostics::report_unsupported(
+                method.name_span,
+                target.as_str(),
+                construct,
+                "native Ruby forwarding is preserved; this target's argument/block carrier is not verified",
+            );
+        }
+    }
     // A keyword parameter is carried by the ruby family and by nothing
     // else yet. No other emitter reads `Param::keyword`, so a `def`
     // that declares one renders POSITIONALLY while its call site

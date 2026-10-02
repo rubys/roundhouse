@@ -1290,6 +1290,11 @@
       "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
     },
     "spinel": {
+      "Error|unsupported|app/helpers/arrangement_helper.rb:2:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
+      "Error|unsupported|app/helpers/books_helper.rb:15:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
+      "Error|unsupported|app/helpers/leaves_helper.rb:11:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
+      "Error|unsupported|app/helpers/leaves_helper.rb:19:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
+      "Error|unsupported|app/helpers/leaves_helper.rb:2:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
       "Warning|lower_residue|<synthetic>|template statement dropped (unknown stmt) — it contributes no output and runs no side effect in the emitted view": 1,
       "Warning|lower_residue|app/channels/application_cable/connection.rb:5:5|`identified_by` in the body of `ApplicationCable::Connection` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|app/controllers/books_controller.rb:29:7|`respond_to` arm `format.md` dropped (format not modeled) — this action answers every format with its html branch, so a request that negotiates `md` (including a route pinned with `:format => \"md\"`) gets HTML back": 1,

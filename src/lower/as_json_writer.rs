@@ -82,6 +82,8 @@ pub fn writer_method(
     let stmts = writer_body(pairs, table, assoc_names)?;
     Ok(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,
@@ -156,6 +158,8 @@ pub fn typed_writer_method(
     })?;
     Ok(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: Span::synthetic(),
         name: Symbol::from(WRITER_METHOD),
         receiver: MethodReceiver::Instance,

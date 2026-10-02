@@ -496,6 +496,8 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Lit { .. } => "Lit",
         ExprNode::Var { .. } => "Var",
         ExprNode::Ivar { .. } => "Ivar",
+        ExprNode::ForwardArgs => "ForwardArgs",
+        ExprNode::KeywordSplat { .. } => "KeywordSplat",
         ExprNode::Const { .. } => "Const",
         ExprNode::Hash { .. } => "Hash",
         ExprNode::Array { .. } => "Array",

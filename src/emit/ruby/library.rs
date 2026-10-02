@@ -1009,7 +1009,12 @@ fn push_assoc_scope_skip(model: &crate::ident::ClassId, method: &Symbol, reason:
 /// method every call site now passes a relation to. Placement is before
 /// the first keyword in both, since `def f(__rel = …, k:)` is the only
 /// legal ordering.
-fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
+fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bool {
+    if m.params.iter().any(|p| p.forwarding) {
+        crate::emit::diagnostics::report_unsupported(m.name_span, "ruby", "full argument forwarding",
+            "full forwarding cannot use the relation-threading argument ABI");
+        return false;
+    }
     let insert_at = m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
     m.params.insert(
         insert_at,
@@ -1032,6 +1037,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
             },
         );
     }
+    true
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
@@ -1202,7 +1208,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     // scope's __rel is not last.
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    insert_rel_param(m, &rel_param);
+                    if !insert_rel_param(m, &rel_param) { continue; }
                     crate::lower::scope_chain::rewrite_scope_body(
                         &mut m.body,
                         &lc.name,
@@ -1241,7 +1247,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 {
                     continue;
                 }
-                insert_rel_param(m, &rel_param);
+                if !insert_rel_param(m, &rel_param) { continue; }
                 if creates {
                     crate::lower::scope_chain::merge_scope_attributes(
                         &mut m.body,
@@ -1798,6 +1804,8 @@ fn autosave_method(
         else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
     });
     crate::dialect::MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(format!("_autosave_{}", name.as_str())),
         receiver: MethodReceiver::Instance,
@@ -1845,6 +1853,8 @@ fn fold_before_validation(
         return;
     }
     methods.push(crate::dialect::MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: hook,
         receiver: MethodReceiver::Instance,
@@ -2477,6 +2487,8 @@ fn push_helper_ivar_writers(
         }
         let span = Span::synthetic();
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: setter,
             receiver: MethodReceiver::Instance,
@@ -2514,6 +2526,8 @@ fn push_helper_ivar_readers(
             continue;
         }
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: name.clone(),
             receiver: MethodReceiver::Instance,
@@ -5752,6 +5766,8 @@ fn synthesize_module_lc(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
@@ -5778,6 +5794,18 @@ fn synthesize_module_lc(
         constants: Vec::new(),
         unknown_calls: Vec::new(),
     }
+}
+
+#[test]
+fn module_adapter_preserves_parameter_declaration_facts() {
+    let source = crate::ingest::ingest_library_class(
+        b"class Probe; def self.call((a,b)); 7; end; end",
+        "probe.rb",
+    ).unwrap().unwrap();
+    let functions = crate::lower::view_to_library::flatten_lcs_to_functions(&[source]);
+    let restored = synthesize_module_lc(&functions);
+    assert_eq!(restored.methods[0].unsupported_formals,
+        Some(crate::dialect::UnsupportedFormal::Destructured));
 }
 
 /// Emit a single library-shape file. `out_path` is the project-root-relative

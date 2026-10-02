@@ -51,6 +51,8 @@ pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction
         module_path,
         name: Symbol::from("statements"),
         params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
         effects: EffectSet::default(),

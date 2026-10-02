@@ -1056,6 +1056,7 @@ fn collect_untyped_lowered(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped_lowered(cond, &format!("{path}/if.cond"), out);
@@ -1175,7 +1176,7 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(v, &format!("{path}/next.value"), out);
             }
         }
-        ExprNode::Splat { value } => {
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
             collect_untyped_lowered(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
@@ -1518,6 +1519,8 @@ fn a_models_own_to_param_wins_over_the_synthesized_one() {
         .clone();
     let own = roundhouse::dialect::MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_param"),
         receiver: MethodReceiver::Instance,
@@ -1581,6 +1584,8 @@ fn a_models_own_to_key_feeds_dom_record_key() {
         .clone();
     let own = roundhouse::dialect::MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: roundhouse::span::Span::synthetic(),
         name: Symbol::from("to_key"),
         receiver: MethodReceiver::Instance,

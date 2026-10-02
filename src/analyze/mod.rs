@@ -38,6 +38,7 @@ mod test_module;
 mod render;
 mod effects;
 mod diagnostics;
+pub(crate) mod forwarding;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
@@ -4281,7 +4282,9 @@ impl Analyzer {
             ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.collect_send_sites(v, self_class, helpers, out); }
             }
-            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, helpers, out),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+                self.collect_send_sites(value, self_class, helpers, out)
+            }
             ExprNode::MultiAssign { value, .. } => {
                 self.collect_send_sites(value, self_class, helpers, out)
             }
@@ -4300,6 +4303,7 @@ impl Analyzer {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
         }
     }

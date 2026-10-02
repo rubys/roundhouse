@@ -40,6 +40,7 @@ impl super::Analyzer {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
 
             ExprNode::Return { value } => self.visit_effects(value, ctx, out),
@@ -179,7 +180,7 @@ impl super::Analyzer {
             ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.visit_effects(v, ctx, out); }
             }
-            ExprNode::Splat { value } => self.visit_effects(value, ctx, out),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => self.visit_effects(value, ctx, out),
             ExprNode::MultiAssign { targets, value } => {
                 self.visit_effects(value, ctx, out);
                 for target in targets.iter_mut() {

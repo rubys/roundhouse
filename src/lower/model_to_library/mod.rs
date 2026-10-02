@@ -30,7 +30,7 @@ pub(crate) mod broadcasts;
 pub(crate) mod markers;
 pub mod row;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Model, Param};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -70,6 +70,8 @@ pub(crate) fn push_synth_instance_method(
     }
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -837,6 +839,58 @@ pub(crate) fn model_defines_writer(model: &Model, field: &crate::ident::Symbol) 
     model_defines_instance_method(model, &writer)
 }
 
+/// Survey the same untyped synthesis used by emission. Source lookup stays
+/// with the caller: inherited library contracts can also be forwarding
+/// destinations, even when neither they nor the model declare `...`.
+pub(crate) fn unretained_model_contracts<'a>(
+    app: &'a crate::App,
+    mut inherited: impl FnMut(&'a Model) -> Vec<&'a MethodDef>,
+) -> HashSet<Span> {
+    // Synthesis can report incidental emit warnings. A survey must neither
+    // publish those nor consume an enclosing transpile's diagnostic buffer.
+    crate::emit::diagnostics::scope(|| {
+        let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+        specs.mark_file_fields(&app.models);
+        let mut missing = HashSet::new();
+        for model in &app.models {
+            let inherited = inherited(model);
+            if inherited.is_empty()
+                && !model.methods().any(|m| m.params.iter().any(|p| p.forwarding))
+            {
+                continue;
+            }
+            let built = build_methods(model, &app.models, &app.schema, &specs);
+            let preserved = |source: &MethodDef, built: &MethodDef| {
+                built.name_span == source.name_span
+                    && built.params == source.params
+                    && built.block_param == source.block_param
+            };
+            for source in model.methods().filter(|m| m.params.iter().any(|p| p.forwarding)) {
+                let matches = |m: &&MethodDef| {
+                    m.name == source.name && m.receiver == source.receiver
+                };
+                let effective = model.methods().filter(matches).last().unwrap();
+                let retained = built.iter().rev().find(matches);
+                if effective.name_span != source.name_span
+                    || retained.is_none_or(|m| !preserved(source, m))
+                {
+                    missing.insert(source.name_span);
+                }
+            }
+            for source in inherited {
+                // No own method means normal inheritance survives. An own
+                // synthesized override must retain the source contract.
+                if built.iter().rev().find(|m| {
+                    m.name == source.name && m.receiver == source.receiver
+                }).is_some_and(|m| !preserved(source, m)) {
+                    missing.insert(source.name_span);
+                }
+            }
+        }
+        missing
+    }).0
+}
+
 fn build_methods(
     model: &Model,
     models: &[Model],
@@ -1071,6 +1125,8 @@ pub(crate) fn push_scope_methods(
 
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: scope.name.clone(),
             receiver: MethodReceiver::Class,
@@ -1210,6 +1266,8 @@ pub(crate) fn push_scope_variants(
                 }
                 methods.push(MethodDef {
                     visibility: crate::dialect::MethodVisibility::Public,
+                    unsupported_formals: None,
+                    has_anonymous_block: false,
                     name_span: crate::span::Span::synthetic(),
                     name: vname,
                     receiver: MethodReceiver::Class,

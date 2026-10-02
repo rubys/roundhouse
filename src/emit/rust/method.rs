@@ -857,6 +857,8 @@ mod tests {
     fn base_module_method(name: &str) -> MethodDef {
         MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(name),
             receiver: MethodReceiver::Class,
@@ -926,6 +928,8 @@ mod tests {
         );
         let m = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("foo"),
             receiver: MethodReceiver::Class,
@@ -976,6 +980,8 @@ mod tests {
         };
         let callee = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("each"),
             receiver: MethodReceiver::Class,
@@ -1013,6 +1019,8 @@ mod tests {
         );
         let forwarder = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("forwarder"),
             receiver: MethodReceiver::Class,
@@ -1062,6 +1070,8 @@ mod tests {
     fn instance_method_with_block_param_no_yield_emits_placeholder() {
         let m = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("baz"),
             receiver: MethodReceiver::Instance,

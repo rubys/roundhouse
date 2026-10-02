@@ -165,3 +165,15 @@ end
         .collect();
     assert!(skips.is_empty(), "no macro call means no skip: {skips:?}");
 }
+
+#[test]
+fn explicit_keyword_producers_bind_values_without_nested_argument_markers() {
+    for (options, expected) in [("{only: %i[new create]}", vec!["new", "create"]), ("{}", vec![])] {
+        let app = app_with(&format!("class ThingsController < ApplicationController\n allow_unauthenticated_access(**{options})\n def show; end\nend"));
+        let skips: Vec<_> = filters(&app).into_iter().filter(|(kind, _, _, _)| *kind == FilterKind::Skip).collect();
+        assert_eq!(skips.len(), 1, "explicit ** should expand: {skips:?}");
+        assert_eq!(skips[0].1, "require_authentication");
+        assert_eq!(skips[0].2, expected);
+        assert!(skips[0].3.is_empty());
+    }
+}

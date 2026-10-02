@@ -40,6 +40,8 @@ pub fn lower_seeds_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         module_path,
         name: Symbol::from("run"),
         params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
