@@ -21,7 +21,9 @@ pub(crate) struct FormWrapperHelper {
 
 fn wrapped_call(m: &MethodDef) -> Option<&Expr> {
     let blk = m.block_param.as_ref()?;
-    if m.params.iter().any(|p| p.rest || p.keyword) {
+    if m.unsupported_formals.is_some()
+        || m.params.iter().any(|p| p.rest || p.keyword || p.forwarding)
+    {
         return None;
     }
     let body = match &*m.body.node {
@@ -164,6 +166,7 @@ pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId
                     bridge.receiver = MethodReceiver::Class;
                     bridge.visibility = MethodVisibility::Public;
                     bridge.block_param = None;
+                    bridge.has_anonymous_block = false;
                     bridge.body = value.clone();
                     bridge.effects = effects.clone();
                     let call_args = params

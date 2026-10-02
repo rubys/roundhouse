@@ -170,6 +170,8 @@ end
     assert_eq!(bridge.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["model", "suffix"]);
     assert!(bridge.params.iter().all(|p| p.default.is_none()));
     assert!(bridge.block_param.is_none());
+    assert!(!bridge.has_anonymous_block, "the generated bridge is blockless");
+    assert!(bridge.unsupported_formals.is_none());
     assert!(!bridge.body.span.is_synthetic());
     let Some(Ty::Fn { params, block, ret, .. }) = &bridge.signature else { panic!("typed bridge") };
     assert!(params.iter().all(|p| p.kind == ParamKind::Required));
@@ -178,6 +180,7 @@ end
     assert!(block.is_none());
     assert!(!app.helper_method_index.contains_key(&bridge.name));
     let wrapper = helper.methods.iter().find(|m| m.name.as_str() == "thing_form_with").unwrap();
+    assert!(wrapper.has_anonymous_block, "retain the source wrapper's declaration fact");
     let body = match &*wrapper.body.node {
         roundhouse::expr::ExprNode::Seq { exprs } => &exprs[0],
         _ => &wrapper.body,
@@ -239,6 +242,13 @@ end
     form_with model: model, data: { controller: own_label, label: @thing.name }, &
   end
   def own_label; "owner"; end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, **nil, &)
+    form_with model: model, data: own_data(model), &
+  end
+  def own_data(model); { label: model.name }; end
 end
 "#,
     ] {
