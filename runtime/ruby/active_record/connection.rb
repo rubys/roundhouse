@@ -206,6 +206,15 @@ module ActiveRecord
       upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning)
     end
 
+    # The predicate of the unique index on `columns` (sorted, joined with
+    # ", ") when that index is partial, else "". The lowering overrides it
+    # for a model whose table has one. `upsert_all` adds it to the
+    # conflict target, as Rails does: SQLite matches a partial index only
+    # through its `WHERE`.
+    def self._conflict_predicate(columns)
+      ""
+    end
+
     # `Model.upsert_all(rows, …)` → SQLite's
     # `INSERT … ON CONFLICT (target) DO UPDATE SET …`.
     #
@@ -249,8 +258,11 @@ module ActiveRecord
       end
       action = assigns.nil? ? "DO NOTHING" : "DO UPDATE SET #{assigns}"
 
+      predicate = _conflict_predicate(target_names.sort.join(", "))
+      conflict_where = predicate == "" ? "" : " WHERE #{predicate}"
+
       sql = "INSERT INTO #{table_name} (#{cols.join(", ")}) VALUES #{tuples.join(", ")}" \
-            " ON CONFLICT (#{target_names.join(", ")}) #{action}"
+            " ON CONFLICT (#{target_names.join(", ")})#{conflict_where} #{action}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
     end

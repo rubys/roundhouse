@@ -17,11 +17,11 @@
 
 use std::fmt::Write;
 
-use crate::schema::{Column, ColumnType, Schema};
+use crate::schema::{Column, ColumnType, Index, Schema, Table};
 
 /// The SQL engine a schema renders for: how it spells identifiers,
-/// column types and key columns. The statements themselves are the same
-/// in every dialect.
+/// column types and key columns, and which partial-index predicates it
+/// keeps. The statements themselves are the same in every dialect.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dialect {
     /// What every target ships today.
@@ -52,6 +52,31 @@ impl Dialect {
         match self {
             Dialect::Sqlite => sqlite_type(ct).to_string(),
             Dialect::Postgres => postgres_type(ct),
+        }
+    }
+
+    /// The `WHERE` of a partial index, when this dialect renders it.
+    /// The predicate is the source database's SQL, rendered as written.
+    ///
+    /// Postgres renders every one. SQLite renders a unique index's,
+    /// because there it decides which rows must be distinct: without it
+    /// the index rejects rows Rails accepts. It leaves out two kinds:
+    ///
+    /// - A non-unique index's. It only narrows which rows the index
+    ///   covers, and a Postgres dump often spells it in syntax SQLite
+    ///   cannot parse (Mastodon's `(state = ANY (ARRAY[2, 3]))`).
+    /// - One SQLite can't be trusted to run as written (see
+    ///   [`sqlite_reads_alike`]). That unique index covers every row, as
+    ///   it did before predicates were kept, and
+    ///   `project::report_sqlite_index_predicates` names it.
+    ///
+    /// The `insert_all` guard and the upsert conflict target read the
+    /// same answer, so all three agree on which rows are constrained.
+    pub fn index_predicate<'a>(self, table: &Table, idx: &'a Index) -> Option<&'a str> {
+        let predicate = idx.predicate.as_deref()?;
+        match self {
+            Dialect::Sqlite if !idx.unique || !sqlite_reads_alike(predicate, table) => None,
+            _ => Some(predicate),
         }
     }
 
@@ -106,7 +131,8 @@ pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
 /// [`render_schema_statements`] in `dialect`. The statements are the
 /// same in every dialect — one CREATE TABLE per table, then one CREATE
 /// INDEX per index, all `IF NOT EXISTS` — and only identifiers, column
-/// types and key columns are spelled per engine.
+/// types, key columns and partial-index predicates
+/// ([`Dialect::index_predicate`]) differ per engine.
 ///
 /// `Err` names a table the dialect has no DDL for: a virtual table is
 /// SQLite's own construct (Rails' SQLite3 adapter is the one that dumps
@@ -162,8 +188,12 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
         for idx in &table.indexes {
             let cols: Vec<String> = idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect();
             let unique = if idx.unique { "UNIQUE " } else { "" };
+            let predicate = dialect
+                .index_predicate(table, idx)
+                .map(|p| format!(" WHERE {p}"))
+                .unwrap_or_default();
             out.push(format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({})",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({}){predicate}",
                 dialect.ident(idx.name.as_str()),
                 dialect.ident(table.name.as_str()),
                 cols.join(", "),
@@ -186,6 +216,114 @@ pub fn render_schema_sql(schema: &Schema) -> String {
         s.push_str(";\n");
     }
     s
+}
+
+/// Whether SQLite reads `predicate`, a partial index's `WHERE` as the
+/// source database wrote it, the way that database does. An allow-list,
+/// because a Postgres dump spells much that SQLite either can't parse
+/// (`(kind)::text`, `= ANY (ARRAY[2, 3])`, `~~`, `@>`) or parses as
+/// something else (`enabled IS UNKNOWN`, where `UNKNOWN` becomes a column
+/// name). Outside its string literals the predicate may use only:
+///
+/// - the table's own columns, bare or double-quoted;
+/// - numbers;
+/// - `AND`, `OR`, `NOT`, `IS`, `NULL`, `TRUE`, `FALSE`, `IN` and
+///   `BETWEEN` (not `LIKE`, which ignores ASCII case in SQLite and not in
+///   Postgres);
+/// - the functions both engines define alike (on ASCII text), called as
+///   `lower(…)`: `lower`, `upper`, `length`, `coalesce`, `nullif` and
+///   `abs`;
+/// - parentheses, commas, and the operators `= <> != < > <= >= + - * / %
+///   ||`.
+///
+/// No rewriting: dropping a `::text` cast is not generally
+/// meaning-preserving (`status::text = '01'` is false for an integer 1
+/// in Postgres, and `status = '01'` is true in SQLite).
+fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
+    const WORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "TRUE", "FALSE", "IN", "BETWEEN"];
+    const FUNCTIONS: &[&str] = &["lower", "upper", "length", "coalesce", "nullif", "abs"];
+    let is_column = |name: &str, quoted: bool| {
+        table.columns.iter().any(|c| {
+            if quoted {
+                c.name.as_str() == name
+            } else {
+                c.name.as_str().eq_ignore_ascii_case(name)
+            }
+        })
+    };
+    let chars: Vec<char> = predicate.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            // A string literal; `''` inside it is an escaped quote.
+            i += 1;
+            loop {
+                match chars.get(i) {
+                    None => return false,
+                    Some('\'') if chars.get(i + 1) == Some(&'\'') => i += 2,
+                    Some('\'') => break,
+                    Some(_) => i += 1,
+                }
+            }
+            i += 1;
+        } else if c == '"' {
+            let mut name = String::new();
+            i += 1;
+            loop {
+                match chars.get(i) {
+                    None => return false,
+                    Some('"') if chars.get(i + 1) == Some(&'"') => {
+                        name.push('"');
+                        i += 2;
+                    }
+                    Some('"') => break,
+                    Some(&ch) => {
+                        name.push(ch);
+                        i += 1;
+                    }
+                }
+            }
+            i += 1;
+            if !is_column(&name, true) {
+                return false;
+            }
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let mut next = i;
+            while chars.get(next).is_some_and(|ch| ch.is_ascii_whitespace()) {
+                next += 1;
+            }
+            let ok = if WORDS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
+                true
+            } else if chars.get(next) == Some(&'(') {
+                FUNCTIONS.iter().any(|f| word.eq_ignore_ascii_case(f))
+            } else {
+                is_column(&word, false)
+            };
+            if !ok {
+                return false;
+            }
+        } else if c.is_ascii_digit() {
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_digit() || *ch == '.') {
+                i += 1;
+            }
+            if chars.get(i).is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_') {
+                return false;
+            }
+        } else if c.is_ascii_whitespace()
+            || matches!(c, '(' | ')' | ',' | '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%' | '|')
+        {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_integer(ct: &ColumnType) -> bool {
@@ -318,6 +456,106 @@ end
         );
     }
 
+    /// A partial index keeps its `where:` wherever it decides which rows
+    /// the index accepts: on a unique index in both dialects. A
+    /// non-unique one keeps it on Postgres only; on SQLite it covers
+    /// every row, as before. So does a unique one whose predicate SQLite
+    /// can't be trusted to run.
+    #[test]
+    fn a_partial_index_keeps_its_predicate() {
+        let schema_rb = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "tokens", force: :cascade do |t|
+    t.bigint "user_id", null: false
+    t.datetime "revoked_at"
+    t.integer "state"
+    t.string "kind"
+    t.index ["user_id"], name: "index_tokens_on_live_user_id", unique: true, where: "(revoked_at IS NULL)"
+    t.index ["state"], name: "index_tokens_on_open_state", where: "(state = ANY (ARRAY[2, 3]))"
+    t.index ["user_id"], name: "index_tokens_on_initial_user_id", unique: true, where: "((kind)::text = 'initial'::text)"
+  end
+end
+"#;
+        let sqlite = statements(schema_rb, Dialect::Sqlite);
+        assert_eq!(
+            sqlite[1..],
+            [
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_tokens_on_live_user_id ON tokens (user_id) \
+                 WHERE (revoked_at IS NULL)",
+                "CREATE INDEX IF NOT EXISTS index_tokens_on_open_state ON tokens (state)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_tokens_on_initial_user_id ON tokens (user_id)",
+            ]
+        );
+        assert_eq!(
+            statements(schema_rb, Dialect::Postgres)[1..],
+            [
+                "CREATE UNIQUE INDEX IF NOT EXISTS \"index_tokens_on_live_user_id\" ON \"tokens\" (\"user_id\") \
+                 WHERE (revoked_at IS NULL)",
+                "CREATE INDEX IF NOT EXISTS \"index_tokens_on_open_state\" ON \"tokens\" (\"state\") \
+                 WHERE (state = ANY (ARRAY[2, 3]))",
+                "CREATE UNIQUE INDEX IF NOT EXISTS \"index_tokens_on_initial_user_id\" ON \"tokens\" (\"user_id\") \
+                 WHERE ((kind)::text = 'initial'::text)",
+            ]
+        );
+    }
+
+    /// What SQLite is trusted to run as written: Mastodon's predicates,
+    /// over the table's own columns. Postgres casts, arrays, `ANY`,
+    /// `ILIKE`, `IS DISTINCT FROM`, `IS UNKNOWN` (SQLite reads `UNKNOWN`
+    /// as a column), `LIKE` (case rules differ), functions it lacks,
+    /// columns the table doesn't have and Postgres-only operators are
+    /// not. A literal's contents don't count either way.
+    #[test]
+    fn sqlite_reads_alike_only_the_shared_predicate_syntax() {
+        let schema = ingest_schema(
+            br#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "statuses", force: :cascade do |t|
+    t.boolean "local"
+    t.string "uri"
+    t.datetime "deleted_at"
+    t.integer "visibility"
+    t.bigint "reblog_of_id"
+    t.string "name"
+    t.string "email"
+    t.integer "createdAt"
+    t.string "revoked at"
+    t.boolean "enabled"
+    t.integer "state"
+  end
+end
+"#,
+            "db/schema.rb",
+        )
+        .unwrap();
+        let table = &schema.tables[&Symbol::from("statuses")];
+        for portable in [
+            "(uri IS NOT NULL)",
+            "((local OR (uri IS NULL)) AND (deleted_at IS NULL) AND (visibility = 0) AND (reblog_of_id IS NULL))",
+            "(enabled = false)",
+            "(name <> 'it''s a :: b [1] UNKNOWN')",
+            "(\"createdAt\" > 0) AND (lower(email) || 'x' != '')",
+            "(\"revoked at\" IS NULL)",
+            "(state IN (1, 2)) AND (visibility BETWEEN -1 AND 2.5)",
+        ] {
+            assert!(sqlite_reads_alike(portable, table), "{portable}");
+        }
+        for postgres_only in [
+            "((name)::text = 'initial'::text)",
+            "(state = ANY (ARRAY[2, 3]))",
+            "(name ILIKE 'a%')",
+            "(name LIKE 'a%')",
+            "(name IS DISTINCT FROM email)",
+            "(enabled IS UNKNOWN)",
+            "(num_nonnulls(uri, email) > 0)",
+            "(archived_at IS NULL)",
+            "(\"revoked_at\" IS NULL)",
+            "(statuses.uri IS NULL)",
+            "(name ~~ 'a%')",
+            "(name = 'unterminated)",
+        ] {
+            assert!(!sqlite_reads_alike(postgres_only, table), "{postgres_only}");
+        }
+    }
+
     /// `create_table`'s key options get Rails' PostgreSQL defaults:
     /// `id: :integer` is a `serial`, `id: :uuid` defaults to
     /// `gen_random_uuid()`, a string key is the app's to supply, and
@@ -401,7 +639,12 @@ end
                 column("createdAt", ColumnType::DateTime, false, false),
                 column("odd\"name", ColumnType::Decimal { precision: Some(10), scale: Some(2) }, true, false),
             ],
-            vec![Index { name: Symbol::from("index_user_on_createdAt"), columns: vec![Symbol::from("createdAt")], unique: true }],
+            vec![Index {
+                name: Symbol::from("index_user_on_createdAt"),
+                columns: vec![Symbol::from("createdAt")],
+                unique: true,
+                predicate: None,
+            }],
         )]);
         assert_eq!(
             render_schema_statements_for(&schema, Dialect::Postgres).unwrap(),

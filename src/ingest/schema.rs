@@ -225,6 +225,7 @@ fn apply_migration_verb(
         "remove_column" => {
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    refuse_predicate_column(verb, table, &c, file)?;
                     table.columns.retain(|x| x.name.as_str() != c);
                 }
             }
@@ -232,6 +233,7 @@ fn apply_migration_verb(
         "rename_column" => {
             if let (Some(t), Some(old), Some(new)) = (arg_name(0), arg_name(1), arg_name(2)) {
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    refuse_predicate_column(verb, table, &old, file)?;
                     for col in &mut table.columns {
                         if col.name.as_str() == old {
                             col.name = Symbol::from(new.clone());
@@ -334,6 +336,93 @@ fn apply_migration_verb(
     Ok(())
 }
 
+/// A column a partial index's predicate names can't be renamed or
+/// removed by the fold. The database rewrites the predicate, or drops
+/// the index, and the fold has only the predicate's text, so it would
+/// render a `WHERE` naming a column that is gone. Erroring keeps the
+/// derived schema honest, like `UNSUPPORTED_VERBS`.
+fn refuse_predicate_column(
+    verb: &str,
+    table: &Table,
+    column: &str,
+    file: &str,
+) -> Result<(), IngestError> {
+    let Some(index) = table
+        .indexes
+        .iter()
+        .find(|i| i.predicate.as_deref().is_some_and(|p| predicate_names(p, column)))
+    else {
+        return Ok(());
+    };
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "migration verb `{verb}` on {}.{column}, which the `where:` of index `{}` names, \
+             is not supported by the schema fold — run `rails db:migrate` to materialize \
+             db/schema.rb",
+            table.name.as_str(),
+            index.name.as_str()
+        ),
+    })
+}
+
+/// Whether `predicate` names `column`: outside its string literals, a
+/// bare word equal to it (ignoring case, as Postgres folds an unquoted
+/// name) or a double-quoted identifier spelling it exactly, `""` being
+/// a quote inside one.
+fn predicate_names(predicate: &str, column: &str) -> bool {
+    let chars: Vec<char> = predicate.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => {
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\'' && chars.get(i + 1) == Some(&'\'') {
+                        i += 2;
+                    } else if chars[i] == '\'' {
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                i += 1;
+            }
+            '"' => {
+                let mut name = String::new();
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '"' && chars.get(i + 1) == Some(&'"') {
+                        name.push('"');
+                        i += 2;
+                    } else if chars[i] == '"' {
+                        break;
+                    } else {
+                        name.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                i += 1;
+                if name == column {
+                    return true;
+                }
+            }
+            c if c.is_alphanumeric() || c == '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                if word.eq_ignore_ascii_case(column) {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// schema.rb writes string literals (`create_table "clips"`); hand-
 /// written migrations write symbols (`create_table :clips`). Accept
 /// both anywhere a table/column name is read.
@@ -429,6 +518,7 @@ fn build_index<'pr>(
 ) -> Index {
     let mut explicit_name: Option<String> = None;
     let mut unique = false;
+    let mut predicate: Option<String> = None;
     for node in kwarg_nodes {
         let Some(kh) = node.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -438,6 +528,10 @@ fn build_index<'pr>(
             match key.as_str() {
                 "name" => explicit_name = string_value(value),
                 "unique" => unique = bool_value(value).unwrap_or(false),
+                // `where: "(archived_at IS NULL)"`: a partial index. On
+                // a unique one, dropping it widened the constraint to
+                // every row.
+                "where" => predicate = string_value(value),
                 _ => {}
             }
         }
@@ -446,7 +540,7 @@ fn build_index<'pr>(
         let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
         format!("index_{}_on_{}", table_name, cols.join("_and_"))
     });
-    Index { name: Symbol::from(name), columns, unique }
+    Index { name: Symbol::from(name), columns, unique, predicate }
 }
 
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
@@ -1121,6 +1215,81 @@ mod tests {
             end
         "#]);
         assert_eq!(col_names(&schema, "users"), ["id", "email"]);
+    }
+
+    /// `where:` makes a partial index, in `t.index` and `add_index`
+    /// alike; the predicate is kept as written.
+    #[test]
+    fn index_where_is_the_partial_predicate() {
+        let schema = fold(&[r#"
+            class CreateTokens < ActiveRecord::Migration[8.1]
+              def change
+                create_table :tokens do |t|
+                  t.bigint :user_id, null: false
+                  t.datetime :revoked_at
+                  t.index :user_id, unique: true, where: "revoked_at IS NULL", name: "live"
+                end
+                add_index :tokens, :revoked_at, where: "revoked_at IS NOT NULL"
+                add_index :tokens, [:user_id, :revoked_at]
+              end
+            end
+        "#]);
+        let indexes: Vec<(&str, bool, Option<&str>)> = schema.tables[&Symbol::from("tokens")]
+            .indexes
+            .iter()
+            .map(|i| (i.name.as_str(), i.unique, i.predicate.as_deref()))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                ("live", true, Some("revoked_at IS NULL")),
+                ("index_tokens_on_revoked_at", false, Some("revoked_at IS NOT NULL")),
+                ("index_tokens_on_user_id_and_revoked_at", false, None),
+            ]
+        );
+    }
+
+    /// The fold has only a predicate's text, so it refuses to rename or
+    /// remove a column the predicate names, rather than render a `WHERE`
+    /// naming a column that is gone. A column it doesn't name is fine.
+    #[test]
+    fn a_column_a_predicate_names_is_not_renamed_or_removed() {
+        let create = r#"
+            class CreateTokens < ActiveRecord::Migration[8.1]
+              def change
+                create_table :tokens do |t|
+                  t.bigint :user_id, null: false
+                  t.datetime :revoked_at
+                  t.string :label
+                  t.index :user_id, unique: true, where: "\"revoked_at\" IS NULL", name: "live"
+                end
+              end
+            end
+        "#;
+        for verb in ["rename_column :tokens, :revoked_at, :archived_at", "remove_column :tokens, :revoked_at"] {
+            let mut schema = Schema::default();
+            ingest_migration(create.as_bytes(), "1_create.rb", &mut schema).expect("create");
+            let change = format!(
+                "class Change < ActiveRecord::Migration[8.1]\n  def change\n    {verb}\n  end\nend\n"
+            );
+            let err = ingest_migration(change.as_bytes(), "2_change.rb", &mut schema).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("tokens.revoked_at") && msg.contains("index `live`"), "{msg}");
+            assert!(msg.contains("rails db:migrate"), "{msg}");
+        }
+        let schema = fold(&[
+            create,
+            "class Change < ActiveRecord::Migration[8.1]\n  def change\n    rename_column :tokens, :label, :title\n  end\nend\n",
+        ]);
+        assert_eq!(col_names(&schema, "tokens"), ["id", "user_id", "revoked_at", "title"]);
+
+        // A quoted name is one identifier, spaces and `""` included; a
+        // string literal's words are not names.
+        assert!(predicate_names("(\"revoked at\" IS NULL)", "revoked at"));
+        assert!(predicate_names("(\"say \"\"hi\"\"\" <> '')", "say \"hi\""));
+        assert!(!predicate_names("(\"revoked at\" IS NULL)", "revoked"));
+        assert!(!predicate_names("(state = 'revoked_at')", "revoked_at"));
+        assert!(predicate_names("(REVOKED_AT IS NULL)", "revoked_at"));
     }
 
     #[test]

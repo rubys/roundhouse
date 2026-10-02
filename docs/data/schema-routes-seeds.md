@@ -81,15 +81,29 @@ a custom or suppressed one is not reproduced, and the model layer
 applies supported literal defaults. A virtual table has no Postgres
 DDL, so that dialect returns an error for it. Postgres renders what
 ingest kept, so it shares the current ingest and IR limits.
-`schema.rb` ingest drops `array: true`; an index's `where:`, `using:`
-and `order:`, and expression indexes; precision on `numeric`,
+`schema.rb` ingest drops `array: true`; an index's `using:`, `order:`
+and `opclass:`, and expression indexes; precision on `numeric`,
 `datetime` and `time`; a `limit:` on an `integer` column (so no
 `smallint` or `bigint`); and schema qualifiers. The key forms the
 PostgreSQL dumper writes are read as the keys they name: `id: :serial`
 is an `integer` key, and a hash-valued `id: { type: :string, limit:
 32 }` keeps its type and limit. And the folds below
 apply (`jsonb` and `json` both render `jsonb`, `timestamptz` renders
-`timestamp`).
+`timestamp`). A partial index's predicate (`t.index … where:`,
+`add_index … where:` in the migration fold, or `WHERE` in
+`structure.sql`) is kept as the source database wrote it. Postgres
+renders it on every index. SQLite renders it on a unique index, where
+it decides which rows must be distinct, and so do the `insert_all`
+conflict guard and `upsert_all`'s conflict target (`unique_by:` picks
+the first unique index by name with those columns, as Rails does).
+SQLite leaves it off a non-unique index, which then covers every row,
+and off a unique one whose predicate falls outside the syntax both
+engines read alike (`Dialect::index_predicate`: the table's columns,
+literals, boolean and comparison operators, a few shared functions).
+A Postgres dump's `::text` casts or `= ANY (ARRAY[…])` fall outside it;
+that index is unique over every row, and the transpile names it in a
+warning. The migration fold refuses to rename or remove a column a
+predicate names.
 Postgres column types map to their SQLite storage at
 ingest (`uuid` → TEXT via `ColumnType::Uuid`, `jsonb` → json,
 `citext` → text, `timestamptz` → datetime, `inet`/`cidr`/`macaddr`/

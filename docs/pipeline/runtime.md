@@ -639,7 +639,12 @@ same read-then-write shape `increment!` below already carries, and under
 single-threaded dispatch the window it opens is not observable. A unique
 index over a NULLABLE column is skipped when building the guard:
 `where(col: nil)` asks whether a row holds SQL NULL, which is a
-different question, and in SQLite such rows never conflict anyway.
+different question, and in SQLite such rows never conflict anyway. A
+partial unique index (`where:`) adds its predicate to the check,
+`.where("(revoked_at IS NULL)")`, so only a row the index covers counts
+as a conflict. The check reads the existing row, not the new one, so a
+new row the predicate does not cover is still skipped when a covered row
+shares its key; Rails inserts it.
 
 **What it costs.** N statements instead of one, plus one SELECT per row
 for the conflict check, and callbacks Rails would not run — visible on

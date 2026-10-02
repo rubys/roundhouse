@@ -38,7 +38,19 @@ pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 /// even the question the index answers (NULLs compare distinct, so such
 /// rows never conflict). Dropping those indexes leaves the guard
 /// conservative — it skips only rows it positively found.
-pub type UniqueKeys = HashMap<ClassId, Vec<Vec<Symbol>>>;
+pub type UniqueKeys = HashMap<ClassId, Vec<UniqueKey>>;
+
+/// One unique index the guard reads: its columns, and the predicate of
+/// a partial one (`where:`), which only conflicts with the rows it
+/// selects. The predicate is the one the SQLite DDL renders
+/// ([`crate::emit::shared::schema_sql::Dialect::index_predicate`]), so
+/// the guard and the index agree; an index whose predicate SQLite isn't
+/// trusted to run is unique over every row in both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniqueKey {
+    pub columns: Vec<Symbol>,
+    pub predicate: Option<String>,
+}
 
 /// Read the unique keys off the schema, keyed by model.
 pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> UniqueKeys {
@@ -48,12 +60,17 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
         let not_null = |name: &Symbol| {
             table.columns.iter().any(|c| &c.name == name && !c.nullable)
         };
-        let keys: Vec<Vec<Symbol>> = table
+        let keys: Vec<UniqueKey> = table
             .indexes
             .iter()
             .filter(|i| i.unique && !i.columns.is_empty())
             .filter(|i| i.columns.iter().all(not_null))
-            .map(|i| i.columns.clone())
+            .map(|i| UniqueKey {
+                columns: i.columns.clone(),
+                predicate: crate::emit::shared::schema_sql::Dialect::Sqlite
+                    .index_predicate(table, i)
+                    .map(str::to_string),
+            })
             .collect();
         if !keys.is_empty() {
             out.insert(m.name.clone(), keys);
@@ -2197,10 +2214,11 @@ fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
 /// ```
 ///
 /// One `unless` per unique key, OR'd, so a table with two unique
-/// indexes skips a row conflicting on either. A model with no usable
-/// unique key (none declared, or every one of them nullable — see
-/// [`UniqueKeys`]) keeps the bare save: there is nothing to conflict on
-/// that this can read.
+/// indexes skips a row conflicting on either. A partial index adds its
+/// predicate, `.where("(revoked_at IS NULL)")`, so only a row it covers
+/// counts as a conflict. A model with no usable unique key (none
+/// declared, or every one of them nullable — see [`UniqueKeys`]) keeps
+/// the bare save: there is nothing to conflict on that this can read.
 fn guard_on_unique_keys(
     span: crate::span::Span,
     model: &ClassId,
@@ -2211,8 +2229,10 @@ fn guard_on_unique_keys(
     let Some(keys) = ctx.unique_keys.get(model) else { return save };
     let mut cond: Option<Expr> = None;
     for key in keys {
-        // `<Model>.where(col: __attrs[:col], …).exists?`
+        // `<Model>.where(col: __attrs[:col], …).exists?`, with a partial
+        // index's predicate as a second `where`.
         let entries = key
+            .columns
             .iter()
             .map(|col| {
                 let k = syn(span, ExprNode::Lit { value: Literal::Sym { value: col.clone() } });
@@ -2232,7 +2252,7 @@ fn guard_on_unique_keys(
                 (k, v)
             })
             .collect::<Vec<_>>();
-        let where_call = syn(
+        let mut where_call = syn(
             span,
             ExprNode::Send {
                 recv: Some(relation_new(span, model)),
@@ -2242,6 +2262,21 @@ fn guard_on_unique_keys(
                 parenthesized: true,
             },
         );
+        if let Some(predicate) = &key.predicate {
+            where_call = syn(
+                span,
+                ExprNode::Send {
+                    recv: Some(where_call),
+                    method: Symbol::from("where"),
+                    args: vec![syn(
+                        span,
+                        ExprNode::Lit { value: Literal::Str { value: predicate.clone() } },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+        }
         let mut exists = syn(
             span,
             ExprNode::Send {
