@@ -873,7 +873,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // class self-sends. Emitted models return a typed SQL identifier
     // literal instead. Relation's count is unchanged, and the separate
     // every_runtime_method_body_is_fully_typed gate remains in force.
-    const CEILING: usize = 1056;
+    // 2026-10-02 1056 -> 1060, +4, MEASURED by diffing the dump against
+    // `main`: `upsert_all`'s `_conflict_predicate(...)` self-send and its
+    // assignment (+2), and the two reads of the result (+2). Like
+    // `_table_sql` above, this probe does not resolve class self-sends;
+    // the method is typed `(String) -> String` in connection.rbs. What
+    // it buys: `upsert_all(unique_by:)` names a partial unique index
+    // with its `WHERE`, as Rails does, which SQLite needs to match it.
+    const CEILING: usize = 1060;
 
     assert!(
         all_untyped.len() <= CEILING,

@@ -7,7 +7,7 @@
 # DIR already holds pack/ (the `spin pack` output: generated C, runtime
 # source, native package source, Makefile) and app/ (what the binary reads
 # at run time: static assets, public/, db/, config/). This writes the two
-# files a downloader reads first.
+# files a downloader reads first, and the image's entry point (boot).
 #
 # WHY clang. The build is one 12 MB translation unit and nothing else of
 # consequence, so it is pure single-core compiler speed: on the same
@@ -40,19 +40,43 @@ COPY pack /src
 RUN make -C /src -j"$(nproc)" CC=clang
 
 FROM debian:trixie-slim
+# ca-certificates: the CA store the binary's OpenSSL verifies against —
+# link unfurls, webhooks and Web Push all leave over https, and
+# debian:trixie-slim has no store at all.
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
+    apt-get install --no-install-recommends -y ca-certificates libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
+# The server runs as an unprivileged user, as campfire's own image does
+# (uid 1000, named for that image's `rails`).
+RUN groupadd --system --gid 1000 campfire && \
+    useradd campfire --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin
 WORKDIR /app
 COPY app/ ./
 COPY --from=build /src/campfire ./campfire
 # The SQLite database lives here; mount a volume to keep it across runs.
-RUN mkdir -p storage
+RUN mkdir -p storage && chown 1000:1000 storage
 VOLUME /app/storage
+# boot starts as root only to hand /app/storage to uid 1000 — a volume
+# created by an earlier image holds root-owned files — then the server
+# runs as that user. Started with `--user`, it skips straight to the
+# server.
+COPY --chmod=755 boot ./boot
 ENV PORT=3000
 EXPOSE 3000
-CMD ["./campfire"]
+CMD ["./boot"]
 DOCKERFILE
+
+cat > "$DIR/boot" <<'BOOT'
+#!/bin/sh
+# The image's entry point: see the Dockerfile's note above COPY boot.
+set -e
+if [ "$(id -u)" = 0 ]; then
+  chown -R 1000:1000 /app/storage
+  exec setpriv --reuid=1000 --regid=1000 --init-groups ./campfire "$@"
+fi
+exec ./campfire "$@"
+BOOT
+chmod 755 "$DIR/boot"
 
 cat > "$DIR/README.md" <<README
 # ONCE Campfire → spinel, for Docker
@@ -86,11 +110,13 @@ the runtime it was generated against travels with it.
 
 ## Build
 
-Compiles the C — one whole-program translation unit, about half a minute
-on a fast machine, a few minutes on a slow one — and produces a ~180 MB
-image whose only extras over \`debian:trixie-slim\` are the SQLite,
-jemalloc and libvips runtime libraries (libvips resizes the uploads —
-attachments, avatars, the account logo — into the variants Rails serves).
+Compiles the C — one whole-program translation unit, a minute or two on a
+fast machine, longer on a slow one — and produces a ~600 MB image:
+\`debian:trixie-slim\` plus the CA certificates and the SQLite, jemalloc
+and libvips runtime libraries and ffmpeg. libvips resizes the uploads —
+attachments, avatars, the account logo — into the variants Rails serves;
+ffmpeg makes the video previews. Those two are most of the size: the
+binary is about 11 MB.
 
 \`\`\`sh
 docker build -t campfire .
@@ -109,6 +135,10 @@ docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire
 
 \`-e PORT=n\` changes the port inside the container; \`-e SPINEL_WORKERS=n\`
 caps the OS worker threads (default: one per core).
+
+The server runs as uid 1000, not root. The container starts as root only
+to give \`/app/storage\` to that user, so a volume an earlier image
+created as root keeps working; \`--user 1000:1000\` skips that step.
 
 The key that signs cookies and links (sessions, sign-in transfer links,
 stream names) is generated on first run and kept in \`/app/storage\`
@@ -140,7 +170,8 @@ the app builds its absolute URLs with the scheme the proxy reports in
 ## Without Docker
 
 The Dockerfile is a recipe, not a requirement. On Linux with a C
-compiler, \`make\`, \`libsqlite3-dev\`, \`libjemalloc-dev\` and \`libvips-dev\`:
+compiler, \`make\`, \`libsqlite3-dev\`, \`libjemalloc-dev\` and \`libvips-dev\`
+(and \`ffmpeg\` on the path for video previews):
 
 \`\`\`sh
 make -C pack -j CC=clang

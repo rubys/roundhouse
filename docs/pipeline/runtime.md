@@ -639,7 +639,12 @@ same read-then-write shape `increment!` below already carries, and under
 single-threaded dispatch the window it opens is not observable. A unique
 index over a NULLABLE column is skipped when building the guard:
 `where(col: nil)` asks whether a row holds SQL NULL, which is a
-different question, and in SQLite such rows never conflict anyway.
+different question, and in SQLite such rows never conflict anyway. A
+partial unique index (`where:`) adds its predicate to the check,
+`.where("(revoked_at IS NULL)")`, so only a row the index covers counts
+as a conflict. The check reads the existing row, not the new one, so a
+new row the predicate does not cover is still skipped when a covered row
+shares its key; Rails inserts it.
 
 **What it costs.** N statements instead of one, plus one SELECT per row
 for the conflict check, and callbacks Rails would not run — visible on
@@ -1468,13 +1473,51 @@ The receiver stays where it is — a relation is lazy, so reading
 `scope_attributes` off it runs no query — and the caller's own
 attributes ride on the OUTSIDE of the merge, which is Rails' order.
 
-**Still divergent:** the seed itself. Rails' `scope_for_create` is
-`where_values_hash`, so EVERY equality condition on the relation
-pre-fills the record; here only an association seed (`where_scope`)
-writes the create-seed slot, so a plain scope's conditions filter reads
-and do not seed writes. `User.active_bots.new` comes back without its
-`role`. An argument shape the rewrite does not admit — a positional
-value, a splat — is left alone and still raises.
+**Supported find-or-create subset:** a concrete model, or a chain of
+`Model.where(column: scalar_literal)` calls, followed by
+`find_or_create_by` / `find_or_create_by!` with a literal Symbol-keyed
+scalar conditions Hash, is expanded at the call site. Keys must be
+ordinary schema columns (not the primary key) and literal types must fit
+the column; this pass does not cast attributes. The lookup retains every
+predicate. On a miss, the concrete constructor receives a typed literal
+Hash of the scope defaults and the explicit conditions (which win), so
+supported constructor callbacks (block-form `after_initialize`, or an
+instance `after_initialize` method) see the initialized attributes. A
+directly attached single-parameter initialization block runs only for a
+new record, before validation/save; an existing match is returned
+without yielding. Supported positions are a statement, a local or
+instance-variable assignment, or the whole method body. Shadowing an
+outer local with the initialization parameter, or rebinding that
+parameter, still returns the original saved record.
+
+**Still divergent:** the general create seed. Rails' `scope_for_create`
+is `where_values_hash`, so EVERY equality condition on the relation
+pre-fills the record; the runtime still records only an association
+seed (`where_scope`). `User.active_bots.new` comes back without its
+`role`.
+
+Outside the find-or-create subset, each with an explicit error:
+
+- `find_or_create_by!` with nonliteral conditions — the runtime has no
+  bang form;
+- general relations, associations, and nonliteral, collection, OR or
+  range predicates (OR/removed predicates are not guessed from an old
+  create seed);
+- initialization blocks with control flow, compound or parallel
+  assignment, new local variables, rescue exception bindings, nested
+  blocks, or rest/block parameters;
+- block locals and optional, post, keyword, block and anonymous-rest
+  parameters, rejected at ingest before their unrepresented signature
+  fields are lost;
+- forwarded initialization blocks (`&proc`, `&lambda`, `&->` and other
+  block arguments);
+- effectful attribute or index assignment targets.
+
+Symbol-form `after_initialize` callbacks are not yet lowered and keep a
+model out of this path. Blockless non-bang lowering and the runtime
+association finders are unchanged. An argument shape the
+plain-constructor rewrite does not admit — a positional value, a splat —
+is left alone and still raises.
 
 ### A scope-INDIFFERENT class method runs unscoped
 

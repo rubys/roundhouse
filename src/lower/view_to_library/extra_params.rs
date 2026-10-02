@@ -53,6 +53,13 @@ pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
     out
 }
 
+/// A partial local is bound by its own name, or by its `safe_local`
+/// form: the record arg of `as: :for` is `for_`.
+fn is_bound(bound: &[String], name: &str) -> bool {
+    let safe = crate::naming::safe_local(name);
+    bound.iter().any(|b| b == name || *b == safe)
+}
+
 fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
     match &*e.node {
         ExprNode::Var { name, .. } => {
@@ -61,7 +68,7 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             // in the template) has no other source than a caller's
             // locals, so it is a partial local like `local_assigns[:x]`.
             let partial_local = is_flash_name(n) || crate::naming::is_reserved_local(n);
-            if !bound.iter().any(|b| b == n) && !out.iter().any(|x| x == n) && partial_local {
+            if !is_bound(bound, n) && !out.iter().any(|x| x == n) && partial_local {
                 out.push(n.to_string());
             }
         }
@@ -87,14 +94,14 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             // spellings for "a local a caller may not have passed" — so
             // it earns a nil-default param the same way.
             if let Some(n) = super::local_assigns_key(e) {
-                if !bound.iter().any(|b| b == &n) && !out.iter().any(|x| x == &n) {
+                if !is_bound(bound, &n) && !out.iter().any(|x| x == &n) {
                     out.push(n);
                 }
             }
             if recv.is_none() && method.as_str() == "defined?" && args.len() == 1 {
                 if let ExprNode::Var { name, .. } = &*args[0].node {
                     let n = name.as_str();
-                    if !bound.iter().any(|b| b == n) && !out.iter().any(|x| x == n) {
+                    if !is_bound(bound, n) && !out.iter().any(|x| x == n) {
                         out.push(n.to_string());
                     }
                 }

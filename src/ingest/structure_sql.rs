@@ -447,10 +447,10 @@ fn maybe_register_enum(stmt: &str, enum_types: &mut HashSet<String>) {
 // ---------------------------------------------------------------------
 
 /// `CREATE [UNIQUE] INDEX [name] ON table [USING method] (cols) [WHERE
-/// …]`. The `WHERE` partial-index clause is dropped the same way
-/// schema.rb's own `add_index …, where: "…"` option is (never carried
-/// into `Index`) — parity, not a new gap. An expression column
-/// (`lower(name)`, `COALESCE(…)`, an operator expression) has no
+/// …]`. The `WHERE` predicate is kept as written, as schema.rb's
+/// `where:` is: on a unique index it limits which rows must be
+/// distinct. An expression column (`lower(name)`, `COALESCE(…)`, an
+/// operator expression) has no
 /// `Symbol` to hold it, so the whole index is skipped rather than
 /// ledgered: it costs the DDL nothing (indexes don't feed column
 /// typing) and ledgering one line per such index would swamp the
@@ -501,11 +501,24 @@ fn handle_create_index(stmt: &str, schema: &mut Schema) {
         return;
     }
 
+    // pg_dump puts the predicate last, after any `INCLUDE`, `NULLS NOT
+    // DISTINCT`, `WITH` or `TABLESPACE`, so it is the rest of the
+    // statement.
+    let words = top_level_words(after_table);
+    let predicate = word_seq_pos_after(&words, close, &["WHERE"])
+        .map(|pos| after_table[pos + "WHERE".len()..].trim().to_string())
+        .filter(|p| !p.is_empty());
+
     if let Some(table) = schema.tables.get_mut(&table_sym) {
         // An index over a column the walk dropped cannot apply — same
         // retain-filter `ingest_schema` uses (see `table_from_create_table`).
         if cols.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-            table.indexes.push(Index { name: Symbol::from(index_name), columns: cols, unique });
+            table.indexes.push(Index {
+                name: Symbol::from(index_name),
+                columns: cols,
+                unique,
+                predicate,
+            });
         }
     }
 }

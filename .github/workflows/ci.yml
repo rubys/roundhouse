@@ -5,11 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `ready_for_review`: a draft runs `unit` alone, so leaving draft has to start the full run.
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Not on `push`: every commit on main keeps a full run.
+    paths-ignore: ['**.md', 'docs/**']
 
-# Cancel superseded PR runs without serializing distinct PRs or main pushes.
-# Pages keeps its separate deployment-only lock below.
+# Cancel superseded PR runs. On main, a started run finishes and a burst of
+# pushes collapses to the newest queued one, so each run that starts is
+# validated to the end. Pages keeps its separate deployment-only lock below.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -33,6 +38,8 @@ env:
 
 jobs:
   writebook-inventory:
+    needs: unit
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -130,7 +137,8 @@ jobs:
   # goes red it is the analyzer's next entry, not noise.
   # -------------------------------------------------------------------
   store-check:
-    needs: generate-fixture
+    needs: [generate-fixture, unit]
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -165,6 +173,8 @@ jobs:
   # need is the WASI SDK (a manual tarball, cached here).
   # -------------------------------------------------------------------
   build-wasm:
+    needs: unit
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     # The job normally finishes in a few minutes; a hung apt install
     # once rode the old 45-minute ceiling and stalled the whole
@@ -224,6 +234,8 @@ jobs:
   # churn turns flaky.
   # -------------------------------------------------------------------
   build-spinel:
+    needs: unit
+    if: ${{ !github.event.pull_request.draft }}
     # Re-enabled 2026-06-17 (framework-tests-spinel 5/5 + compare-spinel 7/7
     # green again on matz/spinel master). Tracks matz/spinel master UNPINNED,
     # so it can go red independently of any roundhouse change; continue-on-error
@@ -235,12 +247,34 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.spinel-sccache
+      SCCACHE_CACHE_SIZE: "256M"
+      # Preprocess each time: Spinel uses conditional __has_include headers.
+      SCCACHE_DIRECT: "false"
+      SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v5
         with:
           repository: matz/spinel
           ref: master
           path: spinel-src
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Restore Spinel compiler cache
+        # Persist only sccache's C compilation store, not build outputs.
+        # A new key saves refreshed entries as unpinned Spinel advances;
+        # sccache validates compiler, flags, source and header contents.
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: spinel-sccache-${{ runner.os }}-${{ runner.arch }}-
+      - name: Start sccache server
+        # Spinel's common.mk selects sccache automatically when on PATH.
+        run: sccache --start-server
       - name: make deps (fetch vendored libprism)
         run: make -C spinel-src deps
       - name: make all
@@ -286,6 +320,7 @@ jobs:
           cp -R spinel-src/lib                  spinel-dist/lib
           cp -R spinel-src/packages             spinel-dist/packages
           cp -R spinel-src/builtins             spinel-dist/builtins
+          git -C spinel-src rev-parse HEAD > spinel-dist/revision.txt
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
@@ -365,111 +400,10 @@ jobs:
   # (cargo test --test <t>_toolchain -- --ignored). The survivors stay
   # for coverage smoke can't reach: tiny-blog gates (crystal, elixir,
   # python — the absent-feature shape real-blog can't test) and
-  # typescript's dual-profile tsc + node:test (async coloring).
+  # typescript's dual-profile tsc + node:test (async coloring). Those
+  # survivors and the framework-tests-* suites now run as steps of the
+  # per-target `compare` job (#273).
   # -------------------------------------------------------------------
-  toolchain-crystal:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Refresh apt index
-        run: sudo apt-get update -qq
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1
-        with:
-          crystal: latest
-      - name: cargo test --test crystal_toolchain -- --ignored
-        run: cargo test --test crystal_toolchain -- --ignored --nocapture
-
-  framework-tests-swift:
-    # Per-target framework-test conformance gate for the Swift target:
-    # transpiles runtime/ruby/test/**/*_test.rb to XCTest classes and runs
-    # them together under one `swift test`, independent of the fixtures.
-    # Complements smoke-swift (the archive's
-    # real-blog suite): this one runs the framework runtime's own
-    # assertions, catching adapter drift the app tests miss. Sibling of
-    # framework-tests-kotlin. NOTE: needs a full toolchain with XCTest —
-    # Linux toolchains bundle it; macOS would need Xcode (not just CLT).
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.1'
-      - name: Install libsqlite3-dev (CSQLite systemLibrary)
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
-      # Unfiltered: all five wired suites (inflector, router,
-      # view_helpers, errors, ac_base) run. The last two joined when the
-      # class-reflection `< StandardError` emit and the inline
-      # `TestController < ActionController::Base` typing landed — the
-      # same pass that un-filtered framework-tests-kotlin.
-      - name: cargo test --test framework_tests_swift
-        run: cargo test --test framework_tests_swift -- --ignored --nocapture
-
-  # toolchain-typescript: tsc parity + node:test on real-blog,
-  # under both the default (`node-sync`, better-sqlite3) profile
-  # AND the `node-async` libsql profile that exercises async
-  # coloring. The filter `real_blog` excludes the still-
-  # aspirational tiny_blog gate (broken on main, pre-existing) and
-  # the diagnostic `dump_transpiled_blog_tsc_errors` non-asserting
-  # helper. Drop the filter once tiny_blog reaches parity.
-  toolchain-typescript:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: cargo test --test typescript_toolchain real_blog -- --ignored
-        run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
-
-  framework-tests-typescript:
-    # Per-target framework-test conformance gate. Transpiles
-    # runtime/ruby/test/**/*_test.rb to TS and runs under tsx.
-    # Independent of the real-blog fixture (each test builds a
-    # minimal in-process App), so this parallelizes freely
-    # against generate-fixture / toolchain-* jobs. Catches
-    # per-target adapter contract drift (e.g., is_exists vs
-    # exists rename, regex anchor translation) before it
-    # cascades into real-blog runtime failures. Sibling of the
-    # disabled toolchain-typescript above; runs on the same
-    # Node setup but a much smaller and faster scope (~12s vs
-    # minutes). See project_framework_test_transpile.md.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: cargo test --test framework_tests_typescript -- --ignored
-        run: cargo test --test framework_tests_typescript -- --ignored --nocapture
-
   # Browser smoke for the TypeScript *SharedWorker* deployment profile
   # (juntos) — distinct from the tsx-server smoke-typescript job below.
   # Harness + README live in tests/browser_smoke/. The pipeline (driven
@@ -488,7 +422,8 @@ jobs:
   # NOT from the published archive. Playwright config gates on $CI
   # (GitHub sets it) → fresh server + forbidOnly + github reporter.
   browser-smoke-typescript:
-    needs: generate-fixture
+    needs: [generate-fixture, unit]
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -638,121 +573,6 @@ jobs:
           # off the `_opt` seam unseen because nothing here ran it.
           (cd wasm/studio && node verify-studio.mjs)
 
-  framework-tests-crystal:
-    # Per-target framework-test conformance gate for the Crystal
-    # target. Transpiles runtime/ruby/test/**/*_test.rb through
-    # crystal::emit and runs the result under `crystal spec`.
-    # Independent of the real-blog fixture (each test builds a
-    # minimal in-process App with a single TestModule), so this
-    # parallelizes freely against generate-fixture / toolchain-*
-    # jobs. Catches per-target adapter contract drift and Crystal
-    # strict-typing regressions (NamedTuple/Hash bridging,
-    # nullable narrowing, etc.) before they cascade into real-blog
-    # runtime failures. Sibling of framework-tests-typescript /
-    # framework-tests-ruby.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Refresh apt index
-        run: sudo apt-get update -qq
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1
-        with:
-          crystal: latest
-      - name: cargo test --test framework_tests_crystal -- --ignored
-        run: cargo test --test framework_tests_crystal -- --ignored --nocapture
-
-  framework-tests-kotlin:
-    # Per-target framework-test conformance gate for the Kotlin target.
-    # Transpiles runtime/ruby/test/**/*_test.rb through kotlin::emit and
-    # runs the emitted JUnit-5 spec under `gradle test`. Independent of the
-    # real-blog fixture (each test builds a minimal in-process App with a
-    # single TestModule), so this parallelizes freely against
-    # generate-fixture / toolchain-* jobs. Complements smoke-kotlin (the
-    # archive's real-blog suite): this one runs the framework runtime's
-    # own assertions, catching adapter drift the app tests miss. Sibling
-    # of framework-tests-typescript / framework-tests-crystal.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.5.1'
-      # Unfiltered: all five wired suites (inflector, router,
-      # view_helpers, errors, ac_base) run. The last two joined when the
-      # class-reflection `< StandardError` emit and the inline
-      # `TestController < ActionController::Base` typing landed — the
-      # same pass that un-filtered framework-tests-swift.
-      - name: cargo test --test framework_tests_kotlin
-        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
-
-  framework-tests-rust:
-    # Per-target framework-test conformance gate for the Rust target.
-    # Transpiles runtime/ruby/test/**/*_test.rb through rust2::emit and
-    # runs the emitted crate under `cargo test`. Independent of the
-    # real-blog fixture (each test builds a minimal in-process App), so
-    # it parallelizes freely against generate-fixture / toolchain-*.
-    #
-    # Why it exists: rust2 collapsed `is_a?(TrueClass)` and
-    # `is_a?(FalseClass)` to one predicate, so every `false` serialized
-    # as `true`. That was found via the TYPESCRIPT gate (db434d83) —
-    # rust had none, and real-blog has no boolean column, so nothing on
-    # the rust side would ever have caught it.
-    #
-    # Scoped to the green subset (inflector). The other five suites are
-    # wired in the test file and fail on named rust2 gaps — see the
-    # comment block there. Same filter convention as
-    # framework-tests-kotlin / -swift; drop names as the gaps close.
-    # Tracked in #34.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo test --test framework_tests_rust (green subset)
-        run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
-
-  framework-tests-ruby:
-    # Per-target framework-test conformance gate for the Ruby target
-    # (CRuby/MRI). Transpiles runtime/ruby/test/**/*_test.rb through
-    # ruby::emit_spinel (named for historical reasons; emits the
-    # Ruby-shape output that runs under stock CRuby). Catches
-    # per-target lowering regressions (test-class-shape rewrites,
-    # fixture refs, parent-class swap) that the source-side
-    # `framework_ruby_tests_pass` gate can't see because it runs the
-    # Ruby verbatim. Sibling of framework-tests-typescript above and
-    # framework-tests-spinel below.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test framework_tests_ruby -- --ignored
-        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
-      # A uuid-keyed app (fixtures/tiny-blog-uuid) emitted to Ruby and
-      # driven on CRuby: minted + supplied keys, find/exists?/update/
-      # destroy by a string key, belongs_to/has_many across a uuid
-      # foreign key (#90). Same runtime, same gems, so it rides here.
-      - name: cargo test --test uuid_key_ruby -- --ignored
-        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
-
   # Per-target framework-test conformance gate for the spinel AOT
   # target. Same emit pipeline as framework-tests-ruby, but each
   # emitted test is compiled to a native binary via `spinel --rbs sig
@@ -884,6 +704,8 @@ jobs:
   # walk against the compiled binary and stay advisory, because spinel
   # is tracked unpinned.
   campfire-compare:
+    needs: unit
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -994,11 +816,49 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
+        id: build
         run: |
+          set -o pipefail
           cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
-            -o build/campfire-compare-spinel --allow-unsupported
-          make -C build/campfire-compare-spinel build
+            -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
+          make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
           tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
+      # Keep the C from the failed invocation, not a second compiler run.
+      # Logs and inputs are still useful if emission failed before any C existed.
+      - name: Capture Campfire compiler failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          set +e
+          mkdir -p ci-campfire-repro/sources
+          {
+            printf 'Roundhouse: %s\nCampfire: %s\n' "$GITHUB_SHA" "$CAMPFIRE_SHA"
+            printf 'Spinel revision: '; cat spinel-dist/revision.txt
+            spinel-dist/spinel --version
+            cc --version
+            uname -a
+          } > ci-campfire-repro/versions.txt 2>&1
+          for log in campfire-emit.log campfire-build.log; do
+            [ ! -f "$log" ] || cp "$log" ci-campfire-repro/
+          done
+          for entry in main.rb boot.rb spin.toml Makefile bin app config lib runtime sig; do
+            source="build/campfire-compare-spinel/$entry"
+            [ ! -e "$source" ] || cp -R "$source" ci-campfire-repro/sources/
+          done
+          # Spinel retains failed C and names it in its diagnostic. Do not
+          # pick an unrelated file left in /tmp by an earlier compiler call.
+          generated=$(sed -n 's/^spinel: the generated C is kept at //p' campfire-build.log 2>/dev/null | tail -1)
+          if [ -n "$generated" ] && [ -f "$generated" ]; then
+            cp "$generated" ci-campfire-repro/generated.c
+          else
+            echo 'No retained C was reported; see the emission/build logs.' > ci-campfire-repro/capture.txt
+          fi
+      - name: Upload Campfire compiler failure
+        if: failure() && steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: campfire-compiler-repro
+          path: ci-campfire-repro
+          retention-days: 7
       - uses: actions/upload-artifact@v7
         id: binary
         with:
@@ -1178,6 +1038,8 @@ jobs:
         run: scripts/campfire-db-differential --spinel /tmp/campfire
 
   campfire-conformance:
+    needs: unit
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1584,27 +1446,6 @@ jobs:
           path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
 
-  toolchain-elixir:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: '1.18'
-          otp-version: '27'
-      - name: cargo test --test elixir_toolchain -- --ignored
-        run: cargo test --test elixir_toolchain -- --ignored --nocapture
-
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
   # README § Test runs the same five driver suites from the published
@@ -1720,87 +1561,6 @@ jobs:
           path: ci-spinel-repro
           retention-days: 7
 
-  toolchain-python:
-    # Re-enabled 2026-06-06: the transpiled framework set is degrade-free,
-    # the emitted real-blog unittest is green (21/21), and `compare python`
-    # matches Rails 5/5. Python version tracks the local dev environment
-    # (system `python3`, which the `python_toolchain` test shells out to);
-    # `from __future__ import annotations` keeps the emit version-agnostic
-    # back to 3.11 (the emitted `requires-python`).
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-      - name: cargo test --test python_toolchain -- --ignored
-        run: cargo test --test python_toolchain -- --ignored --nocapture
-
-  toolchain-csharp:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-      # Two legs: `dotnet build` of the emitted ASP.NET Core project (the C#
-      # analog of crystal's `--no-codegen` / go's `vet` — model layer,
-      # transpiled framework runtime and primitives compiling together), and
-      # `dotnet test tests`, which RUNS the transpiled real-blog suite (21) as
-      # an xUnit project with an executed-count floor. csharp was the last
-      # target whose gates asserted nothing about behavior (#34 §0).
-      # Serialize dotnet's FIRST-RUN configuration before the two legs
-      # race it. Both `real_blog_dotnet_build_passes` and
-      # `real_blog_csharp_tests_pass` shell out to `dotnet`, cargo runs
-      # them on separate threads, and on a cold runner each invocation
-      # tries `DotnetFirstTimeUseConfigurer` — which builds a
-      # `NuGet-Migrations` mutex under /tmp/.dotnet/shm and is NOT
-      # concurrency-safe. The loser dies before running a single test
-      # with `mkdir(…/shm/session…) == -1; errno == EEXIST`, which reads
-      # as a compile failure in the summary and is nothing of the kind.
-      # One warm invocation here does the setup once, serially; the
-      # env vars keep it from being attempted again.
-      #
-      # THE WARM-UP ALONE WAS NOT ENOUGH (5df2b63b tried it; 465201f0
-      # failed the same way, `MigrationRunner.Run` under
-      # `DotnetFirstTimeUseConfigurer.Configure`). Whatever the warm
-      # invocation settles, the two test threads still reach the
-      # configurer concurrently — so the cargo step below also runs
-      # `--test-threads=1`, which removes the race itself rather than
-      # trying to finish before it. Two dotnet legs at ~1 min each are
-      # not worth a flake that reads as a C# compile failure.
-      - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
-        env:
-          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
-          DOTNET_NOLOGO: '1'
-          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-        run: dotnet --info
-      - name: cargo test --test csharp_toolchain -- --ignored
-        env:
-          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
-          DOTNET_NOLOGO: '1'
-          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-        run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
-
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
   # diff response bodies via tools/compare. The toolchain jobs above
@@ -1820,9 +1580,10 @@ jobs:
   # below: two setup-ruby steps / an extra build-spinel dependency don't
   # fit this shape.
   compare:
-    needs: generate-fixture
+    needs: [generate-fixture, unit]
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -1900,7 +1661,50 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./fixtures/real-blog
+      # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
+      - name: cargo test --test framework_tests_rust (green subset)
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
+      - name: cargo test --test crystal_toolchain -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: cargo test --test crystal_toolchain -- --ignored --nocapture
+      - name: cargo test --test framework_tests_crystal -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+      - name: cargo test --test framework_tests_kotlin
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
+      - name: cargo test --test framework_tests_swift
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --test framework_tests_swift -- --ignored --nocapture
+      - name: cargo test --test typescript_toolchain real_blog -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test framework_tests_typescript -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --test framework_tests_typescript -- --ignored --nocapture
+      - name: cargo test --test elixir_toolchain -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'elixir' }}
+        run: cargo test --test elixir_toolchain -- --ignored --nocapture
+      - name: cargo test --test python_toolchain -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: dotnet --info
+      - name: cargo test --test csharp_toolchain -- --ignored
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
       - name: scripts/compare ${{ matrix.target }}
+        if: ${{ !cancelled() }}
         run: scripts/compare ${{ matrix.target }}
 
   # compare-ruby: same shape as every other compare-* — Puma+Rack
@@ -1910,7 +1714,8 @@ jobs:
   # for tailwindcss asset compilation; no target compile step
   # (Ruby is interpreted).
   compare-ruby:
-    needs: generate-fixture
+    needs: [generate-fixture, unit]
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1935,7 +1740,14 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
+      # Not a separate job: framework-tests-ruby needs this same MRI + scaffold bundle (#273).
+      - name: cargo test --test framework_tests_ruby -- --ignored
+        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      - name: cargo test --test uuid_key_ruby -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
       - name: scripts/compare ruby
+        if: ${{ !cancelled() }}
         run: scripts/compare ruby
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
@@ -1948,7 +1760,8 @@ jobs:
   # assets aren't built (the DOM diff compares asset tags, not files —
   # see scripts/compare's jruby branch).
   compare-jruby:
-    needs: generate-fixture
+    needs: [generate-fixture, unit]
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2363,8 +2176,8 @@ jobs:
           node-version: '20'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
-          cd e2e
-          npm install --no-audit --no-fund
+          cd e2e/campfire
+          npm ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
         run: scripts/smoke --tgz campfire/spinel.tgz campfire

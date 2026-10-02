@@ -353,8 +353,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // from the body: a body-reads-the-stem heuristic also fires on a
     // BLOCK parameter, which is how `rooms/layouts/_form` — whose
     // `form_with … do |form|` binds `form` — briefly lost its `yield` arg.
+    //
+    // The arg is a positional param, so a reserved-word `as:` (`as:
+    // :for`) goes through `safe_local`, as its reads do.
     let arg_name = view_key_of(view)
         .and_then(|k| lx.collection_element_locals.get(&k).cloned())
+        .map(|local| crate::naming::safe_local(&local))
         .unwrap_or_else(|| {
             infer_view_arg(stem, dir, base.starts_with('_'), known_models)
         });

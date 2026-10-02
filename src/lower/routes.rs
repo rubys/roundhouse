@@ -572,6 +572,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 standard_resource_actions()
             };
 
+            // Rails evaluates the resource block before adding its defaults.
+            // Register children in source order first: otherwise `/:id` swallows
+            // a collection action such as `/transactions/bulk_update`, and a
+            // default member route wins over an explicit override of that path.
+            let child_ctx = Ctx {
+                parents: {
+                    let mut p = ctx.parents.clone();
+                    p.push(Nesting {
+                        singular: singular_low.clone(),
+                        plural: name.as_str().to_string(),
+                        has_id: !*singular,
+                        param: id_param.to_string(),
+                    });
+                    p
+                },
+                ..ctx.clone()
+            };
+            for child in nested {
+                collect_flat_routes(child, out, &child_ctx);
+            }
+
             for (action, method, suffix) in actions {
                 let action_name: &str = action;
                 let suffix: &str = suffix;
@@ -649,22 +670,6 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         constraints: vec![],
                     });
                 }
-            }
-            let child_ctx = Ctx {
-                parents: {
-                    let mut p = ctx.parents.clone();
-                    p.push(Nesting {
-                        singular: singular_low.clone(),
-                        plural: name.as_str().to_string(),
-                        has_id: !*singular,
-                        param: id_param.to_string(),
-                    });
-                    p
-                },
-                ..ctx.clone()
-            };
-            for child in nested {
-                collect_flat_routes(child, out, &child_ctx);
             }
         }
         RouteSpec::Scope { path, module, as_prefix, defaults, nest, entries } => {

@@ -189,7 +189,7 @@ module Net
       end
       @fresh = false
       write_request(req)
-      read_response
+      read_response(req.method)
     end
   end
 end

@@ -31,6 +31,30 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A test class that a `module` wraps is emitted and runs. Ingest used
+/// to read only the top-level classes of a test file. It lost this
+/// class, and `check` reported nothing. The emit names the file after
+/// the full class name, as it does for `class Models::ArticleTest`.
+#[test]
+fn a_test_class_inside_a_module_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/models_article_test.rb",
+            r#"require "test_helper"
+
+module Models
+  class ArticleTest < ActiveSupport::TestCase
+    test "reads a fixture" do
+      assert_equal "Getting Started with Rails", articles(:one).title
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/models/models_article_test.rb")
+        .assert_passes();
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
@@ -1554,5 +1578,344 @@ fn nested_routes_under_an_only_empty_parent_run() {
             "  resources :articles\n  resources :articles, only: [] do\n    resources :comments, only: [:create, :destroy]\n  end\n",
         )
         .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
+
+/// A collection render with `as: :for` emitted a
+/// positional `for` param and a `|for|` block param.
+#[test]
+fn a_collection_render_with_a_reserved_word_as_local_runs() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/views/articles/_row.html.erb",
+            "<li class=\"for-row\"><%= binding.local_variable_get(:for).title %></li>\n",
+        )
+        .write(
+            "app/views/articles/_assigns_row.html.erb",
+            "<li class=\"for-assigns-row\"><%= local_assigns[:for].title %></li>\n",
+        ),
+        "<%= render partial: \"row\", collection: @articles, as: :for %>\n\
+         <%= render partial: \"assigns_row\", collection: @articles, as: :for %>\n",
+        "    assert_select \"li.for-row\", Article.count\n    \
+             assert_select \"li.for-assigns-row\", Article.count\n",
+    );
+    run.assert_passes();
+}
+
+/// Not `module ApplicationController`, which cannot load beside the controller's own `class ApplicationController`: a class nested in a controller reopens the controller as a class.
+#[test]
+fn a_class_nested_in_a_controller_loads() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  class Failure < StandardError\n    attr_reader :status\n\n    def initialize(status)\n      @status = status\n      super(\"failed with #{status}\")\n    end\n  end\n\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  class Missing < StandardError\n  end\n\n",
+        )
+        .write(
+            "test/models/article_nested_class_test.rb",
+            r#"require "test_helper"
+
+class ArticleNestedClassTest < ActiveSupport::TestCase
+  test "a class nested in a controller is the one the source declared" do
+    failure = ApplicationController::Failure.new(404)
+    assert_equal 404, failure.status
+    assert_equal "failed with 404", failure.message
+    assert_kind_of StandardError, ArticlesController::Missing.new
+    assert ArticlesController < ApplicationController
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_nested_class_test.rb")
+        .assert_passes();
+}
+
+/// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
+#[test]
+fn an_app_with_no_views_boots() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n    head :no_content\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"widgets#index\"\n  resources :widgets, only: :index\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+raise "GET /widgets answered #{status}" unless status == 204
+"#,
+        )
+        .assert_passes();
+}
+
+/// Not `user || raise NotFound` (a syntax error) or `a && self.x = v && b` (assigns `v && b`): a command or a method assignment as an `&&`/`||` operand keeps its parentheses.
+#[test]
+fn a_command_operand_of_a_boolean_operator_keeps_its_parentheses() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.find_or_fail(id)
+    find_by(id: id) || (raise ActiveRecord::RecordNotFound, "no article #{id}")
+  end
+
+  def retitle(text, persist)
+    text.present? && (self.title = text) && persist && save
+  end"#,
+        )
+        .write(
+            "test/models/article_guard_test.rb",
+            r#"require "test_helper"
+
+class ArticleGuardTest < ActiveSupport::TestCase
+  test "a raise operand runs only when the left operand is nil" do
+    article = articles(:one)
+    assert_equal article.id, Article.find_or_fail(article.id).id
+    assert_raises(ActiveRecord::RecordNotFound) { Article.find_or_fail(-1) }
+  end
+
+  test "a setter operand assigns its own argument" do
+    article = articles(:one)
+    assert_equal false, article.retitle("Retitled", false)
+    assert_equal "Retitled", article.title
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_guard_test.rb")
+        .assert_passes();
+}
+
+/// Not `out = ""`, a literal spinel freezes: `+""` stays an unfrozen copy that the method can append to.
+#[test]
+fn a_mutable_string_literal_stays_mutable() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def initials
+    out = +""
+    title.split.each { |word| out << word[0] }
+    out
+  end
+
+  def hashtag
+    tag = +"#"
+    tag << title.downcase.delete(" ")
+  end"##,
+        )
+        .write(
+            "test/models/article_mutable_literal_test.rb",
+            r##"require "test_helper"
+
+class ArticleMutableLiteralTest < ActiveSupport::TestCase
+  test "an unfrozen copy of a literal can be appended to" do
+    article = Article.new(title: "Hello World")
+    assert_equal "HW", article.initials
+    assert_equal "#helloworld", article.hashtag
+  end
+end
+"##,
+        )
+        .run_test_frozen("test/models/article_mutable_literal_test.rb")
+        .assert_passes();
+}
+
+/// The key forms Rails' PostgreSQL schema dumper writes run. `id:
+/// :serial` stopped ingest ("unsupported type `serial`"), and `id: {
+/// type: :string, limit: 32 }` was read as the default key, so the
+/// emitted table had an integer autoincrement key where the app keeps
+/// string ones.
+#[test]
+fn postgres_dumped_key_forms_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", id: :serial, force: :cascade do |t|",
+        )
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            "  create_table \"codes\", id: { type: :string, limit: 32 }, force: :cascade do |t|\n    \
+             t.string \"label\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"",
+        )
+        .write("app/models/code.rb", "class Code < ApplicationRecord\nend\n")
+        .write(
+            "test/models/key_forms_test.rb",
+            r#"require "test_helper"
+
+class KeyFormsTest < ActiveSupport::TestCase
+  test "a serial key is generated" do
+    article = Article.create!(title: "Serial", body: "A long enough body")
+    assert_kind_of Integer, article.id
+    assert_equal "Serial", Article.find(article.id).title
+  end
+
+  test "a string key is the one the app supplies" do
+    Code.create!(id: "launch-2026", label: "Launch")
+    assert_equal "Launch", Code.find("launch-2026").label
+  end
+end
+"#,
+        )
+        .run_test("test/models/key_forms_test.rb")
+        .assert_passes();
+}
+
+/// A unique index with `where:` constrains only the rows its predicate
+/// selects. Ingest dropped the predicate, so the emitted DDL made the
+/// index unique over every row: an archived article's title stayed
+/// taken, `create!` raised `RecordNotUnique`, and `check` said nothing.
+/// `insert_all`'s guard follows the predicate too: it skips a row only
+/// when a row the index covers shares its key (`title` is `null:
+/// false`, so the guard reads the index).
+#[test]
+fn a_partial_unique_index_constrains_only_the_rows_it_selects() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\", null: false\n    \
+             t.datetime \"archived_at\"\n    \
+             t.index [\"title\"], name: \"index_articles_on_live_title\", unique: true, where: \"(archived_at IS NULL)\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.import_titles(first, second, body)
+    Article.insert_all([{ title: first, body: body }, { title: second, body: body }])
+  end"#,
+        )
+        .write(
+            "test/models/article_live_title_test.rb",
+            r#"require "test_helper"
+
+class ArticleLiveTitleTest < ActiveSupport::TestCase
+  test "an archived article's title can be reused" do
+    old = Article.create!(title: "Reused", body: "A long enough body")
+    old.update!(archived_at: Time.now)
+    assert Article.create!(title: "Reused", body: "A long enough body").persisted?
+  end
+
+  test "two live articles still cannot share a title" do
+    Article.create!(title: "Shared", body: "A long enough body")
+    assert_raises(ActiveRecord::RecordNotUnique) do
+      Article.create!(title: "Shared", body: "A long enough body")
+    end
+  end
+
+  test "insert_all skips a live duplicate and adds a row only archived ones share" do
+    Article.create!(title: "Taken", body: "A long enough body")
+    Article.create!(title: "Imported", body: "A long enough body", archived_at: Time.now)
+    Article.import_titles("Taken", "Imported", "A long enough body")
+    assert_equal 1, Article.where(title: "Taken").count
+    assert_equal 1, Article.where(title: "Imported", archived_at: nil).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_live_title_test.rb")
+        .assert_passes();
+}
+
+/// `upsert_all(unique_by:)` names the index Rails' `InsertAll` picks:
+/// the first unique index by name with those columns, in any order. A
+/// partial one goes into the conflict target with its `WHERE`, without
+/// which SQLite matches no partial index; a full one goes in bare.
+#[test]
+fn upsert_all_targets_the_unique_index_rails_picks() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            r#"  create_table "slugs", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "hits", default: 0, null: false
+    t.datetime "retired_at"
+    t.index ["name"], name: "index_slugs_on_live_name", unique: true, where: "(retired_at IS NULL)"
+  end
+
+  create_table "seats", force: :cascade do |t|
+    t.bigint "room_id", null: false
+    t.bigint "user_id", null: false
+    t.integer "visits", default: 0, null: false
+    t.datetime "left_at"
+    t.index ["room_id", "user_id"], name: "index_seats_on_live_room_and_user", unique: true, where: "(left_at IS NULL)"
+  end
+
+  create_table "tags", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "uses", default: 0, null: false
+    t.datetime "retired_at"
+    t.index ["name"], name: "index_tags_on_name", unique: true
+    t.index ["name"], name: "index_tags_on_name_live", unique: true, where: "(retired_at IS NULL)"
+  end
+
+  add_foreign_key "comments", "articles""#,
+        )
+        .write("app/models/slug.rb", "class Slug < ApplicationRecord\nend\n")
+        .write("app/models/seat.rb", "class Seat < ApplicationRecord\nend\n")
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\nend\n")
+        .write(
+            "test/models/upsert_target_test.rb",
+            r#"require "test_helper"
+
+class UpsertTargetTest < ActiveSupport::TestCase
+  test "a partial index: updates the live row, then inserts past a retired one" do
+    Slug.upsert_all([{ name: "home", hits: 1 }], unique_by: :name)
+    Slug.upsert_all([{ name: "home", hits: 2 }], unique_by: :name)
+    assert_equal [2], Slug.where(name: "home").pluck(:hits)
+    Slug.where(name: "home").update_all(retired_at: Time.now)
+    Slug.upsert_all([{ name: "home", hits: 3 }], unique_by: :name)
+    assert_equal [3], Slug.where(name: "home", retired_at: nil).pluck(:hits)
+    assert_equal 2, Slug.where(name: "home").where.not(retired_at: nil).pluck(:hits).first
+  end
+
+  test "a composite partial index: unique_by in either order" do
+    Seat.upsert_all([{ room_id: 1, user_id: 7, visits: 1 }], unique_by: [:room_id, :user_id])
+    Seat.upsert_all([{ room_id: 1, user_id: 7, visits: 2 }], unique_by: [:user_id, :room_id])
+    assert_equal [2], Seat.where(room_id: 1, user_id: 7).pluck(:visits)
+  end
+
+  test "a full index first by name: the bare conflict target" do
+    Tag.upsert_all([{ name: "rails", uses: 1 }], unique_by: :name)
+    Tag.where(name: "rails").update_all(retired_at: Time.now)
+    Tag.upsert_all([{ name: "rails", uses: 2 }], unique_by: :name)
+    assert_equal [2], Tag.where(name: "rails").pluck(:uses)
+  end
+end
+"#,
+        )
+        .run_test("test/models/upsert_target_test.rb")
         .assert_passes();
 }
