@@ -2694,6 +2694,7 @@ fn lower_action_body(
         || variants.iter().any(|v| {
             view_ivars.contains_key(&(module_key.clone(), format!("{action_name}_{v}")))
         });
+    let html_exists = view_ivars.contains_key(&(module_key.clone(), action_name.to_string()));
     let base = if !is_public {
         unwrapped
     } else if defer_implicit_render || responds_via_helper {
@@ -2701,10 +2702,10 @@ fn lower_action_body(
         // Two reasons to want that: the tail is about to move to the
         // dispatcher because something else (a subclass past `super`) may
         // respond, or a private helper in this body already has.
-        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists)
+        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists, html_exists)
     } else {
         crate::lower::controller::body::synthesize_implicit_render_with_html(
-            &unwrapped, action_name, variants, any_template_exists,
+            &unwrapped, action_name, variants, any_template_exists, html_exists,
         )
     };
     let module_name = views_module_name(controller);
