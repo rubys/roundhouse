@@ -589,6 +589,27 @@ fn a_bare_inner_class_runs_after_resolution() {
         .assert_passes();
 }
 
+/// A library-only path gem is app code, and its consumer must run in the output.
+#[test]
+fn a_library_only_path_gem_runs_from_an_app_consumer() {
+    emit_and_run::real_blog()
+        .edit(
+            "Gemfile.lock",
+            "GEM\n",
+            "PATH\n  remote: components/numbers\n  specs:\n    path_numbers (0.1.0)\n\nGEM\n",
+        )
+        .write(
+            "components/numbers/lib/path_number.rb",
+            "class PathNumber\n  def self.value\n    41\n  end\nend\n",
+        )
+        .write(
+            "app/services/path_number_consumer.rb",
+            "class PathNumberConsumer\n  def self.value\n    PathNumber.value + 1\n  end\nend\n",
+        )
+        .run_ruby("raise 'wrong path-gem result' unless PathNumberConsumer.value == 42")
+        .assert_passes();
+}
+
 /// `class UI::ExplicitSelector` does not lexically include `UI`, even
 /// though emitted Ruby nests it there. Keep a top-level same-suffix class
 /// distinct from the one inside UI after source-backed resolution.
@@ -3143,6 +3164,22 @@ end
             "app/controllers/articles_controller.rb",
             "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
             "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @featured = featured_title.to_s.upcase\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// A routed action with a template and no method behind it: Rails runs
+/// `show` whether or not `def show` exists, so `before_action
+/// :set_article, only: %i[show …]` still feeds `articles/show`. `check`
+/// reported every `@article` in that template as having no known type.
+#[test]
+fn a_template_only_action_is_fed_by_its_before_action() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  # GET /articles/1 or /articles/1.json\n  def show\n  end\n\n",
+            "",
         )
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();

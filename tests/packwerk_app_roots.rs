@@ -118,6 +118,29 @@ fn explicit_package_paths_glob_scopes_discovery() {
     );
 }
 
+#[test]
+fn brace_package_paths_select_nested_packages_and_exclude_unmatched_packages() {
+    let app = tree_app(&[
+        ("packwerk.yml", "package_paths: \"{,components,components/*/,components/*/*/}\"\n"),
+        ("package.yml", "enforce_dependencies: true\n"),
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("app/models/article.rb", ARTICLE_MODEL),
+        ("components/inventory/package.yml", "enforce_dependencies: true\n"),
+        ("components/inventory/app/models/comment.rb", COMMENT_MODEL),
+        ("components/domains/shop/package.yml", "enforce_dependencies: true\n"),
+        ("components/domains/shop/app/models/erp_ledger_entry.rb", "class ErpLedgerEntry < ApplicationRecord\nend\n"),
+        ("packs/unused/package.yml", "enforce_dependencies: true\n"),
+        ("packs/unused/app/models/stray.rb", "class Stray < ApplicationRecord\nend\n"),
+    ]);
+    assert_eq!(app.app_roots, vec![
+        "app", "components/domains/shop/app", "components/inventory/app",
+    ]);
+    assert!(app.models.iter().any(|model| model.name.0.as_str() == "Comment"));
+    assert!(app.models.iter().any(|model| model.name.0.as_str() == "ErpLedgerEntry"));
+    assert!(!app.models.iter().any(|model| model.name.0.as_str() == "Stray"));
+}
+
 /// (c) No `packwerk.yml` / `packs.yml` at all: a `packs/blog/app/…`
 /// tree is ordinary non-autoloaded data, not a second app root — the
 /// exact behavior an app without Packwerk had before this change.
