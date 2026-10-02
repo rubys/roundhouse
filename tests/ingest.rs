@@ -1758,3 +1758,19 @@ fn native_classvar_initialization_uses_owned_initializer_ir() {
         assert!(err.to_string().contains("requires source ordering"), "{err}");
     }
 }
+
+#[test]
+fn native_initializers_keep_order_across_singleton_body_merges() {
+    let classes = roundhouse::ingest::ingest_library_classes(
+        b"class Probe; @@before=nil; class << self; @@middle=nil; end; @@after=nil; end",
+        "recursive_initializer.rb",
+    ).unwrap();
+    let names: Vec<_> = classes[0].class_ivar_initializers.iter().map(|expr| {
+        assert!(!expr.span.is_synthetic());
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } => name.as_str(),
+            other => panic!("unexpected initializer: {other:?}"),
+        }
+    }).collect();
+    assert_eq!(names, ["@@before", "@@middle", "@@after"]);
+}

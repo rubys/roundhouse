@@ -171,15 +171,14 @@ pub fn ingest_rails_application_singleton_methods(
         if path.join("::") != "Rails" {
             continue;
         }
-        let (_includes, methods, _constants, _unknown, initializers) =
-            walk_decl_body(sc.body(), &owner, file, false)?;
-        if !initializers.is_empty() {
+        let body = walk_decl_body(sc.body(), &owner, file, false)?;
+        if !body.class_initializers.is_empty() {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: "Rails application singleton class-variable initialization is not modeled".into(),
             });
         }
-        out.extend(methods);
+        out.extend(body.methods);
     }
     Ok(out)
 }
@@ -233,7 +232,7 @@ pub(super) fn library_class_and_struct_base(
         None => parent,
     };
 
-    let (mut includes, mut methods, mut constants, mut unknown_calls, class_initializers) =
+    let DeclBody { mut includes, mut methods, mut constants, mut unknown_calls, class_initializers } =
         walk_decl_body(class.body(), &owner, file, false)?;
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
@@ -1059,7 +1058,7 @@ fn library_class_from_module_node_with_scope(
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
     let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
-    let (includes, methods, constants, unknown_calls, class_initializers) =
+    let DeclBody { includes, methods, constants, unknown_calls, class_initializers } =
         walk_decl_body_with_visibility(module.body(), &owner, file, false, &visibility)?;
     Ok(LibraryClass {
         name: owner,
@@ -1078,7 +1077,7 @@ fn library_class_from_module_node_with_scope(
 /// Walk a class or module body, collecting `include` directives and
 /// method definitions (with `attr_*` lowered to synthesized methods).
 /// Receiverless calls the walk doesn't recognize (`rule(:x) { … }`,
-/// `alias_method`, …) are captured into the fourth slot rather than
+/// `alias_method`, …) are captured into `unknown_calls` rather than
 /// dropped — see `LibraryClass::unknown_calls`. Nested class/module
 /// declarations are still dropped; those surface separately via the
 /// plural ingest entry points.
@@ -1087,7 +1086,84 @@ fn library_class_from_module_node_with_scope(
 /// `class << self` block; it overrides every synthesized method's
 /// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
 /// `class << self` produces class-level getter/setter pairs.
-type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>, Vec<Expr>, Vec<Expr>);
+#[derive(Default)]
+struct DeclBody {
+    includes: Vec<ClassId>,
+    methods: Vec<MethodDef>,
+    constants: Vec<(Symbol, Expr)>,
+    unknown_calls: Vec<Expr>,
+    class_initializers: Vec<Expr>,
+}
+
+impl DeclBody {
+    fn extend(&mut self, other: Self) {
+        self.includes.extend(other.includes);
+        self.methods.extend(other.methods);
+        self.constants.extend(other.constants);
+        self.unknown_calls.extend(other.unknown_calls);
+        self.class_initializers.extend(other.class_initializers);
+    }
+
+    fn finalize_classvars(
+        &mut self,
+        class_attributes: &HashSet<Symbol>,
+        has_class_attr_default: bool,
+        file: &str,
+    ) -> IngestResult<()> {
+        fn writes_classvar(expr: &Expr, class_attributes: Option<&HashSet<Symbol>>) -> bool {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*expr.node
+                && let Some(bare) = name.as_str().strip_prefix("@@")
+                && class_attributes.is_none_or(|attrs| attrs.iter().any(|attr| attr.as_str() == bare))
+            {
+                return true;
+            }
+            let mut found = false;
+            expr.node.for_each_child(&mut |child| found |= writes_classvar(child, class_attributes));
+            found
+        }
+        for m in &mut self.methods {
+            if writes_classvar(&m.body, Some(class_attributes)) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "native class-variable writes alongside cattr/mattr storage are not modeled".into(),
+                });
+            }
+            if m.receiver == MethodReceiver::Class {
+                // Native @@ storage is shared with subclasses, unlike the
+                // per-class @ storage of the existing cattr approximation.
+                if writes_classvar(&m.body, None) {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "class-variable writes in class methods require shared inheritance storage".into(),
+                    });
+                }
+                normalize_classvars_to_ivars(&mut m.body, class_attributes);
+            }
+        }
+        // Preserve standalone cattr/mattr approximation, but never erase
+        // initialization across a default: these effects depend on order.
+        if has_class_attr_default && !self.class_initializers.is_empty() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "cattr/mattr defaults require source-order initialization".into(),
+            });
+        }
+        self.class_initializers.retain(|expr| !matches!(&*expr.node,
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().strip_prefix("@@").is_some_and(|bare|
+                    class_attributes.iter().any(|attr| attr.as_str() == bare))));
+        if !self.class_initializers.is_empty()
+            && (!self.unknown_calls.is_empty() || !self.constants.is_empty() || !self.includes.is_empty())
+        {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "native class-variable initialization alongside other class-body declarations requires source ordering".into(),
+            });
+        }
+        Ok(())
+    }
+}
 
 /// Receiverless class-body calls that are NOT safe to capture into
 /// `unknown_calls`, because their meaning depends on where they sit
@@ -1272,11 +1348,7 @@ fn walk_decl_body_with_visibility<'pr>(
     force_class_receiver: bool,
     visibility: &Visibility,
 ) -> IngestResult<DeclBody> {
-    let mut includes: Vec<ClassId> = Vec::new();
-    let mut methods: Vec<MethodDef> = Vec::new();
-    let mut constants: Vec<(Symbol, Expr)> = Vec::new();
-    let mut unknown_calls: Vec<Expr> = Vec::new();
-    let mut class_initializers: Vec<Expr> = Vec::new();
+    let mut out = DeclBody::default();
     let mut class_attributes: HashSet<Symbol> = HashSet::new();
     let mut has_class_attr_default = false;
     // `module_function` (called bare inside a module body) marks every
@@ -1298,7 +1370,7 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut direct_def_positions: Vec<usize> = Vec::new();
 
     let Some(b) = body else {
-        return Ok((includes, methods, constants, unknown_calls, class_initializers));
+        return Ok(out);
     };
 
     let statements = flatten_statements(b);
@@ -1359,7 +1431,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     ));
                                 }
                             }
-                            constants.push((name, value));
+                            out.constants.push((name, value));
                         }
                     }
                     continue;
@@ -1373,7 +1445,7 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             let name = Symbol::from(constant_id_str(&cw.name()));
             let value = ingest_expr(&cw.value(), file)?;
-            constants.push((name, value));
+            out.constants.push((name, value));
             continue;
         }
         // Retain native nil initialization in source order. Only a declared
@@ -1389,7 +1461,7 @@ fn walk_decl_body_with_visibility<'pr>(
                     message: "class-variable initializer with non-nil value".into(),
                 });
             }
-            class_initializers.push(initializer);
+            out.class_initializers.push(initializer);
             continue;
         }
         if let Some(def) = stmt.as_def_node() {
@@ -1399,13 +1471,7 @@ fn walk_decl_body_with_visibility<'pr>(
             // / `module ClassMethods`, and (like those) contributes no
             // `included` method of its own.
             if let Some(singleton_body) = included_hook_class_methods_body(&def) {
-                let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
-                    walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?;
-                includes.extend(inner_includes);
-                methods.extend(inner_methods);
-                constants.extend(inner_constants);
-                unknown_calls.extend(inner_unknown);
-                class_initializers.extend(inner_initializers);
+                out.extend(walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?);
                 continue;
             }
             if has_class_methods && is_class_methods_bridge(&def) {
@@ -1422,20 +1488,14 @@ fn walk_decl_body_with_visibility<'pr>(
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
-            direct_def_positions.push(methods.len());
-            methods.push(m);
+            direct_def_positions.push(out.methods.len());
+            out.methods.push(m);
             continue;
         }
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
-                walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?;
-            includes.extend(inner_includes);
-            methods.extend(inner_methods);
-            constants.extend(inner_constants);
-            unknown_calls.extend(inner_unknown);
-            class_initializers.extend(inner_initializers);
+            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -1449,13 +1509,7 @@ fn walk_decl_body_with_visibility<'pr>(
         // reason — otherwise the same defs would emit twice.
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
-                let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
-                    walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
-                includes.extend(inner_includes);
-                methods.extend(inner_methods);
-                constants.extend(inner_constants);
-                unknown_calls.extend(inner_unknown);
-                class_initializers.extend(inner_initializers);
+                out.extend(walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?);
                 continue;
             }
         }
@@ -1469,13 +1523,7 @@ fn walk_decl_body_with_visibility<'pr>(
                 // registry's concern fold copies them onto includers.
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
-                        let (inner_includes, inner_methods, inner_constants, inner_unknown, inner_initializers) =
-                            walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?;
-                        includes.extend(inner_includes);
-                        methods.extend(inner_methods);
-                        constants.extend(inner_constants);
-                        unknown_calls.extend(inner_unknown);
-                        class_initializers.extend(inner_initializers);
+                        out.extend(walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?);
                         continue;
                     }
                 }
@@ -1497,7 +1545,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     if crate::ingest::util::is_view_helper_marker_include(&segs) {
                                         continue;
                                     }
-                                    includes.push(ClassId(Symbol::from(path.join("::"))));
+                                    out.includes.push(ClassId(Symbol::from(path.join("::"))));
                                 } else if is_rails_url_helpers_chain(&arg) {
                                     // `include Rails.application.routes.
                                     // url_helpers` (lobsters' Routes class,
@@ -1508,7 +1556,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     // helper names off this marker and the
                                     // ruby emit rewrites `X.<helper>` call
                                     // sites through RouteHelpers.
-                                    includes.push(ClassId(Symbol::from("RouteHelpers")));
+                                    out.includes.push(ClassId(Symbol::from("RouteHelpers")));
                                 }
                             }
                         }
@@ -1559,12 +1607,12 @@ fn walk_decl_body_with_visibility<'pr>(
                             if want_reader {
                                 let mut method = synth_attr_reader(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                methods.push(method);
+                                out.methods.push(method);
                             }
                             if want_writer {
                                 let mut method = synth_attr_writer(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                methods.push(method);
+                                out.methods.push(method);
                             }
                         }
                     }
@@ -1577,14 +1625,14 @@ fn walk_decl_body_with_visibility<'pr>(
                     // not define (an inherited or gem method) is still
                     // captured below.
                     "alias_method"
-                        if alias_source(&call, &methods, force_class_receiver).is_some() =>
+                        if alias_source(&call, &out.methods, force_class_receiver).is_some() =>
                     {
                         let (to, source) =
-                            alias_source(&call, &methods, force_class_receiver).unwrap();
-                        let mut copy = methods[source].clone();
+                            alias_source(&call, &out.methods, force_class_receiver).unwrap();
+                        let mut copy = out.methods[source].clone();
                         copy.name = Symbol::from(to.as_str());
                         visibility.apply(&statement, &mut copy);
-                        methods.push(copy);
+                        out.methods.push(copy);
                     }
                     // `extend self` — the spelling campfire's
                     // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
@@ -1647,7 +1695,7 @@ fn walk_decl_body_with_visibility<'pr>(
                             && !is_sorbet_annotation_mixin(&call)
                         {
                             if let Ok(e) = ingest_expr(&stmt, file) {
-                                unknown_calls.push(e);
+                                out.unknown_calls.push(e);
                             }
                         }
                     }
@@ -1666,7 +1714,7 @@ fn walk_decl_body_with_visibility<'pr>(
                 // self.default_success = …`) rejects the emitted class
                 // outright, so the tree stops there.
                 if let Ok(e) = ingest_expr(&stmt, file) {
-                    unknown_calls.push(e);
+                    out.unknown_calls.push(e);
                 }
             }
         }
@@ -1674,16 +1722,8 @@ fn walk_decl_body_with_visibility<'pr>(
         // surface as separate entries via the plural API.
     }
 
-    // Class-variable reads/writes in CLASS-receiver bodies normalize to
-    // class-level ivars — the storage `cattr_accessor`'s synthesized
-    // accessors use — so `@@DOMAIN.present?` in `def self.enabled?` and
-    // `Keybase.DOMAIN=` agree (verbatim `@@X` in the emitted class method
-    // is a NameError when unassigned; class-level `@X` reads nil).
-    // Instance-method bodies are left alone: `@X` there would be
-    // instance storage, a different variable — a verbatim `@@X` failing
-    // loudly at runtime beats silently splitting the storage.
     // `module_function :a, :b` promotions, applied before the classvar
-    // normalization below so a named method gets exactly what the bare
+    // finalization so a named method gets exactly what the bare
     // form's methods get (the flag there is set before the def is even
     // pushed, so it is already Class by this point).
     //
@@ -1701,15 +1741,15 @@ fn walk_decl_body_with_visibility<'pr>(
         for pos in &direct_def_positions {
             if module_function_named
                 .iter()
-                .any(|n| n == methods[*pos].name.as_str())
+                .any(|n| n == out.methods[*pos].name.as_str())
             {
-                methods[*pos].receiver = MethodReceiver::Class;
-                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
-                promoted.push(methods[*pos].name.clone());
+                out.methods[*pos].receiver = MethodReceiver::Class;
+                out.methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                promoted.push(out.methods[*pos].name.clone());
             }
         }
         if !promoted.is_empty() {
-            for m in &mut methods {
+            for m in &mut out.methods {
                 // The promoted method's own body is included: a
                 // self-recursive call needs the same retarget.
                 retarget_module_function_calls(&mut m.body, owner, &promoted);
@@ -1717,61 +1757,8 @@ fn walk_decl_body_with_visibility<'pr>(
         }
     }
 
-    fn writes_classvar(expr: &Expr, class_attributes: Option<&HashSet<Symbol>>) -> bool {
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*expr.node
-            && let Some(bare) = name.as_str().strip_prefix("@@")
-            && class_attributes.is_none_or(|attrs| attrs.iter().any(|attr| attr.as_str() == bare))
-        {
-            return true;
-        }
-        let mut found = false;
-        expr.node.for_each_child(&mut |child| found |= writes_classvar(child, class_attributes));
-        found
-    }
-    for m in &mut methods {
-        if writes_classvar(&m.body, Some(&class_attributes)) {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "native class-variable writes alongside cattr/mattr storage are not modeled".into(),
-            });
-        }
-        if m.receiver == MethodReceiver::Class {
-            // Native @@ storage is shared with subclasses, whereas the
-            // cattr approximation below uses per-class @ storage. Do not
-            // extend that approximation to newly admitted method writes.
-            if writes_classvar(&m.body, None) {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "class-variable writes in class methods require shared inheritance storage".into(),
-                });
-            }
-            normalize_classvars_to_ivars(&mut m.body, &class_attributes);
-        }
-    }
-    // Keep the existing standalone cattr/mattr approximation unchanged.
-    // A native initializer cannot be erased across a default declaration:
-    // these two initialization effects depend on source order.
-    if has_class_attr_default && !class_initializers.is_empty() {
-        return Err(IngestError::Unsupported {
-            file: file.into(),
-            message: "cattr/mattr defaults require source-order initialization".into(),
-        });
-    }
-    class_initializers.retain(|expr| !matches!(&*expr.node,
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-            if name.as_str().strip_prefix("@@").is_some_and(|bare|
-                class_attributes.iter().any(|attr| attr.as_str() == bare))));
-
-    if !class_initializers.is_empty()
-        && (!unknown_calls.is_empty() || !constants.is_empty() || !includes.is_empty())
-    {
-        return Err(IngestError::Unsupported {
-            file: file.into(),
-            message: "native class-variable initialization alongside other class-body declarations requires source ordering".into(),
-        });
-    }
-    Ok((includes, methods, constants, unknown_calls, class_initializers))
+    out.finalize_classvars(&class_attributes, has_class_attr_default, file)?;
+    Ok(out)
 }
 
 /// Match the `Rails.application.routes.url_helpers` receiver chain (a
@@ -2378,7 +2365,7 @@ pub enum ClassKind {
 ///
 /// Read with its own parse, like `ingest_concern_filters` and
 /// `ingest_concern_model_items` beside it, rather than widening
-/// `DeclBody` — that tuple reaches 25 `LibraryClass` construction
+/// `DeclBody` — the class IR reaches 25 `LibraryClass` construction
 /// sites, nearly all of them synthesizing classes that can never have a
 /// concern carrier.
 /// Every `helper_method :name, …` the file declares.
@@ -2525,7 +2512,7 @@ pub fn ingest_concern_class_method_spans(
             // see `included_hook_class_methods_body`'s doc comment. The
             // third spelling of Concern's class-side carrier; needs its
             // own arm here (this is a from-scratch parse, deliberately
-            // not sharing `walk_decl_body`'s tuple — see the doc comment
+            // not sharing `walk_decl_body`'s result — see the doc comment
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
