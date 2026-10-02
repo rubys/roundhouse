@@ -190,6 +190,74 @@ pub(super) fn push_schema_methods(
         });
     }
 
+    // def self._conflict_predicate(columns) — the predicate of the
+    // unique index `upsert_all(unique_by:)` names, else "". `columns` is
+    // the target's column names, sorted and joined with ", ". Like
+    // Rails' `InsertAll`, the target is the first unique index by name
+    // with those columns, in any order, and a partial one adds its
+    // `WHERE`, without which SQLite matches no partial index. Emitted
+    // only when some target has a predicate; the runtime's default
+    // answers "" for everyone else. The predicate is the one the SQLite
+    // DDL renders.
+    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
+    unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    let mut targets: Vec<(String, Option<String>)> = Vec::new();
+    for i in unique {
+        let mut cols: Vec<&str> = i.columns.iter().map(|c| c.as_str()).collect();
+        cols.sort_unstable();
+        let cols = cols.join(", ");
+        if targets.iter().any(|(c, _)| *c == cols) {
+            continue;
+        }
+        let predicate = crate::emit::shared::schema_sql::Dialect::Sqlite
+            .index_predicate(table, i)
+            .map(str::to_string);
+        targets.push((cols, predicate));
+    }
+    let partial: Vec<(String, String)> =
+        targets.into_iter().filter_map(|(cols, p)| p.map(|p| (cols, p))).collect();
+    if !partial.is_empty() {
+        let columns = Symbol::from("columns");
+        let mut body = lit_str(String::new());
+        for (cols, predicate) in partial.into_iter().rev() {
+            let cond = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(var_ref(columns.clone())),
+                        method: Symbol::from("=="),
+                        args: vec![lit_str(cols)],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Bool,
+            );
+            body = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: lit_str(predicate), else_branch: body },
+                ),
+                Ty::Str,
+            );
+        }
+        methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("_conflict_predicate"),
+            receiver: MethodReceiver::Class,
+            visibility: crate::dialect::MethodVisibility::Public,
+            params: vec![Param::positional(columns.clone())],
+            body,
+            signature: Some(fn_sig(vec![(columns, Ty::Str)], Ty::Str)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // def self.schema_columns
     let column_array = with_ty(
         Expr::new(

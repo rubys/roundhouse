@@ -2016,3 +2016,134 @@ end
         .run_test("test/models/key_forms_test.rb")
         .assert_passes();
 }
+
+/// A unique index with `where:` constrains only the rows its predicate
+/// selects. Ingest dropped the predicate, so the emitted DDL made the
+/// index unique over every row: an archived article's title stayed
+/// taken, `create!` raised `RecordNotUnique`, and `check` said nothing.
+/// `insert_all`'s guard follows the predicate too: it skips a row only
+/// when a row the index covers shares its key (`title` is `null:
+/// false`, so the guard reads the index).
+#[test]
+fn a_partial_unique_index_constrains_only_the_rows_it_selects() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\", null: false\n    \
+             t.datetime \"archived_at\"\n    \
+             t.index [\"title\"], name: \"index_articles_on_live_title\", unique: true, where: \"(archived_at IS NULL)\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.import_titles(first, second, body)
+    Article.insert_all([{ title: first, body: body }, { title: second, body: body }])
+  end"#,
+        )
+        .write(
+            "test/models/article_live_title_test.rb",
+            r#"require "test_helper"
+
+class ArticleLiveTitleTest < ActiveSupport::TestCase
+  test "an archived article's title can be reused" do
+    old = Article.create!(title: "Reused", body: "A long enough body")
+    old.update!(archived_at: Time.now)
+    assert Article.create!(title: "Reused", body: "A long enough body").persisted?
+  end
+
+  test "two live articles still cannot share a title" do
+    Article.create!(title: "Shared", body: "A long enough body")
+    assert_raises(ActiveRecord::RecordNotUnique) do
+      Article.create!(title: "Shared", body: "A long enough body")
+    end
+  end
+
+  test "insert_all skips a live duplicate and adds a row only archived ones share" do
+    Article.create!(title: "Taken", body: "A long enough body")
+    Article.create!(title: "Imported", body: "A long enough body", archived_at: Time.now)
+    Article.import_titles("Taken", "Imported", "A long enough body")
+    assert_equal 1, Article.where(title: "Taken").count
+    assert_equal 1, Article.where(title: "Imported", archived_at: nil).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_live_title_test.rb")
+        .assert_passes();
+}
+
+/// `upsert_all(unique_by:)` names the index Rails' `InsertAll` picks:
+/// the first unique index by name with those columns, in any order. A
+/// partial one goes into the conflict target with its `WHERE`, without
+/// which SQLite matches no partial index; a full one goes in bare.
+#[test]
+fn upsert_all_targets_the_unique_index_rails_picks() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            r#"  create_table "slugs", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "hits", default: 0, null: false
+    t.datetime "retired_at"
+    t.index ["name"], name: "index_slugs_on_live_name", unique: true, where: "(retired_at IS NULL)"
+  end
+
+  create_table "seats", force: :cascade do |t|
+    t.bigint "room_id", null: false
+    t.bigint "user_id", null: false
+    t.integer "visits", default: 0, null: false
+    t.datetime "left_at"
+    t.index ["room_id", "user_id"], name: "index_seats_on_live_room_and_user", unique: true, where: "(left_at IS NULL)"
+  end
+
+  create_table "tags", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "uses", default: 0, null: false
+    t.datetime "retired_at"
+    t.index ["name"], name: "index_tags_on_name", unique: true
+    t.index ["name"], name: "index_tags_on_name_live", unique: true, where: "(retired_at IS NULL)"
+  end
+
+  add_foreign_key "comments", "articles""#,
+        )
+        .write("app/models/slug.rb", "class Slug < ApplicationRecord\nend\n")
+        .write("app/models/seat.rb", "class Seat < ApplicationRecord\nend\n")
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\nend\n")
+        .write(
+            "test/models/upsert_target_test.rb",
+            r#"require "test_helper"
+
+class UpsertTargetTest < ActiveSupport::TestCase
+  test "a partial index: updates the live row, then inserts past a retired one" do
+    Slug.upsert_all([{ name: "home", hits: 1 }], unique_by: :name)
+    Slug.upsert_all([{ name: "home", hits: 2 }], unique_by: :name)
+    assert_equal [2], Slug.where(name: "home").pluck(:hits)
+    Slug.where(name: "home").update_all(retired_at: Time.now)
+    Slug.upsert_all([{ name: "home", hits: 3 }], unique_by: :name)
+    assert_equal [3], Slug.where(name: "home", retired_at: nil).pluck(:hits)
+    assert_equal 2, Slug.where(name: "home").where.not(retired_at: nil).pluck(:hits).first
+  end
+
+  test "a composite partial index: unique_by in either order" do
+    Seat.upsert_all([{ room_id: 1, user_id: 7, visits: 1 }], unique_by: [:room_id, :user_id])
+    Seat.upsert_all([{ room_id: 1, user_id: 7, visits: 2 }], unique_by: [:user_id, :room_id])
+    assert_equal [2], Seat.where(room_id: 1, user_id: 7).pluck(:visits)
+  end
+
+  test "a full index first by name: the bare conflict target" do
+    Tag.upsert_all([{ name: "rails", uses: 1 }], unique_by: :name)
+    Tag.where(name: "rails").update_all(retired_at: Time.now)
+    Tag.upsert_all([{ name: "rails", uses: 2 }], unique_by: :name)
+    assert_equal [2], Tag.where(name: "rails").pluck(:uses)
+  end
+end
+"#,
+        )
+        .run_test("test/models/upsert_target_test.rb")
+        .assert_passes();
+}

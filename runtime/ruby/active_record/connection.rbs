@@ -30,6 +30,7 @@ module ActiveRecord
     def self.transaction: () { () -> untyped } -> untyped
     def self.update_counters: (untyped id, Hash[Symbol, untyped] counters) -> Integer
     def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
+    def self._conflict_predicate: (String columns) -> String
     def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
     def self.record_timestamps=: (untyped value) -> untyped
     def self.record_timestamps: () -> bool

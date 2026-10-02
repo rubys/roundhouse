@@ -375,3 +375,42 @@ ALTER TABLE ONLY shard.readings_p0
     let pk_gaps = gaps.iter().filter(|g| format!("{g}").contains("primary key dropped")).count();
     assert_eq!(pk_gaps, 1, "{gaps:?}");
 }
+
+/// `CREATE … INDEX … WHERE (…)` keeps its predicate, as `where:` in
+/// `schema.rb` does. It used to be dropped, so a partial unique index
+/// came out unique over every row. The predicate is the rest of the
+/// statement, after any `INCLUDE` or `WITH`.
+#[test]
+fn a_partial_index_keeps_its_predicate() {
+    let sql = r#"
+CREATE TABLE public.tokens (
+    id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    revoked_at timestamp(6) without time zone
+);
+
+CREATE UNIQUE INDEX index_tokens_on_live_user_id ON public.tokens USING btree (user_id) WHERE (revoked_at IS NULL);
+
+CREATE INDEX index_tokens_on_revoked ON public.tokens USING btree (user_id) INCLUDE (revoked_at) WITH (fillfactor='90') WHERE ((revoked_at IS NOT NULL) AND (user_id > 0));
+
+CREATE UNIQUE INDEX index_tokens_on_user_id ON public.tokens USING btree (user_id);
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("ingest structure.sql");
+    let predicates: Vec<(&str, bool, Option<&str>)> = schema.tables[&Symbol::from("tokens")]
+        .indexes
+        .iter()
+        .map(|i| (i.name.as_str(), i.unique, i.predicate.as_deref()))
+        .collect();
+    assert_eq!(
+        predicates,
+        vec![
+            ("index_tokens_on_live_user_id", true, Some("(revoked_at IS NULL)")),
+            (
+                "index_tokens_on_revoked",
+                false,
+                Some("((revoked_at IS NOT NULL) AND (user_id > 0))")
+            ),
+            ("index_tokens_on_user_id", true, None),
+        ]
+    );
+}
