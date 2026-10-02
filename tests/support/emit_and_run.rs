@@ -208,7 +208,7 @@ impl Overlay {
 
         let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
         let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
-        let errors = diagnose(&app)
+        let mut errors: Vec<_> = diagnose(&app)
             .into_iter()
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
@@ -216,8 +216,13 @@ impl Overlay {
             .collect();
 
         let emitted = scratch.join("emitted");
-        let files = roundhouse::project::target_files(&app, &source, target)
-            .expect("target files");
+        let (files, emit_diags) = roundhouse::emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&app, &source, target)
+        });
+        errors.extend(emit_diags.into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message)));
+        let files = files.expect("target files");
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
         (emitted, errors)
     }
@@ -227,7 +232,7 @@ impl Overlay {
 pub struct Run {
     command: String,
     pub emitted: PathBuf,
-    /// `check`'s error diagnostics for the overlaid app.
+    /// Analysis, lowering and emission error diagnostics for the overlaid app.
     pub errors: Vec<String>,
     pub success: bool,
     pub stdout: String,
@@ -246,17 +251,17 @@ impl Run {
         }
     }
 
-    /// The whole claim: `check` reports no errors AND the emitted
+    /// The whole claim: analysis and emit report no errors AND the emitted
     /// program ran clean. Either half alone is not support.
     pub fn assert_passes(&self) {
         assert!(
             self.errors.is_empty(),
-            "check reports errors, so the construct is not supported yet:\n{}",
+            "analysis or emit reports errors, so the construct is not supported yet:\n{}",
             self.errors.join("\n")
         );
         assert!(
             self.success,
-            "check is clean but the emitted program failed: `{}` in {}\n\
+            "analysis and emit are clean but the emitted program failed: `{}` in {}\n\
              \n=== stdout ===\n{}\n=== stderr ===\n{}",
             self.command,
             self.emitted.display(),

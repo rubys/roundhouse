@@ -376,7 +376,11 @@ fn writer_slot(method: &MethodDef) -> Option<Symbol> {
     let [param] = method.params.as_slice() else {
         return None;
     };
-    if !(param.from_kwrest || (param.keyword && param.rest)) || method.block_param.is_some() {
+    if !(param.from_kwrest || (param.keyword && param.rest))
+        || method.block_param.is_some()
+        || method.has_anonymous_block
+        || method.unsupported_formals.is_some()
+    {
         return None;
     }
     let ExprNode::Assign {
@@ -390,7 +394,11 @@ fn writer_slot(method: &MethodDef) -> Option<Symbol> {
 }
 
 fn reader_slot(method: &MethodDef) -> Option<Symbol> {
-    if !method.params.is_empty() || method.block_param.is_some() {
+    if !method.params.is_empty()
+        || method.block_param.is_some()
+        || method.has_anonymous_block
+        || method.unsupported_formals.is_some()
+    {
         return None;
     }
     let ExprNode::BoolOp {

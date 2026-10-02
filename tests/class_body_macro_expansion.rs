@@ -383,6 +383,20 @@ fn configuration_does_not_drop_extra_macro_effects() {
 }
 
 #[test]
+fn configuration_does_not_drop_unrepresented_formals() {
+    for (original, replacement) in [
+        ("def configure_window(**opts)", "def configure_window(**opts, &)"),
+        ("def configure_window(**opts)", "def configure_window(*, **opts)"),
+        ("def configure_window(**opts)", "def configure_window((x, y), **opts)"),
+        ("def window_options", "def window_options(&)"),
+        ("def window_options", "def window_options(**nil)"),
+    ] {
+        let concern = WINDOW_SETTINGS.replace(original, replacement);
+        assert_configuration_stays_unknown(&concern);
+    }
+}
+
+#[test]
 fn configuration_does_not_drop_inclusion_time_storage_effects() {
     for effect in [
         "@window_options = {mode: :hidden}",
