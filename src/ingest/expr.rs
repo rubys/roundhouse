@@ -2131,9 +2131,11 @@ fn ingest_forwardable_arguments(
                 let elements: Vec<_> = hash.elements().iter().collect();
                 if elements.iter().any(|e| e.as_assoc_splat_node().is_some_and(|s| s.value().is_none())) {
                     if elements.len() != 1 {
+                        // Mixed forwarding remains outside this slice. Keep
+                        // its existing ledger identity; only lone `**` is new.
                         return Err(IngestError::Unsupported {
                             file: file.into(),
-                            message: "anonymous `**` mixed with other keyword arguments is not supported yet".into(),
+                            message: "anonymous `**` keyword forwarding not yet supported".into(),
                         });
                     }
                     let loc = elements[0].location();

@@ -1278,6 +1278,7 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut unknown_calls: Vec<Expr> = Vec::new();
     let mut class_initializers: Vec<Expr> = Vec::new();
     let mut class_attributes: HashSet<Symbol> = HashSet::new();
+    let mut has_class_attr_default = false;
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
     // method AND a class method. For our targets (which call these as
@@ -1525,16 +1526,25 @@ fn walk_decl_body_with_visibility<'pr>(
                         // pair on the *singleton*, so a bare `Keybase.DOMAIN`
                         // resolves; we model the class form (Rails also makes
                         // instance-level copies, not needed by the corpus).
+                        let is_class_attr =
+                            kw.starts_with("cattr_") || kw.starts_with("mattr_");
+                        let mut has_default = is_class_attr && call.block().is_some();
                         let mut names: Vec<Symbol> = Vec::new();
                         if let Some(args) = call.arguments() {
                             for arg in args.arguments().iter() {
                                 if let Some(s) = symbol_value(&arg) {
                                     names.push(Symbol::from(s));
                                 }
+                                if is_class_attr && let Some(hash) = arg.as_keyword_hash_node() {
+                                    has_default |= hash.elements().iter().any(|element| {
+                                        // A keyword splat can also carry a default.
+                                        element.as_assoc_node().is_none_or(|assoc|
+                                            symbol_value(&assoc.key()).as_deref() == Some("default"))
+                                    });
+                                }
                             }
                         }
-                        let is_class_attr =
-                            kw.starts_with("cattr_") || kw.starts_with("mattr_");
+                        has_class_attr_default |= has_default;
                         if is_class_attr {
                             class_attributes.extend(names.iter().cloned());
                         }
@@ -1738,6 +1748,15 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             normalize_classvars_to_ivars(&mut m.body, &class_attributes);
         }
+    }
+    // Keep the existing standalone cattr/mattr approximation unchanged.
+    // A native initializer cannot be erased across a default declaration:
+    // these two initialization effects depend on source order.
+    if has_class_attr_default && !class_initializers.is_empty() {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "cattr/mattr defaults require source-order initialization".into(),
+        });
     }
     class_initializers.retain(|expr| !matches!(&*expr.node,
         ExprNode::Assign { target: LValue::Var { name, .. }, .. }

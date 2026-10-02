@@ -678,7 +678,7 @@ impl<'a> BodyTyper<'a> {
                 unknown()
             }
 
-            ExprNode::Defined { .. } => Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Bare-name implicit-self Send (no receiver, no args, no

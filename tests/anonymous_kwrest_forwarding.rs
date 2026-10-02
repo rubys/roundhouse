@@ -58,6 +58,19 @@ fn anonymous_kwrest_param_and_forward_keep_the_native_contract() {
 }
 
 #[test]
+fn mixed_anonymous_keywords_keep_the_existing_unsupported_diagnostic() {
+    for call in ["target(factor: 11, **)", "target(**, factor: 11)", "target(**options, **)"] {
+        let source = format!("class Probe; def call(options, **); {call}; end; end");
+        let parsed = ruby_prism::parse(source.as_bytes());
+        assert_eq!(parsed.errors().count(), 0, "legal Ruby control: {source}");
+        let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+            .expect_err("mixed keyword forwarding remains unsupported");
+        assert!(matches!(err, roundhouse::ingest::IngestError::Unsupported { message, .. }
+            if message == "anonymous `**` keyword forwarding not yet supported"));
+    }
+}
+
+#[test]
 fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
     use roundhouse::project::{BuildTarget, target_files};

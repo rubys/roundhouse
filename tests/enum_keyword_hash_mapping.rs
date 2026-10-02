@@ -8,8 +8,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use roundhouse::emit::ruby;
+use roundhouse::expr::{ExprNode, Literal};
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::lower::lower_model_to_library_class;
+use roundhouse::Symbol;
 
 fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files
@@ -22,58 +24,42 @@ const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "articles", force: :cascade do |t|
     t.string "title", null: false
     t.string "status", default: "processing", null: false
+    t.integer "priority", default: 17, null: false
   end
 end
 "#;
 
 const MODEL: &str = r#"class Article < ApplicationRecord
   enum :status, processing: 'processing', ready: 'ready'
+  enum :priority, pending: 17, priority: 41
 end
 "#;
 
-fn article_src() -> String {
-    let mut app = ingest_app_from_tree(tree(&[
-        ("db/schema.rb", SCHEMA),
-        ("app/models/article.rb", MODEL),
-    ]))
-    .expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app);
-    ruby::emit_lowered_models(&app)
-        .iter()
-        .find(|f| f.path.to_string_lossy().ends_with("article.rb"))
-        .map(|f| f.content.clone())
-        .expect("emitted article.rb")
-}
-
 /// The trailing-keyword-hash mapping ingests at all (no error), and
-/// each label's predicate compares against its own string value rather
-/// than an auto-assigned index — string-backed enums carry their own
-/// values, unlike the array form's positional index.
+/// retains its own stored values, not array-position indices. Predicates
+/// compare public labels, including one that collides with its column.
 #[test]
 fn trailing_keyword_hash_mapping_ingests_with_its_own_values() {
-    let src = article_src();
-    // The predicate body compares the column to the label's OWN string
-    // value (not an integer index the array form would assign).
-    let body = src
-        .lines()
-        .skip_while(|l| !l.contains("def processing?"))
-        .nth(1)
-        .unwrap_or_else(|| panic!("no body line after def processing?:\n{src}"))
-        .trim()
-        .to_string();
-    assert!(
-        body.contains("\"processing\""),
-        "processing? must compare against its own string value, not an index:\n{body}"
-    );
-    let ready = src
-        .lines()
-        .skip_while(|l| !l.contains("def ready?"))
-        .nth(1)
-        .unwrap_or_else(|| panic!("no body line after def ready?:\n{src}"))
-        .trim()
-        .to_string();
-    assert!(
-        ready.contains("\"ready\""),
-        "ready? must compare against its own string value:\n{ready}"
-    );
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/article.rb", MODEL),
+    ])).expect("ingest");
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert_eq!(model.enums[&Symbol::from("priority")], vec![
+        ("pending".into(), Literal::Int { value: 17 }),
+        ("priority".into(), Literal::Int { value: 41 }),
+    ]);
+    let article = lower_model_to_library_class(model, &app.schema);
+    for (label, column) in [("processing", "status"), ("ready", "status"), ("pending", "priority"), ("priority", "priority")] {
+        let name = format!("{label}?");
+        let predicates: Vec<_> = article.methods.iter().filter(|m| m.name.as_str() == name).collect();
+        assert_eq!(predicates.len(), 1, "{name} must not be shadowed by a column predicate");
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*predicates[0].body.node else {
+            panic!("{name} must compare the public label, not column truthiness");
+        };
+        assert_eq!(method.as_str(), "==");
+        assert!(matches!(&*recv.node, ExprNode::Send { method, .. } if method.as_str() == column));
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == label));
+    }
 }

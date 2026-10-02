@@ -3176,23 +3176,29 @@ fn enum_keyword_hash_mapping_predicate_runs() {
         .edit(
             "db/schema.rb",
             "create_table \"articles\", force: :cascade do |t|",
-            "create_table \"articles\", force: :cascade do |t|\n    t.string \"kind\", default: \"kind\", null: false",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"kind\", default: \"kind\", null: false\n    t.integer \"priority\", default: 17, null: false",
         )
         .edit(
             "app/models/article.rb",
             "has_many :comments, dependent: :destroy\n",
-            "has_many :comments, dependent: :destroy\n\n  enum :kind, kind: 'kind', other: 'other'\n",
+            "has_many :comments, dependent: :destroy\n\n  enum :kind, kind: 'kind', other: 'other'\n  enum :priority, pending: 17, priority: 41\n",
         )
         .edit(
             "app/views/articles/show.html.erb",
             "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>",
-            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <p id=\"kind-predicate\"><%= @article.kind? %></p>",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <p id=\"kind-predicate\"><%= @article.kind? %></p>\n  <p id=\"priority-predicate\"><%= @article.priority? %></p>",
         )
         .run_ruby(r#"
 article = Article.create!(title: "Enum control", body: "A sufficiently long body")
 raise "enum default predicate is false" unless article.kind?
 article.kind = "other"
 raise "enum predicate ignored its value" if article.kind?
+raise "bare integer mapping lost stored values" unless Article.priorities == {"pending" => 17, "priority" => 41}
+raise "integer enum default label is wrong" unless article.pending?
+raise "column predicate shadowed enum comparison" if article.priority?
+article.priority = 41
+raise "integer label predicate is false" unless article.priority?
+raise "integer label predicate ignored its value" if article.pending?
 "#)
         .assert_passes();
 }

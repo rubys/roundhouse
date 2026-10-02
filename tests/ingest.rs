@@ -1717,6 +1717,33 @@ fn native_classvar_writes_cannot_split_modeled_cattr_storage() {
 }
 
 #[test]
+fn cattr_defaults_cannot_be_silently_dropped_with_native_initializers() {
+    for declaration in ["cattr_reader", "cattr_writer", "cattr_accessor", "mattr_reader", "mattr_writer", "mattr_accessor"] {
+        for default in ["default: 41", "default: nil", "**{default: 41}", "**options", ""] {
+            let call = if default.is_empty() {
+                format!("{declaration}(:count) {{ 41 }}")
+            } else {
+                format!("{declaration} :count, {default}")
+            };
+            for body in [format!("@@count = nil; {call}"), format!("{call}; @@count = nil")] {
+                let source = format!("class Probe; {body}; def self.current; @@count; end; end");
+                let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                    .expect_err("an unmodeled default must not become an unset class ivar");
+                assert!(err.to_string().contains("cattr/mattr defaults require source-order initialization"), "{err}");
+            }
+            // Standalone cattr/mattr modeling predates this native-initializer
+            // slice; don't widen its existing approximation in this PR.
+            let source = format!("class Probe; {call}; end");
+            roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                .expect("standalone class-attribute ingest remains unchanged");
+        }
+        let source = format!("class Probe; @@count = nil; {declaration} :count; end");
+        let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").unwrap();
+        assert!(classes[0].class_ivar_initializers.is_empty(), "default-free nil storage remains modeled");
+    }
+}
+
+#[test]
 fn native_classvar_initialization_uses_owned_initializer_ir() {
     let classes = roundhouse::ingest::ingest_library_classes(
         b"class Probe; @@count = nil; def self.current; @@count; end; end", "probe.rb",
