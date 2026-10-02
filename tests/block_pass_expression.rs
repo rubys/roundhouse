@@ -108,6 +108,10 @@ fn native_projects_reject_arbitrary_forwarded_procs_before_emission() {
         ("app/helpers/filter.rb", "class Filter\n  def run\n    [1, 2].map(&@callback)\n    [1, 2].map(&compute(3))\n  end\nend\n"),
         ("app/views/articles/index.html.erb", "<%= [1, 2].map(&@callback) %><%= [1, 2].map(&compute(3)) %>"),
         ("test/models/article_test.rb", "class ArticleTest < ActiveSupport::TestCase\n  test \"forwarding\" do\n    [1, 2].map(&@callback)\n    [1, 2].map(&compute(3))\n  end\nend\n"),
+        ("app/controllers/articles_controller.rb", "class ArticlesController < ActionController::Base\n  def index(first: [1, 2].map(&@callback), second: [1, 2].map(&compute(3)))\n    first\n  end\nend\n"),
+        ("test/fixtures/articles.yml", "<% [1, 2].map(&@callback) %>\none:\n  value: <%= [1, 2].map(&compute(3)) %>\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  belongs_to :owner, default: -> { [1, 2].map(&@callback); [1, 2].map(&compute(3)) }\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  has_many :items, -> { [1, 2].map(&@callback); [1, 2].map(&compute(3)) }\nend\n"),
     ] {
         let tree = [
             ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),

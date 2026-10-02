@@ -834,55 +834,9 @@ fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<
         }
         e.node.for_each_child(&mut |child| visit(child, target, found));
     }
-    fn visit_method(method: &crate::dialect::MethodDef, f: &mut impl FnMut(&crate::expr::Expr)) {
-        f(&method.body);
-        for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
-            f(default);
-        }
-    }
     let mut found = false;
     let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
-    crate::lower::for_each_hook_body_ref(app, &mut f);
-    for controller in &app.controllers {
-        for action in controller.actions() {
-            for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) {
-                f(default);
-            }
-        }
-    }
-    for view in &app.views {
-        f(&view.body);
-        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) {
-            f(default);
-        }
-    }
-    for tm in &app.test_modules {
-        if let Some(setup) = &tm.setup { f(setup); }
-        for test in &tm.tests { f(&test.body); }
-        for method in &tm.helpers { visit_method(method, &mut f); }
-        for class in &tm.inner_classes {
-            for method in &class.methods { visit_method(method, &mut f); }
-            for (_, value) in &class.constants { f(value); }
-            for call in &class.unknown_calls { f(call); }
-        }
-        for (_, value) in &tm.constants { f(value); }
-    }
-    for fixture in &app.fixtures {
-        for e in &fixture.preamble { f(e); }
-        for value in fixture.records.values().flat_map(|record| record.values()) {
-            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
-        }
-    }
-    for helper in &app.routes.direct_helpers { f(&helper.body); }
-    for function in &app.sql_functions {
-        match &function.kind {
-            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method, &mut f),
-            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
-                visit_method(step, &mut f);
-                visit_method(finalize, &mut f);
-            }
-        }
-    }
+    crate::lower::for_each_emit_body_ref(app, &mut f);
     if found {
         return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
     }
