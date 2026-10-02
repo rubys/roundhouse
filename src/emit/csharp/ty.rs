@@ -27,6 +27,7 @@ pub fn csharp_ty(t: &Ty) -> String {
         // `DateTimeOffset` via an explicit parsing getter — see the temporal
         // branch in csharp/library.rs and `Roundhouse.RhDateTime.Parse`.
         Ty::Time => "DateTimeOffset".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("csharp"),
         // No symbol type in C# — route symbols to string keys, as the
         // Kotlin/TS/Crystal renderers do.
         Ty::Sym => "string".to_string(),

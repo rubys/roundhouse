@@ -1,10 +1,9 @@
 # Release build matrix for the `roundhouse` binary (cargo-dist). The
 # workflow this generates (.github/workflows/release.yml) publishes only
 # on a version tag push (`v2026.9.18`), so nothing is released until one is
-# pushed. To verify the matrix without releasing, open a pull request
-# that sets `pr-run-mode = "upload"` below: the PR then builds every
-# target and attaches the tarballs to its workflow run, and the PR is
-# closed rather than merged.
+# pushed. Pull requests do not start this workflow. Check the release
+# plan locally with `dist plan`; use `dist build` to test packaging
+# without publishing. Neither command creates a GitHub Release.
 #
 # Regenerate after editing: `dist generate` (the plan job checks that
 # release.yml matches this file).
@@ -29,7 +28,7 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 # Path that installers should place binaries in
 install-path = "~/.local/bin"
 # Which actions to run on pull requests
-pr-run-mode = "plan"
+pr-run-mode = "skip"
 # Whether failing tasks should make us give up on all other tasks
 fail-fast = false
 # Whether to install an updater program

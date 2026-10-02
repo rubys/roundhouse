@@ -672,7 +672,7 @@ fn run_analysis(
     crate::ingest::survey::activate();
     let (result, mut parse_diags) =
         crate::ingest::prism::scope(|| ingest_app_with_vfs(&vfs, root));
-    let gaps = crate::ingest::survey::drain();
+    let mut gaps = crate::ingest::survey::drain();
     match result {
         Ok(mut app) => {
             let mut analyzer = Analyzer::new(&app);
@@ -680,6 +680,7 @@ fn run_analysis(
             let registry = analyzer.class_registry().clone();
             let mut diags = diagnose(&app);
             crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+            crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
             crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
             diags.append(&mut parse_diags);
             (diags, Some(Analysis { app, registry, gaps, analyzer }))

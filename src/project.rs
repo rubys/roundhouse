@@ -718,6 +718,96 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
+/// The executed Date-only runtime is native Ruby, not the timestamp seam
+/// shared by the other targets (including the unverified JRuby adapter).
+/// Reject before entering their emitters:
+/// dynamic backends may never render a type, so a type-position check
+/// alone would silently emit a String/Time or call an absent intrinsic.
+fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
+        return Ok(());
+    }
+    fn expr_has_date(e: &crate::expr::Expr) -> bool {
+        if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
+            || matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
+                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+        {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |child| found |= expr_has_date(child));
+        found
+    }
+    fn method_has_date(m: &crate::dialect::MethodDef) -> bool {
+        m.signature.as_ref().is_some_and(crate::ty::Ty::contains_date)
+            || expr_has_date(&m.body)
+            || m.params.iter().filter_map(|p| p.default.as_ref()).any(expr_has_date)
+    }
+    fn class_has_date(lc: &crate::dialect::LibraryClass) -> bool {
+        lc.methods.iter().any(method_has_date)
+            || lc.constants.iter().any(|(_, e)| expr_has_date(e))
+            || lc.unknown_calls.iter().any(expr_has_date)
+    }
+    let mut has_date = app.schema.tables.values().any(|table|
+        table.columns.iter().any(|c| c.col_type == crate::schema::ColumnType::Date));
+    crate::lower::for_each_hook_body_ref(app, &mut |e| has_date |= expr_has_date(e));
+    for view in &app.views {
+        has_date |= expr_has_date(&view.body);
+        has_date |= view.strict_locals.iter().flatten()
+            .filter_map(|p| p.default.as_ref()).any(expr_has_date);
+    }
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                has_date |= method_has_date(method);
+            }
+        }
+    }
+    for lc in app.library_classes.iter().chain(app.rails_application.iter()) {
+        has_date |= class_has_date(lc);
+    }
+    // Hook bodies already include controller bodies/positional defaults
+    // and seeds. Keyword defaults, tests and fixtures are emitted roots
+    // too, even when they have not been analyzed at this boundary.
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                has_date |= action.params.fields.values().any(crate::ty::Ty::contains_date);
+                has_date |= action.kw_params.iter().filter_map(|(_, e)| e.as_ref()).any(expr_has_date);
+            }
+        }
+    }
+    for tm in &app.test_modules {
+        has_date |= tm.setup.as_ref().is_some_and(expr_has_date)
+            || tm.tests.iter().any(|t| expr_has_date(&t.body))
+            || tm.helpers.iter().any(method_has_date)
+            || tm.inner_classes.iter().any(class_has_date)
+            || tm.constants.iter().any(|(_, e)| expr_has_date(e));
+    }
+    for fixture in &app.fixtures {
+        has_date |= fixture.preamble.iter().any(expr_has_date)
+            || fixture.records.values().flat_map(|r| r.values()).any(|value|
+                matches!(value, crate::dialect::FixtureValue::Ruby(e) if expr_has_date(e)));
+    }
+    has_date |= app.routes.direct_helpers.iter().any(|h| expr_has_date(&h.body));
+    for function in &app.sql_functions {
+        has_date |= match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => method_has_date(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } =>
+                method_has_date(step) || method_has_date(finalize),
+        };
+    }
+    has_date |= app.rbs_signatures.values().flat_map(|methods| methods.values())
+        .any(crate::ty::Ty::contains_date);
+    if has_date {
+        emit::diagnostics::unsupported_date_ty(target.as_str());
+        return Err(format!("{}: Date-only values are not supported; use the native Ruby target", target.as_str()));
+    }
+    Ok(())
+}
+
 /// A unique index whose `where:` SQLite can't be trusted to run as
 /// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
 /// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
@@ -762,6 +852,7 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    reject_unsupported_dates(app, target)?;
     report_unsupported_keys(app, target);
     report_sqlite_index_predicates(app, target);
     // A keyword parameter is carried by the ruby family and by nothing

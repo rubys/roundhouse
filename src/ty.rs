@@ -27,10 +27,14 @@ pub enum Ty {
     Str,
     Sym,
 
-    /// A temporal value — Ruby `Time` (Date / DateTime / time-of-day
-    /// columns fold in here too; its method surface is a superset of
-    /// everything the corpus calls on those, and a dedicated variant can
-    /// split them out later if a Date-only method ever surfaces).
+    /// A date-only calendar value, distinct from a timestamp. Storage
+    /// is canonical YYYY-MM-DD text; application readers return a Date.
+    /// Targets without a date-only runtime must report unsupported,
+    /// never substitute a timestamp or a String value.
+    Date,
+
+    /// A temporal value — Ruby `Time` (DateTime / time-of-day columns
+    /// fold in here too). Date-only columns use `Date`, not this type.
     ///
     /// First-class, deliberately NOT `Ty::Str` or `Ty::Class{"Time"}`:
     /// Time is language-specific like `Hash`, so each target maps it to
@@ -309,6 +313,26 @@ impl Ty {
         match self {
             Ty::Time => true,
             Ty::Union { variants } => variants.iter().any(Ty::contains_time),
+            _ => false,
+        }
+    }
+
+    /// A date-only value anywhere in a type, including unused signature
+    /// parameters. Used to reject unsupported targets before rendering.
+    pub fn contains_date(&self) -> bool {
+        match self {
+            Ty::Date => true,
+            Ty::Array { elem } => elem.contains_date(),
+            Ty::Hash { key, value } => key.contains_date() || value.contains_date(),
+            Ty::Tuple { elems } => elems.iter().any(Ty::contains_date),
+            Ty::Union { variants } => variants.iter().any(Ty::contains_date),
+            Ty::Record { row } => row.fields.values().any(Ty::contains_date),
+            Ty::Class { id, args } => id.0.as_str() == "Date" || args.iter().any(Ty::contains_date),
+            Ty::Fn { params, block, ret, .. } => {
+                params.iter().any(|p| p.ty.contains_date())
+                    || block.as_ref().is_some_and(|b| b.contains_date())
+                    || ret.contains_date()
+            }
             _ => false,
         }
     }

@@ -235,6 +235,17 @@ module ActiveRecord
       "id"
     end
 
+    # Finder casting runs in connection.rb (Relation is ruby-family
+    # only). Keep the typed contract here without transpiling a union
+    # receiver's conversion into strict targets.
+    def self._cast_primary_key(_id)
+      raise NotImplementedError, "finder casting requires the Relation runtime"
+    end
+
+    def self._string_primary_key
+      false
+    end
+
     # The temporal subset of `schema_columns`. Unlike its siblings this
     # one does NOT raise unoverridden: a model with no temporal column
     # legitimately has none, and the lowering emits the (possibly empty)

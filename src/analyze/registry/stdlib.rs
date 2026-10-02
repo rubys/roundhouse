@@ -74,17 +74,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
     classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
-    // Date / DateTime singletons — analogous to Time. Same
-    // rationale: structural typing of these classes hasn't been
-    // wired, but the call shape needs to resolve.
-    for name in ["Date", "DateTime"] {
+    // Date instances are date-only values, including constructors and
+    // parsers. The send dispatcher validates their argument contracts;
+    // do not duplicate unvalidated return declarations here. DateTime
+    // keeps its existing timestamp representation.
+    classes.insert(ClassId(Symbol::from("Date")), ClassInfo::default());
+    for name in ["DateTime"] {
         let mut cls = ClassInfo::default();
         cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
         cls.class_methods.insert(Symbol::from("today"), Ty::Untyped);
         cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
         // The parse family has a concrete answer where `current` /
         // `today` / `now` above do not yet: `Ty::Time` is roundhouse's
-        // temporal type and covers Date. Upgrading the three older
+        // timestamp type. Upgrading the three older
         // entries would move types in every app that calls them, so it
         // is deliberately not part of this change.
         for parser in ["parse", "strptime", "iso8601", "civil"] {

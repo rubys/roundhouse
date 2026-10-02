@@ -107,6 +107,8 @@ module ActiveRecord
     def self.table_name: () -> String
     def self._table_sql: () -> String
     def self.primary_key: () -> String
+    def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
+    def self._string_primary_key: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base

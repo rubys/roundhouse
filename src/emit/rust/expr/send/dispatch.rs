@@ -236,9 +236,11 @@ pub(super) fn dispatch_method_by_recv_ty(
             // `arr.include?(x)` — Ruby's Array membership test. Rust's
             // `Vec::contains` takes `&T`, so `cols.contains("k")` fails
             // when `cols: Vec<String>`. `iter().any(...)` sidesteps the
-            // Borrow constraint.
+            // Borrow constraint. Dereference the iter item so both
+            // bool == bool and String == &str comparisons work; `==`
+            // borrows its operands, so non-Copy elements are not moved.
             "include?" | "contains?" if args.len() == 1 => Some(format!(
-                "{recv_s}.iter().any(|__c| __c == {})",
+                "{recv_s}.iter().any(|__c| *__c == {})",
                 args_s[0]
             )),
             _ => None,

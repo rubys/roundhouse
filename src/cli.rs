@@ -157,7 +157,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     let (ingest_result, parse_diags) =
         crate::timings::phase("ingest", || crate::ingest::prism::scope(|| ingest_app(path)));
 
-    let survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
+    let mut survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
 
     let mut app = match ingest_result {
         Ok(app) => app,
@@ -194,6 +194,9 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // notes with the root cause attached so the error count below means
     // "findings", not "shadows of the gaps listed at the end".
     crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &survey_errors);
+    if continue_on_error {
+        crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut survey_errors);
+    }
     // Likewise a dispatch on a gem the analyzer does not model — the
     // census below names the gems, this labels the diagnostics.
     crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
