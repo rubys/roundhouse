@@ -2696,7 +2696,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                     unwrap_or_record::<()>(Err(IngestError::Unsupported {
                         file: format!("{}", controller.name.0.as_str()),
                         message: format!(
-                            "class-body macro not expanded: `{}` from {} is neither finite configuration nor filter DSL",
+                            "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
                             method.as_str(),
                             module.0.as_str()
                         ),

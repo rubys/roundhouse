@@ -219,6 +219,52 @@ fn a_reopened_filter_macro_uses_its_latest_definition() {
     assert_eq!(skipped, ["replacement_authentication"]);
 }
 
+#[test]
+fn unsupported_filter_macro_keeps_its_inventory_identity_and_whole_body() {
+    use roundhouse::ingest::survey;
+
+    let tree = [
+        (
+            "app/controllers/concerns/authentication.rb",
+            r#"
+module Authentication
+  extend ActiveSupport::Concern
+  class_methods do
+    def require_unauthenticated_access(**options)
+      allow_unauthenticated_access **options
+      before_action :redirect_signed_in_user_to_root, **options
+    end
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < ActionController::Base\n include Authentication\n require_unauthenticated_access only: :new\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    let app = result.expect("survey retains the unsupported macro");
+    assert!(gaps.iter().any(|gap| matches!(
+        gap,
+        roundhouse::ingest::IngestError::Unsupported { file, message }
+            if file == "ThingsController"
+                && message == "class-body macro not expanded: `require_unauthenticated_access` from Authentication holds a statement that is not filter DSL"
+    )), "{gaps:?}");
+    assert!(filters(&app).is_empty(), "must not expand only the callback");
+    assert!(app.controllers[0].body.iter().any(|item| matches!(
+        item,
+        ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. }
+                if method.as_str() == "require_unauthenticated_access")
+    )));
+}
+
 fn configuration_app(concern: &str, call: &str) -> Result<App, roundhouse::ingest::IngestError> {
     let controller = format!(
         r#"
