@@ -96,6 +96,13 @@ module ActionController
   # a feature none of them exercise yet.
   class Base
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
+    # True when the request's Accept is a bare `*/*` — an
+    # XMLHttpRequest or fetch that set none. Rails reads that as "any
+    # format", so an action with no html template renders the template
+    # it does have (see `html_fallback` in lower::controller::body).
+    # The dispatcher sets it; false keeps every other request on the
+    # html path.
+    attr_accessor :accepts_any_format
     # Rails' `request.path_parameters`: the matched route's own segments
     # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
     # dispatcher assigns it; a `url_for` options hash reads it to fill a
@@ -121,6 +128,7 @@ module ActionController
       @body    = +""
       @location = nil
       @request_format = :html
+      @accepts_any_format = false
       @content_type = "text/html; charset=utf-8"
       @headers = {}
       @performed = false

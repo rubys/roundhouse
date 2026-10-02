@@ -146,6 +146,24 @@ fn the_html_branch_raises_missing_template_when_there_is_no_html_view() {
 }
 
 #[test]
+fn a_bare_accept_any_renders_the_template_the_action_has() {
+    // The same turbo_stream-only action reached by campfire's attachment
+    // uploader: an XMLHttpRequest that sets no Accept, so `*/*`. Rails
+    // expands `*/*` to every format, finds `create.turbo_stream.erb`,
+    // and answers 200; the upload counts anything under 400 as done.
+    // The html fallback asks `accepts_any_format` before it raises.
+    let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
+    let body = create_action_body(&app);
+    let any = body.find("accepts_any_format").unwrap_or_else(|| panic!("no any-format arm: {body}"));
+    let raise = body.find("MissingTemplate").unwrap_or_else(|| panic!("no raise: {body}"));
+    assert!(any < raise, "the any-format arm is asked before the raise: {body}");
+    assert!(
+        body[any..raise].contains("create_turbo_stream"),
+        "the any-format arm renders the turbo_stream view: {body}"
+    );
+}
+
+#[test]
 fn the_option_form_is_left_alone_rather_than_half_lowered() {
     // `partial:`/`collection:`/`locals:` needs the partial machinery a
     // `render` call site gets. Declining keeps the source shape (and

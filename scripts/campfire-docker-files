@@ -22,8 +22,9 @@ set -euo pipefail
 
 DIR="$1"; ROUNDHOUSE_SHA="$2"; CAMPFIRE_SHA="$3"; SPINEL_VERSION="$4"
 
+# This recipe needs only Docker's bundled frontend. A syntax directive
+# would fetch another image from Docker Hub before even reading the build.
 cat > "$DIR/Dockerfile" <<'DOCKERFILE'
-# syntax=docker/dockerfile:1
 # ONCE Campfire, transpiled by Roundhouse and compiled by Spinel.
 #
 # Two stages. The first compiles pack/ — the generated C plus the Spinel
@@ -60,7 +61,8 @@ VOLUME /app/storage
 # created by an earlier image holds root-owned files — then the server
 # runs as that user. Started with `--user`, it skips straight to the
 # server.
-COPY --chmod=755 boot ./boot
+# The archive already carries boot's executable mode; COPY preserves it.
+COPY boot ./boot
 ENV PORT=3000
 EXPOSE 3000
 CMD ["./boot"]

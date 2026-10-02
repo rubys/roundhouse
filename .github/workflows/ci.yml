@@ -43,6 +43,9 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
@@ -52,15 +55,25 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
           mkdir /tmp/writebook
           tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      - name: Look for an identical successful PR execution
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job writebook-inventory --input /tmp/writebook
       - name: Build Roundhouse and run inventory
+        id: inventory
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         env:
           WRITEBOOK_ROOT: /tmp/writebook
           WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
         run: |
-          cargo build --release --bin roundhouse
-          cargo test --test writebook --release -- --ignored --nocapture
+          cargo build --locked --release --bin roundhouse
+          cargo test --locked --test writebook --release -- --ignored --nocapture
       - name: Save complete check report
-        if: always()
+        id: report
+        if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
         env:
           WRITEBOOK_ROOT: /tmp/writebook
         run: |
@@ -85,6 +98,20 @@ jobs:
             writebook-check.txt
             writebook-inventory-current.json
             tests/fixtures/writebook-inventory.json
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.inventory.outcome == 'success' && steps.report.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job writebook-inventory --outcome '${{ steps.inventory.outcome }}' --outcome '${{ steps.report.outcome }}'
+      - name: Save execution receipt and reports
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-writebook-inventory-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Generate the real-blog fixture once, upload as artifact. Every
@@ -142,6 +169,9 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
@@ -153,13 +183,38 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Look for an identical successful PR execution
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job store-check --input fixtures/store
       - name: cargo build
-        run: cargo build --release --bin roundhouse
+        id: build
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        run: cargo build --locked --release --bin roundhouse
       - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
+        id: check
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: |
           set -euo pipefail
           target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.build.outcome == 'success' && steps.check.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job store-check --outcome '${{ steps.build.outcome }}' --outcome '${{ steps.check.outcome }}'
+      - name: Save execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-store-check-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
@@ -431,8 +486,13 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
+      - name: Use an explicit browser payload directory
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -450,9 +510,34 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Run SharedWorker browser smoke (emit → vite build → drive)
-        run: npm test
+      - name: Emit and build current SharedWorker project
+        run: npm run prebuild
         working-directory: tests/browser_smoke
+      - name: Find successful execution for identical SharedWorker inputs
+        id: reuse
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job browser-smoke-typescript --input tests/browser_smoke/.emitted
+      - name: Run SharedWorker browser smoke (emit → vite build → drive)
+        id: browser
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        run: npm run test-only
+        working-directory: tests/browser_smoke
+      - name: Record actual SharedWorker validation
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.reuse.outcome == 'success' && steps.browser.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job browser-smoke-typescript --outcome '${{ steps.browser.outcome }}'
+      - name: Upload SharedWorker execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-browser-smoke-typescript-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -1589,6 +1674,9 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -1668,8 +1756,20 @@ jobs:
           working-directory: ./fixtures/real-blog
       # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
       - name: cargo test --test framework_tests_rust (green subset)
+        id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          ROUNDHOUSE_CI_REUSE: ${{ github.event_name == 'pull_request' && 'rust-inflector' || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
+      - name: Upload actual inflector execution receipt
+        if: success() && matrix.target == 'rust' && steps.inflector.outcome == 'success' && steps.inflector.outputs.recorded == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-rust-inflector-${{ github.run_attempt }}
+          path: ${{ steps.inflector.outputs.bundle }}
+          retention-days: 7
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
@@ -1891,12 +1991,17 @@ jobs:
     needs: build-site
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
         target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python, ruby, jruby]
     steps:
       - uses: actions/checkout@v5
+      - name: Use an explicit browser payload directory
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: browse-archives
@@ -1975,8 +2080,37 @@ jobs:
           cd e2e
           npm install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
+      - name: Resolve and find successful execution for identical Rust archive inputs
+        id: reuse
+        if: github.event_name == 'pull_request' && matrix.target == 'rust'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job smoke-rust --input browse/rust.tgz
       - name: scripts/smoke ${{ matrix.target }}
-        run: scripts/smoke --tgz browse/${{ matrix.target }}.tgz ${{ matrix.target }}
+        id: smoke
+        if: matrix.target != 'rust' || steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$TARGET" = rust ]; then
+            scripts/smoke --keep --work-dir "$RUNNER_TEMP/ci-smoke-validation" --tgz browse/rust.tgz rust
+          else
+            scripts/smoke --tgz "browse/$TARGET.tgz" "$TARGET"
+          fi
+      - name: Record actual pristine Rust archive validation
+        id: execution
+        if: success() && matrix.target == 'rust' && steps.reuse.outcome == 'success' && steps.reuse.outputs.eligible == 'true' && steps.smoke.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job smoke-rust --validation-dir "$RUNNER_TEMP/ci-smoke-validation/rust" --outcome '${{ steps.smoke.outcome }}'
+      - name: Upload Rust archive execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-smoke-rust-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
