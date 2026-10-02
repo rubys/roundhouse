@@ -5,10 +5,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::App;
+use crate::analyze::ClassInfo;
 use crate::dialect::{MethodDef, MethodReceiver, MethodVisibility};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 use crate::ty::{ParamKind, Ty};
 
@@ -74,7 +75,7 @@ pub(super) fn form_wrapper_helpers(app: &App) -> HashMap<String, FormWrapperHelp
 /// Executable defaults, captures, assignments
 /// and control-flow need a real wrapper-frame lowering, not this substitution.
 /// Existing argument/default/merge evaluation limitations are not expanded here.
-pub(crate) fn preserve_argument_owners(app: &mut App) {
+pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
     let mut names: HashMap<_, HashSet<_>> = HashMap::new();
     let mut counts: HashMap<_, usize> = HashMap::new();
     for lc in &app.library_classes {
@@ -93,7 +94,9 @@ pub(crate) fn preserve_argument_owners(app: &mut App) {
         let own_names = names[&lc.name].clone();
         let allocated = names.get_mut(&lc.name).expect("collected owner");
         let mut added = Vec::new();
-        for m in &mut lc.methods {
+        let mut changed = HashSet::new();
+        let original_len = lc.methods.len();
+        for (index, m) in lc.methods.iter_mut().enumerate() {
             if app.helper_method_index.get(&m.name) != Some(&lc.name)
                 || counts[&(lc.name.clone(), m.name.clone())] != 1
                 || m.params.iter().any(|p| p.default.as_ref().is_some_and(|e| !literal_default(e)))
@@ -195,6 +198,7 @@ pub(crate) fn preserve_argument_owners(app: &mut App) {
                     });
                     value.effects = effects;
                     added.push(bridge);
+                    changed.insert(index);
                 }
             }
             let body = match &mut *m.body.node {
@@ -205,7 +209,24 @@ pub(crate) fn preserve_argument_owners(app: &mut App) {
                 *target = args;
             }
         }
+        if added.is_empty() {
+            continue;
+        }
+        // Register the new class-callable surface before typing its callers.
+        // Do not re-run source analysis over the already-lowered app, or retype
+        // unrelated methods without their original instance-variable context.
+        let mut classes = registry.clone();
+        let info = classes.entry(lc.name.clone()).or_default();
+        for bridge in &added {
+            info.class_methods.insert(bridge.name.clone(), bridge.signature.clone().unwrap());
+            info.class_method_kinds.insert(bridge.name.clone(), bridge.kind);
+        }
         lc.methods.extend(added);
+        for (index, method) in lc.methods.iter_mut().enumerate() {
+            if index >= original_len || changed.contains(&index) {
+                crate::lower::typing::type_method_body(method, &classes, &HashMap::new());
+            }
+        }
     }
 }
 

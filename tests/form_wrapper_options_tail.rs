@@ -189,7 +189,10 @@ end
     )).unwrap().1;
     assert!(!bridge.effects.is_pure(), "the nested DB read is effectful");
     assert_eq!(value.effects, bridge.effects, "the call must retain nested effects");
-    let roundhouse::expr::ExprNode::Send { args, .. } = &*value.node else { panic!("bridge call") };
+    let roundhouse::expr::ExprNode::Send { recv: Some(recv), args, .. } = &*value.node else { panic!("bridge call") };
+    assert_eq!(recv.ty, Some(Ty::Class { id: helper.name.clone(), args: vec![] }),
+        "the synthesized receiver must be typed before downstream lowering");
+    assert_eq!(value.ty.as_ref(), Some(ret.as_ref()));
     assert_eq!(args.iter().map(|a| a.ty.as_ref()).collect::<Vec<_>>(), params.iter().map(|p| Some(&p.ty)).collect::<Vec<_>>());
     let before = app.library_classes.clone();
     roundhouse::session::analyze_and_lower(&mut app);

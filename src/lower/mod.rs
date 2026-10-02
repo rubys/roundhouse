@@ -937,7 +937,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
-    view_to_library::form_wrapper::preserve_argument_owners(app);
+    view_to_library::form_wrapper::preserve_argument_owners(app, registry);
     ran!("form_wrapper_owners");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
