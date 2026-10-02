@@ -760,10 +760,25 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 /// statement text (still possibly containing embedded comments deeper
 /// in, which the quote/comment-aware scanners below handle wherever
 /// they walk it).
+///
+/// The `\restrict <key>` and `\unrestrict <key>` lines that open and
+/// close a dump from pg_dump 18 (and 17.6, 16.10, 15.14, 14.19, 13.22)
+/// go too. They are psql meta-commands: one line each, with no `;`, so
+/// the split glues each onto the statement after it. They change no
+/// schema; Rails 7.2.3 and 8.0.3 onward strip them from the dump.
 fn strip_leading_comment_banner(raw: &str) -> &str {
     let mut s = raw;
     loop {
         let t = s.trim_start();
+        if t.starts_with("\\restrict ") || t.starts_with("\\unrestrict ") {
+            match t.find('\n') {
+                Some(nl) => {
+                    s = &t[nl + 1..];
+                    continue;
+                }
+                None => return "",
+            }
+        }
         if let Some(after) = t.strip_prefix("--") {
             match after.find('\n') {
                 Some(nl) => {

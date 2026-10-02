@@ -77,12 +77,21 @@ pub struct Overlay {
 enum Edit {
     Write { path: String, content: String },
     Replace { path: String, find: String, replace: String },
+    Remove { path: String },
 }
 
 impl Overlay {
     /// Add a file, or replace one outright.
     pub fn write(mut self, path: &str, content: &str) -> Self {
         self.edits.push(Edit::Write { path: path.into(), content: content.into() });
+        self
+    }
+
+    /// Delete an existing file, such as `db/schema.rb` for an app that
+    /// keeps its schema in `db/structure.sql` instead. Panics when it is
+    /// absent.
+    pub fn remove(mut self, path: &str) -> Self {
+        self.edits.push(Edit::Remove { path: path.into() });
         self
     }
 
@@ -189,6 +198,10 @@ impl Overlay {
                     );
                     std::fs::write(full, text.replacen(find.as_str(), replace, 1))
                         .expect("write overlay edit");
+                }
+                Edit::Remove { path } => {
+                    std::fs::remove_file(source.join(path))
+                        .unwrap_or_else(|e| panic!("overlay remove: cannot remove {path}: {e}"));
                 }
             }
         }

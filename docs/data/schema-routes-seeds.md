@@ -260,7 +260,14 @@ one process so this isn't an issue.
    the final shape is straightforward; replaying migrations to derive
    it is avoidable work.
 
-When `schema.rb` is absent (never migrated locally, or gitignored),
+When `schema.rb` is absent, Roundhouse next reads `db/structure.sql`
+(`src/ingest/structure_sql.rs`), the SQL dump Rails writes under
+`config.active_record.schema_format = :sql`. Its reader handles
+PostgreSQL's `pg_dump` format. It skips the `\restrict` and
+`\unrestrict` lines that pg_dump 18 (and the August 2025 minor
+releases) brackets a dump with and that Rails before 7.2.3/8.0.3 keeps;
+any other psql meta-command is ledgered as a statement it does not
+model. When there is neither (never migrated locally, or gitignored),
 the walk falls back to folding `db/migrate/*.rb` in filename order —
 `src/ingest/schema.rs::ingest_migration`, called from
 `src/ingest/app.rs`. Migration shapes it can't fold deterministically

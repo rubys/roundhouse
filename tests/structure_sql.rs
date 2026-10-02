@@ -414,3 +414,55 @@ CREATE UNIQUE INDEX index_tokens_on_user_id ON public.tokens USING btree (user_i
         ]
     );
 }
+
+/// pg_dump 18 (and 17.6, 16.10, 15.14, 14.19, 13.22) opens a dump with
+/// `\restrict <key>` and closes it with `\unrestrict <key>`. Each is a
+/// psql meta-command on a line of its own, with no `;`, so it reached
+/// the statement split glued to whatever came next, and strict ingest
+/// stopped on `structure.sql statement not modeled: \RESTRICT …`. Rails
+/// 7.2.3 and 8.0.3 onward strip both lines from the dump; earlier
+/// versions keep them, after the leading comments they do strip and
+/// before the `SET search_path` they append.
+#[test]
+fn pg_dump_restrict_lines_are_not_statements() {
+    let sql = r#"\restrict zUyUIswlha2RbZMedZzUe8pO4Wf9iauTiSg4I61hfovPxfQRKvvZhhfhXwcY9FH
+CREATE TABLE public.notes (
+    id bigint NOT NULL,
+    body text
+);
+
+ALTER TABLE ONLY public.notes
+    ADD CONSTRAINT notes_pkey PRIMARY KEY (id);
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict zUyUIswlha2RbZMedZzUe8pO4Wf9iauTiSg4I61hfovPxfQRKvvZhhfhXwcY9FH
+
+SET search_path TO "$user", public;
+
+INSERT INTO "schema_migrations" (version) VALUES
+('20261002052542');
+
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
+    let notes = &schema.tables[&Symbol::from("notes")];
+    assert!(col(notes, "id").primary_key);
+    assert_eq!(col(notes, "body").col_type, ColumnType::Text);
+}
+
+/// Only those two lines are skipped. Any other meta-command, such as the
+/// `\connect` that `pg_dump --create` writes, is still ledgered, and the
+/// same text inside a string literal is part of the statement.
+#[test]
+fn other_meta_commands_and_literals_are_left_alone() {
+    let connect = "\\connect app_production\n\nCREATE TABLE public.notes (\n    id bigint NOT NULL\n);\n";
+    let err = ingest_structure_sql(connect.as_bytes(), "db/structure.sql").unwrap_err();
+    assert!(err.to_string().contains("not modeled: \\CONNECT APP_PRODUCTION"), "{err}");
+
+    let sql = "CREATE TABLE public.notes (\n    id bigint NOT NULL,\n    body text DEFAULT 'first line\n\\restrict kept'::text\n);\n";
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
+    let notes = &schema.tables[&Symbol::from("notes")];
+    assert_eq!(col(notes, "body").default.as_deref(), Some("first line\n\\restrict kept"));
+}

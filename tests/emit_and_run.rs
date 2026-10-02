@@ -2772,3 +2772,20 @@ end
         .run_test("test/models/upsert_target_test.rb")
         .assert_passes();
 }
+
+/// The blog with its schema as a `db/structure.sql` from pg_dump 18 runs.
+/// The dump opens with `\restrict <key>` and closes with `\unrestrict
+/// <key>`, psql meta-commands pg_dump writes since 18 and the August 2025
+/// minor releases; Rails before 7.2.3 and 8.0.3 keeps them. Ingest read
+/// each as the head of an unmodeled statement and stopped. The dump is
+/// the blog's `db/schema.rb` loaded into PostgreSQL 18.3 and dumped with
+/// Rails' flags (`--schema-only --no-privileges --no-owner`), with the
+/// `SET search_path` and `schema_migrations` lines Rails appends.
+#[test]
+fn a_structure_sql_from_pg_dump_18_runs() {
+    emit_and_run::real_blog()
+        .remove("db/schema.rb")
+        .write("db/structure.sql", include_str!("support/real_blog_structure.sql"))
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
