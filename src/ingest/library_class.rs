@@ -2451,64 +2451,110 @@ pub fn ingest_concern_class_method_spans(
     // library-shape ingestion. This walk records binding barriers only;
     // it neither evaluates constants nor executes class bodies.
     let mut shadows = HashSet::new();
-    framework_shadow_scopes(&root, &[], &mut shadows);
+    framework_shadow_scopes(&root, &mut shadows);
     (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
 }
 
 fn framework_shadow_scopes(
     node: &ruby_prism::Node<'_>,
-    scope: &[String],
     out: &mut HashSet<Vec<String>>,
 ) {
-    if let Some(program) = node.as_program_node() {
-        framework_shadow_scopes(&program.statements().as_node(), scope, out);
-    } else if let Some(statements) = node.as_statements_node() {
-        for statement in statements.body().iter() {
-            framework_shadow_scopes(&statement, scope, out);
+    struct Shadows<'a> {
+        scope: Vec<String>,
+        out: &'a mut HashSet<Vec<String>>,
+    }
+    impl Shadows<'_> {
+        fn literal_path(node: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+            if let Some(read) = node.as_constant_read_node() {
+                return Some(vec![constant_id_str(&read.name()).to_string()]);
+            }
+            let path = node.as_constant_path_node()?;
+            let mut names = path.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p))?;
+            names.push(constant_id_str(&path.name()?).to_string());
+            Some(names)
         }
-    } else if let Some(write) = node.as_constant_write_node() {
-        if constant_id_str(&write.name()) == "ActiveSupport" {
-            out.insert(scope.to_vec());
-        }
-        if scope == ["ActiveSupport"] && constant_id_str(&write.name()) == "Concern" {
-            out.insert(Vec::new());
-        }
-    } else if let Some(write) = node.as_constant_path_write_node() {
-        if let Some(path) = constant_path_of(&write.target().as_node()) {
+        fn binding(&mut self, node: &ruby_prism::Node<'_>) {
+            let name = node.as_constant_write_node().map(|n| n.name())
+                .or_else(|| node.as_constant_or_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_and_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_operator_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_target_node().map(|n| n.name()));
+            if let Some(name) = name {
+                if constant_id_str(&name) == "ActiveSupport" {
+                    self.out.insert(self.scope.clone());
+                }
+                if self.scope == ["ActiveSupport"] && constant_id_str(&name) == "Concern" {
+                    self.out.insert(Vec::new());
+                }
+            }
+            let target = node.as_constant_path_write_node().map(|n| n.target().as_node())
+                .or_else(|| node.as_constant_path_or_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_and_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_operator_write_node().map(|n| n.target().as_node()));
+            let (path, name) = if let Some(target) = target {
+                (Self::literal_path(&target), target.as_constant_path_node().and_then(|n| n.name()))
+            } else if let Some(target) = node.as_constant_path_target_node() {
+                let mut path = target.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p));
+                if let (Some(path), Some(name)) = (&mut path, target.name()) {
+                    path.push(constant_id_str(&name).to_string());
+                }
+                (path, target.name())
+            } else {
+                return;
+            };
+            let Some(path) = path else {
+                if name.is_some_and(|n| matches!(constant_id_str(&n), "ActiveSupport" | "Concern")) {
+                    self.out.insert(Vec::new());
+                }
+                return;
+            };
             if let Some(index) = path.iter().position(|name| name == "ActiveSupport") {
                 let parent = path[..index].to_vec();
-                out.insert(parent.clone());
-                let mut relative = scope.to_vec();
+                self.out.insert(parent.clone());
+                let mut relative = self.scope.clone();
                 relative.extend(parent);
-                out.insert(relative);
+                self.out.insert(relative);
             }
         }
-    } else {
-        let declaration = if let Some(module) = node.as_module_node() {
-            module_name_path(&module).map(|path| (path, module.body()))
-        } else if let Some(class) = node.as_class_node() {
-            class_name_path(&class).map(|path| (path, class.body()))
-        } else {
-            None
-        };
-        if let Some((path, body)) = declaration {
-            let mut inner = scope.to_vec();
-            inner.extend(path);
+        fn declaration(&mut self, path: ruby_prism::Node<'_>, body: Option<ruby_prism::Node<'_>>, class: bool) {
+            use super::util::constant_path_is_rooted;
+            let Some(names) = Self::literal_path(&path) else { return };
+            let outer = self.scope.clone();
+            if path.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+                self.scope.clear();
+            }
+            self.scope.extend(names);
             // Only a root module reopening preserves the framework identity;
             // nested declarations and class declarations remain barriers.
-            if inner.last().is_some_and(|name| name == "ActiveSupport")
-                && (inner.len() > 1 || node.as_class_node().is_some())
+            if self.scope.last().is_some_and(|name| name == "ActiveSupport")
+                && (self.scope.len() > 1 || class)
             {
-                out.insert(inner[..inner.len() - 1].to_vec());
+                self.out.insert(self.scope[..self.scope.len() - 1].to_vec());
             }
-            if inner.as_slice() == ["ActiveSupport", "Concern"] {
-                out.insert(Vec::new());
+            if self.scope.as_slice() == ["ActiveSupport", "Concern"] {
+                self.out.insert(Vec::new());
             }
             if let Some(body) = body {
-                framework_shadow_scopes(&body, &inner, out);
+                ruby_prism::Visit::visit(self, &body);
             }
+            self.scope = outer;
         }
     }
+    impl<'pr> ruby_prism::Visit<'pr> for Shadows<'_> {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.declaration(node.constant_path(), node.body(), false);
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(superclass) = node.superclass() { self.visit(&superclass); }
+            self.declaration(node.constant_path(), node.body(), true);
+        }
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if let Some(receiver) = node.receiver() { self.visit(&receiver); }
+        }
+    }
+    ruby_prism::Visit::visit(&mut Shadows { scope: Vec::new(), out }, node);
 }
 
 pub fn ingest_concern_filters(

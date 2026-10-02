@@ -668,6 +668,9 @@ fn configuration_refuses_lexically_shadowed_framework_constants() {
     // An unrelated namespace is not on this carrier's lexical lookup path.
     let unrelated = format!("module Unrelated\n ActiveSupport = String\nend\n{WINDOW_SETTINGS}");
     assert!(configuration_app(&unrelated, "configure_window mode: :month").is_ok());
+    let unrelated = format!("module Unrelated\n if true; ActiveSupport ||= String; end\nend\n{WINDOW_SETTINGS}");
+    assert_eq!(configuration_app(&unrelated, "configure_window mode: :month").unwrap()
+        .controllers[0].class_methods().count(), 2);
 
     // A root module reopening preserves the framework identity.
     let reopened = format!("module ActiveSupport; end\n{WINDOW_SETTINGS}");
@@ -676,11 +679,30 @@ fn configuration_refuses_lexically_shadowed_framework_constants() {
 
     for prefix in [
         "ActiveSupport = String",
+        "ActiveSupport ||= String",
+        "ActiveSupport &&= String",
+        "ActiveSupport += String",
+        "ActiveSupport, other = String, 1",
+        "ActiveSupport::Concern ||= String",
+        "ActiveSupport::Concern &&= String",
+        "ActiveSupport::Concern += String",
+        "ActiveSupport::Concern, other = String, 1",
+        "Object.new::Concern = String",
+        "Object.new::Concern, other = String, 1",
+        "if true; ActiveSupport = String; end",
+        "unless false; ActiveSupport = String; end",
+        "begin; ActiveSupport = String; end",
         "class ActiveSupport; end",
         "module ActiveSupport::Concern; end",
         "module ActiveSupport; module Concern; end; end",
         "module ActiveSupport; class Concern; end; end",
         "module ActiveSupport; Concern = String; end",
+        "module ActiveSupport; Concern ||= String; end",
+        "module ActiveSupport; Concern &&= String; end",
+        "module ActiveSupport; Concern += String; end",
+        "module ActiveSupport; Concern, other = String, 1; end",
+        "module ActiveSupport; if true; Concern = String; end; end",
+        "module Unrelated; module ::ActiveSupport::Concern; end; end",
         "WindowSettings::ActiveSupport = String",
         "module WindowSettings; module ActiveSupport; end; end",
         "ActiveSupport::Concern = String",
