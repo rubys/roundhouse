@@ -4544,6 +4544,8 @@ impl Analyzer {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
         }
     }

@@ -303,6 +303,8 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Redo => "redo".to_string(),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::ForwardArgs => "...".to_string(),
+        ExprNode::ForwardKeywords => "**".to_string(),
+        ExprNode::Defined { operand } => format!("defined?({})", emit_expr(operand)),
         ExprNode::KeywordSplat { value } => format!("**{}", paren_multiline(emit_arg(value))),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
@@ -1003,7 +1005,7 @@ pub(super) fn emit_send_base(
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
     // and `self`, before any surface-syntax prettification below.
-    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. })) {
+    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::KeywordSplat { .. })) {
         return match recv {
             Some(r) => {
                 let receiver = emit_expr(r);

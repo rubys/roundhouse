@@ -1,11 +1,4 @@
-//! `def f(**); g(**); end` — anonymous keyword-rest forwarding. Prism
-//! reports the parameter as a `KeywordRestParameterNode` with an empty
-//! `name()`, and the declaration side used to silently drop it, while
-//! the call-site bare `**` (an `AssocSplatNode` with no value) was
-//! ledgered as "anonymous `**` keyword forwarding not yet supported".
-//! Both sides now synthesize the same `__fwd_kwargs` binding name
-//! `pr/argument-forwarding`'s `...` desugar uses, so the two ends
-//! agree without a dedicated "anonymous kwrest" IR shape.
+//! Anonymous keyword forwarding retains provenance, not a capturable local.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +15,7 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
-fn anonymous_kwrest_param_and_forward_share_the_synthesized_binding() {
+fn anonymous_kwrest_param_and_forward_keep_the_native_contract() {
     let app = ingest_app_from_tree(tree(&[(
         "app/services/widget.rb",
         "class Widget\n  def build\n    other\n  end\n\n  def other(**opts)\n    opts\n  end\nend\n",
@@ -45,28 +38,49 @@ fn anonymous_kwrest_param_and_forward_share_the_synthesized_binding() {
         .expect("AnonWidget class");
     let build = class.methods.iter().find(|m| m.name.as_str() == "build").expect("build method");
 
-    // Declaration side: the anonymous `**` synthesizes a `__fwd_kwargs`
-    // parameter (flattened to a defaulted positional, `from_kwrest`,
-    // the same shape a NAMED `**opts` gets when nothing else in the
-    // def keeps the keyword group — see the `keeps_keywords` gate in
-    // `ingest_library_method`) rather than being dropped.
+    // The declaration has no binding; it must never capture a user's local.
     let kwrest = build
         .params
         .iter()
-        .find(|p: &&Param| p.from_kwrest)
-        .unwrap_or_else(|| panic!("expected a synthesized kwrest param, got {:?}", build.params));
-    assert_eq!(kwrest.name.as_str(), "__fwd_kwargs");
+        .find(|p: &&Param| p.keyword && p.rest)
+        .unwrap_or_else(|| panic!("expected anonymous kwrest, got {:?}", build.params));
+    assert_eq!(kwrest.name.as_str(), "");
+    assert!(!kwrest.from_kwrest);
 
-    // Call side: the bare `**` forward reads that same binding rather
-    // than failing ingest.
+    // The call packet is not a value read from a synthesized variable.
     match &*build.body.node {
         ExprNode::Send { args, .. } => {
             assert_eq!(args.len(), 1);
-            match &*args[0].node {
-                ExprNode::Var { name, .. } => assert_eq!(name.as_str(), "__fwd_kwargs"),
-                other => panic!("expected a __fwd_kwargs Var, got {other:?}"),
-            }
+            assert!(matches!(&*args[0].node, ExprNode::ForwardKeywords));
         }
         other => panic!("expected a Send body, got {other:?}"),
+    }
+}
+
+#[test]
+fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
+    use roundhouse::diagnostic::{DiagnosticKind, Severity};
+    use roundhouse::project::{BuildTarget, target_files};
+    for (source, construct) in [
+        ("class Probe; def self.call(**); target(**); end; def self.target(factor:); factor; end; end", "anonymous keyword forwarding"),
+        ("class Probe; def self.call; defined?(MissingPr197); end; end", "runtime defined? query"),
+        ("class Probe; def call; @@count ||= 11; @@count; end; end", "class variable write"),
+        ("class Probe; def self.call; @@count; end; end", "class variable read"),
+    ] {
+        let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).unwrap();
+        roundhouse::session::analyze_and_lower(&mut app);
+        for target in BuildTarget::ALL.iter().copied().filter(|t| !matches!(t, BuildTarget::Blog)) {
+            let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+                target_files(&app, roundhouse::fixtures::real_blog(), target)
+            });
+            let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
+                DiagnosticKind::Unsupported { construct: name, .. } if name.as_str() == construct)).collect();
+            if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+                assert!(gates.is_empty(), "{target:?}: {diags:?}");
+            } else {
+                assert!(!gates.is_empty(), "{target:?}: {construct}: {diags:?}");
+                assert!(gates.iter().all(|d| d.severity == Severity::Error && !d.span.is_synthetic()));
+            }
+        }
     }
 }

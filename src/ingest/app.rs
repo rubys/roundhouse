@@ -227,6 +227,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    super::sources::set_root(dir);
     let additional_test_paths = additional_test_paths(vfs, dir)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();

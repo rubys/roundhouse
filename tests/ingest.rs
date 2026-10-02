@@ -1570,19 +1570,20 @@ fn defined_extended_targets_ingest_and_round_trip() {
             roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
         };
         let expr = parse(source);
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
-            panic!("expected defined? marker: {expr:?}");
+        let ExprNode::Defined { operand } = &*expr.node else {
+            panic!("expected native defined? syntax: {expr:?}");
         };
-        assert_eq!(method.as_str(), "defined?");
-        assert_eq!(args.len(), 1);
         match source {
-            "defined?(Widget)" => assert!(matches!(&*args[0].node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget"])),
-            "defined?(Widget::Kind)" => assert!(matches!(&*args[0].node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget", "Kind"])),
-            "defined?(widget.kind)" => assert!(matches!(&*args[0].node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "kind")),
-            _ => assert!(matches!(&*args[0].node, ExprNode::Super { args: None })),
+            "defined?(Widget)" => assert!(matches!(&*operand.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget"])),
+            "defined?(Widget::Kind)" => assert!(matches!(&*operand.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget", "Kind"])),
+            "defined?(widget.kind)" => assert!(matches!(&*operand.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "kind")),
+            _ => assert!(matches!(&*operand.node, ExprNode::Super { args: None })),
         }
         let emitted = emit_expr(&expr);
         assert_eq!(emit_expr(&parse(&emitted)), emitted);
+        let mut children = 0;
+        expr.node.for_each_child(&mut |_| children += 1);
+        assert_eq!(children, 0, "a syntax query must not expose value children");
     }
 }
 
@@ -1642,7 +1643,73 @@ fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
     };
     let emitted = emit_expr(&parse("a, *b, c = [1, 2, 3, 4]"));
     assert!(emitted.contains("a = "), "{emitted}");
-    assert!(emitted.contains("...-1]") || emitted.contains("... -1]"), "{emitted}");
+    assert!(emitted.contains(".drop(1).take("), "{emitted}");
     assert!(emitted.contains("[-1]"), "{emitted}");
     assert_eq!(emit_expr(&parse(&emitted)), emitted);
+}
+
+#[test]
+fn post_rest_effectful_targets_remain_explicitly_unsupported() {
+    for source in [
+        "a, *, mark(log)[0] = [rhs(log)]",
+        "mark(log)[0], *b, c = [rhs(log)]",
+        "a, *mark(log)[0], c = [rhs(log)]",
+        "a, *, target.value = [rhs(log)]",
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("LHS order must not change silently");
+        assert!(err.to_string().contains("preserved LHS evaluation order"), "{err}");
+    }
+}
+
+#[test]
+fn class_method_classvar_writes_cannot_be_normalized_to_per_class_storage() {
+    for method in ["def self.bump", "class << self; def bump"] {
+        for write in ["@@count ||= 11", "@@count = 14"] {
+            let extra_end = if method.starts_with("class") { "end" } else { "" };
+            let source = format!("class Parent; {method}; {write}; @@count; end; {extra_end}; end\nclass Child < Parent; end");
+            let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                .expect_err("shared classvar storage must not become a class ivar");
+            assert!(err.to_string().contains("shared inheritance storage"), "{err}");
+        }
+    }
+}
+
+#[test]
+fn post_rest_nonliteral_rhs_remains_unsupported_without_coercion() {
+    for rhs in ["11", "nil", "Coercible.new", "values", "[11, 22].dup"] {
+        let source = format!("a, *b, c = {rhs}");
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>")
+            .expect_err("collection methods do not implement Ruby coercion");
+        assert!(err.to_string().contains("to_ary coercion"), "{err}");
+    }
+}
+
+#[test]
+fn richer_defined_call_shapes_remain_explicitly_unsupported() {
+    for source in ["defined?(self.call(11))", "defined?(self.call {})", "defined?(self&.call)"] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0);
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("unverified query shape");
+        assert!(err.to_string().contains("defined? calls"), "{err}");
+    }
+}
+
+#[test]
+fn native_classvar_writes_cannot_split_modeled_cattr_storage() {
+    for declaration in ["cattr_accessor", "mattr_accessor"] {
+        let source = format!("class Probe; {declaration} :count; def bump; @@count = 11; end; def self.current; @@count; end; end");
+        let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+            .expect_err("native and modeled storage cannot silently diverge");
+        assert!(err.to_string().contains("alongside cattr/mattr storage"), "{err}");
+    }
 }

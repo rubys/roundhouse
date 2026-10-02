@@ -87,6 +87,32 @@ fn ingest_multi_write(
         None => return Ok(ExprNode::MultiAssign { targets, value }),
         Some(rest) => rest,
     };
+    if !mw.rights().is_empty() {
+        // The desugar below indexes the RHS directly. Ruby instead calls
+        // to_ary (or wraps a scalar); collection dispatch alone does not
+        // prove those coercion semantics. Only literal arrays are verified.
+        if mw.value().as_array_node().is_none() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "post-rest multi-write requires an array literal RHS; to_ary coercion is not modeled".into(),
+            });
+        }
+        // Receiver/index expressions on an assignment LHS run BEFORE the
+        // RHS in Ruby. This desugar only preserves variable targets; do not
+        // accept the new post-rest shape with a different evaluation order.
+        for target in mw.lefts().iter().chain(mw.rights().iter())
+            .chain(rest.as_splat_node().and_then(|s| s.expression()))
+        {
+            if target.as_local_variable_target_node().is_none()
+                && target.as_instance_variable_target_node().is_none()
+            {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "post-rest multi-write with non-variable targets requires preserved LHS evaluation order".into(),
+                });
+            }
+        }
+    }
     // `a, *rest = expr` — trailing splat. The shared IR has no rest-aware
     // destructuring node, so desugar to a temp bind + positional `[]`
     // reads + `rest = temp.drop(n)`. Every resulting node (Assign / `[]`
@@ -102,26 +128,28 @@ fn ingest_multi_write(
     let int_lit = |v: i64| {
         Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } })
     };
-    let index_read = |index: Expr| {
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
         Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(tmp_read()),
-                method: Symbol::from("[]"),
-                args: vec![index],
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
                 block: None,
                 parenthesized: true,
             },
         )
     };
-    // `a, *b, c = expr` — POST-rest targets after the splat. Prism's
-    // `rights()` holds them (`c` here); reading them off the tail needs
-    // negative indices, and the rest binding (`b`) needs a slice rather
-    // than the plain `drop(n)` the no-rights case uses below — it has to
-    // stop short of the tail, not just skip the head.
+    let index_read = |index: Expr| send(tmp_read(), "[]", vec![index]);
     let rights: Vec<Node<'_>> = mw.rights().iter().collect();
     let n_lefts = targets.len();
     let n_rights = rights.len();
+    // Leading bindings consume first. A short RHS supplies the remaining
+    // values to the right targets from left to right, then pads with nil;
+    // negative indexing alone would reuse values already claimed by the head.
+    let short_rhs = || send(
+        send(tmp_read(), "length", vec![]), "<", vec![int_lit((n_lefts + n_rights) as i64)],
+    );
     let mut exprs: Vec<Expr> = Vec::with_capacity(n_lefts + n_rights + 3);
     exprs.push(Expr::new(
         span,
@@ -138,42 +166,29 @@ fn ingest_multi_write(
     // only a named target gets a binding.
     if let Some(rest_node) = rest.as_splat_node().and_then(|s| s.expression()) {
         let rest_target = multi_write_target(&rest_node, file)?;
+        let tail = send(tmp_read(), "drop", vec![int_lit(n_lefts as i64)]);
         let rest_value = if n_rights == 0 {
-            // No post-rest targets: the rest is everything after the
-            // leading positionals.
-            Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(tmp_read()),
-                    method: Symbol::from("drop"),
-                    args: vec![int_lit(n_lefts as i64)],
-                    block: None,
-                    parenthesized: true,
-                },
-            )
+            tail
         } else {
-            // Post-rest targets claim the tail: the rest is everything
-            // BETWEEN the leading positionals and the trailing ones —
-            // `temp[n_lefts...-n_rights]`, an exclusive range with a
-            // negative end that counts back from the tail regardless of
-            // the RHS's actual length.
-            index_read(Expr::new(
+            let count = Expr::new(
                 span,
-                ExprNode::Range {
-                    begin: Some(int_lit(n_lefts as i64)),
-                    end: Some(int_lit(-(n_rights as i64))),
-                    exclusive: true,
+                ExprNode::If {
+                    cond: short_rhs(),
+                    then_branch: int_lit(0),
+                    else_branch: send(send(tmp_read(), "length", vec![]), "-", vec![int_lit((n_lefts + n_rights) as i64)]),
                 },
-            ))
+            );
+            send(tail, "take", vec![count])
         };
         exprs.push(Expr::new(span, ExprNode::Assign { target: rest_target, value: rest_value }));
     }
-    // Each post-rest target reads from the tail by negative index:
-    // `a, *b, c, d = expr` puts `c` at `temp[-2]` and `d` at `temp[-1]`,
-    // regardless of how long `b` ends up being.
     for (i, right_node) in rights.iter().enumerate() {
         let target = multi_write_target(right_node, file)?;
-        let read = index_read(int_lit(-((n_rights - i) as i64)));
+        let read = Expr::new(span, ExprNode::If {
+            cond: short_rhs(),
+            then_branch: index_read(int_lit((n_lefts + i) as i64)),
+            else_branch: index_read(int_lit(-((n_rights - i) as i64))),
+        });
         exprs.push(Expr::new(span, ExprNode::Assign { target, value: read }));
     }
     exprs.push(tmp_read());
@@ -267,6 +282,40 @@ fn absurd_raise(span: Span, value: Expr) -> ExprNode {
         block: None,
         parenthesized: true,
     }
+}
+
+/// A defined? operand is syntax, not an expression to normalize. In
+/// particular, framework predicates and Sorbet assertions must stay calls.
+fn ingest_defined_operand(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
+    if let Some(call) = node.as_call_node() {
+        if call.arguments().is_some() || call.block().is_some() || call.is_safe_navigation() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "defined? calls with arguments, blocks or safe navigation are not modeled".into(),
+            });
+        }
+        let loc = node.location();
+        return Ok(Expr::new(
+            Span { file: super::sources::file_id(file), start: loc.start_offset() as u32, end: loc.end_offset() as u32 },
+            ExprNode::Send {
+                recv: call.receiver().map(|recv| ingest_defined_operand(&recv, file)).transpose()?,
+                method: Symbol::from(constant_id_str(&call.name())),
+                args: vec![],
+                block: None,
+                parenthesized: call.opening_loc().is_some(),
+            },
+        ));
+    }
+    if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some()
+        || node.as_forwarding_super_node().is_some() || node.as_local_variable_read_node().is_some()
+        || node.as_instance_variable_read_node().is_some() || node.as_self_node().is_some()
+    {
+        return ingest_expr(node, file);
+    }
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!("`defined?` does not support this target yet: {node:?}"),
+    })
 }
 
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
@@ -429,7 +478,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 && block.is_none()
                 && recv.is_some()
                 && args.len() == 1
-                && !matches!(&*args[0].node, ExprNode::ForwardArgs)
+                && !matches!(&*args[0].node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords)
             {
                 let r = recv.unwrap();
                 let mut defaults = args.into_iter().next().unwrap();
@@ -633,115 +682,46 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // `Var(name)` reference inside a marker Send; the view-lowerer
         // picks up that inner Var as a partial parameter
         // (collect_extra_params) then rewrites the marker Send to
-        // `!name.nil?` (rewrite_defined_to_nil_check). `defined?(@ivar)`,
-        // `defined?(Const)` / `defined?(A::B)`, `defined?(a.b)`, and
-        // `defined?(super)` extend the same marker-Send shape with their
-        // own operand expression — none of them are partial-local
-        // guards, so the view-lowerer's Var-based rewrite never sees
-        // them, and the analyzer's universal `defined?` typing (`Str?`,
-        // see `analyze/body/send.rs`) covers all of them alike since it
-        // dispatches on the method name, not the operand shape.
+        // `!name.nil?` (rewrite_defined_to_nil_check). Richer native queries
+        // have a dedicated node so no ordinary-call pass rewrites them.
         n if n.as_defined_node().is_some() => {
             let d = n.as_defined_node().unwrap();
             let inner = d.value();
-            // `defined?(@ivar)` — the memoization-guard idiom
-            // (`return @x if defined?(@x)`), all over Mastodon's
-            // ApplicationController. Lift the ivar read into the same
-            // marker Send; the analyzer types `defined?` as `Str?` and
-            // the ivar's type comes from its assignments, so the guard
-            // costs nothing. (Class-body ivars aren't partial locals,
-            // so the view-lowerer's Var-based rewrite never sees this
-            // shape.)
-            if let Some(iv) = inner.as_instance_variable_read_node() {
-                let raw = constant_id_str(&iv.name());
-                let name = raw.strip_prefix('@').unwrap_or(raw);
-                let ivar = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Ivar { name: Symbol::from(name) },
-                );
-                return Ok(Expr::new(
+            // Only bareword partial locals need a special representation;
+            // native runtime operands use the syntax-only walker.
+            let bareword = inner.as_call_node().filter(|c| {
+                c.receiver().is_none() && c.arguments().is_none() && c.block().is_none()
+            });
+            let arg = if let Some(call) = bareword {
+                Expr::new(
                     span,
-                    ExprNode::Send {
-                        recv: None,
-                        method: Symbol::from("defined?"),
-                        args: vec![ivar],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ));
-            }
-            // `defined?(Const)` / `defined?(A::B)` — whether a constant
-            // resolves is, in principle, a fact the class registry could
-            // answer statically. Answering it here would mean
-            // duplicating the registry's own resolution timing inside
-            // ingest, before the registry is even built; leaving it as
-            // a runtime check — same marker-Send shape as every other
-            // `defined?` target — is exactly as correct (Ruby evaluates
-            // it at runtime too) and costs nothing extra.
-            let arg: Option<Expr> = if let Some(cr) = inner.as_constant_read_node() {
-                Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from(constant_id_str(&cr.name()))] },
-                ))
-            } else if let Some(cp) = inner.as_constant_path_node() {
-                Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: constant_path_segments(&cp) },
-                ))
-            } else if inner.as_forwarding_super_node().is_some() {
-                // `defined?(super)` — bare `super`, no parens. Same
-                // `ExprNode::Super` a plain `super` statement ingests
-                // to; `defined?` only asks whether it resolves; it does
-                // not invoke it.
-                Some(Expr::new(Span::synthetic(), ExprNode::Super { args: None }))
-            } else if let Some(c) = inner.as_call_node() {
-                let bareword =
-                    c.receiver().is_none() && c.arguments().is_none() && c.block().is_none();
-                if bareword {
-                    Some(Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Var {
-                            id: crate::ident::VarId(0),
-                            name: Symbol::from(constant_id_str(&c.name())),
-                        },
-                    ))
-                } else {
-                    // `defined?(a.b)` — a real receiver/call chain, not
-                    // the partial-local idiom. Ingest it exactly like
-                    // any other expression; `defined?` only asks
-                    // whether it would raise, not what it returns, but
-                    // giving the analyzer the real Send lets it
-                    // type-check the receiver and args the same as
-                    // anywhere else in the body.
-                    Some(ingest_expr(&c.as_node(), file)?)
-                }
-            } else if let Some(lv) = inner.as_local_variable_read_node() {
-                Some(Expr::new(
-                    Span::synthetic(),
                     ExprNode::Var {
                         id: crate::ident::VarId(0),
-                        name: Symbol::from(constant_id_str(&lv.name())),
+                        name: Symbol::from(constant_id_str(&call.name())),
                     },
-                ))
+                )
+            } else if inner.as_local_variable_read_node().is_some()
+                || inner.as_instance_variable_read_node().is_some()
+            {
+                ingest_expr(&inner, file)?
+            } else if inner.as_call_node().is_some() || inner.as_constant_read_node().is_some()
+                || inner.as_constant_path_node().is_some() || inner.as_forwarding_super_node().is_some()
+            {
+                return Ok(Expr::new(span, ExprNode::Defined {
+                    operand: ingest_defined_operand(&inner, file)?,
+                }));
             } else {
-                None
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("`defined?` does not support this target yet: {inner:?}"),
+                });
             };
-            match arg {
-                Some(arg) => ExprNode::Send {
-                    recv: None,
-                    method: Symbol::from("defined?"),
-                    args: vec![arg],
-                    block: None,
-                    parenthesized: true,
-                },
-                None => {
-                    return Err(IngestError::Unsupported {
-                        file: file.into(),
-                        message: format!(
-                            "`defined?` does not support this target yet: {inner:?}"
-                        ),
-                    });
-                }
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("defined?"),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
             }
         }
         n if n.as_symbol_node().is_some() => {
@@ -762,7 +742,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // other string literal, so `File.expand_path('..', __FILE__)`
         // and friends type-check through it for free.
         n if n.as_source_file_node().is_some() => {
-            ExprNode::Lit { value: Literal::Str { value: app_relative_path(file) } }
+            ExprNode::Lit { value: Literal::Str { value: super::sources::relative_path(file) } }
         }
         // `__LINE__` — the current line number. Looked up in the
         // per-thread source registry (`sources::register` already ran
@@ -1984,27 +1964,6 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     Ok(Expr::new(span, expr_node))
 }
 
-/// Best-effort app-root-relative rendering of an ingest `file` identity,
-/// for `__FILE__`. `file` is frequently an absolute filesystem path (it
-/// is built from wherever `ingest_app` was pointed), and baking that
-/// into an emitted literal would embed one machine's directory layout
-/// into the output. Rails apps keep every source file under one of a
-/// handful of top-level directories, so trimming everything before the
-/// first one found is a cheap, dependency-free way to recover the
-/// app-relative path without threading the app root through every
-/// `ingest_expr` call. Falls back to `file` unchanged when none match
-/// (already-relative paths, as `parse_one`-style tests use).
-fn app_relative_path(file: &str) -> String {
-    const ROOTS: &[&str] =
-        &["app/", "lib/", "config/", "db/", "spec/", "test/", "bin/", "script/"];
-    for root in ROOTS {
-        if let Some(idx) = file.find(root) {
-            return file[idx..].to_string();
-        }
-    }
-    file.to_string()
-}
-
 /// Map a Prism `binary_operator` symbol (`+`, `-`, `<<`, …) to the IR
 /// `OpAssignOp`. Returns `None` if the operator isn't one we model
 /// today — the caller reports `IngestError::Unsupported` so unknown
@@ -2167,6 +2126,24 @@ fn ingest_forwardable_arguments(
                 end: loc.end_offset() as u32,
             }, ExprNode::ForwardArgs));
         } else {
+            if let Some(hash) = arg.as_keyword_hash_node() {
+                let elements: Vec<_> = hash.elements().iter().collect();
+                if elements.iter().any(|e| e.as_assoc_splat_node().is_some_and(|s| s.value().is_none())) {
+                    if elements.len() != 1 {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: "anonymous `**` mixed with other keyword arguments is not supported yet".into(),
+                        });
+                    }
+                    let loc = elements[0].location();
+                    args.push(Expr::new(Span {
+                        file: super::sources::file_id(file),
+                        start: loc.start_offset() as u32,
+                        end: loc.end_offset() as u32,
+                    }, ExprNode::ForwardKeywords));
+                    continue;
+                }
+            }
             let value = ingest_expr(&arg, file)?;
             // Only a CALL's KeywordHashNode owns this fact. `{**h}`
             // remains an ordinary positional hash/merge expression.
@@ -2607,19 +2584,13 @@ fn ingest_hash_literal(
                 message: format!("unsupported hash element: {el:?}"),
             });
         };
-        // Anonymous `**` forwarding (`def f(**) ; g(**) ; end`) has no
-        // value node of its own to ingest — `ingest_library_method`'s
-        // `keyword_rest` arm synthesizes a `__fwd_kwargs` parameter for
-        // exactly this case (same name `pr/argument-forwarding`'s `...`
-        // desugar uses), so a bare `**` here reads that binding rather
-        // than failing.
-        let value = match splat.value() {
-            Some(value) => ingest_expr(&value, file)?,
-            None => Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__fwd_kwargs") },
-            ),
-        };
+        // Nameless call forwarding is an opaque packet, handled by the
+        // argument-list walk. It cannot be used as an ordinary hash value.
+        let value = splat.value().ok_or_else(|| IngestError::Unsupported {
+            file: file.into(),
+            message: "anonymous `**` outside a call argument is not supported".into(),
+        })?;
+        let value = ingest_expr(&value, file)?;
         saw_splat = true;
         chain = Some(merge_into(chain, std::mem::take(&mut pending), span, value));
     }

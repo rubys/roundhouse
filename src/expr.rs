@@ -421,6 +421,14 @@ pub enum ExprNode {
     /// positional/keyword/block provenance; never a user variable or
     /// an ordinary positional hash. Requires a forwarding formal.
     ForwardArgs,
+    /// Anonymous keyword forwarding (`**`) in call argument position.
+    /// This is an opaque packet sourced from the enclosing anonymous
+    /// keyword-rest formal, not a value or a synthetic local binding.
+    ForwardKeywords,
+    /// Native Ruby syntax query. The operand is syntax, not a value child:
+    /// generic typing/lowering must not resolve or rewrite it. Reachability
+    /// may inspect it to retain methods whose existence is being queried.
+    Defined { operand: Expr },
     /// Source keyword argument group containing `**expression`.
     /// The one value child is the existing ordered hash merge expression;
     /// it evaluates once. This is not a positional `{**hash}` literal.
@@ -520,6 +528,8 @@ impl ExprNode {
             ExprNode::Redo => "Redo",
             ExprNode::Splat { .. } => "Splat",
             ExprNode::ForwardArgs => "ForwardArgs",
+            ExprNode::ForwardKeywords => "ForwardKeywords",
+            ExprNode::Defined { .. } => "Defined",
             ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
             ExprNode::While { .. } => "While",
@@ -568,6 +578,8 @@ impl ExprNode {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -755,6 +767,8 @@ impl ExprNode {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {

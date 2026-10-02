@@ -236,7 +236,10 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // an argument-packet marker, not a value escaping the type system.
     if value_used
         && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
-        && !matches!(&*expr.node, ExprNode::Seq { .. } | ExprNode::ForwardArgs)
+        && !matches!(
+            &*expr.node,
+            ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
+        )
     {
         let kind = DiagnosticKind::GradualUntyped {
             expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
@@ -472,6 +475,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }

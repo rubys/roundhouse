@@ -66,7 +66,15 @@ pub(super) fn push_schema_methods(
             }
         }
         methods.push(synth_attr_writer(owner, col, model));
-        methods.push(synth_column_predicate(owner, col));
+        // An enum label can share its column's name. Rails' enum predicate
+        // overrides the generic attribute query in that case; otherwise
+        // push_user_methods would discard the value comparison as a duplicate.
+        let predicate = Symbol::from(format!("{}?", col.name.as_str()));
+        if !model.enums.contains_key(&col.name)
+            || !super::associations::model_defines_instance_method(model, &predicate)
+        {
+            methods.push(synth_column_predicate(owner, col));
+        }
         // `<col>_previously_changed?` and `saved_change_to_<col>?`
         // (ActiveModel::Dirty subset) — both read the runtime Base's
         // `saved_changes` diff of the last save, and Rails documents

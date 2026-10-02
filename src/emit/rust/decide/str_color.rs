@@ -826,6 +826,8 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         | ExprNode::Break { value: None }
         | ExprNode::Retry
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::Redo => {}
     }
     count

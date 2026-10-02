@@ -405,6 +405,9 @@ where
             }
         }
         ExprNode::Cast { value, .. } => walk_sends(value, visit),
+        // Existence queries still need the queried methods to survive
+        // treeshaking, even though they are not ordinary evaluated children.
+        ExprNode::Defined { operand } => walk_sends(operand, visit),
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
@@ -412,6 +415,7 @@ where
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
         | ExprNode::SelfRef => {}
     }
 }

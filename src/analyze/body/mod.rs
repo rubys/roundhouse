@@ -678,6 +678,8 @@ impl<'a> BodyTyper<'a> {
                 unknown()
             }
 
+            ExprNode::Defined { .. } => Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Bare-name implicit-self Send (no receiver, no args, no
                 // block) resolves to a local binding when one exists. Ruby
@@ -1474,7 +1476,7 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::ForwardArgs => Ty::Untyped,
+            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::Untyped,
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
                 // Splat propagates the inner expression's type

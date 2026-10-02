@@ -1270,6 +1270,7 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut methods: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     let mut unknown_calls: Vec<Expr> = Vec::new();
+    let mut class_attributes: HashSet<Symbol> = HashSet::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
     // method AND a class method. For our targets (which call these as
@@ -1524,6 +1525,9 @@ fn walk_decl_body_with_visibility<'pr>(
                         }
                         let is_class_attr =
                             kw.starts_with("cattr_") || kw.starts_with("mattr_");
+                        if is_class_attr {
+                            class_attributes.extend(names.iter().cloned());
+                        }
                         let recv = if is_class_attr || force_class_receiver {
                             MethodReceiver::Class
                         } else {
@@ -1693,9 +1697,36 @@ fn walk_decl_body_with_visibility<'pr>(
         }
     }
 
+    fn writes_classvar(expr: &Expr, class_attributes: Option<&HashSet<Symbol>>) -> bool {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*expr.node
+            && let Some(bare) = name.as_str().strip_prefix("@@")
+            && class_attributes.is_none_or(|attrs| attrs.iter().any(|attr| attr.as_str() == bare))
+        {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| found |= writes_classvar(child, class_attributes));
+        found
+    }
     for m in &mut methods {
+        if writes_classvar(&m.body, Some(&class_attributes)) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "native class-variable writes alongside cattr/mattr storage are not modeled".into(),
+            });
+        }
         if m.receiver == MethodReceiver::Class {
-            normalize_classvars_to_ivars(&mut m.body);
+            // Native @@ storage is shared with subclasses, whereas the
+            // cattr approximation below uses per-class @ storage. Do not
+            // extend that approximation to newly admitted method writes.
+            if writes_classvar(&m.body, None) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable writes in class methods require shared inheritance storage".into(),
+                });
+            }
+            normalize_classvars_to_ivars(&mut m.body, &class_attributes);
         }
     }
 
@@ -1733,22 +1764,15 @@ fn is_rails_url_helpers_chain(node: &ruby_prism::Node<'_>) -> bool {
     }
 }
 
-fn normalize_classvars_to_ivars(e: &mut Expr) {
+fn normalize_classvars_to_ivars(e: &mut Expr, class_attributes: &HashSet<Symbol>) {
     match &mut *e.node {
-        ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => {
+        ExprNode::Var { name, .. } if name.as_str().starts_with("@@")
+            && class_attributes.iter().any(|attr| attr.as_str() == &name.as_str()[2..]) => {
             let bare = Symbol::from(&name.as_str()[2..]);
             *e.node = ExprNode::Ivar { name: bare };
         }
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-            if name.as_str().starts_with("@@") =>
-        {
-            let bare = Symbol::from(&name.as_str()[2..]);
-            let ExprNode::Assign { target, value } = &mut *e.node else { unreachable!() };
-            *target = LValue::Ivar { name: bare };
-            normalize_classvars_to_ivars(value);
-        }
         _ => {
-            e.node.for_each_child_mut(&mut |c| normalize_classvars_to_ivars(c));
+            e.node.for_each_child_mut(&mut |c| normalize_classvars_to_ivars(c, class_attributes));
         }
     }
 }

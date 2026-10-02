@@ -1313,7 +1313,7 @@ pub(crate) fn for_each_hook_body_ref(
 
 // One inventory for the extra emit-bound roots the hook walker intentionally
 // excludes. Keep the mutable projection and immutable survey in lockstep.
-macro_rules! forwarding_roots {
+macro_rules! emit_roots {
     ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
         for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
         for tm in & $($mutable)? $app.test_modules {
@@ -1336,14 +1336,14 @@ macro_rules! forwarding_roots {
     }
 }
 
-pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+pub(crate) fn for_each_emit_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
     for_each_hook_body(app, f);
-    forwarding_roots!(app, f, iter_mut, as_mut, mut);
+    emit_roots!(app, f, iter_mut, as_mut, mut);
 }
 
-pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
     for_each_hook_body_ref(app, f);
-    forwarding_roots!(app, f, iter, as_ref);
+    emit_roots!(app, f, iter, as_ref);
 }
 
 pub use associations::{

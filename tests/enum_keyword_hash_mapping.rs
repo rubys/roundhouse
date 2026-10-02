@@ -45,14 +45,6 @@ fn article_src() -> String {
         .expect("emitted article.rb")
 }
 
-fn line_containing(src: &str, needle: &str) -> String {
-    src.lines()
-        .find(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("no line contains {needle:?}:\n{src}"))
-        .trim()
-        .to_string()
-}
-
 /// The trailing-keyword-hash mapping ingests at all (no error), and
 /// each label's predicate compares against its own string value rather
 /// than an auto-assigned index — string-backed enums carry their own
@@ -60,11 +52,6 @@ fn line_containing(src: &str, needle: &str) -> String {
 #[test]
 fn trailing_keyword_hash_mapping_ingests_with_its_own_values() {
     let src = article_src();
-    let processing = line_containing(&src, "def processing?");
-    assert!(
-        src.contains(&format!("{processing}\n")) || true,
-        "predicate method exists:\n{src}"
-    );
     // The predicate body compares the column to the label's OWN string
     // value (not an integer index the array form would assign).
     let body = src

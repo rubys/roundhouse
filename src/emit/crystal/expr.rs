@@ -292,6 +292,12 @@ fn emit_node(n: &ExprNode) -> String {
             n.kind_str(),
             "full argument forwarding has no carrier on this target",
         ),
+        ExprNode::ForwardKeywords | ExprNode::Defined { .. } => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "native Ruby syntax has no implementation on this target",
+        ),
         ExprNode::KeywordSplat { .. } => crate::emit::diagnostics::report_unsupported(
             crate::span::Span::synthetic(),
             "crystal",

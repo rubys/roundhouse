@@ -439,6 +439,8 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => false,
         ExprNode::Send { recv, method, args, block, .. } => {
             (recv.is_none() && args.is_empty() && method.as_str() == name)

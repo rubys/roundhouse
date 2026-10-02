@@ -41,6 +41,8 @@ impl super::Analyzer {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
 
             ExprNode::Return { value } => self.visit_effects(value, ctx, out),

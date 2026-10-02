@@ -46,6 +46,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::span::{FileId, SourceFile};
 
@@ -57,11 +58,27 @@ thread_local! {
 struct Registry {
     files: Vec<SourceFile>,
     by_path: HashMap<String, FileId>,
+    root: Option<PathBuf>,
 }
 
 /// Clear the registry for a fresh whole-app ingest.
 pub fn reset() {
     SOURCES.with(|s| *s.borrow_mut() = Registry::default());
+}
+
+/// Whole-app ingest supplies the real root once; source identities and
+/// diagnostic spans stay unchanged, while `__FILE__` can be relocatable.
+pub(super) fn set_root(root: &Path) {
+    SOURCES.with(|s| s.borrow_mut().root = Some(root.to_path_buf()));
+}
+
+pub(super) fn relative_path(path: &str) -> String {
+    SOURCES.with(|s| {
+        let reg = s.borrow();
+        let path = Path::new(path);
+        reg.root.as_ref().and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path).to_string_lossy().into_owned()
+    })
 }
 
 /// Record a source file and return its `FileId` (1-based). Idempotent
@@ -115,7 +132,8 @@ pub fn line_at(path: &str, offset: usize) -> Option<u32> {
         let reg = s.borrow();
         let id = *reg.by_path.get(path)?;
         let file = reg.files.get((id.0 as usize).checked_sub(1)?)?;
-        Some(file.line_col(offset as u32).0)
+        Some(file.text.as_bytes()[..offset.min(file.text.len())].iter()
+            .filter(|&&b| b == b'\n').count() as u32 + 1)
     })
 }
 
@@ -137,6 +155,7 @@ pub fn drain() -> Vec<SourceFile> {
     SOURCES.with(|s| {
         let mut reg = s.borrow_mut();
         reg.by_path.clear();
+        reg.root = None;
         std::mem::take(&mut reg.files)
     })
 }

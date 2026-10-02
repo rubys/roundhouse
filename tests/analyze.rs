@@ -570,6 +570,8 @@ fn action_aggregate_equals_subtree_fold() {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -1031,6 +1033,8 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }
@@ -1218,6 +1222,8 @@ fn collect_bare_name_sends(
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }
