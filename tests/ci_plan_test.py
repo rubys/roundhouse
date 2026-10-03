@@ -149,11 +149,39 @@ class Routing(unittest.TestCase):
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
 
+    def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
+        for path in [
+            "src/lower/arel/visitor.rs",
+            "src/lower/model_to_library/adapter_emit.rs",
+            "tests/param_binds.rs",
+            "tests/param_binds_emit.rb",
+            "tests/param_binds_runtime.rb",
+            "tests/support/emit_and_run.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["spinel_tests"], ["param_binds"])
+                self.assertEqual(
+                    self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
+                )
+        for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    ci.select([path])["spinel_tests"], ["spinel_db_lease", "param_binds"]
+                )
+        for path in [
+            "README.md",
+            "src/analyze/call.rs",
+            "src/lower/rails.rs",
+            "tests/spinel_web_push_crypto.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
+
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {
             "runtime/spinel/web_push_crypto.rb": "spinel_web_push_crypto",
             "runtime/spinel/signed_cookies.rbs": "rails_compat_vectors_spinel",
-            "runtime/spinel/sqlite_adapter.rb": "spinel_db_lease",
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
@@ -220,7 +248,7 @@ class Routing(unittest.TestCase):
             ["runtime/spinel/web_push_crypto.rb", "runtime/spinel/sqlite_adapter.rb"]
         )
         self.assertEqual(
-            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease"]
+            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", "param_binds"]
         )
 
     def test_wasm_changes_have_no_archive_or_spinel_fanout(self):

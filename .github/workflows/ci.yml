@@ -939,7 +939,7 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      # Full runs select all five suites; targeted runs select their owners.
+      # Full runs select all native suites; targeted runs select their owners.
       # Continue after a failing suite without losing its failure status.
       - name: Run selected native framework checks
         env:

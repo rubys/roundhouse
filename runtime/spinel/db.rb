@@ -100,9 +100,9 @@ module SQL
   ffi_func :sqlite3_clear_bindings,    [:ptr],                                :int
   # Placeholder binding (roundhouse#12, Path A.2). `bind_int64` binds a
   # `?` param to an integer (int64 so lobsters-scale ids don't truncate);
-  # `bind_text` binds a string — the trailing two args are `nbyte` and
-  # the destructor, both passed as `-1`: nbyte -1 lets sqlite strlen the
-  # NUL-terminated text, and destructor -1 is `SQLITE_TRANSIENT`
+  # `bind_text` binds the full byte length, including embedded
+  # NULs (a negative nbyte would truncate at the first NUL). Its
+  # destructor -1 is `SQLITE_TRANSIENT`
   # (`((sqlite3_destructor_type)-1)`) so sqlite copies the bytes before
   # returning — safe even if the Ruby string is later GC'd. int→:ptr
   # coercion for the -1 destructor is the spinel primitive validated in
@@ -1332,7 +1332,7 @@ module Db
 
   def self.bind_text(stmt, idx, value)
     return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_text(stmt, idx, value, -1, -1)
+    SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1)
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline

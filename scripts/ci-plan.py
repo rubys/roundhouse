@@ -36,6 +36,7 @@ SPINEL_TESTS = [
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
+    "param_binds",
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -86,6 +87,13 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {
+        "tests/param_binds_emit.rb",
+        "tests/param_binds_runtime.rb",
+        "tests/support/emit_and_run.rs",
+        "src/lower/model_to_library/adapter_emit.rs",
+    } or path.startswith("src/lower/arel/"):
+        suites.add("param_binds")
     if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
@@ -105,7 +113,7 @@ def native_coverage(path):
         if any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
-            owned_tests.add("spinel_db_lease")
+            owned_tests.update(("spinel_db_lease", "param_binds"))
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
         if (
