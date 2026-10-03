@@ -75,7 +75,7 @@ pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (
 pub fn parse_module_constant_exprs(
     source: &str,
 ) -> Result<Vec<(Symbol, Expr)>, String> {
-    let result = parse(source.as_bytes());
+    let result = crate::ingest::prism::parse_silent(source.as_bytes());
     let mut out: Vec<(Symbol, Expr)> = Vec::new();
     if result.errors().count() > 0 {
         return Ok(out);
@@ -100,7 +100,7 @@ pub fn parse_module_constant_exprs(
 pub fn parse_module_ivar_exprs(
     source: &str,
 ) -> Result<Vec<(String, Symbol, Expr)>, String> {
-    let result = parse(source.as_bytes());
+    let result = crate::ingest::prism::parse_silent(source.as_bytes());
     let mut out: Vec<(String, Symbol, Expr)> = Vec::new();
     if result.errors().count() > 0 {
         return Ok(out);
@@ -364,7 +364,7 @@ fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {
 /// Parse Ruby source and extract every `def` it finds (at top level
 /// and one level inside module/class bodies) as a `MethodDef`.
 pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
-    let result = parse(source.as_bytes());
+    let result = crate::ingest::prism::parse_silent(source.as_bytes());
 
     let errors: Vec<String> = result
         .errors()

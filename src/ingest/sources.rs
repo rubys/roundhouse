@@ -45,7 +45,7 @@
 //! ordering.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::span::{FileId, SourceFile};
@@ -59,7 +59,12 @@ struct Registry {
     files: Vec<SourceFile>,
     by_path: HashMap<String, FileId>,
     root: Option<PathBuf>,
-    parsed_lines: HashMap<usize, Vec<usize>>,
+    parsed: HashMap<usize, ParsedSource>,
+}
+
+struct ParsedSource {
+    lines: Vec<usize>,
+    reserved_locals: HashSet<String>,
 }
 
 /// Clear the registry for a fresh whole-app ingest.
@@ -153,15 +158,35 @@ pub fn line_at(path: &str, offset: usize) -> Option<u32> {
 pub(super) fn register_parse(source: &[u8]) {
     let lines = source.iter().enumerate().filter_map(|(offset, &byte)|
         (byte == b'\n').then_some(offset)).collect();
-    SOURCES.with(|s| { s.borrow_mut().parsed_lines.insert(source.as_ptr() as usize, lines); });
+    // Reserve compiler-style identifiers throughout the input, including
+    // parameters and later assignments outside the expression being lowered.
+    // Strings/comments may conservatively reserve a name too; no user binding
+    // may be captured just because it is outside this node's source slice.
+    let reserved_locals = source.split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+        .filter(|word| word.starts_with(b"__"))
+        .map(|word| String::from_utf8_lossy(word).into_owned()).collect();
+    SOURCES.with(|s| {
+        s.borrow_mut().parsed.insert(source.as_ptr() as usize, ParsedSource { lines, reserved_locals });
+    });
 }
 
 pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> {
     let offset = location.start_offset();
     // Recover only the input's identity, never dereference an adjusted pointer.
     let source = location.as_slice().as_ptr() as usize - offset;
-    SOURCES.with(|s| s.borrow().parsed_lines.get(&source)
-        .map(|lines| lines.partition_point(|&newline| newline < offset) as u32 + 1))
+    SOURCES.with(|s| s.borrow().parsed.get(&source)
+        .map(|parsed| parsed.lines.partition_point(|&newline| newline < offset) as u32 + 1))
+}
+
+/// Check a generated local against the actual parse, not first-text-wins spans.
+/// Direct expression callers without the parse wrapper still reserve names
+/// in their supplied node; whole-file entry points reserve the entire input.
+pub(super) fn generated_local_is_reserved(location: &ruby_prism::Location<'_>, name: &str) -> bool {
+    let source = location.as_slice().as_ptr() as usize - location.start_offset();
+    SOURCES.with(|s| s.borrow().parsed.get(&source)
+        .is_some_and(|parsed| parsed.reserved_locals.contains(name)))
+        || location.as_slice().split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+            .any(|word| word == name.as_bytes())
 }
 
 /// The registered path for a `FileId`; `None` for the synthetic
@@ -183,7 +208,7 @@ pub fn drain() -> Vec<SourceFile> {
         let mut reg = s.borrow_mut();
         reg.by_path.clear();
         reg.root = None;
-        reg.parsed_lines.clear();
+        reg.parsed.clear();
         std::mem::take(&mut reg.files)
     })
 }
@@ -247,6 +272,21 @@ mod tests {
         drain();
         assert_eq!(line_at_parse(&a), None);
         assert_eq!(line_at_parse(&b), None);
+    }
+
+    #[test]
+    fn generated_names_follow_the_live_parse_and_clear_on_drain() {
+        reset();
+        let first = super::super::prism::parse(b"__mw_0=11; __mw_0_1=22; a, *b, c=[11,22,33]", "probe.rb");
+        let second = super::super::prism::parse(b"a, *b, c=[11,22,33]", "probe.rb");
+        let a = first.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        let b = second.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        assert!(generated_local_is_reserved(&a, "__mw_0"));
+        assert!(generated_local_is_reserved(&a, "__mw_0_1"));
+        assert!(!generated_local_is_reserved(&a, "__mw_0_2"));
+        assert!(!generated_local_is_reserved(&b, "__mw_0"));
+        drain();
+        assert!(!generated_local_is_reserved(&a, "__mw_0"));
     }
 
     #[test]

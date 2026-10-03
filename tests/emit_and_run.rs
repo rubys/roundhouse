@@ -3367,6 +3367,73 @@ end
 }
 
 #[test]
+fn anonymous_keywords_forward_empty_and_false_values_through_super() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_parent.rb", r#"class KeywordParent
+  def call(factor: false, offset: nil, **)
+    [factor, offset]
+  end
+end
+class KeywordChild < KeywordParent
+  def call(**)
+    super(**)
+  end
+end
+"#)
+        .run_ruby(r#"
+probe = KeywordChild.new
+raise "empty keyword packet changed defaults" unless probe.call == [false, nil]
+raise "false or nil keyword was dropped" unless probe.call(factor: nil, offset: false) == [nil, false]
+"#).assert_passes();
+}
+
+#[test]
+fn destructuring_preserves_user_bindings_and_expression_values() {
+    const TEMPLATE: &str = r#"class HygieneProbe
+  def self.targets
+    a, *TARGET, c = [11, 22, 33]
+    [a, TARGET, c]
+  end
+  def self.scope(PARAM)
+    a, *middle, c = [11, 22, 33]
+    [a, middle, c, PARAM]
+  end
+  def self.expression
+    (a, *middle, c = [11, 22, 33, 44])
+  end
+  def self.instance_targets
+    @a, *@middle, @c = [*[11, 22], 33, 44]
+    [@a, @middle, @c]
+  end
+end
+"#;
+    // Deliberately collide with both span-derived stems. Parameter names
+    // change later offsets, so settle the source before ingesting it.
+    let mut target = "__target".to_string();
+    let mut param = "__param".to_string();
+    let source = loop {
+        let source = TEMPLATE.replace("TARGET", &target).replace("PARAM", &param);
+        let next_target = format!("__mw_{}", source.find("a, *").unwrap());
+        let next_param = format!("__mw_{}", source.find("a, *middle").unwrap());
+        if target == next_target && param == next_param { break source }
+        target = next_target;
+        param = next_param;
+    };
+    const ASSERTIONS: &str = r#"
+raise "temporary captured rest target" unless HygieneProbe.targets == [11, [22], 33]
+raise "temporary captured a parameter" unless HygieneProbe.scope(41) == [11, [22], 33, 41]
+raise "assignment expression lost RHS" unless HygieneProbe.expression == [11, 22, 33, 44]
+raise "ivar targets or array splat changed" unless HygieneProbe.instance_targets == [11, [22, 33], 44]
+"#;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{source}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog().write("app/services/hygiene_probe.rb", &source)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+#[test]
 fn post_rest_destructuring_handles_short_arrays_and_evaluates_once() {
     const SOURCE: &str = r#"class DestructureProbe
   def self.first_value
@@ -3426,6 +3493,20 @@ fn class_variable_compound_writes_share_the_read_storage() {
     @@count = @@count + 3
     @@count
   end
+  def operators
+    @@count += 7
+    @@count -= 3
+    @@count &&= @@count + 2
+    @@count
+  end
+  def skip
+    @@count = false
+    @@count &&= explode
+    @@count
+  end
+  def explode
+    raise "short circuit evaluated RHS"
+  end
   def self.current
     @@count
   end
@@ -3439,6 +3520,10 @@ raise "compound write and read used different storage" unless CounterChild.new.n
 raise "class reader used per-class storage" unless CounterProbe.current == 14 && CounterChild.current == 14
 raise "class variable storage split across inheritance" unless CounterProbe.new.next_value == 17
 raise "class reader lost the shared update" unless CounterProbe.current == 17 && CounterChild.current == 17
+raise "compound operators changed" unless CounterChild.new.operators == 23
+raise "operator storage split across inheritance" unless CounterProbe.current == 23
+raise "false RHS was evaluated" unless CounterProbe.new.skip == false
+raise "shared false storage lost" unless CounterChild.current == false
 "#).assert_passes();
 }
 
@@ -3465,10 +3550,28 @@ fn defined_guards_and_source_literals_run_after_emission() {
   def self.predicates
     [defined?(self.uninvoked.nil?), defined?(self.value.nil?), defined?(self.value.present?)]
   end
+  def self.simple
+    [defined?(self), defined?(nil), defined?(true), defined?(false), defined?(17), defined?(MissingOuterPr197::Inner)]
+  end
+  def classvars
+    before = defined?(@@value)
+    @@value = nil
+    [before, defined?(@@value)]
+  end
+  def visible
+    11
+  end
+  private
+  def hidden
+    raise "private query invoked method"
+  end
 end
 class GuardChild < GuardProbe
   def self.calls
     defined?(super)
+  end
+  def queries
+    [defined?(self.visible), defined?(self.hidden)]
   end
 end
 "#)
@@ -3478,6 +3581,9 @@ raise "method guard changed" unless GuardProbe.calls == "method"
 raise "super guard changed" unless GuardChild.calls == "super"
 raise "source identity changed" unless GuardProbe.location == ["app/services/guard_probe.rb", 13]
 raise "predicate query was lowered or evaluated as a normal call" unless GuardProbe.predicates == [nil, "method", "method"]
+raise "static descriptors became booleans" unless GuardProbe.simple == ["self", "nil", "true", "false", "expression", nil]
+raise "nil class variable was confused with absence" unless GuardProbe.new.classvars == [nil, "class variable"]
+raise "inherited or private method query changed" unless GuardChild.new.queries == ["method", nil]
 "#).assert_passes();
 }
 

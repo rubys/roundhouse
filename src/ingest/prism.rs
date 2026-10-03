@@ -78,6 +78,14 @@ fn push(d: Diagnostic) {
     });
 }
 
+/// Retain parse metadata without reporting context-only syntax errors.
+/// Compiled ERB and typed runtime sources keep their own diagnostic policy.
+pub(crate) fn parse_silent(source: &[u8]) -> ParseResult<'_> {
+    let result = ruby_prism::parse(source);
+    sources::register_parse(result.source());
+    result
+}
+
 /// Drop-in replacement for [`ruby_prism::parse`]: parse `source` and, for
 /// every syntax error Prism reports, record a [`Diagnostic`] against
 /// `file` before returning the (error-recovered) [`ParseResult`]
@@ -85,8 +93,7 @@ fn push(d: Diagnostic) {
 /// diagnostic's [`Span`] against the [`sources`] registry; pass `""`
 /// (or any unregistered path) to get a message-only diagnostic.
 pub fn parse<'pr>(source: &'pr [u8], file: &str) -> ParseResult<'pr> {
-    let result = ruby_prism::parse(source);
-    sources::register_parse(result.source());
+    let result = parse_silent(source);
     let errors = result.errors();
     // Peek before resolving the file id so the registry lookup is
     // skipped on the common (no-error) path.
@@ -132,6 +139,31 @@ mod tests {
         assert_eq!(diags[0].code(), "parse");
         assert!(!diags[0].span.is_synthetic());
         sources::reset();
+    }
+
+    #[test]
+    fn silent_program_ingest_reserves_enclosing_block_parameters() {
+        use crate::expr::{ExprNode, LValue};
+        sources::reset();
+        let source = "[41].map do |__mw_24|\n  a, *b, c = [11, 22, 33]\n  [a, b, c, __mw_24]\nend";
+        let (expr, diags) = scope(|| {
+            let expr = super::super::expr::ingest_ruby_program(source, "compiled.erb").unwrap();
+            // Context-only errors must remain silent in compiled snippets.
+            super::super::expr::ingest_ruby_program("yield", "layout.erb").unwrap();
+            expr
+        });
+        assert!(diags.is_empty());
+        let ExprNode::Send { block: Some(block), .. } = &*expr.node else { panic!("missing map block") };
+        let ExprNode::Lambda { params, body, .. } = &*block.node else { panic!("missing lambda") };
+        assert_eq!(params[0].as_str(), "__mw_24");
+        let ExprNode::Seq { exprs } = &*body.node else { panic!("missing block body") };
+        let ExprNode::Seq { exprs } = &*exprs[0].node else { panic!("missing multi-write") };
+        let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*exprs[0].node else {
+            panic!("missing temporary");
+        };
+        assert_eq!(exprs[0].span.start, 24, "control must collide with the unsuffixed stem");
+        assert_ne!(name.as_str(), "__mw_24");
+        sources::drain();
     }
 
     #[test]

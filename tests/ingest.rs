@@ -1651,6 +1651,33 @@ fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
 }
 
 #[test]
+fn multi_write_temporary_does_not_capture_a_user_target() {
+    let source = "a, *__mw_0, c = [11, 22, 33]";
+    let result = ruby_prism::parse(source.as_bytes());
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let ExprNode::Seq { exprs } = &*expr.node else { panic!("expected desugared assignment") };
+    let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*exprs[0].node else {
+        panic!("expected temporary binding");
+    };
+    assert_ne!(name.as_str(), "__mw_0");
+}
+
+#[test]
+fn simple_defined_operands_keep_ruby_descriptors() {
+    for (source, expected) in [
+        ("defined?(self)", "self"), ("defined?(nil)", "nil"),
+        ("defined?(true)", "true"), ("defined?(false)", "false"),
+        ("defined?(17)", "expression"),
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+        assert!(matches!(&*expr.node, ExprNode::Lit { value: Literal::Str { value } } if value == expected), "{source}: {expr:?}");
+    }
+}
+
+#[test]
 fn post_rest_effectful_targets_remain_explicitly_unsupported() {
     for source in [
         "a, *, mark(log)[0] = [rhs(log)]",
@@ -1670,7 +1697,7 @@ fn post_rest_effectful_targets_remain_explicitly_unsupported() {
 #[test]
 fn class_method_classvar_writes_cannot_be_normalized_to_per_class_storage() {
     for method in ["def self.bump", "class << self; def bump"] {
-        for write in ["@@count ||= 11", "@@count = 14"] {
+        for write in ["@@count ||= 11", "@@count = 14", "@@count &&= 17", "@@count += 3", "@@count -= 1"] {
             let extra_end = if method.starts_with("class") { "end" } else { "" };
             let source = format!("class Parent; {method}; {write}; @@count; end; {extra_end}; end\nclass Child < Parent; end");
             let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")

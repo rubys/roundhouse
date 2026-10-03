@@ -2661,7 +2661,7 @@ pub fn ingest_concern_filters(
     source: &[u8],
     file: &str,
 ) -> Vec<(ClassId, Vec<crate::dialect::Filter>)> {
-    let result = parse(source);
+    let result = super::prism::parse_silent(source);
     let root = result.node();
     let mut out = Vec::new();
     for (scope, module) in find_all_modules_with_scope(&root) {
@@ -2843,7 +2843,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
     use super::concern_accessors::{decline, is_candidate, is_supported};
     use crate::dialect::ModelBodyItem;
 
-    let result = parse(source);
+    let result = super::prism::parse_silent(source);
     let root = result.node();
     let mut out = Vec::new();
     let mut enums_out = Vec::new();

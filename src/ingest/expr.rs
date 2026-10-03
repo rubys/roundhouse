@@ -121,7 +121,14 @@ fn ingest_multi_write(
     // rest flag through ~15 MultiAssign consumers. The Seq ends in the
     // temp read so the whole expression's value is the RHS array —
     // matching Ruby, where `(a, *b = arr)` evaluates to `arr`.
-    let tmp = Symbol::from(format!("__mw_{}", span.start).as_str());
+    let stem = format!("__mw_{}", span.start);
+    let mut name = stem.clone();
+    let mut suffix = 0;
+    while super::sources::generated_local_is_reserved(&mw.location(), &name) {
+        suffix += 1;
+        name = format!("{stem}_{suffix}");
+    }
+    let tmp = Symbol::from(name);
     let tmp_read = || {
         Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp.clone() })
     };
@@ -309,7 +316,8 @@ fn ingest_defined_operand(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
     if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some()
         || node.as_forwarding_super_node().is_some() || node.as_local_variable_read_node().is_some()
-        || node.as_instance_variable_read_node().is_some() || node.as_self_node().is_some()
+        || node.as_instance_variable_read_node().is_some() || node.as_class_variable_read_node().is_some()
+        || node.as_self_node().is_some()
     {
         return ingest_expr(node, file);
     }
@@ -688,6 +696,19 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_defined_node().is_some() => {
             let d = n.as_defined_node().unwrap();
             let inner = d.value();
+            // These syntax-only answers are known without evaluating an
+            // operand or consulting native storage, on every target.
+            let descriptor = if inner.as_self_node().is_some() { Some("self") }
+                else if inner.as_nil_node().is_some() { Some("nil") }
+                else if inner.as_true_node().is_some() { Some("true") }
+                else if inner.as_false_node().is_some() { Some("false") }
+                else if inner.as_integer_node().is_some() { Some("expression") }
+                else { None };
+            if let Some(descriptor) = descriptor {
+                return Ok(Expr::new(span, ExprNode::Lit {
+                    value: Literal::Str { value: descriptor.into() },
+                }));
+            }
             // Only bareword partial locals need a special representation;
             // native runtime operands use the syntax-only walker.
             let bareword = inner.as_call_node().filter(|c| {
@@ -707,6 +728,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 ingest_expr(&inner, file)?
             } else if inner.as_call_node().is_some() || inner.as_constant_read_node().is_some()
                 || inner.as_constant_path_node().is_some() || inner.as_forwarding_super_node().is_some()
+                || inner.as_class_variable_read_node().is_some()
             {
                 return Ok(Expr::new(span, ExprNode::Defined {
                     operand: ingest_defined_operand(&inner, file)?,
@@ -1055,6 +1077,32 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
                 op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_class_variable_and_write_node().is_some() => {
+            let w = n.as_class_variable_and_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_class_variable_operator_write_node().is_some() => {
+            let w = n.as_class_variable_operator_write_node().unwrap();
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("unsupported compound-assignment operator: {}", constant_id_str(&w.binary_operator())),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var {
+                    id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())),
+                },
+                op,
                 value,
             }
         }
@@ -2059,7 +2107,7 @@ fn ingest_index_argument(
 /// can share it.
 pub(super) fn ingest_ruby_program(source: &str, file: &str) -> IngestResult<Expr> {
     super::sources::register(file, source);
-    // Raw parse, NOT the parse-diagnostic wrapper: `source` here is the
+    // Silent parse, NOT the parse-diagnostic wrapper: `source` here is the
     // compiled-from-ERB buffer (or a seeds script), parsed out of its
     // true method-body context. Prism flags context-only errors on it —
     // a layout's `<%= yield %>` compiles to a top-level `yield`, which is
@@ -2067,7 +2115,7 @@ pub(super) fn ingest_ruby_program(source: &str, file: &str) -> IngestResult<Expr
     // method roundhouse ingests it into. Reporting those would be a false
     // positive on every layout, so this path stays silent (as it was
     // before the wrapper); real `.rb` source files report via the wrapper.
-    let result = ruby_prism::parse(source.as_bytes());
+    let result = super::prism::parse_silent(source.as_bytes());
     let root = result.node();
     let program = root.as_program_node().ok_or_else(|| IngestError::Parse {
         file: file.into(),

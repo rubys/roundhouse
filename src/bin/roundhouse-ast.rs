@@ -301,7 +301,7 @@ fn emit_stage(
 /// Multi-statement programs land as `ExprNode::Seq`; single-statement
 /// programs collapse to the inner node.
 fn ingest_snippet(source: &str) -> Result<Expr, String> {
-    let result = ruby_prism::parse(source.as_bytes());
+    let result = ingest::prism::parse(source.as_bytes(), "<input>");
     let root = result.node();
     let program = root
         .as_program_node()

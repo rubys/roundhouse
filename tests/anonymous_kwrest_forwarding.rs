@@ -77,7 +77,10 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
     for (source, construct) in [
         ("class Probe; def self.call(**); target(**); end; def self.target(factor:); factor; end; end", "anonymous keyword forwarding"),
         ("class Probe; def self.call; defined?(MissingPr197); end; end", "runtime defined? query"),
+        ("class Probe; def call; defined?(@@missing); end; end", "runtime defined? query"),
         ("class Probe; def call; @@count ||= 11; @@count; end; end", "class variable write"),
+        ("class Probe; def call; @@count &&= 11; @@count; end; end", "class variable write"),
+        ("class Probe; def call; @@count += 3; @@count; end; end", "class variable write"),
         ("class Probe; def self.call; @@count; end; end", "class variable read"),
         ("class Probe; @@count = nil; end", "class variable write"),
     ] {
