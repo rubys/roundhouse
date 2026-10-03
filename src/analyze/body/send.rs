@@ -727,6 +727,20 @@ impl<'a> BodyTyper<'a> {
                 return ty.clone();
             }
         }
+        // `presence` hands the receiver back or nil, so on a typed
+        // receiver it is `T?` — what `lower::blank` stamps on the
+        // `blank? ? nil : r` it rewrites the site to. Resolved ahead of
+        // the receiver-agnostic table, which answers `Untyped`.
+        //
+        // Not an Array: a `has_many` reader types as one while the
+        // runtime answers a Relation, and `lower::enumerable_ext` reads
+        // the untyped half of `rel.presence || [x]` as its sign that
+        // the value may be either.
+        if method.as_str() == "presence" {
+            if let Some(ty) = recv_ty.filter(|ty| !matches!(ty, Ty::Var { .. } | Ty::Array { .. })) {
+                return super::union_of(ty.clone(), Ty::Nil);
+            }
+        }
         // `.call` on a value TYPED as a function (an RBS `^() -> T`
         // parameter — `broadcast_render(blk)`'s `blk.call` is the
         // runtime site) answers the function's declared return. Only
@@ -2608,8 +2622,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         "dig" => Some(Ty::Untyped),
         // `presence` and `present?` are ActiveSupport's
         // blank-aware predicates. `presence` returns the receiver or
-        // nil; we don't statically distinguish, so Untyped is the
-        // gradual answer. `present?` / `blank?` are universally Bool.
+        // nil; a typed receiver is answered `T?` before this table, so
+        // Untyped is the answer only for an unknown one. `present?` /
+        // `blank?` are universally Bool.
         "present?" | "blank?" => Some(Ty::Bool),
         "presence" => Some(Ty::Untyped),
         _ => None,
