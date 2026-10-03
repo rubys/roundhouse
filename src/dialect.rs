@@ -1476,6 +1476,12 @@ pub enum RouteSpec {
         /// while the lowered action read a param nothing set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         param: Option<Symbol>,
+        /// `resources :parts, path: "components"` — the URL segment,
+        /// in place of the name. The opposite of `as:`: only the path
+        /// moves; the helpers (`parts_path`) and the controller
+        /// (`PartsController`) still come from `name`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

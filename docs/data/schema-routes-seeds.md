@@ -147,7 +147,7 @@ renames; `Explicit` records its `member`/`collection` scope).
 `Rails.application.routes.draw do … end` and walks its statements.
 The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
 `root`, `resources`/`resource` (with `only:`/`except:`/`as:`/
-`controller:`/`param:`, symbol or string spellings alike, as Rails
+`controller:`/`param:`/`path:`, symbol or string spellings alike, as Rails
 `to_sym`s them), `namespace`/`scope`,
 `member`/`collection`/`constraints` blocks, `mount`, `draw(:name)`
 split files under `config/routes/`, and options like `defaults:`,

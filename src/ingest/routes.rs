@@ -1170,6 +1170,7 @@ fn ingest_resources_route(
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
     let mut param: Option<Symbol> = None;
+    let mut path: Option<String> = None;
     let mut only_none = false;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -1236,7 +1237,48 @@ fn ingest_resources_route(
                 // `params[:task_id]`. Dropped, the path bound `:id`
                 // and the lowered action read nil (#84).
                 "param" => param = symbol_or_string_value(&value).map(|s| Symbol::from(s.as_str())),
-                // `path:` and `shallow:` land when a fixture demands them.
+                // `path: "components"` renames the URL SEGMENT and nothing
+                // else (`/components`, still `parts_path` and
+                // `PartsController`). Rails strips the slashes, so
+                // `path: "/components"` is the same segment.
+                "path" => {
+                    let Some(raw) = symbol_or_string_value(&value) else {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path:` is not a literal string or symbol"
+                            ),
+                        });
+                    };
+                    // A dynamic segment (`"categories/:category_id/parts"`),
+                    // a glob or an optional group adds route params the
+                    // flattener does not carry yet; refuse rather than
+                    // serve a path whose `:category_id` never reaches
+                    // `params`.
+                    if raw.contains([':', '*', '(']) {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` has a dynamic segment"
+                            ),
+                        });
+                    }
+                    // `path: ""` / `path: "/"` mounts the resource at the
+                    // root (`GET /` is `index`, `/:id` is `show`). That
+                    // is not the resource name, so refuse it rather
+                    // than fall back to `/parts`.
+                    let segment = raw.trim_matches('/');
+                    if segment.is_empty() {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
+                            ),
+                        });
+                    }
+                    path = Some(segment.to_string());
+                }
+                // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
         }
@@ -1261,6 +1303,7 @@ fn ingest_resources_route(
         as_name,
         controller,
         param,
+        path,
     })
 }
 

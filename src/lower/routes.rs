@@ -200,8 +200,12 @@ struct Nesting {
     /// Helper-name segment (`user`, `account`); accumulates into the
     /// prefix in declaration order.
     singular: String,
-    /// Path segment, which is the name as written (`users`, `account`).
+    /// Plural helper-name segment, the name as written (`users`,
+    /// `account`).
     plural: String,
+    /// Path segment: the name as written, or the resource's `path:`
+    /// (`resources :users, path: "people"` nests at `/people/:user_id`).
+    segment: String,
     /// Whether this level contributes a `/:<singular>_id` segment.
     ///
     /// FALSE for a singular `resource :account`: Rails routes its
@@ -520,8 +524,12 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             as_name,
             controller,
             param,
+            path: path_segment,
         } => {
-            let resource_path = format!("/{name}");
+            // `path:` moves the URL segment only; the helpers and the
+            // controller below still come from `name`.
+            let segment = path_segment.as_deref().unwrap_or(name.as_str());
+            let resource_path = format!("/{segment}");
             // `param: :task_id` renames the member segment (#84). The
             // action table is written with `:id`; substitute here so
             // the path, the helper's param list and the controller's
@@ -586,6 +594,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     p.push(Nesting {
                         singular: singular_low.clone(),
                         plural: name.as_str().to_string(),
+                        segment: segment.to_string(),
                         has_id: !*singular,
                         param: id_param.to_string(),
                     });
@@ -813,13 +822,13 @@ fn nest_path(
     let mut params: Vec<String> = Vec::new();
     for frame in outer {
         prefix.push('/');
-        prefix.push_str(&frame.plural);
+        prefix.push_str(&frame.segment);
         if frame.has_id {
             prefix.push_str(&format!("/:{}_{}", frame.singular, frame.param));
             params.push(format!("{}_{}", frame.singular, frame.param));
         }
     }
-    let (parent, parent_plural) = (innermost.singular.as_str(), innermost.plural.as_str());
+    let (parent, parent_plural) = (innermost.singular.as_str(), innermost.segment.as_str());
     let prefix = &prefix;
     // Rails joins route segments with `/` unconditionally. A bare-verb
     // shortcut arrives here already slash-prefixed (`/reply`), but an
@@ -974,6 +983,7 @@ mod tests {
         vec![Nesting {
             singular: singular.to_string(),
             plural: plural.to_string(),
+            segment: plural.to_string(),
             has_id: true,
             param: "id".to_string(),
         }]
