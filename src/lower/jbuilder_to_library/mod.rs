@@ -38,6 +38,11 @@
 //!  10. `if c … else … end` and the `if`/`unless` modifiers around any
 //!      of the above                    → the same `if`, each branch's
 //!                                       pairs appended inside it
+//!  11. `json.<key> col do |x| … end`   → one pair whose value is an
+//!                                       array, one object per element
+//!                                       built by the block
+//!  12. `json.array! col do |x| … end`  → the same array, as the whole
+//!                                       template
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -52,7 +57,7 @@
 //! whole record.
 //!
 //! Still deferred: `json.merge!`, `json.key_format!`, `json.ignore_nil!`,
-//! `json.child!`, and the block form of `array!`.
+//! and `json.child!`.
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
@@ -335,6 +340,7 @@ fn type_method_body_solo(method: &mut MethodDef) {
 
 // ── walker ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Ctx {
     /// Source directory of the template — `articles` for
     /// `articles/_article.json.jbuilder`. Used by partial resolution
@@ -413,6 +419,21 @@ enum JbStmt<'a> {
         then_branch: &'a Expr,
         else_branch: &'a Expr,
     },
+    /// `json.<key> col do |x| … end` — one pair whose value is an array
+    /// with one element per member of `col`, each built by the block.
+    PairBlock {
+        key: Symbol,
+        collection: &'a Expr,
+        item_var: Symbol,
+        body: &'a Expr,
+    },
+    /// `json.array! col do |x| … end` — the same array as the whole
+    /// template.
+    ArrayBlock {
+        collection: &'a Expr,
+        item_var: Symbol,
+        body: &'a Expr,
+    },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -482,6 +503,13 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             }
             JbStmt::Partial { partial_path, arg } => {
                 let mut out = emit_partial_call(partial_path, arg, ctx);
+                for e in &mut out {
+                    e.inherit_span(src_span);
+                }
+                return out;
+            }
+            JbStmt::ArrayBlock { collection, item_var, body } => {
+                let mut out = emit_array_block(collection, item_var, body, ctx);
                 for e in &mut out {
                     e.inherit_span(src_span);
                 }
@@ -663,7 +691,16 @@ fn emit_pairs(
                 ));
                 sep = Sep::After;
             }
-            JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } => {
+            JbStmt::PairBlock { key, collection, item_var, body } => {
+                push_separator(out, ctx, sep);
+                out.push(io_append_lit(
+                    &ctx.accumulator,
+                    &format!("\"{}\":", key.as_str()),
+                ));
+                out.extend(emit_array_block(collection, item_var, body, ctx));
+                sep = Sep::After;
+            }
+            JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } | JbStmt::ArrayBlock { .. } => {
                 // These shouldn't appear in an object template, but if
                 // they do (mixed with pair-emitting stmts), drop a
                 // TODO marker rather than emit malformed JSON.
@@ -754,6 +791,17 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some(collection) = args.first() else {
                 return JbStmt::Unknown;
             };
+            // `json.array! col do |x| … end` — the block builds each
+            // element. Only with no options: Jbuilder renders a
+            // `partial:` before it looks at a block.
+            if args.len() == 1 {
+                if let Some((item_var, body)) = item_block(block) {
+                    if !element_body_supported(body) {
+                        return JbStmt::Unknown;
+                    }
+                    return JbStmt::ArrayBlock { collection, item_var, body };
+                }
+            }
             let Some(opts) = args.iter().skip(1).find_map(extract_hash) else {
                 return JbStmt::Unknown;
             };
@@ -833,6 +881,25 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             };
             JbStmt::Nested { key: Symbol::from(key), body }
         }
+        // `json.<key> col do |x| … end` — Jbuilder's `set!` with a value
+        // AND a block is `array!` on the value under that key: an array
+        // of objects, one per element, each built by the block. Checked
+        // before the single-pair shape below, which would otherwise take
+        // the collection as the value and drop the block.
+        key if args.len() == 1 && block.is_some() => {
+            let Some((item_var, body)) = item_block(block) else {
+                return JbStmt::Unknown;
+            };
+            if !element_body_supported(body) {
+                return JbStmt::Unknown;
+            }
+            JbStmt::PairBlock {
+                key: Symbol::from(key),
+                collection: &args[0],
+                item_var,
+                body,
+            }
+        }
         // `json.<key> <expr>` — single-pair shape. The method name IS
         // the JSON key; the single positional arg is the value.
         key if args.len() == 1 => JbStmt::Pair {
@@ -859,6 +926,51 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         }
         _ => JbStmt::Unknown,
     }
+}
+
+/// The element variable and body of a one-parameter block,
+/// `do |x| … end` / `{ |x| … }`. Anything else is not the shape.
+fn item_block(block: &Option<Expr>) -> Option<(Symbol, &Expr)> {
+    let block = block.as_ref()?;
+    let ExprNode::Lambda { params, rest_param: None, body, .. } = &*block.node else {
+        return None;
+    };
+    let [item_var] = params.as_slice() else {
+        return None;
+    };
+    Some((item_var.clone(), body))
+}
+
+/// Whether a collection block's body lowers to the element Jbuilder
+/// builds. A lone `json.partial!` is the element; a partial next to
+/// other statements (or under a branch) renders into the same element
+/// in Jbuilder, which the object walker cannot do yet: it writes a
+/// partial there as an empty append and the element would lose the
+/// partial's fields. Such a body is reported as unsupported and the
+/// statement stays Unknown, rather than lowered without them.
+fn element_body_supported(body: &Expr) -> bool {
+    fn has_partial(stmts: &[&Expr]) -> bool {
+        stmts.iter().any(|s| match classify(s) {
+            JbStmt::Partial { .. } => true,
+            JbStmt::Cond { then_branch, else_branch, .. } => {
+                has_partial(&branch_stmts(then_branch)) || has_partial(&branch_stmts(else_branch))
+            }
+            _ => false,
+        })
+    }
+    let stmts = flatten_cache_blocks(stmts_of(body));
+    if stmts.len() == 1 && matches!(classify(stmts[0]), JbStmt::Partial { .. }) {
+        return true;
+    }
+    if !has_partial(&stmts) {
+        return true;
+    }
+    crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+        file: String::new(),
+        message: "jbuilder: a collection block that mixes `json.partial!` with other statements is not compiled"
+            .to_string(),
+    });
+    false
 }
 
 /// `json` parsed as a bare method call: `Send { recv: None, method:
@@ -1005,6 +1117,99 @@ fn emit_array_partial(
     out.push(io_append_call(&ctx.accumulator, joined));
     out.push(io_append_lit(&ctx.accumulator, "]"));
     out
+}
+
+/// An array with one element per member of `collection`, each element
+/// the JSON the block's body builds for it:
+///
+///   io << "["
+///   if !(col.nil?)
+///     io << col.map do |x|
+///       io_x = String.new
+///       io_x << "{" … io_x << "}"
+///       io_x
+///     end.join(",")
+///   end
+///   io << "]"
+///
+/// Same map+join as `emit_array_partial`; the element is the block's
+/// body walked as a template of its own, into its own accumulator. A
+/// body that is one `json.partial!` call is that call, without the
+/// accumulator around it.
+fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx) -> Vec<Expr> {
+    let stmts = flatten_cache_blocks(stmts_of(body));
+    let single_partial = match stmts.as_slice() {
+        [only] => match classify(only) {
+            JbStmt::Partial { partial_path, arg } => Some((partial_path, arg)),
+            _ => None,
+        },
+        _ => None,
+    };
+    // A one-call element reads as a one-line `{ |x| … }`; a built one
+    // is several statements and takes `do |x| … end`.
+    let block_style = if single_partial.is_some() {
+        crate::expr::BlockStyle::Brace
+    } else {
+        crate::expr::BlockStyle::Do
+    };
+    let element = match single_partial {
+        Some((partial_path, arg)) => {
+            let (mod_path, method) = partial_target(&partial_path, &ctx.resource_dir);
+            // The argument gets the rewrites a `PairPartial` argument
+            // gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`).
+            send(
+                Some(const_path(&mod_path)),
+                &format!("{method}_json"),
+                vec![rewrite_h_escape(&rewrite_route_helpers(arg, ctx))],
+                None,
+                true,
+            )
+        }
+        None => {
+            let mut inner = ctx.clone();
+            inner.accumulator = format!("{}_{}", ctx.accumulator, item_var.as_str());
+            let mut exprs = vec![assign_accumulator_string_new(&inner.accumulator)];
+            exprs.extend(emit_object(&stmts, &inner));
+            let mut result = var_ref(Symbol::from(inner.accumulator.as_str()));
+            result.hint = Some(IrHint::StringBuilderResult);
+            exprs.push(result);
+            seq(exprs)
+        }
+    };
+
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            rest_param: None,
+            params: vec![item_var.clone()],
+            block_param: None,
+            body: element,
+            block_style,
+        },
+    );
+    let mapped = send(Some(collection.clone()), "map", Vec::new(), Some(block), false);
+    let joined = send(Some(mapped), "join", vec![lit_str(",".to_string())], None, true);
+    // Jbuilder's `array!` answers `[]` for a nil collection, and
+    // `json.<key>(nil) { … }` goes through it.
+    let present = send(
+        Some(send(Some(collection.clone()), "nil?", Vec::new(), None, false)),
+        "!",
+        Vec::new(),
+        None,
+        false,
+    );
+    vec![
+        io_append_lit(&ctx.accumulator, "["),
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: present,
+                then_branch: io_append_call(&ctx.accumulator, joined),
+                else_branch: seq(Vec::new()),
+            },
+        ),
+        io_append_lit(&ctx.accumulator, "]"),
+    ]
 }
 
 fn emit_partial_call(partial_path: &str, arg: &Expr, ctx: &Ctx) -> Vec<Expr> {
