@@ -331,16 +331,36 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
         // calls it; everything else about the shape (when it runs, what
         // `valid?` does with `errors` afterwards) is already the same
         // for a rule-derived check.
-        ValidationRule::Custom { method } => vec![Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: None,
-                method: method.clone(),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        )],
+        ValidationRule::Custom { method, if_method, unless_method } => {
+            let bare = |m: &Symbol| {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: None,
+                        method: m.clone(),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                )
+            };
+            let call = bare(method);
+            let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+            // `if: :pred` / `unless: :pred` guard the call, as Rails'
+            // callback conditions do.
+            let guarded = match (if_method, unless_method) {
+                (Some(c), _) => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond: bare(c), then_branch: call, else_branch: nil() },
+                ),
+                (None, Some(c)) => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond: bare(c), then_branch: nil(), else_branch: call },
+                ),
+                (None, None) => call,
+            };
+            vec![guarded]
+        }
         ValidationRule::Uniqueness { .. } => {
             // Not yet exercised by real-blog; lands when a fixture forces the issue.
             Vec::new()

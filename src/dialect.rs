@@ -445,7 +445,15 @@ pub enum ValidationRule {
     Format { pattern: String },
     Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
     Inclusion { values: Vec<Literal> },
-    Custom { method: Symbol },
+    Custom {
+        method: Symbol,
+        /// `validate :m, if: :pred` / `unless: :pred` — the instance
+        /// predicate guarding the check (Symbol conditions only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_method: Option<Symbol>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unless_method: Option<Symbol>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

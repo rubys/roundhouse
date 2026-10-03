@@ -456,10 +456,11 @@ pub(super) fn ingest_model_body_item(
         // and `lower::validations` have always had and nothing ever
         // produced.
         //
-        // Bare symbols ONLY: `validate :x, on: :update` runs on one
-        // persistence context, `if:`/`unless:` on a condition, and
-        // running such a check unconditionally would reject records
-        // Rails accepts. Those keep today's behaviour (the call falls
+        // Bare symbols, plus `if:`/`unless:` naming a predicate (`validate
+        // :no_overlap, if: :validate_overlap?` was dropped, so the check
+        // never ran). `validate :x, on: :update` runs on one persistence
+        // context, and running it unconditionally would reject records
+        // Rails accepts: that keeps today's behaviour (the call falls
         // through to the unsupported-DSL ledger) rather than being
         // silently promoted to an always-on check.
         if method == "validate" {
@@ -476,7 +477,33 @@ pub(super) fn ingest_model_body_item(
                 .arguments()
                 .map(|args| args.arguments().iter().count())
                 .unwrap_or(0);
-            if !symbols.is_empty() && symbols.len() == arg_count {
+            // `if: :pred` / `unless: :pred` (Symbol conditions only) ride
+            // along on the rule; any other option — `on:`, a lambda —
+            // keeps the call out, as before.
+            let mut if_method: Option<Symbol> = None;
+            let mut unless_method: Option<Symbol> = None;
+            let mut options_ok = true;
+            let mut option_args = 0usize;
+            if let Some(args) = call.arguments() {
+                for a in args.arguments().iter() {
+                    let Some(kw) = a.as_keyword_hash_node() else { continue };
+                    option_args += 1;
+                    for el in kw.elements().iter() {
+                        let Some(assoc) = el.as_assoc_node() else {
+                            options_ok = false;
+                            continue;
+                        };
+                        let key = symbol_value(&assoc.key());
+                        let value = symbol_value(&assoc.value()).map(|v| Symbol::from(v.as_str()));
+                        match (key.as_deref(), value) {
+                            (Some("if"), Some(v)) => if_method = Some(v),
+                            (Some("unless"), Some(v)) => unless_method = Some(v),
+                            _ => options_ok = false,
+                        }
+                    }
+                }
+            }
+            if options_ok && !symbols.is_empty() && symbols.len() + option_args == arg_count {
                 // ONE Validation carrying one Custom rule per symbol:
                 // this function returns a single body item, and
                 // `push_validate_method` walks `rules`, so the list
@@ -490,7 +517,11 @@ pub(super) fn ingest_model_body_item(
                         attribute,
                         rules: symbols
                             .into_iter()
-                            .map(|m| crate::dialect::ValidationRule::Custom { method: m })
+                            .map(|m| crate::dialect::ValidationRule::Custom {
+                                method: m,
+                                if_method: if_method.clone(),
+                                unless_method: unless_method.clone(),
+                            })
                             .collect(),
                     },
                     leading_comments,
