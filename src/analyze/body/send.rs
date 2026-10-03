@@ -1955,6 +1955,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             Ty::Array { elem: Box::new(transformed_elem()) }
         }
         "filter_map" => Ty::Array { elem: Box::new(non_nil_elem(&transformed_elem())) },
+        "index_with" => Ty::Hash { key: Box::new(elem.clone()), value: Box::new(transformed_elem()) },
         // `flat_map` expects the block to return an Array, flattens by one.
         "flat_map" | "collect_concat" => match block_ret {
             Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
@@ -2481,6 +2482,7 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // Unary minus/plus: Ruby desugars `-n` to `n.-@`. Int stays Int.
         "-@" | "+@" => Ty::Int,
         "to_f" => Ty::Float,
+        "to_d" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("BigDecimal")), args: vec![] },
         "zero?" | "positive?" | "negative?" | "even?" | "odd?" => Ty::Bool,
         // Arithmetic: Int op Int → Int (we approximate Int/Float mixing here;
         // refine when a fixture demands it).

@@ -77,6 +77,42 @@ pub(crate) fn parse(def: &ruby_prism::DefNode<'_>) -> Formals {
     }
 }
 
+/// A bare `**` call forwards the enclosing method's nameless keyword
+/// rest. Nested method bodies are their own declarations, so an outer
+/// `**` does not license an inner one. Anything else stays an error
+/// instead of becoming an empty hash.
+pub(super) fn require_anonymous_keyword_declaration(
+    anonymous: Option<AnonymousFormal>,
+    body: &crate::expr::Expr,
+    file: &str,
+) -> IngestResult<()> {
+    if anonymous == Some(AnonymousFormal::KeywordRest) || !body_forwards_anonymous_keywords(body) {
+        return Ok(());
+    }
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: "anonymous `**` keyword forwarding requires an anonymous keyword-rest declaration".into(),
+    })
+}
+
+fn body_forwards_anonymous_keywords(body: &crate::expr::Expr) -> bool {
+    fn is_forward(expr: &crate::expr::Expr) -> bool {
+        matches!(&*expr.node, crate::expr::ExprNode::KeywordSplat { value }
+            if matches!(&*value.node, crate::expr::ExprNode::Var { name, .. } if name.as_str().is_empty()))
+    }
+    if is_forward(body) {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |child| {
+        if found || matches!(&*child.node, crate::expr::ExprNode::Lambda { .. }) {
+            return;
+        }
+        found = body_forwards_anonymous_keywords(child);
+    });
+    found
+}
+
 pub(super) fn reject_entrypoint(
     def: &ruby_prism::DefNode<'_>,
     file: &str,

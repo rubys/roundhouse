@@ -144,6 +144,52 @@ end"#;
 }
 
 #[test]
+fn private_class_method_follows_module_function() {
+    for source in [
+        "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :build_row\nend\n",
+        "module BulkWrite\n  def build_row\n    1\n  end\n  module_function :build_row\n  private_class_method :build_row\nend\n",
+        "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  def other\n    2\n  end\n  private_class_method :build_row, :other\nend\n",
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "thing.rb").expect(source);
+        let methods = &classes[0].methods;
+        assert_eq!(
+            visibility(methods, "build_row", MethodReceiver::Class),
+            MethodVisibility::Private,
+            "{source}"
+        );
+        if source.contains("def other") {
+            assert_eq!(
+                visibility(methods, "other", MethodReceiver::Class),
+                MethodVisibility::Private,
+                "{source}"
+            );
+        }
+    }
+    let restored = "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :build_row\n  public_class_method :build_row\nend\n";
+    let restored_methods = &ingest_library_classes(restored.as_bytes(), "thing.rb")
+        .expect("public_class_method")[0]
+        .methods;
+    assert_eq!(
+        visibility(restored_methods, "build_row", MethodReceiver::Class),
+        MethodVisibility::Public
+    );
+    let undefined = "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :missing\nend\n";
+    assert!(
+        ingest_library_classes(undefined.as_bytes(), "thing.rb").is_err(),
+        "a name module_function never copied stays an error"
+    );
+}
+
+#[test]
+fn private_class_method_accepts_several_defined_class_methods() {
+    let source = "class Probe\n  def self.a; 1; end\n  def self.b; 2; end\n  def self.c; 3; end\n  private_class_method :a, :b, :c\n  public_class_method :b\nend\n";
+    let methods = methods(source, false);
+    assert_eq!(visibility(&methods, "a", MethodReceiver::Class), MethodVisibility::Private);
+    assert_eq!(visibility(&methods, "b", MethodReceiver::Class), MethodVisibility::Public);
+    assert_eq!(visibility(&methods, "c", MethodReceiver::Class), MethodVisibility::Private);
+}
+
+#[test]
 fn forward_inherited_dynamic_and_ambiguous_changes_stay_errors() {
     for body in [
         "private :later\n def later; 1; end",

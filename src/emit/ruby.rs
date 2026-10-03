@@ -55,6 +55,7 @@ pub fn emit_method(m: &MethodDef) -> String {
             (Some(default), true) => {
                 format!("{}: {}", p.name.as_str(), emit_default(default))
             }
+            (None, true) if p.rest && p.name.as_str().is_empty() => "**".to_string(),
             (None, true) if p.rest => format!("**{}", p.name.as_str()),
             (None, true) => format!("{}:", p.name.as_str()),
             (None, false) if p.rest => format!("*{}", p.name.as_str()),

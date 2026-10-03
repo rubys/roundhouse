@@ -1354,8 +1354,13 @@ pub struct RedirectRoute {
     /// The action name on the synthesized controller, derived from the
     /// path so the emitted method reads as what it serves.
     pub action: Symbol,
-    /// Where it sends the client: the literal path as written.
+    /// Where it sends the client: the literal path as written, or a
+    /// block expression that evaluates to a string.
     pub location: String,
+    /// Set when `location` is already Ruby source for the redirect
+    /// target, not a literal path containing `%{param}` placeholders.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub location_is_expression: bool,
     /// Rails' `redirect` answers 301 unless the call says otherwise.
     pub status: u16,
 }

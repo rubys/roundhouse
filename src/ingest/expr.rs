@@ -14,6 +14,38 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Bare `**` in a call. The empty local is the nameless keyword-rest
+/// formal, not a value to merge and not an invented empty hash.
+fn anonymous_keyword_forward(span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::KeywordSplat {
+            value: Expr::new(
+                span,
+                ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("") },
+            ),
+        },
+    )
+}
+
+fn is_anonymous_keyword_forward(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::KeywordSplat { value }
+        if matches!(&*value.node, ExprNode::Var { name, .. } if name.as_str().is_empty()))
+}
+
+fn defined_marker(span: Span, operand: Expr) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("defined?"),
+            args: vec![operand],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
     // substitute a `Literal::Nil` placeholder so the surrounding
@@ -598,14 +630,10 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // Rails view partials to check whether an optional local was
         // passed: `<% if defined?(show_tree_lines) && show_tree_lines %>`.
         //
-        // Restrict to the bareword shape Prism produces for the
-        // partial-local idiom: either a no-arg CallNode (when the name
-        // isn't lexically bound, which is the partial-local case) or a
-        // LocalVariableReadNode (when it IS bound). Both lift to a
-        // `Var(name)` reference inside a marker Send. Other shapes
-        // (`defined?(@ivar)`, `defined?(Foo)`, `defined?(obj.method)`)
-        // have target-different semantics and surface as Unsupported
-        // for now — lobsters/real-blog don't use them.
+        // Bareword locals, ivars, and constant paths lift into the same
+        // marker Send. A constant operand is marked so later passes keep
+        // the written path and do not resolve or
+        // autoload it. Method calls and index reads stay unsupported.
         //
         // The view-lowerer picks up the inner Var as a partial
         // parameter (collect_extra_params) then rewrites the marker
@@ -628,16 +656,16 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     Span::synthetic(),
                     ExprNode::Ivar { name: Symbol::from(name) },
                 );
-                return Ok(Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: None,
-                        method: Symbol::from("defined?"),
-                        args: vec![ivar],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ));
+                return Ok(defined_marker(span, ivar));
+            }
+            // `defined?(Foo)` / `defined?(A::B)` / `defined?(::Foo)` are
+            // non-evaluating guards. The constant is retained as a path,
+            // not resolved or autoloaded; a missing constant is a runtime
+            // answer, not an ingest failure.
+            if inner.as_constant_read_node().is_some() || inner.as_constant_path_node().is_some() {
+                let mut constant = ingest_expr(&inner, file)?;
+                constant.decisions |= crate::expr::DEFINED_CONSTANT;
+                return Ok(defined_marker(span, constant));
             }
             let name: Option<String> = if let Some(c) = inner.as_call_node() {
                 let bareword = c.receiver().is_none()
@@ -662,19 +690,13 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                             name: Symbol::from(name),
                         },
                     );
-                    ExprNode::Send {
-                        recv: None,
-                        method: Symbol::from("defined?"),
-                        args: vec![var],
-                        block: None,
-                        parenthesized: true,
-                    }
+                    return Ok(defined_marker(span, var));
                 }
                 None => {
                     return Err(IngestError::Unsupported {
                         file: file.into(),
                         message: format!(
-                            "`defined?` only supports bareword targets today: {inner:?}"
+                            "`defined?` only supports bareword, ivar, and constant targets today: {inner:?}"
                         ),
                     });
                 }
@@ -2305,8 +2327,12 @@ fn ingest_forwardable_arguments(
             let has_keyword_splat = arg.as_keyword_hash_node().is_some_and(|hash| {
                 hash.elements().iter().any(|e| e.as_assoc_splat_node().is_some())
             });
-            args.push(if has_keyword_splat {
-                Expr::new(value.span, ExprNode::KeywordSplat { value })
+            args.push(if has_keyword_splat || is_anonymous_keyword_forward(&value) {
+                if is_anonymous_keyword_forward(&value) {
+                    value
+                } else {
+                    Expr::new(value.span, ExprNode::KeywordSplat { value })
+                }
             } else {
                 value
             });
@@ -2739,14 +2765,15 @@ fn ingest_hash_literal(
                 message: format!("unsupported hash element: {el:?}"),
             });
         };
-        // Anonymous `**` forwarding (`def f(**) ; g(**) ; end`) has no
-        // value to merge, and the declaration side drops the unnamed
-        // parameter — fail loud rather than emit a silently empty hash.
+        // Anonymous `**` (`def f(**); g(**); end`) has no expression to
+        // merge. Keep it as a keyword-splat marker so a method that
+        // declared the nameless rest can forward it. A bare `**` outside
+        // that declaration stays an error rather than becoming `{}`.
         let Some(value) = splat.value() else {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "anonymous `**` keyword forwarding not yet supported".into(),
-            });
+            saw_splat = true;
+            let marker = anonymous_keyword_forward(span);
+            chain = Some(merge_into(chain, std::mem::take(&mut pending), span, marker));
+            continue;
         };
         saw_splat = true;
         let value = ingest_expr(&value, file)?;

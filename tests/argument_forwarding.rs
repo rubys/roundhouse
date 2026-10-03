@@ -520,14 +520,73 @@ fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
 }
 
 #[test]
-fn anonymous_keyword_call_forwarding_is_still_a_separate_gap() {
-    let source = b"class Probe\n def call(__fwd_kwargs, **)\n target(__fwd_kwargs, **)\n end\nend";
+fn anonymous_keyword_call_forwards_the_retained_declaration() {
+    let source = r#"
+class Base
+  def upsert_all(seconds, mode:, extra:)
+    seconds + extra + (mode == :replace ? 1 : 0)
+  end
+  def self.build(subject, label:)
+    [subject, label].join(":")
+  end
+end
+class Record
+  def initialize(subject, label:)
+    @subject = subject
+    @label = label
+  end
+  def rendered
+    [@subject, @label].join(":")
+  end
+end
+class Probe < Base
+  def upsert_all(attributes, **)
+    super(attributes[:seconds] * 10 + attributes[:skew], **)
+  end
+  def self.build_instance(subject, **)
+    Record.new(subject, **)
+  end
+  def self.mixed(subject, **)
+    build(subject, **)
+  end
+  def self.named(subject, **params)
+    build(subject, **params)
+  end
+end
+"#;
+    let script = r#"
+left = Probe.new.upsert_all({seconds: 2, skew: 3}, mode: :keep, extra: 5)
+right = Probe.new.upsert_all({seconds: 2, skew: 1}, mode: :replace, extra: 0)
+raise "dropped or swapped keywords: #{left}/#{right}" unless left == 28 && right == 22
+built = Probe.build_instance("row", label: "kept").rendered
+swapped = Probe.build_instance("other", label: "other").rendered
+raise "build dropped keywords: #{built}/#{swapped}" unless built == "row:kept" && swapped == "other:other"
+mixed = Probe.mixed("row", label: "mixed")
+raise "mixed bare ** dropped keywords: #{mixed}" unless mixed == "row:mixed"
+named = Probe.named("row", label: "named")
+raise "named **params regressed: #{named}" unless named == "row:named"
+puts "anonymous keyword forwarding passed"
+"#;
+    let native = Command::new("ruby")
+        .args(["-e", &format!("{source}; {script}")])
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "anonymous keyword forwarding passed\n");
+}
+
+#[test]
+fn bare_keyword_forward_outside_an_anonymous_declaration_stays_an_error() {
+    let source = b"class Probe\n def call(params)\n target(**)\n end\n def target(**params)\n params\n end\nend";
     let error = roundhouse::ingest::ingest_library_class(source, "probe.rb")
-        .expect_err("declaration retention does not implement bare ** call forwarding");
+        .expect_err("bare ** outside an anonymous keyword-rest declaration");
     assert!(
-        error
-            .to_string()
-            .contains("anonymous `**` keyword forwarding not yet supported")
+        error.to_string().contains("anonymous `**` keyword forwarding requires"),
+        "{error}"
     );
 }
 

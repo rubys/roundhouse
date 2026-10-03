@@ -46,8 +46,8 @@
 //! `head :too_many_requests`, actionpack's own defaults. `controller_path`
 //! is the class name underscored, which is what Rails derives too.
 //!
-//! WHAT IS LEFT. `if:`/`unless:`, `store:`, a `by:` or `with:` that is
-//! not a lambda, or a `name:` that is not a literal — the macro stays
+//! WHAT IS LEFT. `store:`, a `by:` or `with:` that is not a lambda, or a
+//! `name:` that is not a literal — the macro stays
 //! where it was and the survey names it, which is the contract for a
 //! class-body macro roundhouse cannot expand (`report_unrecognized_controller_macros`).
 //! The method reaches the ruby-family lanes fully; a strict target
@@ -66,6 +66,10 @@ struct Limit {
     with_src: String,
     only: Vec<Symbol>,
     except: Vec<Symbol>,
+    if_cond: Option<Symbol>,
+    unless_cond: Option<Symbol>,
+    if_cond_expr: Option<Expr>,
+    unless_cond_expr: Option<Expr>,
 }
 
 pub fn lower_rate_limit(app: &mut crate::App) {
@@ -169,10 +173,10 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
             except: limit.except.clone(),
             only_style: Default::default(),
             except_style: Default::default(),
-            if_cond: None,
-            unless_cond: None,
-            if_cond_expr: None,
-            unless_cond_expr: None,
+            if_cond: limit.if_cond.clone(),
+            unless_cond: limit.unless_cond.clone(),
+            if_cond_expr: limit.if_cond_expr.clone(),
+            unless_cond_expr: limit.unless_cond_expr.clone(),
             block: None,
             prepend: false,
         };
@@ -205,6 +209,10 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let mut name: Option<String> = None;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
+    let mut if_cond = None;
+    let mut unless_cond = None;
+    let mut if_cond_expr = None;
+    let mut unless_cond_expr = None;
     for (k, v) in entries {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
         match key.as_str() {
@@ -218,6 +226,20 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
             }
             "only" => only = symbol_list(v)?,
             "except" => except = symbol_list(v)?,
+            "if" => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => if_cond = Some(value.clone()),
+                ExprNode::Lambda { .. } => if_cond_expr = Some(v.clone()),
+                _ => return None,
+            },
+            "unless" => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => unless_cond = Some(value.clone()),
+                ExprNode::Lambda { .. } => unless_cond_expr = Some(v.clone()),
+                _ => return None,
+            },
+            // A custom store changes which counter increments. The shared
+            // limiter has no store argument, so expanding without it would
+            // silently use the default cache.
+            "store" => return None,
             _ => return None,
         }
     }
@@ -246,6 +268,10 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         with_src: with_src.unwrap_or_else(|| "head(:too_many_requests)".to_string()),
         only,
         except,
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
     })
 }
 
@@ -349,12 +375,43 @@ mod tests {
     }
 
     #[test]
-    fn an_option_it_cannot_expand_leaves_the_macro_in_place() {
+    fn an_unknown_option_leaves_the_macro_in_place() {
         let mut c = controller(
             "class SessionsController < ApplicationController\n  \
-             rate_limit to: 10, within: 3.minutes, if: :guest?\nend\n",
+             rate_limit to: 10, within: 3.minutes, bogus: true\nend\n",
         );
         assert!(take_from_controller_body(&mut c).is_empty());
         assert!(c.body.iter().any(|i| matches!(i, ControllerBodyItem::Unknown { .. })));
+    }
+
+    #[test]
+    fn if_unless_and_by_lambda_are_kept() {
+        let mut c = controller(
+            "class TokensController < ApplicationController\n  \
+             rate_limit to: 5, within: 1.minute, only: :create, if: -> { @credential }, unless: :quiet?, by: -> { @token }\nend\n",
+        );
+        let limits = take_from_controller_body(&mut c);
+        assert_eq!(limits.len(), 1);
+        let limit = &limits[0];
+        assert_eq!(limit.only, vec![Symbol::from("create")]);
+        assert!(limit.if_cond_expr.is_some());
+        assert_eq!(limit.unless_cond.as_ref().map(|s| s.as_str()), Some("quiet?"));
+        assert!(limit.key_src.contains("@token"), "{}", limit.key_src);
+        let filter = c.body.iter().find_map(|item| match item {
+            ControllerBodyItem::Filter { filter, .. } => Some(filter),
+            _ => None,
+        }).expect("filter");
+        assert!(filter.if_cond_expr.is_some());
+        assert_eq!(filter.unless_cond.as_ref().map(|s| s.as_str()), Some("quiet?"));
+    }
+
+    #[test]
+    fn a_custom_store_is_not_dropped() {
+        let mut c = controller(
+            "class SessionsController < ApplicationController\n  \
+             rate_limit to: 10, within: 3.minutes, store: custom_store\nend\n",
+        );
+        assert!(take_from_controller_body(&mut c).is_empty());
+        assert!(c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { .. })));
     }
 }

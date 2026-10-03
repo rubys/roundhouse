@@ -151,8 +151,10 @@ with an `analysis:` prefix and their source location. A resolved direct
 `alba` dependency adds gem attribution; without that evidence the entry
 names only the Alba-shaped subset. These admission failures remain
 `error[unsupported]` and exit 1: a coverage entry is not executable
-serializer support. Alba declarations rejected during ingest still
-exit 2, but `--continue` prints their partial survey ledger.
+serializer support. An ingest refusal that survey mode records,
+including a rejected Alba declaration, does not abort `--continue`:
+analysis continues and the exit code comes from later findings.
+Strict mode still stops at the first refusal and exits 2.
 
 Without it (the default, also spelled `--strict`), ingest stops at the
 first unrecognized construct and exits 2. That is the right mode for an

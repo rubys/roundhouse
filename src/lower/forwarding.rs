@@ -11,7 +11,7 @@ pub(super) fn apply(app: &mut App) -> Vec<Diagnostic> {
     let plans = keyword_calls(app);
     let mut diagnostics = Vec::new();
     for (span, policy) in &plans {
-        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper) {
+        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseUndeclared | KeywordPolicy::RefuseOrdinarySuper) {
             diagnostics.push(keyword_refusal(*span, *policy));
         }
     }

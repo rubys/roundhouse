@@ -144,6 +144,35 @@ fn class_methods_block_reaches_the_including_model() {
 /// there. Copying it invented `User.email_on_blocklist?` on three
 /// lobsters models before the carrier list existed.
 #[test]
+fn class_shift_self_reaches_the_including_model() {
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"messages\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            "class Message < ApplicationRecord\n  include Message::Window\nend\n",
+        ),
+        (
+            "app/models/message/window.rb",
+            "module Message::Window\n  extend ActiveSupport::Concern\n  class << self\n    def from_token(token)\n      token\n    end\n  end\nend\n",
+        ),
+    ]))
+    .expect("ingest");
+    let files = ruby::emit_lowered_models(&app);
+    let message = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/models/message.rb"))
+        .map(|f| f.content.clone())
+        .expect("message.rb");
+    assert!(
+        message.contains("def self.from_token(token)"),
+        "class << self method lands on the includer:\n{message}"
+    );
+}
+
+#[test]
 fn module_own_singletons_do_not_reach_the_includer() {
     let m = message();
     assert!(

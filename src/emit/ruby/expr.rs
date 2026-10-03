@@ -116,9 +116,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Var { name, .. } => emit_local_read(name.as_str()),
         ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::SelfRef => "self".to_string(),
-        ExprNode::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
-        }
+        ExprNode::Const { path } => emit_const_path(path),
         ExprNode::Hash { entries, kwargs } => emit_hash(entries, *kwargs),
         ExprNode::Array { elements, style } => emit_array(elements, style),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
@@ -323,7 +321,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Super { args } => match args {
             None => "super".to_string(),
             Some(args) => {
-                let args_s: Vec<String> = args.iter().map(emit_arg).collect();
+                let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
                 format!("super({})", args_s.join(", "))
             }
         },
@@ -339,7 +337,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Redo => "redo".to_string(),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::ForwardArgs => "...".to_string(),
-        ExprNode::KeywordSplat { value } => format!("**{}", paren_multiline(emit_arg(value))),
+        ExprNode::KeywordSplat { value } => emit_keyword_splat(value),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
             format!("{} = {}", lhs.join(", "), emit_expr(value))
@@ -1034,7 +1032,7 @@ pub(super) fn emit_send_base(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_arg).collect();
+    let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
@@ -1425,6 +1423,34 @@ pub(crate) fn ruby_sym_literal(value: &str) -> String {
         format!(":{value}")
     } else {
         format!(":{}", ruby_str_literal(value))
+    }
+}
+
+fn emit_keyword_splat(value: &Expr) -> String {
+    if matches!(&*value.node, ExprNode::Var { name, .. } if name.as_str().is_empty()) {
+        "**".to_string()
+    } else {
+        format!("**{}", paren_multiline(emit_arg(value)))
+    }
+}
+
+/// A call or `super` argument. A bare `**` is already a keyword splat;
+/// wrapping it again would print `****`.
+fn emit_keyword_forward_arg(arg: &Expr) -> String {
+    if matches!(&*arg.node, ExprNode::KeywordSplat { .. }) {
+        emit_node(&arg.node)
+    } else {
+        emit_arg(arg)
+    }
+}
+
+/// `::File` is stored with an empty first segment. Joining that as
+/// `::File` keeps the rooted spelling; a relative path stays `A::B`.
+fn emit_const_path(path: &[crate::Symbol]) -> String {
+    if path.first().is_some_and(|s| s.as_str().is_empty()) {
+        format!("::{}", path[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"))
+    } else {
+        path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
     }
 }
 

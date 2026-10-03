@@ -100,14 +100,23 @@ fn alba_rejections_are_ledgered_without_reporting_executable_support() {
     assert!(surveyed.contains("Survey: 1 ingest gap(s)"), "{surveyed}");
     assert!(surveyed.contains("app/resources/article_resource.rb"), "{surveyed}");
 
-    // A syntactically valid DSL outside the modeled declaration subset fails
-    // earlier. Preserve that strict rejection and still surface its gap.
+    // A syntactically valid DSL outside the modeled declaration subset is
+    // still unsupported. Strict mode fails fast; survey mode ledgers the
+    // declaration, leaves the class unlowered, and continues to the summary.
     std::fs::write(root.join("app/resources/article_resource.rb"), "class ArticleResource < ApplicationResource\n  attributes :id, :title, if: :visible?\nend\n").unwrap();
-    let (code, rejected) = check(&["--continue", path]);
+    let (code, rejected) = check(&["--strict", path]);
     assert_eq!(code, 2, "{rejected}");
     assert!(rejected.contains("ingest failed"), "{rejected}");
-    assert!(rejected.contains("Survey: 1 ingest gap(s)"), "{rejected}");
     assert!(rejected.contains("Alba source-property subset: unsupported Alba declaration"), "{rejected}");
-    assert!(rejected.contains("app/resources/article_resource.rb"), "{rejected}");
+    assert!(!rejected.contains("error(s)"), "strict refusal must not print an analysis summary: {rejected}");
+
+    let (code, continued) = check(&["--continue", path]);
+    assert_ne!(code, 2, "a ledgered Alba declaration must not abort --continue: {continued}");
+    assert!(!continued.contains("ingest failed"), "{continued}");
+    assert!(continued.contains("Survey: 1 ingest gap(s)"), "{continued}");
+    assert!(continued.contains("Alba source-property subset: unsupported Alba declaration"), "{continued}");
+    assert!(continued.contains("app/resources/article_resource.rb"), "{continued}");
+    assert!(continued.contains("error(s)"), "analysis summary must be printed: {continued}");
     std::fs::remove_dir_all(root).unwrap();
 }
+

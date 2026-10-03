@@ -53,7 +53,6 @@ pub(super) fn expand(
     if configurations.is_empty() {
         return Ok(());
     }
-
     let surfaces = controller_concern_surfaces(app);
     let verified = verified_concerns(app, carriers, &surfaces.module_includes, framework_shadows);
     for controller in &mut app.controllers {
@@ -67,14 +66,15 @@ pub(super) fn expand(
         }
         // Transactional per controller: on refusal the survey retains the
         // complete source body, never a partially synthesized configuration.
-        if let Some(body) = survey::unwrap_or_record(expand_controller(
+        let expanded_body = expand_controller(
             controller,
             &candidates,
             surface,
             &surfaces.module_includes,
             &catalog,
             &verified,
-        ))? {
+        );
+        if let Some(body) = survey::unwrap_or_record(expanded_body)? {
             controller.body = body;
         }
     }
@@ -285,10 +285,24 @@ fn expand_controller(
             recv: None,
             method,
             args,
-            block: None,
+            block,
             ..
         } = &*expr.node
         {
+            if block.is_some()
+                && configurations.iter().any(|c| &c.writer.name == method)
+            {
+                // The writer does not store a block. Leave the call
+                // unexpanded rather than consuming the keywords and
+                // dropping the block.
+                return Err(refuse(
+                    "class configuration call has a block the writer does not store",
+                ));
+            }
+            if block.is_some() {
+                expanded.push(item.clone());
+                continue;
+            }
             if method.as_str() == "include" {
                 for arg in args {
                     if let ExprNode::Const { path } = &*arg.node {
@@ -308,21 +322,31 @@ fn expand_controller(
                         "class configuration call precedes its concern include",
                     ));
                 }
-                let mut value = match args.as_slice() {
-                    [] => Expr::new(
+                // An unreadable call stays the original statement. Refusing
+                // the whole controller would also drop every later readable
+                // store on that controller, which is the failure the survey
+                // still reports as an unrecognized macro.
+                let hash = match args.as_slice() {
+                    [] => None,
+                    [hash] if readable_keyword_hash(hash) => Some(hash),
+                    _ => {
+                        return Err(refuse(
+                            "class configuration needs a fully readable keyword hash",
+                        ));
+                    }
+                };
+                let mut value = hash.cloned().unwrap_or_else(|| {
+                    Expr::new(
                         expr.span,
                         ExprNode::Hash {
                             entries: vec![],
                             kwargs: false,
                         },
-                    ),
-                    [hash] if finite_keyword_hash(hash) => hash.clone(),
-                    _ => {
-                        return Err(refuse(
-                            "class configuration needs literal keyword arguments",
-                        ));
-                    }
-                };
+                    )
+                });
+                if let ExprNode::KeywordSplat { value: inner } = &mut *value.node {
+                    value = inner.clone();
+                }
                 if let ExprNode::Hash { kwargs, .. } = &mut *value.node {
                     *kwargs = false;
                 }
@@ -424,13 +448,16 @@ fn reader_slot(method: &MethodDef) -> Option<Symbol> {
         .then(|| name.clone())
 }
 
-fn finite_keyword_hash(expr: &Expr) -> bool {
-    let ExprNode::Hash {
-        entries,
-        kwargs: true,
-    } = &*expr.node
-    else {
-        return false;
+fn readable_keyword_hash(expr: &Expr) -> bool {
+    let entries = match &*expr.node {
+        ExprNode::Hash { entries, kwargs: true } => entries,
+        // A parenthesized call can retain the keyword list as a splat of
+        // that same hash. It is still the writer's options, not a value.
+        ExprNode::KeywordSplat { value } => match &*value.node {
+            ExprNode::Hash { entries, kwargs: true } => entries,
+            _ => return false,
+        },
+        _ => return false,
     };
     entries.iter().all(|(key, value)| {
         matches!(
@@ -438,6 +465,21 @@ fn finite_keyword_hash(expr: &Expr) -> bool {
             ExprNode::Lit {
                 value: Literal::Sym { .. }
             }
-        ) && matches!(&*value.node, ExprNode::Lit { .. })
+        ) && readable_config_value(value)
     })
+}
+
+/// A value the writer stores as data. Filter options, symbols, and a
+/// lambda are readable. A method call or splat is not, and the whole
+/// configuration stays ledgered rather than storing half of it.
+fn readable_config_value(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } | ExprNode::Lambda { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(readable_config_value),
+        ExprNode::Hash { entries, kwargs: true } => entries.iter().all(|(key, value)| {
+            matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                && readable_config_value(value)
+        }),
+        _ => false,
+    }
 }

@@ -75,7 +75,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
         }
     }
     for (span, policy) in keyword_calls_with_index(app, &contracts) {
-        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper) {
+        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseUndeclared | KeywordPolicy::RefuseOrdinarySuper) {
             out.push(keyword_refusal(span, policy));
         }
     }
@@ -340,6 +340,7 @@ pub(crate) enum KeywordPolicy {
     Native,
     Legacy,
     Refuse,
+    RefuseUndeclared,
     RefuseOrdinarySuper,
 }
 
@@ -351,6 +352,14 @@ pub(crate) fn keyword_refusal(span: Span, policy: KeywordPolicy) -> Diagnostic {
             "keyword splat in ordinary super",
             "super destination's native or lowered argument ABI cannot be verified",
         );
+    }
+    if policy == KeywordPolicy::Refuse || policy == KeywordPolicy::RefuseUndeclared {
+        let detail = if policy == KeywordPolicy::RefuseUndeclared {
+            "bare `**` requires an anonymous keyword-rest declaration"
+        } else {
+            "bare `**` callee ABI cannot be verified"
+        };
+        return Diagnostic::unsupported(span, None, "anonymous keyword forwarding", detail);
     }
     Diagnostic::unsupported(
         span,
@@ -378,6 +387,7 @@ fn keyword_calls_with_index(
         e: &Expr,
         plans: &mut HashMap<Span, KeywordPolicy>,
         fallback: bool,
+        fill_missing: bool,
     ) {
         let args = match &*e.node {
             ExprNode::Send { args, .. } => Some(args.as_slice()),
@@ -388,7 +398,47 @@ fn keyword_calls_with_index(
             a.iter()
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
         }) && !(fallback && plans.contains_key(&e.span))
+            && !(fill_missing && plans.contains_key(&e.span))
         {
+            if args.is_some_and(has_named_keyword_rest)
+                && context.is_some_and(|(_, method)| {
+                    method.params.iter().any(|p| p.keyword && p.rest && !p.name.as_str().is_empty())
+                })
+                && anonymous_keyword_callee(app, contracts, context, e)
+            {
+                plans.entry(e.span).or_insert(KeywordPolicy::Native);
+                e.node.for_each_child(&mut |c| {
+                    visit(app, contracts, context, c, plans, fallback, fill_missing)
+                });
+                return;
+            }
+            if args.is_some_and(has_anonymous_keyword_forward) {
+                let declared = context.is_some_and(|(_, method)| {
+                    method.params.iter().any(|p| {
+                        p.keyword && p.rest && p.name.as_str().is_empty() && !p.forwarding
+                    })
+                });
+                let callable = anonymous_keyword_callee(app, contracts, context, e);
+                let policy = if declared && callable {
+                    KeywordPolicy::Native
+                } else if declared {
+                    KeywordPolicy::Refuse
+                } else {
+                    KeywordPolicy::RefuseUndeclared
+                };
+                plans
+                    .entry(e.span)
+                    .and_modify(|previous| {
+                        if *previous != policy {
+                            *previous = KeywordPolicy::Refuse;
+                        }
+                    })
+                    .or_insert(policy);
+                e.node.for_each_child(&mut |c| {
+                    visit(app, contracts, context, c, plans, fallback, fill_missing)
+                });
+                return;
+            }
             let policy = if !possible_full_destination(contracts, context, e) {
                 // Unrelated selectors cannot reach a full contract. Avoid
                 // scanning receiver provenance and hierarchies for each of
@@ -433,8 +483,9 @@ fn keyword_calls_with_index(
                 })
                 .or_insert(policy);
         }
-        e.node
-            .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback));
+        e.node.for_each_child(&mut |c| {
+            visit(app, contracts, context, c, plans, fallback, fill_missing)
+        });
     }
     let mut plans = HashMap::new();
     for (owner, method) in methods(app) {
@@ -445,6 +496,7 @@ fn keyword_calls_with_index(
             &method.body,
             &mut plans,
             false,
+            false,
         );
         for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
             visit(
@@ -454,11 +506,17 @@ fn keyword_calls_with_index(
                 default,
                 &mut plans,
                 false,
+                false,
             );
         }
     }
+    // The first walk classifies with the enclosing declaration. This one
+    // only fills a bare `**` whose span that walk did not see.
+    for (owner, method) in methods(app) {
+        visit(app, contracts, Some((owner, method)), &method.body, &mut plans, false, true);
+    }
     crate::lower::for_each_forwarding_body_ref(app, &mut |e| {
-        visit(app, contracts, None, e, &mut plans, true)
+        visit(app, contracts, None, e, &mut plans, true, false)
     });
     plans
 }
@@ -485,6 +543,50 @@ fn possible_full_destination(
             && contracts
                 .full_selectors
                 .contains(&Symbol::from("initialize")))
+}
+
+fn accepts_anonymous_keywords(method: &MethodDef) -> bool {
+    !method.params.iter().any(|p| p.forwarding || p.from_keyword || p.from_kwrest)
+        && method.unsupported_formals.is_none()
+        && method.params.iter().any(|p| p.keyword)
+}
+
+fn anonymous_keyword_callee(
+    app: &App,
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> bool {
+    match &*call.node {
+        // No modeled parent is not proof the parent rejects keywords.
+        // A parent method that is present and has no keyword slot does.
+        ExprNode::Super { .. } => destination(app, contracts, context, call)
+            .is_none_or(|(method, _)| accepts_anonymous_keywords(method)),
+        ExprNode::Send { method, recv, .. } if method.as_str() == "new" => {
+            match destination(app, contracts, context, call) {
+                Some((found, _)) => accepts_anonymous_keywords(found),
+                None => recv.as_ref().is_some_and(|recv| {
+                    matches!(&*recv.node, ExprNode::Const { .. })
+                }),
+            }
+        }
+        _ => destination(app, contracts, context, call)
+            .is_some_and(|(method, _)| accepts_anonymous_keywords(method)),
+    }
+}
+
+fn has_named_keyword_rest(args: &[Expr]) -> bool {
+    args.iter().any(|arg| {
+        matches!(&*arg.node, ExprNode::KeywordSplat { value }
+            if matches!(&*value.node, ExprNode::Var { name, .. } if !name.as_str().is_empty()))
+    })
+}
+
+fn has_anonymous_keyword_forward(args: &[Expr]) -> bool {
+    args.iter().any(|arg| {
+        matches!(&*arg.node, ExprNode::KeywordSplat { value }
+            if matches!(&*value.node, ExprNode::Var { name, .. } if name.as_str().is_empty()))
+    })
 }
 
 fn has_forwarding(args: &[Expr]) -> bool {

@@ -417,7 +417,7 @@ fn survey_accessor_refusal_preserves_other_dsl_enums_modules_and_genuine_gaps() 
     enum :status, %i[draft ready]
     attr_accessor :scratch
     private :scratch
-    defined?(OptionalFeature)
+    defined?(feature.enabled?)
   end
 end
 module ExtraChecks
@@ -436,7 +436,10 @@ end
     let gaps = survey::drain();
     let app = result.expect("survey must keep unrelated declarations");
     assert!(gaps.iter().any(|gap| gap.to_string().contains("concern attr_accessor")), "{gaps:?}");
-    assert!(gaps.iter().any(|gap| gap.to_string().contains("`defined?` only supports bareword")), "{gaps:?}");
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("`defined?` only supports bareword, ivar, and constant")),
+        "{gaps:?}"
+    );
     let model = &app.models[0];
     assert_eq!(model.associations().count(), 1);
     assert_eq!(model.validations().count(), 1);

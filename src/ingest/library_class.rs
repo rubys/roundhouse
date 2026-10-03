@@ -1406,9 +1406,15 @@ fn walk_decl_body_with_visibility<'pr>(
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
                 // The retained singleton copy is public even if the original
-                // instance definition is private/protected. extend self shares
-                // the original method instead and must retain its visibility.
-                m.visibility = crate::dialect::MethodVisibility::Public;
+                // instance definition is private/protected, unless
+                // `private_class_method` / `public_class_method` already
+                // recorded a class-side change at this def. extend self
+                // shares the original method instead and must retain its
+                // visibility.
+                let class_visibility_changed = visibility.class_side_changed(m.name.as_str());
+                if !class_visibility_changed {
+                    m.visibility = crate::dialect::MethodVisibility::Public;
+                }
             }
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
@@ -1447,6 +1453,24 @@ fn walk_decl_body_with_visibility<'pr>(
                 unknown_calls.extend(inner_unknown);
                 continue;
             }
+        }
+        if let Some(alias) = stmt.as_alias_method_node() {
+            let to = alias_keyword_name(&alias.new_name());
+            let from = alias_keyword_name(&alias.old_name());
+            let receiver = if force_class_receiver { MethodReceiver::Class } else { MethodReceiver::Instance };
+            if let Some((to, from)) = to.zip(from) {
+                if let Some(source) = methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
+                    let mut copy = methods[source].clone();
+                    copy.name = Symbol::from(to.as_str());
+                    visibility.apply(&statement, &mut copy);
+                    methods.push(copy);
+                    continue;
+                }
+            }
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "alias names a method this body has not defined".into(),
+            });
         }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
@@ -1680,7 +1704,12 @@ fn walk_decl_body_with_visibility<'pr>(
                 .any(|n| n == methods[*pos].name.as_str())
             {
                 methods[*pos].receiver = MethodReceiver::Class;
-                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                // Same rule as the bare marker: the copy starts public,
+                // and a later `private_class_method :name` keeps the
+                // visibility already recorded for that def.
+                if !visibility.class_side_changed(methods[*pos].name.as_str()) {
+                    methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                }
                 promoted.push(methods[*pos].name.clone());
             }
         }
@@ -1757,6 +1786,15 @@ fn normalize_classvars_to_ivars(e: &mut Expr) {
 /// last `old` already walked on the same side (instance, or class inside
 /// `class << self`). None when either name is not a literal symbol or
 /// the body has not defined `old`.
+pub(super) fn alias_keyword_name(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(symbol) = symbol_value(node) {
+        return Some(symbol);
+    }
+    node.as_call_node()
+        .filter(|call| call.receiver().is_none() && call.arguments().is_none())
+        .map(|call| constant_id_str(&call.name()).to_string())
+}
+
 fn alias_source(
     call: &ruby_prism::CallNode<'_>,
     methods: &[MethodDef],
@@ -2003,12 +2041,22 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        if keeps_keywords {
+                        // `target(**params)` forwards. `skip_before_action :name,
+                        // **options` consumes the hash as filter options and
+                        // must keep the flattened positional binding.
+                        let body_forwards_rest = def.body().is_some_and(|body| {
+                            let text = String::from_utf8_lossy(body.location().as_slice());
+                            text.contains(&format!("(**{s})")) || text.contains(&format!(", **{s})"))
+                        });
+                        if keeps_keywords || body_forwards_rest {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
                             // and dropping it beside `*args` changes the
                             // rest array even when the keyword-rest is unread.
+                            // A body that forwards `**rest` needs the same
+                            // retention: flattening it makes the call pass
+                            // one positional hash.
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
                             params.push(p);
@@ -2048,6 +2096,11 @@ pub(super) fn ingest_library_method(
     };
 
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
+    super::forwarding::require_anonymous_keyword_declaration(
+        formals.anonymous,
+        &body,
+        file,
+    )?;
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
@@ -2465,6 +2518,14 @@ pub fn ingest_concern_class_method_spans(
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
+            if let Some(singleton) = stmt.as_singleton_class_node() {
+                // `class << self` is a class-method carrier. Record the
+                // defs so an includer receives them. `module_function`
+                // is not this node and stays on the module.
+                if singleton.expression().as_self_node().is_some() {
+                    defs_in(singleton.body(), file, &mut spans);
+                }
+            }
             if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);

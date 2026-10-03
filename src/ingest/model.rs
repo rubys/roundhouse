@@ -249,6 +249,36 @@ pub(super) fn ingest_model_with_enum_constants(
             // place; `ingest_model_body_item` returns a single item and
             // can't. Library classes get the same treatment one level
             // down, in `walk_decl_body`.
+            if let Some(alias) = stmt.as_alias_method_node() {
+                let to = super::library_class::alias_keyword_name(&alias.new_name());
+                let from = super::library_class::alias_keyword_name(&alias.old_name());
+                let copied = to.zip(from).and_then(|(to, from)| {
+                    body.iter().rev().find_map(|item| match item {
+                        ModelBodyItem::Method { method, .. }
+                            if method.name.as_str() == from
+                                && method.receiver == crate::dialect::MethodReceiver::Instance =>
+                        {
+                            let mut copy = method.clone();
+                            copy.name = crate::ident::Symbol::from(to.as_str());
+                            Some(copy)
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(method) = copied {
+                    body.push(ModelBodyItem::Method {
+                        method,
+                        leading_comments: leading,
+                        leading_blank_line: leading_blank,
+                    });
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "alias names a method this body has not defined".into(),
+                });
+            }
             if let Some(sc) = stmt.as_singleton_class_node() {
                 match ingest_singleton_class_methods(&sc, file, &visibility) {
                     Ok(methods) => {
@@ -1332,6 +1362,11 @@ pub(super) fn ingest_method(
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    super::forwarding::require_anonymous_keyword_declaration(
+        formals.anonymous,
+        &body,
+        file,
+    )?;
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),

@@ -67,11 +67,25 @@ impl Visibility {
         Ok(out)
     }
 
+    /// `private_class_method` / `public_class_method` named this method
+    /// after `module_function` copied it to the class side.
+    pub(super) fn class_side_changed(&self, name: &str) -> bool {
+        self.changed.contains(&(true, name.to_string()))
+    }
+
     pub(super) fn apply(&self, statement: &Node<'_>, method: &mut MethodDef) {
-        if let Some(value) = self
-            .values
-            .get(&(statement.location().start_offset(), method.name.to_string()))
-        {
+        let offset = statement.location().start_offset();
+        let name = method.name.to_string();
+        // A `module_function` class copy is recorded one past the def so an
+        // instance `private :name` cannot overwrite it. Prefer that copy
+        // only after a class-method visibility change named this method.
+        if self.class_side_changed(&name) {
+            if let Some(value) = self.values.get(&(offset.wrapping_add(1), name.clone())) {
+                method.visibility = *value;
+                return;
+            }
+        }
+        if let Some(value) = self.values.get(&(offset, name)) {
             method.visibility = *value;
         }
     }
@@ -209,6 +223,7 @@ impl Visibility {
         // A new lexical body always starts public. A marker in the enclosing
         // class must not privatize def self.x or leak into class_methods.
         let mut default = MethodVisibility::Public;
+        let mut module_function = false;
         for statement in flatten_statements(body) {
             let offset = statement.location().start_offset();
             let def = definition(&statement);
@@ -248,13 +263,22 @@ impl Visibility {
                     inline = Some(visibility);
                 } else if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
+                        if arg.as_call_node().is_some_and(|call| call.receiver().is_none() && marker(&call)) {
+                            break;
+                        }
                         let Some(name) = symbol_or_string_value(&arg) else {
                             return Err(Self::unsupported(
                                 file,
                                 "visibility method names must be literal symbols or strings",
                             ));
                         };
-                        self.change(name, class_side || named_class, visibility, file)?;
+                        // `private_class_method :name` after `def self.name`.
+                        // The instance-side lookup misses that normal order.
+                        // A forward reference and an instance-only name still fail.
+                        let class_copy = named_class
+                            && !self.known.contains_key(&(false, name.clone()))
+                            && self.known.contains_key(&(true, name.clone()));
+                        self.change(name, class_side || named_class || class_copy, visibility, file)?;
                     }
                     continue;
                 } else {
@@ -304,7 +328,21 @@ impl Visibility {
                         default
                     }
                 });
-                self.define(offset, name, side, visibility, file)?;
+                self.define(offset, name.clone(), side, visibility, file)?;
+                if module_function && !side {
+                    // The library walk keeps one class-side method and looks
+                    // visibility up by the def offset. A later instance
+                    // `private :name` must not clobber that class copy, so
+                    // the copy lives at the next offset and `apply` prefers
+                    // it once `private_class_method` names the method.
+                    self.define(
+                        offset.wrapping_add(1),
+                        name,
+                        true,
+                        MethodVisibility::Public,
+                        file,
+                    )?;
+                }
                 continue;
             }
             if let Some(sc) = node.as_singleton_class_node() {
@@ -336,6 +374,36 @@ impl Visibility {
             }
             let name = call.name();
             let name = constant_id_str(&name);
+            if !class_side && name == "module_function" && call.arguments().is_none() {
+                module_function = true;
+                continue;
+            }
+            if !class_side && name == "module_function" {
+                // `module_function :a, :b` copies already-defined instance
+                // methods onto the class side. Record those names so a
+                // following `private_class_method :a` addresses the copy
+                // the library walk actually keeps.
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        let Some(copied) = symbol_or_string_value(&arg) else {
+                            continue;
+                        };
+                        if self.known.contains_key(&(false, copied.clone()))
+                            && !self.known.contains_key(&(true, copied.clone()))
+                        {
+                            let positions = self.known[&(false, copied.clone())].clone();
+                            let copies: Vec<usize> =
+                                positions.iter().map(|p| p.wrapping_add(1)).collect();
+                            self.known.insert((true, copied.clone()), copies.clone());
+                            for position in copies {
+                                self.values
+                                    .insert((position, copied.clone()), MethodVisibility::Public);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if class_side && name == "module_function" {
                 // Its public copy belongs to the carrier itself, not to the
                 // includer whose methods we retain after flattening.

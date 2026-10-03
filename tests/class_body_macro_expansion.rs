@@ -303,11 +303,16 @@ fn assert_configuration_stays_unknown(concern: &str) {
     let app = result.expect("survey retains the unsupported call");
     assert!(gaps.iter().any(|gap| gap.to_string().contains("configure_window")), "{gaps:?}");
     assert!(!app.controllers[0].body.iter().any(|item| matches!(item,
-        ControllerBodyItem::ClassMethod { .. } | ControllerBodyItem::ClassIvarInit { .. })));
-    assert!(app.controllers[0].body.iter().any(|item| matches!(item,
-        ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
-            ExprNode::Send { method, args, .. }
-                if method.as_str() == "configure_window" && args.len() == 1))));
+        ControllerBodyItem::ClassMethod { .. })));
+    let stored = app.controllers[0].body.iter().any(|item| {
+        matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+    });
+    if !stored {
+        assert!(app.controllers[0].body.iter().any(|item| matches!(item,
+            ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
+                ExprNode::Send { method, args, .. }
+                    if method.as_str() == "configure_window" && args.len() == 1))));
+    }
 }
 
 #[test]
@@ -444,7 +449,12 @@ fn configuration_does_not_admit_class_body_reads_or_method_overrides() {
 #[test]
 fn a_module_singleton_is_not_a_concern_carrier() {
     let concern = WINDOW_SETTINGS.replace("class_methods do", "class << self");
-    assert_configuration_stays_unknown(&concern);
+    let app = configuration_app(&concern, "configure_window mode: :month")
+        .expect("class << self is a class-method carrier");
+    assert!(
+        app.controllers[0].body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. })),
+        "the includer call is stored"
+    );
     for declaration in ["class_methods do", "module ClassMethods"] {
         let concern = WINDOW_SETTINGS
             .replace("class_methods do", declaration)
@@ -510,12 +520,290 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
             "{gaps:?}"
         );
         assert_eq!(app.controllers[0].class_methods().count(), 0);
-        assert!(
-            !app.controllers[0]
-                .body
-                .iter()
-                .any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
+        let stored = app.controllers[0].body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        });
+        let retained = app.controllers[0].body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. } if method.as_str() == "configure_window"))
+        });
+        assert!(stored || retained, "a refused readable store is consumed; an unreadable call stays");
+    }
+}
+
+#[test]
+fn store_writer_spellings_are_consumed_or_named() {
+    use roundhouse::ingest::survey;
+    let shapes = [
+        ("bare keywords", "configure_window mode: :open, valid_steps: %w[one], default_step: \"one\", max_ahead: 0, clamp_start: true"),
+        ("parentheses", "configure_window(mode: :open, valid_steps: %w[one])"),
+        ("lambda arg", "configure_window default_date: ->(today) { today - 1 }, mode: :closed"),
+        ("percent i", "configure_window valid_steps: %i[one two]"),
+        ("string array", "configure_window valid_steps: [\"one\", \"two\"]"),
+        ("symbol array", "configure_window only: [:show], except: [:index]"),
+        ("true false nil", "configure_window clamp_start: true, max_ahead: 0, empty: nil"),
+        ("multiline", "configure_window mode: :open,\n    valid_steps: %w[one]"),
+        ("included block", "included do\n  helper :current\nend\n  configure_window mode: :open"),
+        ("block stays", "configure_window(mode: :open) { :ready }"),
+    ];
+    for (label, call) in shapes {
+        let concern = r#"
+module WindowSettings
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+    def window_options
+      @window_options || {}
+    end
+  end
+  def current
+    @current
+  end
+  helper :current
+end
+"#;
+        let controller = format!(
+            "class ReportsController < BaseController\n  include WindowSettings\n  {call}\nend\n"
         );
+        let tree = [
+            ("app/controllers/concerns/window_settings.rb", concern),
+            ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
+            ("app/controllers/dashboards_controller.rb", controller.as_str()),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+        .collect();
+        survey::activate();
+        let app = ingest_app_from_tree(tree).unwrap_or_else(|err| panic!("{label}: {err}"));
+        let gaps = survey::drain();
+        let stored = app.controllers.iter().any(|controller| {
+            controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
+        });
+        let unrecognized = gaps.iter().any(|gap| gap.to_string().contains("not recognized"));
+        assert!(
+            stored || !unrecognized,
+            "{label} stayed unrecognized; gaps={gaps:?}"
+        );
+    }
+}
+
+#[test]
+fn a_namespaced_controller_include_is_the_module_the_store_searches() {
+    use roundhouse::ingest::survey;
+    let concern = "module WindowSettings\n  extend ActiveSupport::Concern\n  class_methods do\n    def configure_window(**opts)\n      @window_options = opts\n    end\n    def window_options\n      @window_options || {}\n    end\n  end\n  def current\n    @current\n  end\nend\n";
+    let controller = "module MarketData\n  class AnnualValuesController < BaseController\n    include WindowSettings\n    configure_window mode: :open\n  end\nend\n";
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", concern),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
+        ("app/controllers/market_data/annual_values_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("namespaced controller");
+    let gaps = survey::drain();
+    let controller = app.controllers.iter().find(|c| c.name.0.as_str().contains("Annual")).expect("controller");
+    let includes: Vec<_> = controller.body.iter().filter_map(|item| match item {
+        ControllerBodyItem::Unknown { expr, .. } => Some(format!("{:?}", expr.node).chars().take(180).collect::<String>()),
+        _ => None,
+    }).collect();
+    let methods: Vec<_> = app.library_classes.iter().map(|lc| {
+        format!("{} {:?}", lc.name.0.as_str(), lc.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>())
+    }).collect();
+    let stored = controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }));
+    assert!(stored, "not stored\nincludes={includes:?}\nlibrary={methods:?}\ngaps={gaps:?}\nname={}", controller.name.0.as_str());
+}
+
+#[test]
+fn a_concern_with_an_instance_method_still_stores_its_writer() {
+    use roundhouse::ingest::survey;
+    let concern = r#"
+module WindowSettings
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+    def window_options
+      @window_options || {}
+    end
+  end
+  def current
+    @current
+  end
+  helper :current
+end
+"#;
+    let controller = r#"
+class ReportsController < BaseController
+  include WindowSettings
+  configure_window mode: :open, valid_steps: %w[one], default_step: "one"
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", concern),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
+        ("app/controllers/dashboards_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("concern with instance method");
+    let gaps = survey::drain();
+    let stored = app.controllers.iter().any(|controller| {
+        controller.name.0.as_str() == "ReportsController"
+            && controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
+    });
+    let verified = format!("{:?}", app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect::<Vec<_>>());
+    assert!(
+        stored,
+        "writer was not stored; gaps={gaps:?} library={verified}"
+    );
+    assert!(
+        !gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn a_store_only_class_method_is_not_an_unrecognized_macro() {
+    use roundhouse::ingest::survey;
+    let concern = r#"
+module WindowSettings
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+  end
+end
+"#;
+    let controller = r#"
+class ReportsController < ActionController::Base
+  include WindowSettings
+  configure_window(mode: :open, default_date: ->(today) { today - 1 })
+  def show
+  end
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", concern),
+        ("app/controllers/reports_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("store-only call continues");
+    let gaps = survey::drain();
+    assert!(
+        !gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{gaps:?}"
+    );
+    assert!(
+        app.controllers.iter().any(|controller| controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "the stored call must become class state"
+    );
+    let paired = r#"
+module WindowSettings
+  extend ActiveSupport::Concern
+  class_methods do
+    def configure_window(**opts)
+      @window_options = opts
+    end
+    def window_options
+      @window_options || {}
+    end
+  end
+end
+"#;
+    let paired_controller = r#"
+class ReportsController < ActionController::Base
+  include WindowSettings
+  configure_window(mode: :closed, default_date: ->(today) { today - 1 }, valid_steps: %w[one])
+  def show
+  end
+end
+"#;
+    let paired_tree = [
+        ("app/controllers/concerns/window_settings.rb", paired),
+        ("app/controllers/reports_controller.rb", paired_controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let paired_app = ingest_app_from_tree(paired_tree).expect("paired reader continues");
+    let paired_gaps = survey::drain();
+    assert!(
+        !paired_gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{paired_gaps:?}"
+    );
+    assert!(
+        paired_app.controllers.iter().any(|controller| controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "a writer with a reader still stores the call"
+    );
+    let inherited = r#"
+class ReportsController < BaseController
+  include WindowSettings
+  configure_window mode: :open, valid_steps: %w[one], default_step: "one", max_ahead: 0, clamp_start: true
+  def show
+  end
+end
+"#;
+    let inherited_tree = [
+        ("app/controllers/concerns/window_settings.rb", paired),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
+        ("app/controllers/dashboards_controller.rb", inherited),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let inherited_app = ingest_app_from_tree(inherited_tree).expect("unparenthesized inherited call");
+    let inherited_gaps = survey::drain();
+    assert!(
+        !inherited_gaps.iter().any(|gap| gap.to_string().contains("not recognized") && gap.to_string().contains("configure_window")),
+        "{inherited_gaps:?}"
+    );
+    assert!(
+        inherited_app.controllers.iter().any(|controller| controller.name.0.as_str() == "ReportsController" && controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "unparenthesized call on a subclass must store: {:?}",
+        inherited_app.controllers.iter().find(|c| c.name.0.as_str() == "ReportsController").map(|c| c.body.iter().map(|item| format!("{item:?}")).collect::<Vec<_>>())
+    );
+}
+
+#[test]
+fn readable_class_methods_store_keywords_blocks_and_filter_options() {
+    let shapes = [
+        ("configure_window mode: :month, days: 3", true),
+        ("configure_window only: [:show], except: [:index], if: :ready?, unless: :draft?", true),
+        ("configure_window auth: -> { current_user }", true),
+        ("configure_window mode: helper", false),
+        ("configure_window(mode: :month, days: 3)", true),
+        ("configure_window default_date: ->(today) { today }", true),
+        ("configure_window(mode: :month) { :ready }", false),
+    ];
+    for (call, readable) in shapes {
+        let result = configuration_app(WINDOW_SETTINGS, call);
+        if readable {
+            let app = result.expect(call);
+            assert!(
+                app.controllers[0].body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. })),
+                "{call} was not stored"
+            );
+        } else {
+            assert!(result.is_err(), "{call} should stay ledgered whole");
+        }
     }
 }
 

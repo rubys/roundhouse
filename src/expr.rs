@@ -71,6 +71,10 @@ pub enum IrHint {
     MutableStringLiteral,
 }
 
+/// A `Const` that is only the operand of `defined?(Foo)` or
+/// `defined?(A::B)`. It is not evaluated, resolved, or autoloaded.
+pub const DEFINED_CONSTANT: u64 = 1 << 3;
+
 /// The core typed λ-calculus. Ruby's ~80 AST node kinds collapse into ~15 here;
 /// everything else lives in the Rails dialect or is handled by normalization.
 ///
