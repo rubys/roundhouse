@@ -1,10 +1,12 @@
 """Routing boundaries and false-green checks, without GitHub or toolchains."""
 
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +15,46 @@ spec = importlib.util.spec_from_file_location(
 )
 ci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ci)
+
+
+@contextmanager
+def git_repository():
+    env = os.environ.copy()
+    for name in (
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        env.pop(name, None)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        def git(*args):
+            return (
+                subprocess.check_output(
+                    ["git", "-C", directory, *args],
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+                .decode()
+                .strip()
+            )
+
+        git("init")
+        git("config", "user.name", "CI test")
+        git("config", "user.email", "test@example.invalid")
+        previous = os.getcwd()
+        try:
+            os.chdir(root)
+            # Direct planner calls and CLI subprocesses also see the clean env.
+            with patch.dict(os.environ, env, clear=True):
+                yield root, git
+        finally:
+            os.chdir(previous)
 
 
 class Routing(unittest.TestCase):
@@ -201,6 +243,38 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["smoke"], ci.TARGETS)
 
+    def test_proven_project_owners_keep_their_consumers_without_other_targets(self):
+        for scope in ["interpreted", "ruby-family"]:
+            with self.subTest(scope=scope):
+                plan = ci.select(["src/project.rs"], project_scope=scope)
+                self.assertEqual(plan["smoke"], ["ruby", "jruby"])
+                self.assertEqual(plan["extra_compare"], [])
+                self.assertIn("compare-jruby", plan["required"])
+                self.assertIn("writebook-inventory", plan["required"])
+                self.assertIn("archive-results", plan["required"])
+                self.assertFalse(plan["wasm"])
+                self.assertFalse(plan["site"])
+                if scope == "ruby-family":
+                    self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+                    self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
+                    self.assertEqual(plan["archives"], ["ruby", "jruby", "spinel"])
+                else:
+                    self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
+                    self.assertEqual(plan["archives"], ["ruby", "jruby"])
+        for paths, options in [
+            (["src/project.rs"], {"full": True}),
+            (["src/project.rs", "src/bin/roundhouse.rs"], {}),
+            (["src/project.rs", "src/emit/shared/ops.rs"], {}),
+        ]:
+            self.assertEqual(
+                ci.select(paths, project_scope="interpreted", **options)["smoke"],
+                ci.TARGETS,
+            )
+        self.assertEqual(
+            ci.select(["src/project.rs"], project_scope="unknown")["smoke"],
+            ci.TARGETS,
+        )
+
     def test_full_manual_and_publication_are_distinct(self):
         plan = ci.select([], full=True)
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
@@ -341,22 +415,68 @@ class Results(unittest.TestCase):
 
 
 class MergeTree(unittest.TestCase):
-    def test_diff_tracks_both_rename_owners_and_deletions(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-
-            def git(*args):
-                return (
-                    subprocess.check_output(
-                        ["git", "-C", directory, *args], stderr=subprocess.DEVNULL
+    def test_fixture_ignores_inherited_git_locations(self):
+        with git_repository() as (outer, outer_git):
+            (outer / "sentinel").write_text("unchanged\n")
+            outer_git("add", ".")
+            outer_git("commit", "-m", "outer")
+            outer_head = outer_git("rev-parse", "HEAD")
+            locations = {
+                "GIT_DIR": str(outer / ".git"),
+                "GIT_COMMON_DIR": str(outer / ".git"),
+                "GIT_WORK_TREE": str(outer),
+                "GIT_INDEX_FILE": str(outer / ".git/index"),
+                "GIT_OBJECT_DIRECTORY": str(outer / ".git/objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(outer / ".git/objects"),
+                "GIT_PREFIX": "wrong/",
+            }
+            with patch.dict(os.environ, {**locations, "CI_FIXTURE_MARKER": "kept"}):
+                with git_repository() as (root, git):
+                    self.assertEqual(Path(git("rev-parse", "--show-toplevel")), root)
+                    self.assertEqual(os.environ["CI_FIXTURE_MARKER"], "kept")
+                    (root / "README.md").write_text("base\n")
+                    git("add", ".")
+                    git("commit", "-m", "base")
+                    base = git("rev-parse", "HEAD")
+                    (root / "README.md").write_text("changed\n")
+                    git("add", ".")
+                    git("commit", "-m", "docs")
+                    head = git("rev-parse", "HEAD")
+                    self.assertEqual(
+                        ci.changed_inputs({"before": base}, "push", head),
+                        (["README.md"], None),
                     )
-                    .decode()
-                    .strip()
+                    event_path = root / "event.json"
+                    event_path.write_text(json.dumps({"before": base}))
+                    output = subprocess.check_output(
+                        ["python3", "-B", ci.__file__, "plan"],
+                        env={
+                            **os.environ,
+                            "GITHUB_EVENT_PATH": str(event_path),
+                            "GITHUB_EVENT_NAME": "push",
+                            "GITHUB_SHA": head,
+                            "GITHUB_OUTPUT": os.devnull,
+                            "GITHUB_STEP_SUMMARY": os.devnull,
+                            "CI_FULL": "false",
+                            "CI_PUBLISH": "false",
+                            "CI_SPINEL_REVISION": "a" * 40,
+                        },
+                        text=True,
+                    )
+                    jobs = next(
+                        line[5:]
+                        for line in output.splitlines()
+                        if line.startswith("jobs=")
+                    )
+                    self.assertEqual(json.loads(jobs), ci.BASE)
+                self.assertEqual(
+                    {name: os.environ[name] for name in locations}, locations
                 )
+            self.assertEqual(outer_git("rev-parse", "HEAD"), outer_head)
+            self.assertEqual(outer_git("status", "--porcelain"), "")
 
-            git("init")
-            git("config", "user.name", "CI test")
-            git("config", "user.email", "test@example.invalid")
+    def test_diff_tracks_both_rename_owners_and_deletions(self):
+        with git_repository() as (root, git):
             (root / "src/emit").mkdir(parents=True)
             (root / "src/emit/go.rs").write_text("old owner\n")
             git("add", ".")
@@ -371,21 +491,188 @@ class MergeTree(unittest.TestCase):
             git("merge", "--no-ff", "feature", "-m", "merge")
             sha = git("rev-parse", "HEAD")
             event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
-            previous = os.getcwd()
-            try:
-                os.chdir(root)
-                paths = ci.changed_paths(event, "pull_request", sha)
-                self.assertEqual(set(paths), {"src/emit/go.rs", "src/emit/swift.rs"})
-                self.assertEqual(ci.select(paths)["extra_compare"], ["swift", "go"])
-                with self.assertRaises(ValueError):
-                    ci.changed_paths(event, "pull_request", head)
-                with (
-                    patch.dict(event["pull_request"]["base"], sha=head),
-                    self.assertRaises(ValueError),
-                ):
-                    ci.changed_paths(event, "pull_request", sha)
-            finally:
-                os.chdir(previous)
+            paths, scope = ci.changed_inputs(event, "pull_request", sha)
+            self.assertIsNone(scope)
+            self.assertEqual(set(paths), {"src/emit/go.rs", "src/emit/swift.rs"})
+            self.assertEqual(ci.select(paths)["extra_compare"], ["swift", "go"])
+            with self.assertRaises(ValueError):
+                ci.changed_inputs(event, "pull_request", head)
+            with (
+                patch.dict(event["pull_request"]["base"], sha=head),
+                self.assertRaises(ValueError),
+            ):
+                ci.changed_inputs(event, "pull_request", sha)
+
+
+class ProjectScope(unittest.TestCase):
+    source = (
+        "fn target_files() {\n    shared();\n}\n\n"
+        "fn ruby_family_runtime_files() {\n    interpreted();\n}\n\n"
+        "fn spinel_files() {\n    native();\n}\n"
+    )
+
+    def test_body_ownership_and_union(self):
+        interpreted = self.source.replace("interpreted();", "new_interpreted();")
+        native = self.source.replace("native();", "new_native();")
+        self.assertEqual(
+            ci.project_change_scope(self.source, interpreted), "interpreted"
+        )
+        self.assertEqual(ci.project_change_scope(self.source, native), "ruby-family")
+        self.assertEqual(
+            ci.project_change_scope(
+                self.source, native.replace("interpreted();", "new_interpreted();")
+            ),
+            "ruby-family",
+        )
+        self.assertEqual(ci.project_change_scope(native, self.source), "ruby-family")
+
+    def test_all_builder_owners_and_raw_literal_fallbacks(self):
+        for name, scope in {
+            "ruby_runtime_files": "interpreted",
+            "jruby_runtime_files": "interpreted",
+            "ruby_family_runtime_files": "interpreted",
+            "spinel_files": "ruby-family",
+            "spin_shape": "ruby-family",
+        }.items():
+            before = f"fn {name}() {{\n    old();\n}}\n"
+            after = before.replace("old();", "new();")
+            with self.subTest(name=name):
+                self.assertEqual(ci.project_change_scope(before, after), scope)
+            for prefix in ["r", "br", "cr"]:
+                for hashes in ["", "#", "###"]:
+                    raw = f'let text = {prefix}{hashes}"old"{hashes};'
+                    literal = before.replace("old();", raw)
+                    for first, second in [
+                        (before, literal),
+                        (literal, before),
+                        (literal, literal.replace('"old"', '"new"')),
+                    ]:
+                        with self.subTest(name=name, raw=raw, first=first):
+                            self.assertIsNone(ci.project_change_scope(first, second))
+
+    def test_unknown_shared_signatures_and_ambiguous_shapes_stay_full(self):
+        for changed in [
+            self.source.replace("shared();", "new_shared();"),
+            self.source.replace("spinel_files()", "spinel_files(app: &App)"),
+            self.source.replace("fn spinel_files", "pub fn spinel_files"),
+            self.source.replace("    native();", "native();"),
+            self.source.replace("    native();", '    let text = r#"native();"#;'),
+            self.source.replace("    native();", "    /* native(); */"),
+            self.source.replace("    native();", "    /*\n}\nfn shared() {\n    */"),
+            self.source + "\nfn shared_helper() {\n    work();\n}\n",
+            self.source + "\nfn spinel_files() {\n    duplicate();\n}\n",
+            self.source.replace("fn spinel_files() {\n    native();\n}\n", ""),
+            self.source,
+        ]:
+            with self.subTest(changed=changed):
+                self.assertIsNone(ci.project_change_scope(self.source, changed))
+        self.assertIsNone(
+            ci.project_change_scope(
+                self.source,
+                self.source.replace("native();", "new_native();").replace(
+                    "shared();", "new_shared();"
+                ),
+            )
+        )
+
+    def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):
+        fake = "fn ruby_runtime_files() {\n    cross_target();\n}\n"
+        for opening, closing in [
+            ('const SHARED: &str = r##"\n', '"##;\n'),
+            ('const SHARED: &str = "\n', '";\n'),
+            ('const SHARED: &str = br#"\n', '"#;\n'),
+            ("/*\n", "*/\n"),
+            ("shared_macro! {\n", "}\n"),
+            ("shared_macro!(\n", ");\n"),
+            ("shared_macro![\n", "];\n"),
+        ]:
+            source = opening + fake + closing + self.source
+            with self.subTest(opening=opening):
+                self.assertIsNone(
+                    ci.project_change_scope(
+                        source, source.replace("cross_target();", "different();")
+                    )
+                )
+
+    def test_real_http_auth_registration_is_family_owned(self):
+        source = (Path(__file__).parents[1] / "src/project.rs").read_text()
+        registration = """    // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
+    // runtime/http_authentication.rb (ruby family only). It types the
+    // block parameters the helpers yield, which the app's blocks compare.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/http_authentication.rbs")
+            .map_err(|e| format!("read runtime/spinel/http_authentication.rbs: {e}"))?;
+        files.push(("sig/runtime/http_authentication.rbs".to_string(), rbs));
+    }
+
+"""
+        self.assertEqual(source.count(registration), 1)
+        self.assertEqual(
+            ci.project_change_scope(source.replace(registration, ""), source),
+            "ruby-family",
+        )
+
+    def test_git_uses_whole_event_trees_and_rejects_mode_changes(self):
+        with git_repository() as (root, git):
+            (root / "src").mkdir()
+            project = root / "src/project.rs"
+            project.write_text(self.source)
+            git("add", ".")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            git("switch", "-c", "feature")
+            project.write_text(self.source.replace("native();", "new_native();"))
+            git("add", ".")
+            git("commit", "-m", "native change")
+            native = git("rev-parse", "HEAD")
+            project.write_text(
+                project.read_text().replace("shared();", "new_shared();")
+            )
+            git("add", ".")
+            git("commit", "-m", "shared change")
+            head = git("rev-parse", "HEAD")
+            git("switch", "-")
+            git("merge", "--no-ff", "feature", "-m", "merge")
+            sha = git("rev-parse", "HEAD")
+            event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+            with self.assertRaises(ValueError):
+                ci.changed_inputs({"before": base}, "push", native)
+            git("checkout", "--detach", native)
+            paths, scope = ci.changed_inputs({"before": base}, "push", native)
+            self.assertEqual(paths, ["src/project.rs"])
+            self.assertEqual(scope, "ruby-family")
+            event_path = root / "event.json"
+            event_path.write_text(json.dumps({"before": base}))
+            output = subprocess.check_output(
+                ["python3", "-B", ci.__file__, "plan"],
+                env={
+                    **os.environ,
+                    "GITHUB_EVENT_PATH": str(event_path),
+                    "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_SHA": native,
+                    "GITHUB_OUTPUT": os.devnull,
+                    "CI_FULL": "false",
+                    "CI_PUBLISH": "false",
+                    "CI_SPINEL_REVISION": "a" * 40,
+                },
+                text=True,
+            )
+            plan = json.loads(
+                next(
+                    line[5:] for line in output.splitlines() if line.startswith("plan=")
+                )
+            )
+            self.assertEqual(plan["smoke"], ["ruby", "jruby"])
+            self.assertFalse(plan["wasm"])
+            git("checkout", "--detach", sha)
+            self.assertIsNone(ci.changed_inputs(event, "pull_request", sha)[1])
+            git("checkout", "--detach", native)
+            project.chmod(0o755)
+            git("add", ".")
+            git("commit", "-m", "mode change")
+            self.assertIsNone(
+                ci.changed_inputs({"before": base}, "push", git("rev-parse", "HEAD"))[1]
+            )
 
 
 if __name__ == "__main__":

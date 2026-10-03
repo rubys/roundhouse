@@ -472,7 +472,7 @@ fn run_transpile(
     // `String`), so before this they were dropped without a word.
     let assets = project::write_binary_assets(&app.binary_assets, &files, out)?;
     eprintln!(
-        "roundhouse: wrote {} files to {} ({})",
+        "roundhouse: emitted {} files to {} ({})",
         files.len() + assets,
         out.display(),
         target.as_str()

@@ -27,18 +27,6 @@ fn app_from(files: &[(&str, &str)]) -> roundhouse::App {
     app
 }
 
-fn unresolved(app: &roundhouse::App) -> Vec<String> {
-    diagnose(app)
-        .into_iter()
-        .filter_map(|d| match d.kind {
-            DiagnosticKind::UnresolvedType { name: Some(name), .. } => {
-                Some(name.as_str().to_string())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 fn base(extra: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
     let mut files: Vec<(&'static str, String)> = vec![
         (

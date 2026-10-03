@@ -10,11 +10,13 @@
 //!
 //! Conservative: only bare literals whose own-dir partial does NOT
 //! exist, resolved strictly up the controller parent chain to the
-//! first dir that has the partial. Everything else stays as written.
+//! first dir that has the partial. A controller under
+//! ApplicationController reaches `application/` through that chain.
+//! Everything else stays as written.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::naming::snake_case;
+use crate::naming::underscore;
 
 pub fn apply_partial_qualification(app: &mut App) {
     use std::collections::{HashMap, HashSet};
@@ -37,9 +39,9 @@ pub fn apply_partial_qualification(app: &mut App) {
         .controllers
         .iter()
         .filter_map(|c| {
-            let dir = snake_case(c.name.0.as_str().strip_suffix("Controller")?);
+            let dir = underscore(c.name.0.as_str().strip_suffix("Controller")?);
             let parent = c.parent.as_ref()?;
-            let pdir = snake_case(parent.0.as_str().strip_suffix("Controller")?);
+            let pdir = underscore(parent.0.as_str().strip_suffix("Controller")?);
             Some((dir, pdir))
         })
         .collect();
@@ -64,14 +66,24 @@ fn qualify(
         return;
     }
     let Some(first) = args.first_mut() else { return };
-    let ExprNode::Hash { entries, kwargs: true } = &mut *first.node else { return };
-    for (k, v) in entries {
-        if !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-            if value.as_str() == "partial")
-        {
-            continue;
-        }
-        let ExprNode::Lit { value: Literal::Str { value } } = &mut *v.node else { continue };
+    // `render "name", k: v` names the partial in the first argument;
+    // `render partial: "name"` names it under the `partial:` key.
+    let names: Vec<&mut String> = match &mut *first.node {
+        ExprNode::Lit { value: Literal::Str { value } } => vec![value],
+        ExprNode::Hash { entries, kwargs: true } => entries
+            .iter_mut()
+            .filter(|(k, _)| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                    if value.as_str() == "partial")
+            })
+            .filter_map(|(_, v)| match &mut *v.node {
+                ExprNode::Lit { value: Literal::Str { value } } => Some(value),
+                _ => None,
+            })
+            .collect(),
+        _ => return,
+    };
+    for value in names {
         if value.contains('/') {
             continue;
         }

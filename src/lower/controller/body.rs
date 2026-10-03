@@ -985,6 +985,19 @@ pub fn implicit_render_statement(
 const RESPONSE_TERMINALS: &[&str] =
     &["render", "redirect_to", "redirect_back_or_to", "head", "send_data", "send_file"];
 
+/// Rails' HTTP auth helpers that render the 401 challenge when the
+/// credentials are missing or refused. They MIGHT respond, so a filter
+/// calling one needs the preamble's halting check and an action calling
+/// one a guarded default render; they are not in `RESPONSE_TERMINALS`
+/// because on success they leave the response to the action, so
+/// `has_toplevel_terminal` must not count them.
+pub const HTTP_AUTH_CHALLENGES: &[&str] = &[
+    "authenticate_or_request_with_http_basic",
+    "authenticate_or_request_with_http_token",
+    "request_http_basic_authentication",
+    "request_http_token_authentication",
+];
+
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {
         if *found {
@@ -992,6 +1005,7 @@ fn contains_terminal(body: &Expr) -> bool {
         }
         if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
             if RESPONSE_TERMINALS.contains(&method.as_str())
+                || HTTP_AUTH_CHALLENGES.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
             {
                 *found = true;

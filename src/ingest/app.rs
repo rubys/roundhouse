@@ -882,6 +882,29 @@ end
                 }
             }
         }
+        // `Kaminari.configure { |config| config.default_per_page = N }`
+        // — the page size `Relation#page` applies. Synthesized as
+        // `kaminari_default_per_page` on the reopen, over Kaminari's
+        // own default (25) in runtime/ruby/rails.rb.
+        {
+            let init_dir = dir.join("config/initializers");
+            let mut per_page: Option<u64> = None;
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        let file = entry.display().to_string();
+                        per_page = extract_kaminari_default_per_page(&bytes, &file).or(per_page);
+                    }
+                }
+            }
+            if let Some(n) = per_page {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def kaminari_default_per_page\n  {n}\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // App-defined config keys — `config.app_version = …` in
         // application.rb or an initializer, read back as
         // `Rails.application.config.app_version`. Rails' config object
@@ -5439,6 +5462,84 @@ fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
         }
     }
     (untrusted, blocked)
+}
+
+/// `<param>.default_per_page = N` inside a `Kaminari.configure do
+/// |<param>| … end` block (top level or under `to_prepare`), the last
+/// one winning as it does when Ruby runs the block. Read off the parse
+/// rather than the lines, so an assignment in another config block of
+/// the same file (`Rails.application.configure do |config|`) is not
+/// mistaken for Kaminari's.
+///
+/// A value that is not a positive Integer literal (a constant, an ENV
+/// read) is recognized but not evaluated: it is a survey gap, and this
+/// file contributes no page size rather than a guessed one.
+fn extract_kaminari_default_per_page(source: &[u8], file: &str) -> Option<u64> {
+    let src = String::from_utf8_lossy(source);
+    // Cheap skip before parsing: this runs over every initializer, and
+    // most never name Kaminari.
+    if !src.contains("Kaminari") {
+        return None;
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let program = root.as_program_node()?;
+    let mut found = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "configure" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if !matches!(constant_text(&recv, &src).as_deref(), Some("Kaminari" | "::Kaminari")) {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(param) = block
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+            .and_then(|p| p.requireds().iter().next())
+            .and_then(|p| p.as_required_parameter_node())
+        else {
+            continue;
+        };
+        let param = super::util::constant_id_str(&param.name());
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { continue };
+        for inner in body.body().iter() {
+            let Some(assign) = inner.as_call_node() else { continue };
+            if super::util::constant_id_str(&assign.name()) != "default_per_page=" {
+                continue;
+            }
+            let on_param = assign
+                .receiver()
+                .and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|r| super::util::constant_id_str(&r.name()) == param);
+            if !on_param {
+                continue;
+            }
+            let Some(args) = assign.arguments() else { continue };
+            let args: Vec<_> = args.arguments().iter().collect();
+            let [value] = args.as_slice() else { continue };
+            let literal = value
+                .as_integer_node()
+                .and_then(|i| super::util::integer_i64(&i.value()))
+                .and_then(|n| u64::try_from(n).ok())
+                .filter(|&n| n > 0);
+            if literal.is_none() {
+                let loc = value.location();
+                survey::record(&IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!(
+                        "Kaminari default_per_page is not a positive Integer literal (`{}`); the emitted app does not apply it",
+                        &src[loc.start_offset()..loc.end_offset()]
+                    ),
+                });
+            }
+            found = literal;
+        }
+    }
+    found
 }
 
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {

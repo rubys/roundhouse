@@ -4868,6 +4868,7 @@ pub(crate) fn instantiate_return_kind(
         ReturnKind::ArrayOfSelf => Ty::Array { elem: Box::new(self_ty()) },
         ReturnKind::SelfOrNil => Ty::Union { variants: vec![self_ty(), Ty::Nil] },
         ReturnKind::Int => Ty::Int,
+        ReturnKind::IntOrNil => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::HashSymStr => Ty::Hash {
             key: Box::new(Ty::Sym),

@@ -458,6 +458,11 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Share first-party split DWARF instead of copying it into every test
+      # executable. Keep sidecars until all tests finish; code stays unoptimized.
+      # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
@@ -498,8 +503,24 @@ jobs:
       # the unit job ran it as a no-op. The first refuses to skip.
       - name: Install the gem the emitted Ruby tree runs on
         run: gem install sqlite3 --no-document
-      - name: cargo test
-        run: cargo test --all-targets
+      # Keep compilation separate from execution: hundreds of independently
+      # linked integration binaries make both significant costs. The second
+      # command reuses these binaries; no test result is cached or skipped.
+      - name: Build all test targets
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/build" -- \
+            cargo test --locked --all-targets --no-run --timings
+      - name: Run all test targets
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
+            cargo test --locked --all-targets
+      - name: Upload test build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-build-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
       # scripts/bench emits nine of its lanes with `cargo run --bin
       # emit_preview` — the DEBUG profile — and nothing else in CI did:
       # the site job and bin/rh run `--release`, whose frames are a
@@ -509,10 +530,19 @@ jobs:
       # run here so the next one fails a PR instead of a nightly.
       - name: Emit every bench lane in the debug profile (scripts/bench's shape)
         run: |
-          set -euo pipefail
-          for target in typescript crystal rust python elixir go kotlin swift csharp; do
-            cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
-          done
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/bench" -- \
+            bash -euo pipefail -c '
+              for target in typescript crystal rust python elixir go kotlin swift csharp; do
+                cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
+              done
+            '
+      - name: Upload unit resource samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-resources
+          path: ${{ runner.temp }}/unit-resources/
+          if-no-files-found: ignore
 
   # -------------------------------------------------------------------
   # One job per target language. Each generates a project from the

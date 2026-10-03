@@ -10,6 +10,46 @@
 - TypeScript SharedWorker browser tests, Campfire conformance, and Campfire
   comparison including its model/database differential.
 
+The unit job compiles with `cargo test --locked --all-targets --no-run --timings`
+and then executes `cargo test --locked --all-targets` against those binaries.
+Separate step durations distinguish build/link cost from test execution; the
+`unit-build-timings` artifact retains Cargo's per-target HTML build report,
+including on failures when a report is available. Test results are never reused.
+The test profile keeps file/line backtraces with `line-tables-only` debug info;
+the independent dev-profile bench emission gate remains unchanged.
+
+The Linux unit job also sets `CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked`.
+First-party split DWARF sidecars can be shared instead of repeated in every
+integration-test executable. Keep these files alongside the build until tests
+finish; deleting them early can break backtrace symbolication. Disk comparisons
+must include sidecars and object files, not only executable sizes. This override
+does not change local platform defaults, dev or release profiles. The policy
+suite checks real library and integration-test file/line backtraces.
+
+Build, execution and debug-bench phases also retain `unit-resources`: five-second
+CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
+filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/
+`build` allocated sizes. Initial/final samples cover short commands too. Reports
+are outside the Cargo cache and uploaded on failure; commands and exit codes
+are preserved. Measurement/report I/O failures are best-effort warnings, never
+replacements for the command result. No cleanup runs while test binaries are
+still needed.
+
+These are resource measurements, not a performance gate. CPU percentages and
+available RAM include other runner processes and the OS; available RAM excludes
+reclaimable-cache pressure. Child CPU time is cumulative and may exceed wall
+time; child peak RSS is the largest single process, **not** concurrent tree RAM.
+Five-second samples can miss shorter spikes. To reproduce a Linux measurement:
+
+```bash
+CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
+python3 scripts/ci-resources.py --out /tmp/unit-resources/build -- \
+  cargo test --locked --all-targets --no-run --timings
+CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
+python3 scripts/ci-resources.py --out /tmp/unit-resources/tests -- \
+  cargo test --locked --all-targets
+```
+
 These are nine validation executions, plus three small orchestration jobs
 (`plan`, `compact-required`, `ci-summary`). Drafts select only fixture and
 unit validation. **`CI summary` is informational:** it reports missing,
@@ -39,7 +79,20 @@ helper, without additional Python packages.
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |
 | Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
+| Proven body-only edits in `src/project.rs`'s interpreted Ruby/JRuby builders | Ruby/JRuby comparison and archive smokes, plus Writebook inventory |
+| Proven body-only edits in its shared Ruby/Spinel builders | Ruby/JRuby owners plus all native Spinel/Campfire consumers and Writebook inventory; no unrelated target or WASM fanout |
 | Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
+
+Project assembly is narrowed only when the base and event trees differ solely
+inside the bodies of `ruby_runtime_files`, `jruby_runtime_files`,
+`ruby_family_runtime_files`, `spinel_files` or `spin_shape`. Signatures and
+every byte outside those bodies must remain identical. Shared helpers,
+constants, dispatch, new/deleted functions, mode changes and unrecognized
+source shapes still select full validation. This deliberately conservative
+recognizer is not a Rust parser: raw strings (`r`, `br`, `cr`) within builder
+bodies and block comments retain full coverage. Other changed paths and
+`ci:full` can still expand the combined plan; no last-commit or PR-title inference
+is used.
 
 ### Requesting broader or fresh validation
 
@@ -290,7 +343,7 @@ input makes it ineligible. Do not substitute a PR-wide changed-files filter or
 the last head-commit diff for merge-tree identity. Keep artifact producers fresh
 unless current-run outputs and their provenance can be preserved honestly.
 
-Run `PYTHONDONTWRITEBYTECODE=1 python3 tests/ci_reuse_test.py -v` and
+Run `python3 -B tests/ci_reuse_test.py -v` and
 `cargo test --test workflow_yaml_parses` when changing this policy. The Rust
 workflow tests execute the Python adversarial suite, so normal unit CI gates it.
 For coverage routing, archive evidence or full-workflow changes, also run

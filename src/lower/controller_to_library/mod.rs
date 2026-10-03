@@ -41,7 +41,7 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    has_toplevel_terminal, synthesize_deferred_implicit_render, synthesize_implicit_render,
+    has_toplevel_terminal, synthesize_deferred_implicit_render,
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
@@ -2031,7 +2031,8 @@ fn can_respond_within(
             if matches!(
                 method.as_str(),
                 "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
-            ) {
+            ) || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            {
                 *found = true;
                 return;
             }

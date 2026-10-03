@@ -846,11 +846,7 @@ fn collect_early_returns<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
 /// Every string a hash-value expression can evaluate to: a string
 /// literal is itself; `CONST[x]` where CONST is a (frozen) hash literal
 /// of string values is all of that hash's values.
-fn string_values_of(e: &Expr, consts: &HashMap<&str, &Expr>) -> Option<BTreeSet<String>> {
-    string_values_in(e, consts, e, 0)
-}
-
-/// [`string_values_of`], also following a LOCAL through every write to
+/// Also follows a LOCAL through every write to
 /// it in `body` — a plain assignment, or one slot of a multiple
 /// assignment from an `if` whose branches are array literals:
 ///

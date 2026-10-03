@@ -1,6 +1,133 @@
 use std::fs;
 
 #[test]
+fn unit_separates_build_timing_without_reducing_coverage() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let unit = &ci["jobs"]["unit"];
+    assert!(unit.get("if").is_none());
+    assert!(unit.get("continue-on-error").is_none());
+    assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
+    assert_eq!(
+        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
+        Some("unpacked")
+    );
+    assert!(ci["env"].get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO").is_none());
+    let steps = unit["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Build all test targets"))
+        .expect("compile every target with timings");
+    let run = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Run all test targets"))
+        .expect("execute every non-ignored test, not just compile it");
+    assert!(build < run);
+    for (index, phase, command) in [
+        (
+            build,
+            "build",
+            "cargo test --locked --all-targets --no-run --timings",
+        ),
+        (run, "tests", "cargo test --locked --all-targets"),
+    ] {
+        assert!(steps[index].get("if").is_none());
+        assert!(steps[index].get("continue-on-error").is_none());
+        let body = steps[index]["run"].as_str().unwrap();
+        assert!(body.contains(&format!("--out \"$RUNNER_TEMP/unit-resources/{phase}\" --")));
+        assert!(body.trim_end().ends_with(command));
+    }
+    let timings = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-build-timings"))
+        .expect("retain build timings for investigation");
+    assert_eq!(timings["if"].as_str(), Some("always()"));
+    assert_eq!(
+        timings["with"]["path"].as_str(),
+        Some("target/cargo-timings/")
+    );
+    let bench = steps
+        .iter()
+        .find(|step| {
+            step["name"].as_str()
+                == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
+        })
+        .expect("retain the independent dev-profile stack-overflow gate");
+    assert!(bench.get("if").is_none());
+    assert!(bench.get("continue-on-error").is_none());
+    let body = bench["run"].as_str().unwrap();
+    assert!(body.contains("bash -euo pipefail -c"));
+    assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
+    assert!(body.contains("cargo run --quiet --bin emit_preview -- --target"));
+    let resources = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .expect("retain phase samples even when a command fails");
+    assert_eq!(resources["if"].as_str(), Some("always()"));
+    assert_eq!(
+        resources["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/unit-resources/")
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "linux", debug_assertions))]
+fn test_backtraces_retain_library_and_integration_source_locations() {
+    const PROBE: &str = "ROUNDHOUSE_TEST_BACKTRACE_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        // The child runs outside the checkout: this deliberately panics in
+        // first-party library code, with an integration-test frame above it.
+        roundhouse::fixtures::real_blog();
+        panic!("missing-fixture probe unexpectedly returned");
+    }
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-backtrace-{}-{unique}", std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "test_backtraces_retain_library_and_integration_source_locations",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("RUST_BACKTRACE", "1")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    fs::remove_dir(&root).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{stderr}");
+    for source in ["src/fixtures.rs:", "tests/ci_policy_workflow.rs:"] {
+        // The panic header includes a location even without debug info.
+        // Require symbolicated stack frames, not just that header.
+        assert!(
+            stderr.lines().any(|line| line.trim_start().starts_with("at ") && line.contains(source)),
+            "missing file/line backtrace for {source}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn resource_monitor_preserves_failures_and_metric_meanings() {
+    let result = std::process::Command::new("python3")
+        .args(["-B", "tests/ci_resources_test.py", "-v"])
+        .output()
+        .expect("CI helper tests require python3");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn routing_and_required_results_reject_false_green() {
     for test in ["tests/ci_plan_test.py", "tests/ci_archive_evidence_test.py"] {
         let result = std::process::Command::new("python3")
