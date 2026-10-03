@@ -29,7 +29,8 @@
 //! apps (the blog).
 
 use super::model_to_library::{fn_sig, push_synth_instance_method};
-use crate::dialect::{AccessorKind, MethodDef, Model, ModelBodyItem, Param};
+use crate::app::App;
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
@@ -105,6 +106,220 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
         AccessorKind::AttributeWriter,
         true,
     );
+}
+
+/// A model's own `<attr>=` that calls `super`. In Rails the macro's
+/// writer lives in a module the model includes, so `super` reaches it.
+/// Here the model's writer wins outright (`push_secure_password_methods`
+/// skips the name), and its `super` went to `ActiveRecord::Base`, which
+/// has no such writer: NoMethodError at run time, with `check` clean.
+/// This pass adds the macro's writer to the model under a name of its
+/// own and makes the override call that where it wrote `super`, as
+/// `lower::as_json_super` does for `as_json`.
+///
+/// A post-analyze pass over the app, ahead of the passes that inline
+/// blocks (`create_block`), so it sees the writer as written and every
+/// place another writer could come from. Left unchanged, rather than
+/// risk skipping a writer or passing the wrong value:
+/// - a model with a module mixed into it or an ancestor model, in the
+///   class body or by an initializer (`User.include Hooks`): the module
+///   could define `<attr>=` too, and `super` would reach it first;
+/// - an app that already has a method of the helper's name: in a model
+///   (a `def`, an association, a macro such as `attr_reader`), a column
+///   of any table, or a library class or module;
+/// - a writer whose parameters are not one plain positional, which a
+///   bare `super` could not forward as the helper's one argument;
+/// - a writer with a `super` inside a block: there the writer's
+///   parameter name can mean the block's own variable (a block
+///   parameter, or a `|; local|`, which ingest does not keep).
+pub fn apply_secure_password_super(app: &mut App) {
+    let eligible: Vec<(usize, Symbol)> = app
+        .models
+        .iter()
+        .enumerate()
+        .filter_map(|(i, model)| {
+            let attr = secure_password_attr(&model.body)?;
+            let helper = helper_name(&attr);
+            let lineage = lineage(app, model);
+            let left_alone = lineage.iter().any(|m| includes_a_module(m))
+                || app.module_mixins.iter().any(|mixin| {
+                    mixin.target.as_str() == "ActiveRecord::Base"
+                        || lineage.iter().any(|m| m.name.0 == mixin.target)
+                })
+                || app.models.iter().any(|m| names_method(m, &helper))
+                || app.library_classes.iter().any(|lc| lc.methods.iter().any(|m| m.name == helper))
+                || app.schema.tables.values().any(|t| t.columns.iter().any(|c| c.name == helper));
+            (!left_alone).then_some((i, attr))
+        })
+        .collect();
+    for (i, attr) in eligible {
+        let model = &mut app.models[i];
+        let writer = Symbol::from(format!("{}=", attr.as_str()));
+        let helper = helper_name(&attr);
+        let mut rewritten = false;
+        for item in &mut model.body {
+            let ModelBodyItem::Method { method, .. } = item else { continue };
+            if method.name != writer || method.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            let plain_param = matches!(method.params.as_slice(), [p]
+                if p.default.is_none()
+                    && !p.keyword
+                    && !p.rest
+                    && !p.from_keyword
+                    && !p.from_kwrest);
+            if !plain_param || super_in_a_block(&method.body, false) {
+                continue;
+            }
+            let params: Vec<Symbol> = method.params.iter().map(|p| p.name.clone()).collect();
+            if super_to_helper(&mut method.body, &helper, &params) > 0 {
+                // It now calls the macro's writer, which writes ivars.
+                method.mutates_self = true;
+                rewritten = true;
+            }
+        }
+        if rewritten {
+            let plain = Symbol::from("unencrypted_password");
+            let digest = Symbol::from(format!("{}_digest", attr.as_str()));
+            // Typed here: the analyzer has already run.
+            let mut body = plaintext_writer_body(&attr, &digest);
+            type_writer_body(&mut body, &plain);
+            let method = MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: Span::synthetic(),
+                name: helper,
+                receiver: MethodReceiver::Instance,
+                params: vec![Param::positional(plain.clone())],
+                body,
+                signature: Some(fn_sig(vec![(plain, Ty::Str)], Ty::Nil)),
+                effects: crate::effect::EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: true,
+                block_param: None,
+            };
+            model.body.push(ModelBodyItem::Method {
+                method,
+                leading_comments: Vec::new(),
+                leading_blank_line: true,
+            });
+        }
+    }
+}
+
+/// Type a synthesized writer body the way the analyzer would have,
+/// since it is built after the analyzer ran and `diagnose` reports an
+/// untyped read or call in a model body: the String parameter `param`,
+/// `BCrypt::Password` and its `create`, `to_s` and `nil?`.
+fn type_writer_body(e: &mut Expr, param: &Symbol) {
+    e.node.for_each_child_mut(&mut |c| type_writer_body(c, param));
+    let bcrypt = || Ty::Class {
+        id: crate::ident::ClassId(Symbol::from("BCrypt::Password")),
+        args: vec![],
+    };
+    e.ty = match &*e.node {
+        ExprNode::Var { name, .. } if name == param => Some(Ty::Str),
+        ExprNode::Const { .. } => Some(bcrypt()),
+        ExprNode::Send { method, .. } => match method.as_str() {
+            "create" => Some(bcrypt()),
+            "to_s" => Some(Ty::Str),
+            "nil?" => Some(Ty::Bool),
+            _ => e.ty.clone(),
+        },
+        ExprNode::Lit { value: Literal::Nil } => Some(Ty::Nil),
+        _ => e.ty.clone(),
+    };
+}
+
+/// `model` and its ancestors among the app's models.
+fn lineage<'a>(app: &'a App, model: &'a Model) -> Vec<&'a Model> {
+    let mut out = vec![model];
+    let mut parent = model.parent.clone();
+    while let Some(p) = parent {
+        let Some(m) = app.models.iter().find(|m| m.name == p) else { break };
+        if out.iter().any(|seen| seen.name == m.name) {
+            break;
+        }
+        out.push(m);
+        parent = m.parent.clone();
+    }
+    out
+}
+
+fn helper_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("_secure_{}_writer", attr.as_str()))
+}
+
+fn includes_a_module(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        matches!(item, ModelBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { recv: None, method, .. }
+                if matches!(method.as_str(), "include" | "prepend")))
+    })
+}
+
+/// Does `model` name a method `name`: a `def`, an association, or a
+/// symbol or call by that name anywhere in its class body
+/// (`attr_reader :name`, `alias_method :name, …`, `define_method(:name)`)?
+fn names_method(model: &Model, name: &Symbol) -> bool {
+    fn mentions(e: &Expr, name: &Symbol) -> bool {
+        let here = match &*e.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value == name,
+            ExprNode::Send { method, .. } => method == name,
+            _ => false,
+        };
+        let mut found = here;
+        e.node.for_each_child(&mut |c| found |= mentions(c, name));
+        found
+    }
+    model.associations().any(|a| a.name() == name)
+        || model.body.iter().any(|item| match item {
+            ModelBodyItem::Method { method, .. } => &method.name == name,
+            ModelBodyItem::Unknown { expr, .. } => mentions(expr, name),
+            _ => false,
+        })
+}
+
+fn super_in_a_block(e: &Expr, in_block: bool) -> bool {
+    if in_block && matches!(&*e.node, ExprNode::Super { .. }) {
+        return true;
+    }
+    let inside = in_block || matches!(&*e.node, ExprNode::Lambda { .. });
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found |= super_in_a_block(c, inside));
+    found
+}
+
+/// Replace each `super` in `e` with `self.<helper>(…)`, innermost
+/// first, and count them. A bare `super` passes the writer's own
+/// `params`.
+fn super_to_helper(e: &mut Expr, helper: &Symbol, params: &[Symbol]) -> usize {
+    let mut count = 0;
+    e.node.for_each_child_mut(&mut |c| count += super_to_helper(c, helper, params));
+    let ExprNode::Super { args } = &*e.node else { return count };
+    // A bare `super` forwards the writer's parameter, which the helper
+    // takes as its String plaintext.
+    let args = args.clone().unwrap_or_else(|| {
+        params
+            .iter()
+            .map(|p| {
+                let mut read = sp_expr(ExprNode::Var { id: VarId(0), name: p.clone() });
+                read.ty = Some(Ty::Str);
+                read
+            })
+            .collect()
+    });
+    *e.node = ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::SelfRef)),
+        method: helper.clone(),
+        args,
+        block: None,
+        parenthesized: true,
+    };
+    count + 1
 }
 
 /// Rails names the authenticator after the attribute, except the

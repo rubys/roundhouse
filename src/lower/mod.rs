@@ -292,6 +292,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
+    // `super` in a model's own `password=` → the `has_secure_password`
+    // writer under its own name. Before `create_block`, which inlines
+    // blocks: the pass leaves a `super` inside a block alone.
+    ("secure_password_super", &[]),
     ("parameterize", &[]),
     // `Pathname(p)` → `Pathname.new(p)`. Rewrites a receiverless call
     // no other pass produces or consumes into a Const-receiver send of
@@ -547,7 +551,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
-    ("create_block", &[]),
+    ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
     // the enclosing statement. AFTER `create_block`, whose inlining
@@ -737,6 +741,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("time_current");
     as_json_super::apply_as_json_super_grounding(app);
     ran!("as_json_super");
+    secure_password::apply_secure_password_super(app);
+    ran!("secure_password_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
     pathname_ctor::apply_pathname_ctor_lowering(app);

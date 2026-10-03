@@ -3354,3 +3354,87 @@ fn rails_root_join_takes_any_number_of_parts() {
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
+
+/// Not `super: no superclass method 'password='`: a model's own password writer that calls `super` reaches `has_secure_password`'s writer, as the macro's module method does in Rails.
+#[test]
+fn a_password_writer_that_calls_super_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "db/schema.rb",
+            "create_table \"comments\", force: :cascade do |t|",
+            "create_table \"comments\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password
+
+  def password=(value)
+    @password_supplied = true
+    super(value == "" ? nil : value)
+  end
+
+  def password_supplied?
+    @password_supplied == true
+  end
+
+  def seed_plaintext(value)
+    @password = value
+  end"#,
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord",
+            r#"class Comment < ApplicationRecord
+  has_secure_password
+
+  def password=(value)
+    @password_supplied = true
+    super
+  end
+
+  def password_supplied?
+    @password_supplied == true
+  end
+
+  def seed_plaintext(value)
+    @password = value
+  end"#,
+        )
+        .write(
+            "test/models/article_password_writer_test.rb",
+            r#"require "test_helper"
+
+class ArticlePasswordWriterTest < ActiveSupport::TestCase
+  # Each assignment ends in nil, which the macro's writer stores
+  # without reaching bcrypt (CI's unit job does not install it).
+  test "super(x) passes x to the macro's writer" do
+    article = articles(:one)
+    article.seed_plaintext("seeded")
+    assert !article.password_supplied?
+    article.password = ""
+    assert article.password_supplied?
+    assert_nil article.password
+  end
+
+  test "a bare super passes the writer's own argument" do
+    comment = comments(:one)
+    comment.seed_plaintext("seeded")
+    assert !comment.password_supplied?
+    comment.password = nil
+    assert comment.password_supplied?
+    assert_nil comment.password
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_password_writer_test.rb")
+        .assert_passes();
+}
