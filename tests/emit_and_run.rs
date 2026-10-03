@@ -3316,3 +3316,65 @@ fn rails_root_join_takes_any_number_of_parts() {
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
+
+/// A controller under `ActionController::API`, the base `rails new
+/// --api` writes, dispatches (#163). The runtime defined only `Base`,
+/// so the ruby tree raised NameError loading ApplicationController, and
+/// every request to the spinel binary answered 500 (`undefined method
+/// 'params='`). The `before_action` reads `params[:id]`, which is the
+/// writer the spinel dispatcher failed on.
+#[test]
+fn an_action_controller_api_controller_dispatches() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::API\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  before_action :set_widget, only: :show
+
+  def index
+    head :no_content
+  end
+
+  def show
+    head :not_found unless @widget
+  end
+
+  private
+
+  def set_widget
+    @widget = Widget.find_by(id: params[:id])
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"widgets#index\"\n  resources :widgets, only: %i[index show]\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"widget = Widget.create!(name: "a")
+def get(path)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  status
+end
+{ "/widgets" => 204, "/widgets/#{widget.id}" => 204, "/widgets/#{widget.id + 1}" => 404 }.each do |path, want|
+  got = get(path)
+  raise "GET #{path} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
+        .assert_passes();
+}

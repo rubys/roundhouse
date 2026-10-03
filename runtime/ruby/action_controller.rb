@@ -1,4 +1,7 @@
 require_relative "action_controller/base"
+# `ActionController::API`, the base an API app's ApplicationController
+# names: Base under the API name.
+require_relative "action_controller/api"
 # Per-request context statics (Current.request / .controller) + the
 # controller's `request` accessor — a reopen file outside the strict-
 # target tables (base.rb transpiles everywhere; a Request-typed field
