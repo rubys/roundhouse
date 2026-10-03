@@ -70,14 +70,21 @@ module Rails
       @base = base
     end
 
-    def join(part)
-      AppPath.new(@base + "/" + part)
+    # Pathname#join takes any number of parts
+    # (`Rails.root.join("source", "posts")`), and with none it answers
+    # the path itself.
+    def join(*parts)
+      if parts.empty?
+        self
+      else
+        AppPath.new(@base + "/" + parts.join("/"))
+      end
     end
 
     # `Rails.root + "storage/x"` — Pathname#+ is a path join, not string
     # concatenation, so it is `join` under another name.
     def +(part)
-      AppPath.new(@base + "/" + part)
+      join(part)
     end
 
     def to_s

@@ -35,6 +35,8 @@ use roundhouse::ingest::ingest_app;
 mod emit_and_run;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/rails_root_join.rs"]
+mod rails_root_join;
 
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
@@ -47,6 +49,17 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::rails_root_join_takes_any_number_of_parts`:
+/// the fixtures never call `join` with more than one part, so no other
+/// Spinel lane compiles the variadic `Rails::AppPath#join`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn rails_root_join_takes_any_number_of_parts_natively() {
+    let run = rails_root_join::overlay().run_spinel(rails_root_join::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {

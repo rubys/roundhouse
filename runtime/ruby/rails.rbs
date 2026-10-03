@@ -15,7 +15,7 @@ module Rails
     @base: String
 
     def initialize: (String base) -> void
-    def join: (String part) -> AppPath
+    def join: (*String parts) -> AppPath
     def +: (String part) -> AppPath
     def to_s: () -> String
     def to_path: () -> String
