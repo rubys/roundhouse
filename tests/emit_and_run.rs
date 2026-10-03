@@ -3533,3 +3533,32 @@ puts "ok"
         )
         .assert_passes();
 }
+
+/// A bare `tag` inside a MODEL is the model's own reader (`belongs_to
+/// :tag`), never the view TagBuilder — models have no view helpers. The
+/// tag-builder pass ran over model bodies too, so a
+/// join model's ownership check (`tag.user_id == time_entry.user_id`)
+/// compiled to `"<user-id></user-id>" == …` and failed for every row.
+#[test]
+fn a_bare_tag_in_a_model_is_its_association_not_the_tag_builder() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"articles\", force: :cascade do |t|",
+            "  create_table \"labels\", force: :cascade do |t|\n    t.string \"name\"\n    t.integer \"owner_id\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"stickers\", force: :cascade do |t|\n    t.integer \"tag_id\", null: false\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"articles\", force: :cascade do |t|",
+        )
+        .write("app/models/label.rb", "class Label < ApplicationRecord\nend\n")
+        .write(
+            "app/models/sticker.rb",
+            "class Sticker < ApplicationRecord\n  belongs_to :tag, class_name: \"Label\"\n\n  def tag_owner\n    tag.owner_id\n  end\nend\n",
+        )
+        .run_ruby(r#"
+Sticker.delete_all
+Label.delete_all
+l = Label.create!(name: "urgent", owner_id: 7)
+s = Sticker.create!(tag_id: l.id)
+raise "tag reader became the tag builder: #{s.tag_owner.inspect}" unless s.tag_owner == 7
+puts "model tag reader ok"
+"#)
+        .assert_passes();
+}
