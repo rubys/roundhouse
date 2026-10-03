@@ -36,6 +36,10 @@
 //! exactly one meaning in Ruby, and it is this one: on a plain String
 //! it is a NoMethodError, and on the inquirer it is the comparison.
 //!
+//! A predicate the app itself defines on `String` is also a real String
+//! method: campfire's `lib/rails_ext/string.rb` adds `all_emoji?`, and
+//! the inquirer, a String subclass, answers it the same way.
+//!
 //! An app defining its own `inquiry` disables the pass wholesale, the
 //! same coarse opt-out `exclude_predicate` takes beside this file: the
 //! name would then mean something the app chose, and a receiver type
@@ -50,10 +54,10 @@ pub fn apply_inquiry_lowering(app: &mut App) {
     if app_defines_inquiry(app) {
         return;
     }
-    let inquirers = inquirer_methods(app);
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &inquirers));
+    let facts = Facts { inquirers: inquirer_methods(app), app_string_methods: app_string_methods(app) };
+    super::for_each_hook_body(app, &mut |body| rewrite(body, &facts));
     for view in &mut app.views {
-        rewrite(&mut view.body, &inquirers);
+        rewrite(&mut view.body, &facts);
     }
 }
 
@@ -65,7 +69,31 @@ fn inquirer_methods(app: &App) -> std::collections::HashSet<Symbol> {
     crate::analyze::inquiry::inquirer_methods(app)
 }
 
-fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<Symbol>) {
+struct Facts {
+    inquirers: std::collections::HashSet<Symbol>,
+    app_string_methods: std::collections::HashSet<Symbol>,
+}
+
+/// The methods the app defines by reopening `String`, its included
+/// modules' among them.
+fn app_string_methods(app: &App) -> std::collections::HashSet<Symbol> {
+    let mut out = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![crate::ident::ClassId(Symbol::from("String"))];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        for lc in app.library_classes.iter().filter(|lc| lc.name == id) {
+            out.extend(lc.methods.iter().map(|m| m.name.clone()));
+            stack.extend(lc.includes.iter().cloned());
+        }
+    }
+    out
+}
+
+fn rewrite(expr: &mut Expr, facts: &Facts) {
+    let inquirers = &facts.inquirers;
     // `<recv>.inquiry.<name>?` — the DIRECT pair, matched BEFORE the
     // recursive walk folds the `.inquiry` away.
     //
@@ -85,7 +113,7 @@ fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<Symbol>) {
     if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
         if args.is_empty() {
             if let Some(label) = method.as_str().strip_suffix('?') {
-                if !label.is_empty() {
+                if !label.is_empty() && !facts.app_string_methods.contains(method) {
                     if let ExprNode::Send {
                         recv: Some(inner),
                         method: inner_method,
@@ -96,7 +124,7 @@ fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<Symbol>) {
                     {
                         if inner_method.as_str() == "inquiry" && inner_args.is_empty() {
                             let mut inner = inner.clone();
-                            rewrite(&mut inner, inquirers);
+                            rewrite(&mut inner, facts);
                             let span = expr.span;
                             *expr = eq_label(span, inner, label);
                             return;
@@ -107,7 +135,7 @@ fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<Symbol>) {
         }
     }
 
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, inquirers));
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, facts));
 
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return;
@@ -125,7 +153,10 @@ fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<Symbol>) {
 
     // `<recv>.<name>?` on a String the registry doesn't answer that for.
     let Some(label) = method.as_str().strip_suffix('?') else { return };
-    if label.is_empty() || crate::analyze::string_answers(method) {
+    if label.is_empty()
+        || crate::analyze::string_answers(method)
+        || facts.app_string_methods.contains(method)
+    {
         return;
     }
     // Either the analyzer typed the receiver a String, or the receiver

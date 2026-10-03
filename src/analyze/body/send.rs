@@ -1439,7 +1439,14 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
-            Some(Ty::Str) => str_method(method),
+            // A method the app adds by reopening `String` (campfire's
+            // `all_emoji?`) answers where the builtin table has nothing.
+            Some(Ty::Str) => match str_method(method) {
+                Ty::Var { .. } => self
+                    .lookup_in_module(&ClassId(Symbol::from("String")), method)
+                    .unwrap_or_else(unknown),
+                ty => ty,
+            },
             Some(Ty::Sym) => sym_method(method),
             // A `Ty::Time` value (datetime-column read, `Time.now`, etc.)
             // dispatches through the same table the `Time` class constant
