@@ -1619,6 +1619,28 @@ end
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
+    // `app/models/post/summary.rb` often reopens `class Post` only to
+    // hold `Post::Summary`. That reopen is a namespace, not a class of
+    // its own: kept as a library class, it owns the file
+    // `app/models/post.rb` and the emit writes it over the model. With
+    // the reopen dropped, the nested class keeps its own file, as a
+    // class nested in the model's own file does. This runs after every
+    // walk, because `app/services` and `lib` can hold the same reopen,
+    // and `lib` can hold the model.
+    let model_names: std::collections::HashSet<&str> =
+        app.models.iter().map(|m| m.name.0.as_str()).collect();
+    app.library_classes.retain(|lc| {
+        let bodiless = !lc.is_module
+            && lc.parent.is_none()
+            && lc.includes.is_empty()
+            && lc.methods.is_empty()
+            && lc.class_ivar_initializers.is_empty()
+            && lc.constants.is_empty()
+            && lc.unknown_calls.is_empty()
+            && lc.origin.is_none();
+        !(bodiless && model_names.contains(lc.name.0.as_str()))
+    });
+
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);

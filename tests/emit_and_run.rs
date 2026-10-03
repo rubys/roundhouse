@@ -3533,3 +3533,65 @@ puts "ok"
         )
         .assert_passes();
 }
+
+/// A file in `app/models/<model>/` often reopens the model only to
+/// hold a nested class. That reopen is a namespace, so the model keeps
+/// its own file. Before, the reopen became a library class whose file
+/// was the model's file, so the emit wrote the nested class over the
+/// model, and `Article.find` raised `NoMethodError`.
+#[test]
+fn a_model_reopened_to_hold_a_nested_class_keeps_its_model() {
+    a_reopen_at_keeps_the_model("app/models/article/summary.rb");
+}
+
+/// The same reopen outside `app/models`. The ingest reads these
+/// folders later, and the reopen must not write over the model there
+/// either.
+#[test]
+fn a_model_reopened_in_app_services_keeps_its_model() {
+    a_reopen_at_keeps_the_model("app/services/article/summary.rb");
+}
+
+#[test]
+fn a_model_reopened_in_lib_keeps_its_model() {
+    a_reopen_at_keeps_the_model("lib/article/summary.rb");
+}
+
+fn a_reopen_at_keeps_the_model(path: &str) {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  DRAFT = \"draft\".freeze\n\n  def summary\n    Summary.new(self)\n  end\n",
+        )
+        .write(
+            path,
+            r##"class Article
+  class Summary
+    def initialize(article)
+      @article = article
+    end
+
+    def text
+      "#{@article.title} (#{Article::DRAFT})"
+    end
+  end
+end
+"##,
+        )
+        .write(
+            "test/models/article_summary_test.rb",
+            r##"require "test_helper"
+
+class ArticleSummaryTest < ActiveSupport::TestCase
+  test "the model and its nested class both load" do
+    article = Article.find(articles(:one).id)
+    assert_equal "#{article.title} (draft)", article.summary.text
+    assert Article < ApplicationRecord
+  end
+end
+"##,
+        )
+        .run_test("test/models/article_summary_test.rb")
+        .assert_passes();
+}
