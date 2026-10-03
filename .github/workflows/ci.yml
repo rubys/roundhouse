@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Fetch pinned Writebook source
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
@@ -213,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # generate-fixture already builds the store and runs the guide's
       # Rails tests before uploading it; analyze that same source tree.
       - uses: actions/download-artifact@v8
@@ -281,7 +281,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: wasm
       - name: Install libclang (host bindgen)
@@ -461,7 +461,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -560,7 +560,7 @@ jobs:
       - name: Use an explicit browser payload directory
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -784,7 +784,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -864,7 +864,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -947,7 +947,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1099,7 +1099,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1169,7 +1169,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1208,7 +1208,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1657,7 +1657,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -1761,7 +1761,7 @@ jobs:
     steps: &compare-steps
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -1921,7 +1921,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -1967,7 +1967,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -2014,7 +2014,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -2335,7 +2335,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -2539,7 +2539,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture

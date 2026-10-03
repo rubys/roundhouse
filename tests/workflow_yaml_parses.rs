@@ -16,6 +16,10 @@
 use std::fs;
 use std::path::Path;
 
+/// The SHA `Swatinem/rust-cache@v2` resolved to in full validation run
+/// 37099243728 (`v2.9.2`). The floating tag is not a version pin.
+const RUST_CACHE_ACTION: &str = "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6";
+
 #[cfg(unix)]
 #[test]
 fn spinel_cache_download_failure_falls_back_without_hiding_build_failures() {
@@ -203,9 +207,20 @@ fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
                 "{name:?}: Rust must come from the repository pin"
             );
             if uses.starts_with("Swatinem/rust-cache@") {
+                assert_eq!(
+                    uses, RUST_CACHE_ACTION,
+                    "{name:?}: pin rust-cache to the measured v2.9.2 SHA"
+                );
                 assert!(
                     setup.is_some_and(|setup| setup < i),
                     "{name:?}: select pinned Rust before caching"
+                );
+                let workspace_crates = &step["with"]["cache-workspace-crates"];
+                assert!(
+                    workspace_crates.is_null()
+                        || workspace_crates.as_bool() == Some(false)
+                        || workspace_crates.as_str() == Some("false"),
+                    "{name:?}: cache-workspace-crates stays off"
                 );
             }
         }
