@@ -897,7 +897,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // the method is typed `(String) -> String` in connection.rbs. What
     // it buys: `upsert_all(unique_by:)` names a partial unique index
     // with its `WHERE`, as Rails does, which SQLite needs to match it.
-    const CEILING: usize = 1130;
+    // 2026-10-02 1130 -> 1179, +49, MEASURED by method against main
+    // e0d8610e: Kaminari's surface on Relation (relation.rb 691 -> 738)
+    // and `Base.page` (connection.rb 208 -> 210). Almost all of it is
+    // the readers calling one another bare (`next_page` reads
+    // `current_page` and `total_pages`, `total_count` is `count`), which
+    // this probe does not resolve; the rest is the untyped `num`
+    // parameter of `page` / `per`. The full-context gate in
+    // runtime_src_integration counts three. What it buys: Kaminari's
+    // `page` / `per` chains and readers run.
+    const CEILING: usize = 1179;
 
     assert!(
         all_untyped.len() <= CEILING,

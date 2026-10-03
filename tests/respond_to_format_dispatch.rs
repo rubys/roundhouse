@@ -18,9 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer};
-use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
 
 const FILES: &[(&str, &str)] = &[
     (

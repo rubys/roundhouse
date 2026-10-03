@@ -151,42 +151,116 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Generate the real-blog fixture once, upload as artifact. Every
-  # downstream test job downloads + extracts it — pay the Ruby/Rails
-  # install cost once per CI run instead of in each of seven jobs.
+  # Share both fixtures through this run's artifact. First-attempt PRs
+  # may reuse a daily source snapshot; main/scheduled/manual/rerun builds
+  # always generate freshly. Store guide tests execute on either path.
   # -------------------------------------------------------------------
   generate-fixture:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      BUNDLE_JOBS: '4'
     steps:
       - uses: actions/checkout@v5
+      - name: Isolate fixture gems
+        # Runner paths are available in steps, not in job-level env expressions.
+        run: |
+          echo "GEM_HOME=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - name: Identify fixture inputs
+        id: gems
+        env:
+          FIXTURE_RECIPE: ${{ hashFiles('bin/rh', 'scripts/create-blog', 'scripts/create-store', 'scripts/test-store', '.github/workflows/ci.yml') }}
+        run: |
+          echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
+          platform="${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')"
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+          tools="$(ruby -rbundler -e 'print "#{Gem::VERSION}-#{Bundler::VERSION}"')"
+          echo "platform=${platform}-${ImageVersion}-${tools}" >> "$GITHUB_OUTPUT"
+          echo "fixture-key=fixture-source-v1-${RUNNER_OS}-${RUNNER_ARCH}-${platform}-${ImageVersion}-${tools}-$(date -u +%F)-${FIXTURE_RECIPE}" >> "$GITHUB_OUTPUT"
+      - name: Restore fixture source snapshot
+        id: fixture-cache
+        if: github.event_name == 'pull_request' && github.run_attempt == 1
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
+      - name: Select fresh generation or restored source
+        id: fixture
+        env:
+          RESTORED: ${{ steps.fixture-cache.outcome == 'success' && steps.fixture-cache.outputs.cache-hit == 'true' }}
+        run: |
+          if [ "$RESTORED" = true ]; then
+            tar -xzf real-blog.tar.gz
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Cache installed fixture gems
+        # Weekly keys refresh dependencies only within the same runner
+        # image version, Ruby patch/platform and RubyGems/Bundler. Generation
+        # checks for the latest Rails release, even on a gem-cache hit.
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          # Downloaded .gem archives and documentation are not needed to use
+          # installed gems; omitting them keeps cache transfers smaller.
+          path: |
+            ${{ env.GEM_HOME }}/bin
+            ${{ env.GEM_HOME }}/build_info
+            ${{ env.GEM_HOME }}/extensions
+            ${{ env.GEM_HOME }}/gems
+            ${{ env.GEM_HOME }}/plugins
+            ${{ env.GEM_HOME }}/specifications
+          key: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
+          restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       - name: Install Rails
-        run: gem install rails
+        if: steps.fixture.outputs.generate == 'true'
+        run: gem install rails --no-document
       - name: Generate fixtures/real-blog
+        if: steps.fixture.outputs.generate == 'true'
         run: bin/rh fixture
       # The Rails Guides store rides the same artifact: the /ide/
       # default app and a picker entry, so build-site and
       # browser-smoke-ide bundle it without a second Rails install.
       - name: Generate fixtures/store by following the guide
+        if: steps.fixture.outputs.generate == 'true'
         run: cd fixtures && ../scripts/create-store store
+      - name: Run guide tests on restored store
+        # create-store runs these on fresh builds; a source hit is not a
+        # test receipt. Install its locked bundle without updating the lock.
+        if: steps.fixture.outputs.generate == 'false'
+        run: scripts/test-store
       - name: Pack fixtures
+        if: steps.fixture.outputs.generate == 'true'
         run: |
-          tar --exclude='./fixtures/real-blog/tmp' \
-              --exclude='./fixtures/real-blog/log' \
-              --exclude='./fixtures/store/tmp' \
-              --exclude='./fixtures/store/log' \
-              --exclude='./fixtures/store/storage' \
+          tar --exclude='fixtures/real-blog/tmp' \
+              --exclude='fixtures/real-blog/log' \
+              --exclude='fixtures/store/tmp' \
+              --exclude='fixtures/store/log' \
+              --exclude='fixtures/store/storage' \
               -czf real-blog.tar.gz fixtures/real-blog fixtures/store
+      - name: Save fresh fixture source snapshot
+        # Main/full cycles never restore, but can seed the default-branch
+        # cache for PRs. Never save failed generation or guide-test results.
+        if: success() && steps.fixture.outputs.generate == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
       - name: Upload fixture
         uses: actions/upload-artifact@v7
         with:
           name: real-blog-fixture
           path: real-blog.tar.gz
+          compression-level: 0
           retention-days: 1
 
   # -------------------------------------------------------------------
@@ -458,6 +532,16 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Current-run debug compiler for compatible Campfire consumers (#317).
+    # Empty artifact-id means the consumers must not run as selected greens.
+    outputs:
+      roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
+    env:
+      # Share first-party split DWARF instead of copying it into every test
+      # executable. Integration sidecars are freed with their finished batch;
+      # shared library/bin sidecars stay. Code stays unoptimized.
+      # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
@@ -498,8 +582,24 @@ jobs:
       # the unit job ran it as a no-op. The first refuses to skip.
       - name: Install the gem the emitted Ruby tree runs on
         run: gem install sqlite3 --no-document
-      - name: cargo test
-        run: cargo test --all-targets
+      # Bounded build → run → free waves: every --all-targets identity still
+      # goes through Cargo (lib, bins, each integration target). Finished
+      # integration executables and their own split-DWARF sidecars are freed
+      # after a successful batch so peak disk stays near one wave instead of
+      # all hundreds at once. Shared libraries, package binaries (including
+      # CARGO_BIN_EXE helpers), and fingerprints stay for later batches and
+      # the independent debug bench gate. No test result is cached or skipped.
+      - name: Build and run all test targets in batches
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
+            python3 scripts/ci-unit-tests.py
+      - name: Upload test build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-build-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
       # scripts/bench emits nine of its lanes with `cargo run --bin
       # emit_preview` — the DEBUG profile — and nothing else in CI did:
       # the site job and bin/rh run `--release`, whose frames are a
@@ -509,10 +609,51 @@ jobs:
       # run here so the next one fails a PR instead of a nightly.
       - name: Emit every bench lane in the debug profile (scripts/bench's shape)
         run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/bench" -- \
+            bash -euo pipefail -c '
+              for target in typescript crystal rust python elixir go kotlin swift csharp; do
+                cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
+              done
+            '
+      - name: Upload unit resource samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-resources
+          path: ${{ runner.temp }}/unit-resources/
+          if-no-files-found: ignore
+      # Share the Debug-profile compiler with Campfire conformance and
+      # comparison/db-differential (#317). Same profile as cargo test and
+      # the harness scripts' historical `cargo run` (not release). The
+      # binary alone is not enough: consumers must set ROUNDHOUSE_BIN so
+      # scripts/lib/roundhouse-bin.sh execs it instead of rebuilding.
+      # cargo test builds integration harnesses under profile.test; the
+      # `roundhouse` bin itself is profile.dev — rebuild is a cache hit
+      # after the bench emit step and guarantees the staged path exists.
+      - name: Stage current-run debug roundhouse binary
+        run: |
           set -euo pipefail
-          for target in typescript crystal rust python elixir go kotlin swift csharp; do
-            cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
-          done
+          cargo build --locked --bin roundhouse
+          test -x target/debug/roundhouse
+          mkdir -p roundhouse-debug-bin
+          cp -L target/debug/roundhouse roundhouse-debug-bin/roundhouse
+          chmod +x roundhouse-debug-bin/roundhouse
+          {
+            echo "source_sha=${GITHUB_SHA}"
+            echo "profile=debug"
+            echo "binary=roundhouse"
+            echo "producer_job=unit"
+            echo "rustc_host=$(rustc -vV | awk '/^host:/{print $2}')"
+            echo "rustc_release=$(rustc -vV | awk '/^release:/{print $2}')"
+            ./roundhouse-debug-bin/roundhouse --version | sed 's/^/version=/'
+          } | tee roundhouse-debug-bin/identity.txt
+      - name: Upload current-run debug roundhouse binary
+        id: roundhouse-bin
+        uses: actions/upload-artifact@v7
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+          retention-days: 1
 
   # -------------------------------------------------------------------
   # One job per target language. Each generates a project from the
@@ -570,6 +711,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Warm downloads for the generated app, not node_modules or dist.
+          cache: npm
+          cache-dependency-path: |
+            tests/browser_smoke/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install harness deps
         run: npm ci
         working-directory: tests/browser_smoke
@@ -834,7 +980,8 @@ jobs:
   #
   # Cheap, unlike its lobsters sibling: `campfire-suite` runs the EMIT's
   # own tests, so it needs no Rails bundle and no mise-pinned ruby — just
-  # cargo, ruby, the sqlite3 gem, and the sqlite3 CLI.
+  # the shared debug roundhouse binary (#317), ruby, the sqlite3 gem, and
+  # the sqlite3 CLI.
   # campfire-compare: REAL Rails campfire vs the CRuby-emit lane — the
   # only job that boots Rails campfire. Both lanes start from the same
   # seeded rows and take the same cable walk (sign in through the real
@@ -850,7 +997,9 @@ jobs:
   # is tracked unpinned.
   campfire-compare:
     needs: [unit, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') }}
+    # Require the unit producer's debug binary artifact id so a missing
+    # upload cannot skip into a green compact gate (#317).
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -863,8 +1012,25 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the unit job's current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1202,13 +1368,32 @@ jobs:
 
   campfire-conformance:
     needs: [unit, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') }}
+    # Require the unit producer's debug binary artifact id so a missing
+    # upload cannot skip into a green compact gate (#317).
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: strict-emit and campfire-suite use the unit debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1340,14 +1525,17 @@ jobs:
       # (rubys/roundhouse#71). This step is the run the ledger's
       # "zero errors" invariant is actually about.
       #
-      # Same profile as the suite's own `cargo run`, so the build is
-      # shared rather than paid twice.
+      # Same debug binary as the suite (ROUNDHOUSE_BIN from unit), so the
+      # compiler is shared rather than paid twice (#317).
       - name: Enforce the strict-emit ceiling
         env:
           CEILING_ERRORS: 0
         run: |
           set -uo pipefail
-          cargo run --quiet --bin roundhouse -- \
+          test -n "${ROUNDHOUSE_BIN:-}"
+          test -x "$ROUNDHOUSE_BIN"
+          # Never cargo run: prove the producer binary is the one that emits.
+          "$ROUNDHOUSE_BIN" \
             --target spinel /tmp/campfire -o /tmp/campfire-spinel \
             > /tmp/campfire-strict.log 2>&1
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
@@ -2389,6 +2577,14 @@ jobs:
   # sign-in, `/first_run` renders, and `/account/logo` -- a source-path
   # read the sign-in page triggers -- is found. Advisory like every
   # spinel job.
+  #
+  # Hosted rebuild is dominated by compiling pack/ (~95 s). The two apt
+  # layers (~30–38 s, parallel, ~460 MB BuildKit export) are reused for
+  # an eight-hour window via a local BuildKit cache under actions/cache.
+  # A new spin pack still recompiles; the three HTTP checks always run.
+  # A docker-container Buildx builder exports type=local on hosted
+  # runners (default docker driver may not); the image is still loaded
+  # and tagged `campfire` so docker run matches the README install.
   smoke-campfire-docker:
     needs: [build-campfire-archive, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire-docker') && needs.build-campfire-archive.result == 'success' }}
@@ -2402,6 +2598,23 @@ jobs:
         with:
           name: campfire-archive
           path: campfire
+      - name: Campfire Docker apt cache window
+        id: apt-window
+        # UTC epoch / 28800 → eight-hour buckets. Primary key only: a miss
+        # re-resolves Debian packages instead of carrying an older bucket
+        # forward. runner.temp is set via $RUNNER_TEMP (job env cannot use
+        # the runner context).
+        run: |
+          echo "bucket=$(( $(date -u +%s) / 28800 ))" >> "$GITHUB_OUTPUT"
+          echo "CAMPFIRE_DOCKER_CACHE=$RUNNER_TEMP/campfire-docker-buildkit" >> "$GITHUB_ENV"
+      - name: Restore Campfire Docker apt layers
+        id: docker-cache
+        # Fail-open: a cache outage must not skip the README build.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
       - name: Build and run the image
         id: smoke
         run: |
@@ -2412,7 +2625,23 @@ jobs:
           fi
           tar xzf campfire/docker.tgz
           cd campfire-docker
-          docker build -t campfire .
+          cache_args=()
+          if [ -d "$CAMPFIRE_DOCKER_CACHE" ] && [ -n "$(ls -A "$CAMPFIRE_DOCKER_CACHE" 2>/dev/null || true)" ]; then
+            cache_args+=(--cache-from "type=local,src=$CAMPFIRE_DOCKER_CACHE")
+          fi
+          # Export after the build so a later successful save can seed the
+          # next run. mode=max keeps intermediate build-apt when pack/ changes.
+          # ignore-error: cache export must not abort the HTTP checks.
+          mkdir -p "$CAMPFIRE_DOCKER_CACHE"
+          cache_args+=(--cache-to "type=local,dest=$CAMPFIRE_DOCKER_CACHE,mode=max,ignore-error=true")
+          # docker-container builder supports local cache export on the
+          # hosted runner's default daemon. --load tags `campfire` so the
+          # subsequent docker run matches the README install path.
+          if ! docker buildx inspect campfire-docker-cache >/dev/null 2>&1; then
+            docker buildx create --name campfire-docker-cache --driver docker-container >/dev/null
+          fi
+          docker buildx use campfire-docker-cache
+          docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
           for i in $(seq 1 30); do
             curl -sf -o /dev/null localhost:3000/first_run && break
@@ -2427,6 +2656,15 @@ jobs:
           docker logs campfire
           docker rm -f campfire >/dev/null
           [ "$root" = 302 ] && [ "$first" = 200 ] && [ "$logo" = 200 ]
+      - name: Save Campfire Docker apt layers
+        # Only after a green smoke, and only when the primary key missed —
+        # an exact hit already holds this window's layers. Fail-open.
+        if: steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
       - name: Record byte-specific archive validation
         if: always()
         env:
@@ -2575,6 +2813,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Also warm the live demo's downloads; always build current output.
+          cache: npm
+          cache-dependency-path: |
+            e2e/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install Ruby (for the turbo-rails / stimulus-rails JS bundles)
         uses: ruby/setup-ruby@v1
         with:

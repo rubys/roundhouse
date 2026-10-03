@@ -1492,7 +1492,17 @@ fn every_runtime_method_body_concretely_typed() {
     // or arrays, NOT untyped. The residual is the model-dependent keys
     // and hydrated records read from the existing dynamic model seam,
     // as in the set operators above. No parameter contract was erased.
-    const CEILING: usize = 519;
+    //
+    // 519 -> 520 (517 -> 520 measured on main e0d8610e, which sat two
+    // under the ceiling): Kaminari's `page` / `per`, THREE sites
+    // (relation.rb 238 -> 240, connection.rb 40 -> 41, MEASURED). Each
+    // is a read of the `num` parameter, untyped because `page(params[
+    // :page])` hands over whatever the request held (a String, nil, or
+    // an Integer from app code); the bodies read it once, through
+    // `to_s`. The readers (`current_page`, `total_pages`, …) add none.
+    // What it buys: Kaminari chains, which the catalog already typed
+    // as builders, run instead of raising NoMethodError.
+    const CEILING: usize = 520;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -328,6 +328,101 @@ module ActiveRecord
       self
     end
 
+    # ---- Kaminari's page / per, over LIMIT / OFFSET ------------------
+    #
+    # The catalog types `page` and `per` as builders and the readers
+    # below as terminals; this is the runtime behind them, with
+    # Kaminari's arithmetic. `count` already leaves LIMIT and OFFSET out
+    # of its SQL (`count_sql`), which is exactly Kaminari's
+    # `total_count`. Not modeled: `padding`, `without_count`,
+    # `max_per_page` / `max_pages`, and the `Kaminari.paginate_array`
+    # wrapper for a loaded Array.
+    #
+    # The readers go through locals rather than doing arithmetic on the
+    # ivars: a runtime ivar reads as `T | Nil` (see `ActionController::
+    # Page`), and Kaminari's own nil cases are the ones guarded here.
+
+    # `page(n)`: page `n` at the app's default page size. A nil, blank,
+    # non-numeric or non-positive `n` is page 1, as Kaminari's `to_i`
+    # makes it.
+    def page(num = nil)
+      per_page = Rails.application.kaminari_default_per_page
+      n = num.to_s.to_i
+      n = 1 if n < 1
+      limit(per_page)
+      offset((n - 1) * per_page)
+    end
+
+    # `per(n)`: the same page at `n` rows. Kaminari leaves the relation
+    # as it is for a nil, blank or negative `n` (its `/^\d/` test), so
+    # `per(params[:per])` without the parameter keeps the default size;
+    # `per(0)` is `limit(0)`.
+    def per(num)
+      text = num.to_s
+      return self unless text.match?(/\A\d/)
+      n = text.to_i
+      return limit(0) if n == 0
+      page_now = current_page
+      limit(n)
+      offset((page_now - 1) * n)
+    end
+
+    def limit_value
+      @limit
+    end
+
+    def offset_value
+      @offset
+    end
+
+    # 1 for a relation that was never paged, where Kaminari divides by
+    # a nil limit; `per(0)` raises, as Kaminari's ZeroPerPageOperation
+    # (a ZeroDivisionError) does.
+    def current_page
+      per_page = @limit
+      return 1 if per_page.nil?
+      raise ZeroDivisionError, "Current page was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      skipped = @offset
+      skipped = 0 if skipped.nil? || skipped < 0
+      skipped / per_page + 1
+    end
+
+    def total_count
+      count
+    end
+
+    # Rounded up; 0 for an empty relation, as in Kaminari, which makes
+    # page 1 of nothing out of range rather than the last page. A
+    # relation that was never paged is one page.
+    def total_pages
+      per_page = @limit
+      return 1 if per_page.nil?
+      raise ZeroDivisionError, "Total pages was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      (total_count + per_page - 1) / per_page
+    end
+
+    def first_page?
+      current_page == 1
+    end
+
+    def last_page?
+      current_page == total_pages
+    end
+
+    def out_of_range?
+      current_page > total_pages
+    end
+
+    def next_page
+      return nil if last_page? || out_of_range?
+      current_page + 1
+    end
+
+    def prev_page
+      return nil if first_page? || out_of_range?
+      current_page - 1
+    end
+
     def group(*parts)
       @records = nil
       # Symbols qualify against this relation's table (Rails renders

@@ -79,6 +79,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"     # ROUNDHOUSE_BIN or cargo run
 
 APP="$HOME/git/once-campfire"
 OUT=""
@@ -204,8 +205,8 @@ if [[ -z "$REUSE" ]]; then
     # a ledger app. The point is to run what DOES work and count it.
     step "transpiling $APP → $OUT (target: $TARGET)"
     rm -rf "$OUT"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    roundhouse_run \
+        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
     # The suite's own fixtures populate every table, so the database only

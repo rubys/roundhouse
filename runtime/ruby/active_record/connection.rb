@@ -354,6 +354,13 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).none
     end
 
+    # Kaminari's class-side entry point, `Model.page(n)`: the same page
+    # of a fresh Relation (Relation#page). Ruby-family-only for the
+    # reason `where` above is.
+    def self.page(num = nil)
+      ActiveRecord::Relation.new(self).page(num)
+    end
+
     # Rails-shape `first` fallback, same story as `where`/`all` above:
     # spec/dynamic call sites reach the class method directly
     # (`Category.first` in lobsters' specs); lowered call sites don't

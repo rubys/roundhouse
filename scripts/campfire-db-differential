@@ -36,6 +36,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
@@ -95,8 +96,8 @@ else
         "$APP/" "$WORK/app/"
     ruby "$REPO_ROOT/tests/db_differential/overlay.rb" "$WORK/app"
     OUT="$WORK/emit"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target "$LANE" "$WORK/app" -o "$OUT" --allow-unsupported) 2>"$WORK/transpile.log" | tail -1
+    roundhouse_run \
+        --target "$LANE" "$WORK/app" -o "$OUT" --allow-unsupported 2>"$WORK/transpile.log" | tail -1
     if grep -q "differential_scenarios_controller.*error\[" "$WORK/transpile.log"; then
         grep "differential_scenarios_controller.*error\[" "$WORK/transpile.log"
         die "the scenario itself does not transpile"

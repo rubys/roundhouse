@@ -41,7 +41,7 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    has_toplevel_terminal, synthesize_deferred_implicit_render, synthesize_implicit_render,
+    has_toplevel_terminal, synthesize_deferred_implicit_render,
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 

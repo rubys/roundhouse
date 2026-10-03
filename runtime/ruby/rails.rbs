@@ -70,6 +70,7 @@ module Rails
     def active_storage_excluded_content_types: () -> Array[String]
     def vips_block_untrusted: () -> bool
     def vips_blocked_operations: () -> Array[String]
+    def kaminari_default_per_page: () -> Integer
   end
 end
 

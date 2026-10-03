@@ -768,20 +768,6 @@ fn eq_zero(recv: Expr) -> Expr {
     )
 }
 
-/// `<expr> == ""`.
-fn eq_empty_str(recv: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("=="),
-            args: vec![lit_str(String::new())],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
 fn ivar(name: &str) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from(name) })
 }

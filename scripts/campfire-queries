@@ -49,6 +49,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 OUT=""
@@ -111,8 +112,8 @@ else
     OUT="$(mktemp -d -t roundhouse-campfire-queries.XXXXXX)"
     step "transpiling $APP -> $OUT (target: spinel)"
     rm -rf "$OUT"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target spinel "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    roundhouse_run \
+        --target spinel "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
     step "building the binary"
     spinel_link_path
     (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \

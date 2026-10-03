@@ -4,11 +4,77 @@
 
 `.github/workflows/ci.yml` runs a compact floor on PRs and main pushes:
 
-- Fixture generation and `unit` (`cargo test --all-targets`, including emitted
-  Ruby execution tests and the debug-profile bench emission checks).
+- Fixture generation and `unit` (every `cargo test --all-targets` identity,
+  including emitted Ruby execution tests and the debug-profile bench emission
+  checks).
 - Store analysis, Ruby/Rust/TypeScript comparisons against live Rails.
 - TypeScript SharedWorker browser tests, Campfire conformance, and Campfire
   comparison including its model/database differential.
+
+The unit job runs `scripts/ci-unit-tests.py`: library and package binaries first,
+then integration targets in bounded Cargo batches (default 20; override with
+`--batch-size` or `ROUNDHOUSE_UNIT_BATCH_SIZE`). Each batch is still
+`cargo test --locked --test …` for build and execution — identities, failure
+propagation, and local `cargo test --test NAME` selection stay intact.
+After a successful integration batch, only that batch's integration executables
+and their own unpacked split-DWARF sidecars are deleted. Shared libraries,
+package binaries (including `CARGO_BIN_EXE` helpers), fingerprints, and
+dependency artifacts remain for later batches and for the independent
+dev-profile bench emission gate. Test results are never reused or cached.
+Compile-everything-before-any-execute is intentionally not preserved: a later
+batch can fail to compile after earlier batches have already run. The
+`unit-build-timings` artifact still retains Cargo's HTML report when produced
+(lib/bin build and the first integration wave). The test profile keeps file/line
+backtraces with `line-tables-only` debug info.
+
+The Linux unit job also sets `CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked`.
+First-party split DWARF sidecars can be shared instead of repeated in every
+integration-test executable. Sidecars for a finished integration target are
+freed with that target after its batch succeeds; shared library/bin sidecars
+stay. Disk comparisons must include sidecars and object files, not only
+executable sizes. This override does not change local platform defaults, dev or
+release profiles. The policy suite checks real library and integration-test
+file/line backtraces and the batch orchestrator's coverage/reclaim rules.
+
+### Current-run debug compiler for Campfire (#317)
+
+After its own tests and debug-profile bench emissions, `unit` stages
+`target/debug/roundhouse` (profile.dev, same shape as the harness scripts'
+historical `cargo run`) with an `identity.txt` that records `source_sha`,
+`profile=debug`, host/toolchain and `roundhouse --version`. The artifact
+`roundhouse-debug-bin` is current-run only.
+
+`campfire-conformance` and `campfire-compare` (including the model/database
+differential in that job) download it, require a non-empty producer
+`artifact-id`, set `ROUNDHOUSE_BIN`, and emit through
+`scripts/lib/roundhouse-bin.sh`. They do not install Rust and must not
+silently rebuild via `cargo run`. A missing or non-executable
+`ROUNDHOUSE_BIN` fails the lane. Local development keeps the cargo fallback
+when the variable is unset. Release-profile jobs, Spinel toolchain builds and
+cross-run binary reuse are out of scope.
+
+Build/execution and debug-bench phases also retain `unit-resources`: five-second
+CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
+filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/
+`build` allocated sizes. Because batches free finished integration artifacts,
+JSON also records `disk_used_peak_bytes` and a roughly once-per-minute
+`deps_peak` sample so end-of-phase sizes are not mistaken for the high-water
+mark. Initial/final samples cover short commands too. Reports are outside the
+Cargo cache and uploaded on failure; commands and exit codes are preserved.
+Measurement/report I/O failures are best-effort warnings, never replacements
+for the command result.
+
+These are resource measurements, not a performance gate. CPU percentages and
+available RAM include other runner processes and the OS; available RAM excludes
+reclaimable-cache pressure. Child CPU time is cumulative and may exceed wall
+time; child peak RSS is the largest single process, **not** concurrent tree RAM.
+Five-second samples can miss shorter spikes. To reproduce a Linux measurement:
+
+```bash
+CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
+python3 scripts/ci-resources.py --out /tmp/unit-resources/tests -- \
+  python3 scripts/ci-unit-tests.py
+```
 
 These are nine validation executions, plus three small orchestration jobs
 (`plan`, `compact-required`, `ci-summary`). Drafts select only fixture and
@@ -39,7 +105,20 @@ helper, without additional Python packages.
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |
 | Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
+| Proven body-only edits in `src/project.rs`'s interpreted Ruby/JRuby builders | Ruby/JRuby comparison and archive smokes, plus Writebook inventory |
+| Proven body-only edits in its shared Ruby/Spinel builders | Ruby/JRuby owners plus all native Spinel/Campfire consumers and Writebook inventory; no unrelated target or WASM fanout |
 | Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
+
+Project assembly is narrowed only when the base and event trees differ solely
+inside the bodies of `ruby_runtime_files`, `jruby_runtime_files`,
+`ruby_family_runtime_files`, `spinel_files` or `spin_shape`. Signatures and
+every byte outside those bodies must remain identical. Shared helpers,
+constants, dispatch, new/deleted functions, mode changes and unrecognized
+source shapes still select full validation. This deliberately conservative
+recognizer is not a Rust parser: raw strings (`r`, `br`, `cr`) within builder
+bodies and block comments retain full coverage. Other changed paths and
+`ci:full` can still expand the combined plan; no last-commit or PR-title inference
+is used.
 
 ### Requesting broader or fresh validation
 
@@ -96,7 +175,8 @@ the same producer bytes, without later re-emission.
 Every cycle executes freshly; validation results are not cached. Spinel master
 is resolved once per run, and evidence records the compiler revision actually
 used. Its lanes remain advisory. Ordinary build caches and the conservative PR
-execution receipts described below are unchanged.
+execution receipts described below are unchanged. Full cycles also regenerate
+both Rails fixtures: the PR-only source snapshot cache is never restored here.
 
 Archive producers upload with `always()`, preserving any files already produced
 if a later producer step fails. The outcome report names the source SHA, run and
@@ -129,9 +209,38 @@ fanouts, **not** total repository concurrency or a guaranteed PR runner priority
 `scripts/ci-reuse.py` can reuse **executed, successful** checks from the same
 pull request. The allowlist is `store-check`, `writebook-inventory`, Rust archive
 smoke, SharedWorker browser smoke, and the Rust inflector framework suite.
-Unit tests, fixture generation, artifact producers, DOM comparisons, other
-selected toolchain lanes and all selected main-branch checks execute freshly.
+Unit tests, emitted-artifact producers, DOM comparisons, other selected
+toolchain lanes and all selected main-branch checks execute freshly.
 Routing changes the required coverage, not the execution-receipt trust rules.
+
+The SharedWorker browser and site jobs cache npm's download store through
+`setup-node`, keyed by their checked-in harness/asset lockfile and the
+TypeScript package-manifest recipe (`src/emit/typescript/package.rs`). This
+warms downloads for freshly emitted apps, not `node_modules`, browser binaries,
+builds or test results. Installation and builds still run, without offline
+resolution or a cache-hit skip; floating dependencies still resolve normally.
+Missing caches only cost downloads. Downstream receipts continue to fingerprint
+the actual installed modules and built output, not the npm cache key.
+
+### Fixture inputs
+
+Installed gems use an isolated `GEM_HOME`, keyed by observed runner image
+version/architecture, exact Ruby engine/version/platform and RubyGems/Bundler.
+Weekly fallback keys stay within that compatibility boundary. Fresh generation
+still checks for the current Rails release; gems are not shipped in the artifact.
+
+First-attempt PRs may restore packed blog/store source under an exact key combining
+`bin/rh`, generator/validation scripts, `ci.yml`, the same observed environment
+and UTC day, without fallback keys. This deliberately holds floating gem resolution
+within one day, not a claim of deterministic generation. Main, scheduled/manual
+runs and reruns always regenerate; full PR coverage alone does not disable reuse.
+Successful default-branch output can seed PR reads; PR writes remain PR-scoped.
+Missing/unavailable caches fall back to generation; corrupt source fails closed.
+
+`scripts/test-store` installs the frozen bundle and runs both guide tests on fresh
+and restored paths. Every run uploads its own artifact, excluding scratch/logs and
+Store storage but retaining the seeded Blog database. The source snapshot contains
+no compiled output or test receipt; downstream fingerprints remain unchanged.
 
 ## What must match
 
@@ -158,8 +267,10 @@ SHA-stamped WASM and its consumers are **not** eligible.
 
 Any shared compiler change invalidates both jobs. A change only to an unrelated
 Rust integration test can reuse Writebook. Store reuse will often miss because
-fresh Rails generation changes its actual contents; that is intentional, not a
-reason to pretend identical generator scripts produced identical inputs.
+fresh Rails generation changes its actual contents. A PR source-cache hit
+preserves actual source bytes (including migration names and generated
+credentials); receipt reuse still checks those bytes and the compiler inputs,
+never just the generator recipe.
 
 ## Downstream consumers
 
@@ -220,7 +331,7 @@ the outer harness returning success on a hit cannot create a new receipt.
 | IDE/WASM browser | WASM intentionally embeds the current commit SHA. Do not normalize away a changed consumer input to force a hit. |
 | Spinel framework/toolchain/archive lanes | Need fresh emitted source plus the actual unpinned Spinel binary, `spin` package closure, C toolchain and native-library identities. Advisory failures remain signals, never reusable success. |
 | Campfire CRuby/Spinel compare, model differential and conformance | Include pinned Campfire source, Rails/gem oracle closure, assets, Redis/DB scenarios, native packages, Spinel binary and GC mode as applicable. Current harnesses still resolve mutable external inputs. |
-| Campfire Docker smoke | Build the current Docker context and resolve its mutable base/apt closure before fingerprinting the actual runnable image. Archive identity alone cannot certify that image. |
+| Campfire Docker smoke | Build the current Docker context and run the three HTTP checks every time. Archive identity alone cannot certify the image. Apt layers may be reused for an eight-hour window (~460 MB BuildKit export under `actions/cache`, primary key only — no cross-bucket restore); a fresh `spin pack` still recompiles `pack/`, and the smoke never skips the image build or HTTP. Do not cache the make layer or replace the install with a prebuilt image. |
 | Site/archive producers, assembly and publication | Must produce current-run outputs and provenance; site content also fetches live bench data. They are not reused validation results. |
 
 ## Evidence, not just a green run
@@ -273,8 +384,17 @@ advisory lanes remain signals rather than reasons to cancel independent checks.
 Receipt reuse does not bypass selected checks' dependency or failure handling.
 The Campfire Docker recipe no longer downloads a separate Dockerfile frontend:
 its ordinary multi-stage instructions use the bundled frontend and COPY
-preserves the archive's executable boot mode. Base images and apt packages
-still resolve freshly, and the real Docker smoke remains enabled.
+preserves the archive's executable boot mode. The real Docker smoke remains
+enabled. Measured 2026-10-03 (hosted job 111138541027 and a local rebuild of
+the published archive): cold build is ~138–158 s, dominated by compiling
+`pack/src/campfire.c` (~95 s). The build-apt and runtime-apt layers
+(~30–38 s, parallel) are exported as a ~460 MB BuildKit cache and restored
+for an eight-hour UTC window (primary key only, no cross-bucket restore) so a
+later `spin pack` still recompiles while skipping apt. A `docker-container`
+Buildx builder exports `type=local` on hosted runners; the image is loaded as
+`campfire` and the three HTTP checks always run. Cache export uses
+`ignore-error=true` so a cache backend failure does not skip those checks.
+Do not cache the make result or ship a prebuilt image in place of the build.
 
 ## Forcing a fresh check and extending the allowlist
 
@@ -290,7 +410,7 @@ input makes it ineligible. Do not substitute a PR-wide changed-files filter or
 the last head-commit diff for merge-tree identity. Keep artifact producers fresh
 unless current-run outputs and their provenance can be preserved honestly.
 
-Run `PYTHONDONTWRITEBYTECODE=1 python3 tests/ci_reuse_test.py -v` and
+Run `python3 -B tests/ci_reuse_test.py -v` and
 `cargo test --test workflow_yaml_parses` when changing this policy. The Rust
 workflow tests execute the Python adversarial suite, so normal unit CI gates it.
 For coverage routing, archive evidence or full-workflow changes, also run

@@ -1029,9 +1029,9 @@ pub fn target_files(
             return Err(format!("class-instance-variable initialization is not supported ({})", target.as_str()));
         }
     }
-    let files = match target {
+    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
+        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(files, _)| spin_shape(files)),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
@@ -1052,7 +1052,7 @@ pub fn target_files(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
-    }?;
+    })?;
 
     // Ruby-family trees ship the framework runtime as verbatim text, so
     // their tree-shake runs here, on the finished file set (after
@@ -1071,7 +1071,9 @@ pub fn target_files(
             .map(|s| s.as_str().to_string())
             .collect();
         let mut files = files;
-        emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
+            emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        });
         files
     } else {
         files
@@ -1410,19 +1412,27 @@ fn collect_asset_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>)
 
 /// Write `files` to `dest` — each entry's path is taken relative to
 /// `dest`, parent dirs created as needed. Used by the `--target LANG`
-/// mode of the `roundhouse` binary.
+/// mode of the `roundhouse` binary. Identical files are left untouched
+/// so re-emitting does not invalidate mtime-based native builds.
 pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     for (path, content) in files {
-        let full = dest.join(path);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-        }
-        fs::write(&full, content)
-            .map_err(|e| format!("write {}: {e}", full.display()))?;
+        write_if_changed(&dest.join(path), content.as_bytes())?;
     }
     Ok(())
+}
+
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    if fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return Ok(());
+    }
+    // Comparison is an optimization, not a new read-permission requirement:
+    // if reading fails, retain the existing write attempt and its I/O errors.
+    fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Copy the app's binary assets into an emitted tree.
@@ -1437,27 +1447,22 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
 /// any file it knows how to produce; this only fills the holes the
 /// text-only pipeline leaves.
 ///
-/// Returns the number of files copied, so the caller can report a
-/// truthful total.
+/// Returns the number of non-conflicting assets materialized, including
+/// identical files left untouched, so the caller can report a truthful total.
 pub fn write_binary_assets(
     assets: &[(String, Vec<u8>)],
     emitted: &[(String, String)],
     dest: &Path,
 ) -> Result<usize, String> {
-    let mut written = 0usize;
+    let mut materialized = 0usize;
     for (rel, bytes) in assets {
         if emitted.iter().any(|(p, _)| p == rel) {
             continue;
         }
-        let full = dest.join(rel);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-        }
-        fs::write(&full, bytes).map_err(|e| format!("write {}: {e}", full.display()))?;
-        written += 1;
+        write_if_changed(&dest.join(rel), bytes)?;
+        materialized += 1;
     }
-    Ok(written)
+    Ok(materialized)
 }
 
 /// Sort the emit output (`Vec<EmittedFile>`) into the `(path, content)`
@@ -1973,7 +1978,7 @@ fn ruby_family_runtime_files(
     fixture: &Path,
     flavor: RubyFlavor,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut files = spinel_files(app, fixture)?;
+    let (mut files, test_stems) = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
@@ -2325,7 +2330,7 @@ fn ruby_family_runtime_files(
     apply_controller_dispatch(&mut files, app, true);
     apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
-    apply_makefile_test_list(&mut files, app);
+    apply_makefile_test_list_stems(&mut files, &test_stems);
     apply_runtime_gem_wiring(&mut files);
     // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
     // appended a commented-out block to the spinel tree's boot.rb (that
@@ -3494,7 +3499,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // got it — one layer down. A lane is evidence only if it runs the
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
-    let mut files = spinel_files(app, fixture)?;
+    let (mut files, _) = spinel_files(app, fixture)?;
 
     write_bundled_requires(&mut files);
     Ok(files)
@@ -3695,7 +3700,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     }
 }
 
-fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
+// Return app-emitted test stems separately: merging the scaffold loses
+// their provenance, and the Ruby-family Makefile must exclude runtime tests.
+fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
@@ -4068,7 +4075,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         }
     }
 
-    files.extend(sort_files(emit::ruby::emit_spinel(app)));
+    let app_files = emit::ruby::emit_spinel(app);
+    let test_stems = app_test_stems(&app_files);
+    files.extend(sort_files(app_files));
 
     // Emit the ingested support classes (extras/, lib/, app/helpers/,
     // app/mailers/, and non-AR classes under app/models/ — Markdowner,
@@ -4180,7 +4189,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_test_gem_wiring(&mut files);
     apply_spinel_sql_functions(&mut files, app)?;
     apply_pagination_demand(&mut files)?;
-    Ok(files)
+    Ok((files, test_stems))
 }
 
 /// geared_pagination's `set_page_and_extract_portion_from` sets `@page` on
@@ -4526,7 +4535,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
 /// dependency we invented. The constant in an emitted body IS the demand.
 ///
 /// Ruby-family only, and wired at the CRuby/JRuby forks rather than in
-/// `spinel_files`, beside `apply_makefile_test_list` for the reason that
+/// `spinel_files`, beside `apply_makefile_test_list_stems` for the reason that
 /// function's own note gives: the shared scaffold set feeds spinel too,
 /// and a spinel tree that declares nokogiri in a Gemfile its toolchain
 /// lane has to `bundle install` is a build break in a target that never
@@ -4977,31 +4986,6 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     }
 }
 
-/// De-blog the scaffold Makefile's `SPINEL_TESTS` list for the CRuby /
-/// JRuby trees, where it drives `make cruby-test` over the app's own
-/// emitted tests. The scaffold hard-codes the blog's four stems, so
-/// every other app shipped a target naming files it does not have —
-/// campfire emits 52 and named none of them.
-///
-/// NOT applied in `spinel_files`, even though that is where the
-/// Makefile arrives: the SPINEL target rewrites the same block from its
-/// own `lane` (see `spin_shape`), which is a different selection of
-/// tests, and it anchors on the blog list with a hard error if the
-/// anchor is missing. Running this first consumed that anchor and took
-/// `build-site` down. Two lanes, two owners, and the split is by TARGET
-/// — so this has to sit on the CRuby side of the fork, not upstream of
-/// it.
-///
-/// Derived from what the EMITTER produced rather than from
-/// `app.test_modules`: re-deriving the stems from the source
-/// declarations would be a second copy of `test_file_stem`'s naming
-/// rules — including the namespace flatten
-/// `Rooms::ClosedsControllerTest` → `rooms_closeds_controller` — and a
-/// stale one the first time those rules change. It also cannot be a
-/// scan of the FINAL file set: the scaffold drops the framework
-/// runtime's own `test/models/*_test.rb` at the same paths (they
-/// `require "models/article"` and are not runnable standalone), and
-/// `article_broadcasts_test` rode along into the blog's list that way.
 /// The prebuilt JS bundles that arrive from a gem rather than from the
 /// app's own tree, keyed by the filename an import map pins them as.
 /// Each is `<gem_dir>/<dir>/<file>` — `app/assets/javascripts` for the
@@ -5033,7 +5017,7 @@ const GEM_JS_BUNDLES: &[(&str, &str, &str)] = &[
 const RAILS_JS: &str = "app/assets/javascripts";
 
 /// De-blog the scaffold Makefile's `ASSET_JS` list and its gem-bundle
-/// rules, the way `apply_makefile_test_list` does for `SPINEL_TESTS`.
+/// rules, the way `apply_makefile_test_list_stems` does for `SPINEL_TESTS`.
 ///
 /// The scaffold hard-codes the blog's seven pins, ending in
 /// `controllers/hello_controller.js` — a file no other app has, so
@@ -5336,8 +5320,12 @@ fn apply_makefile_asset_blocks(
     }
 }
 
-fn apply_makefile_test_list(files: &mut [(String, String)], app: &App) {
-    let mut stems: Vec<String> = emit::ruby::emit_spinel(app)
+/// Read the actual app emission before scaffold/runtime merging. The emitter
+/// owns filename rules, including `Rooms::ClosedsControllerTest` becoming
+/// `rooms_closeds_controller_test`. Scanning the merged tree would also pick
+/// up scaffold-only tests such as `test/models/article_broadcasts_test.rb`.
+fn app_test_stems(app_files: &[EmittedFile]) -> Vec<String> {
+    let mut stems: Vec<String> = app_files
         .iter()
         .filter_map(|f| {
             let p = f.path.to_str()?;
@@ -5351,9 +5339,11 @@ fn apply_makefile_test_list(files: &mut [(String, String)], app: &App) {
         })
         .collect();
     stems.sort();
-    apply_makefile_test_list_stems(files, &stems);
+    stems
 }
 
+/// Replace the scaffold's blog test list only for CRuby/JRuby. Spinel's
+/// `spin_shape` selects its own lane and still needs the original anchor.
 fn apply_makefile_test_list_stems(files: &mut [(String, String)], stems: &[String]) {
     const BLOG_LIST: &str = "SPINEL_TESTS := \\\n\
                              \ttest/models/article_test \\\n\
@@ -5500,6 +5490,11 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
 fn names_constant(src: &str, konst: &str) -> bool {
+    // Most files never mention this name. Reject those with the optimized
+    // substring search before walking/decoding every line of the runtime.
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
@@ -5539,6 +5534,9 @@ fn names_constant(src: &str, konst: &str) -> bool {
 /// True where the emitted program defines the constant itself, in which
 /// case the bundled library is not what the name refers to.
 fn defines_constant(src: &str, konst: &str) -> bool {
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         ["class ", "module "].iter().any(|kw| {
@@ -5562,6 +5560,9 @@ fn defines_constant(src: &str, konst: &str) -> bool {
 /// `packages/erb` (a `class`) collided with the shim (a `module`). The
 /// lobsters AOT lane was red for ten days on that comment.
 fn requires_feature(src: &str, require_line: &str) -> bool {
+    if !src.contains(require_line) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed
@@ -6562,89 +6563,6 @@ fn walk_dir_into(
     Ok(())
 }
 
-/// Walk `src` recursively, routing `.rb` files under `rb_prefix` and
-/// `.rbs` files under `rbs_prefix`. Other extensions and dotfiles are
-/// skipped. Splits `runtime/ruby/<sub>/` between the load-path tree
-/// (`runtime/`) and the typed sidecar tree (`sig/runtime/`) in one pass.
-fn walk_dir_partitioned(
-    src: &Path,
-    rb_prefix: &str,
-    rbs_prefix: &str,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    if !src.exists() {
-        return Err(format!("missing {}/", src.display()));
-    }
-    let mut stack: Vec<(PathBuf, String)> = vec![(src.to_path_buf(), String::new())];
-    while let Some((dir, sub)) = stack.pop() {
-        for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
-            let entry = entry.map_err(|e| format!("read entry: {e}"))?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
-            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            let nested = format!("{sub}{name_str}");
-            if ty.is_dir() {
-                stack.push((path, format!("{nested}/")));
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let prefix = match ext {
-                "rb" => rb_prefix,
-                "rbs" => rbs_prefix,
-                _ => continue,
-            };
-            let content = match fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            out.push((format!("{prefix}{nested}"), content));
-        }
-    }
-    Ok(())
-}
-
-/// Walk `src` non-recursively, collecting only files whose extension
-/// is in `exts`. Used to gather `runtime/spinel/*.rb` without
-/// recursing into `runtime/spinel/{scaffold,test}` (those are walked
-/// separately into different output prefixes).
-fn walk_dir_flat(
-    src: &Path,
-    exts: &[&str],
-    prefix: &str,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    for entry in fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| format!("read entry: {e}"))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext_match = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|e| exts.contains(&e))
-            .unwrap_or(false);
-        if !ext_match {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| format!("non-utf8 filename: {}", path.display()))?;
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        out.push((format!("{prefix}{name}"), content));
-    }
-    Ok(())
-}
-
 /// Orchestrates the `--site` mode of the `roundhouse` binary: for
 /// every `BuildTarget`, produce `_site/browse/<lang>.{json,tgz,zip}`,
 /// and copy the static landing-page assets (`site/`) plus the
@@ -7287,7 +7205,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_seed_file_is_REPLACED_not_preserved() {
+    fn a_stale_seed_file_is_replaced_not_preserved() {
         // The inverse of the old contract, and the point of the change:
         // spinel/ruby/jruby pick up the scaffold's copy by directory
         // walk, and that copy held the BLOG's rows for every app.

@@ -77,6 +77,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"     # ROUNDHOUSE_BIN or cargo run
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
@@ -174,8 +175,8 @@ else
     OUT="$(mktemp -d -t roundhouse-campfire-compare.XXXXXX)"
     step "transpiling $APP → $OUT (target: $LANE)"
     rm -rf "$OUT"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target "$LANE" "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    roundhouse_run \
+        --target "$LANE" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
 fi
 
 if [[ "$LANE" == ruby && ! -f "$OUT/.job-hold-spliced" ]]; then

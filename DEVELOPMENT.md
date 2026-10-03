@@ -38,7 +38,20 @@ cargo test --test framework_tests_ruby -- --ignored # framework runtime's
 ```
 
 The default test suite is the forcing function and must pass before
-any commit. Toolchain and framework tests are `#[ignore]`-gated so a
+any commit. The test profile uses `line-tables-only` debug information:
+backtraces retain file/line locations without repeating module metadata in
+hundreds of integration-test binaries. Code stays unoptimized. For full
+debugger information, use `CARGO_PROFILE_TEST_DEBUG=2 cargo test`.
+
+To separate compiler work from the emitted program's runtime, opt into phase
+timings. Ruby-family emission reports assembly and text-level tree shaking
+separately; timing is disabled by default:
+
+```bash
+ROUNDHOUSE_TIMINGS=1 cargo test --test emit_and_run the_unedited_blog_runs -- --nocapture
+```
+
+Toolchain and framework tests are `#[ignore]`-gated so a
 local `cargo test` doesn't require every target runtime installed —
 CI covers them via per-target jobs and the `smoke` matrix (which
 executes each published archive's README verbatim; several toolchain
@@ -69,6 +82,125 @@ Build (requires Rust):
 - `bin/rh compare [<target>]` — fetch the same URL from Rails and the target, diff canonicalized DOM.
 - `bin/rh bench [<target>...]` — HTTP throughput + RSS benchmark across targets.
 - `bin/rh site` — build the full multi-target Pages site.
+
+### Focused local verification
+
+`bin/rh verify` is a foreground, fail-fast developer/agent loop, **not full
+CI or merge approval**. It builds and runs library tests, then only the
+integration and ignored toolchain suites you explicitly select. Cargo builds
+the programs needed by those suites (including application binaries for
+integration tests); unrelated test programs are not built. The full
+`cargo build --tests` / `cargo test --all-targets` guidance above still applies
+at milestones.
+
+```sh
+bin/rh verify --plan --base main --test ingest
+bin/rh verify --test ingest --test real_blog
+bin/rh verify --toolchain ruby --json > verification.json
+bin/rh verify --test framework_tests_ruby --ignored
+```
+
+Like Cargo, default library/`--test` checks exclude `#[ignore]` tests.
+An ignored-only suite therefore executes no tests by default. Use `--ignored`
+with `--test` to run only its ignored tests instead; library tests remain
+unchanged. `--toolchain TARGET` already selects ignored tests in
+`TARGET_toolchain`. Ignored tests are never enabled implicitly: mixed suites
+can contain checks requiring additional SDKs or deliberately unsupported work.
+
+It needs Git, repository-pinned Rust, Ruby/test gems and any selected target
+toolchain. Python 3 (stdlib only) is optional for the hosted-coverage preview;
+planner failures are reported as unavailable and do not block local checks.
+Fixtures and dependencies required by the executed tests must already be
+prepared; missing fixtures are listed, but each test owns its prerequisites
+and reports failures itself. The runner never installs them. `--plan`
+only reads Git and the existing `scripts/ci-plan.py` policy; it does not call
+Cargo, create a lock, generate Python bytecode, or execute tests.
+
+`--base REF` compares the **current working tree** with that exact commit
+(default `HEAD`), including tracked edits, deletions and untracked non-ignored
+files. It does not fetch, find a merge base, or simulate GitHub's PR merge
+tree. The hosted coverage selection is informational: those jobs are not
+executed locally, and the planner cannot infer draft/label/full-call context.
+Choose integration tests from the behavior you changed, not just file names.
+Inherited Git repository-location variables are cleared for verification
+subprocesses, so reports, locks and tests use this checkout rather than a
+repository selected by a calling Git hook. The caller's environment is untouched.
+
+Commands run sequentially with one Rust test thread. Cargo defaults to at
+most four workers and non-incremental builds. Repository debug profiles are
+left intact, including the test profile's space-saving line tables for
+backtraces. Explicit Cargo environment settings are preserved, and `--jobs N`
+overrides the worker count. No optimization or debug-assertion setting is changed.
+Debug bench emissions and browser/DOM/corpus gates are not part of this loop.
+The tool performs no cleanup, autofixes, publishing or Git writes beyond its
+worktree-local verification lock. Do not run other builds/tests concurrently
+in the same checkout: the lock coordinates `verify` callers, not arbitrary
+Cargo commands.
+
+Before and after execution (also after a failed check), the runner reports
+available and total filesystem space for the checkout and Cargo target
+directory. Cargo's offline, locked metadata resolves the target location,
+including `CARGO_TARGET_DIR` and Cargo configuration; a missing target directory
+is measured at its nearest existing parent without creating it. The optional
+probe uses POSIX `df -P -k` (Linux/macOS); missing tools or unsupported output,
+including environments without `df`, are reported as unavailable and never
+block tests or override their exit codes. `--plan` performs neither probe nor
+Cargo metadata lookup. Less than **5 GiB** available produces an advisory
+warning on stderr, not an enforced build budget or automatic cleanup.
+
+These are filesystem snapshots, **not the size of this run's artifacts**:
+other processes and shared caches affect free space. Existing artifacts are
+retained; selecting fewer suites prevents unnecessary new builds but does not
+remove old ones. Check disk space with your platform tools before large runs.
+
+For a smaller build footprint, Cargo can omit symbol tables when readable
+native backtraces/debugging are not needed. This is opt-in, target-dependent,
+and does not change optimization, debug assertions or overflow checks. Set
+both profile variables using your shell's environment syntax; POSIX example:
+
+```sh
+CARGO_PROFILE_DEV_STRIP=symbols CARGO_PROFILE_TEST_STRIP=symbols \
+  bin/rh verify --test ingest --json > verification.json
+```
+
+No separate `rh` option or stripping of existing executables is needed.
+Caller-supplied dev/test `DEBUG`, `STRIP` and `OPT_LEVEL` environment values are
+included in `build_environment`; absent values leave Cargo configuration
+alone. That report is not a complete effective Cargo configuration.
+Checks that require symbolicated backtraces, including `ci_policy_workflow`,
+need debug information and symbols; do not disable them for those suites.
+Changing profile settings can create additional cached artifact variants;
+stripping does not shrink old binaries or dependency archives. Higher
+optimization can reduce artifact size but increase compile time: measure
+the cold-build and repeated-run tradeoff before choosing it for a CI loop.
+
+For an occasional package-cache reset, **first stop all builds, tests and
+generated programs using it**, confirm the target directory from the report,
+and do not clean a directory shared with other checkouts. Preview Cargo's
+dev/test package cleanup before executing it:
+
+```sh
+cargo clean --package roundhouse --profile dev --offline --locked --dry-run --verbose
+# Only after inspecting the preview, remove --dry-run to perform cleanup.
+```
+
+Use `--target-dir PATH` when necessary to identify the dedicated cache
+explicitly. The default dev and test profiles share Cargo's `debug/`
+output directory, so `--profile dev` covers both here. Package cleanup
+retains dependency artifacts but removes Roundhouse dev/test programs,
+which must be rebuilt. Do not clean after
+every run: stable build settings and reuse of a dedicated cache are faster.
+The verifier never performs this cleanup automatically.
+
+`--json` sends a report to stdout and child output to stderr. The report names
+HEAD, changed paths, base, build settings, each command, its exit code/time and
+`passed`, `failed` or `not-run` status. `disk_space` contains before/after
+snapshots in bytes or probe errors (null snapshots for a preview).
+It includes the working tree but is not a content fingerprint or reusable
+execution receipt; do not reuse it merely because HEAD matches.
+A preview is `planned`; a failed child stops subsequent
+checks and preserves its exit code. Invalid arguments or missing Git are
+reported on stderr with exit 2; an unavailable Cargo command exits 127.
 
 Cleanup: `bin/rh clean <target | fixture>`.
 
@@ -108,9 +240,9 @@ with the generating command when the directory is absent; and
 returning an empty app, so a wrong path fails at the path, not at the
 first model it cannot find.
 
-CI regenerates the fixture once per run in the `generate-fixture` job
-and shares the artifact across the unit job and every per-target
-job — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI prepares both fixtures in `generate-fixture` and shares this run's artifact
+across unit and per-target jobs. Cache and freshness rules are documented in
+[CI coverage and reuse](docs/ci-reuse.md#fixture-inputs).
 
 `tests/real_blog.rs` pairs against the generated tree; its
 load-bearing gates:

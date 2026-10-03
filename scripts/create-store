@@ -20,6 +20,7 @@
 # Usage: create-store [app-name]      (default: store)
 #   RAILS_NEW_VERSION=8.1.3 pins the generator, as create-blog does.
 set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="${1:-store}"
 
 echo "Creating the Getting Started store: $APP_NAME"
@@ -499,4 +500,4 @@ TEST
 # not the guide's app.
 echo
 echo "Store created. The guide's own tests:"
-bin/rails test test/models/product_test.rb test/mailers/product_mailer_test.rb
+"$SCRIPT_DIR/test-store" .

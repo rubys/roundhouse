@@ -385,6 +385,7 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
     use crate::catalog::ReturnKind;
     match kind {
         ReturnKind::Int => Some(Ty::Int),
+        ReturnKind::IntOrNil => Some(Ty::Union { variants: vec![Ty::Int, Ty::Nil] }),
         ReturnKind::Bool => Some(Ty::Bool),
         ReturnKind::Str => Some(Ty::Str),
         ReturnKind::HashSymStr => {

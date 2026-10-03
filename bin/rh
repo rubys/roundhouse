@@ -15,6 +15,8 @@ require 'optparse'
 require 'fileutils'
 require 'open3'
 require 'shellwords'
+require 'json'
+require 'etc'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
 TARGETS = %w[spinel ruby jruby crystal csharp elixir go kotlin python rust swift typescript typescript-worker].freeze
@@ -24,6 +26,7 @@ def main(argv)
   cmd = argv.shift
   case cmd
   when 'doctor'    then cmd_doctor(argv)
+  when 'verify'    then cmd_verify(argv)
   when 'fetch'     then cmd_fetch(argv)
   when 'fixture'   then cmd_fixture(argv)
   when 'transpile' then cmd_transpile(argv)
@@ -65,6 +68,7 @@ def print_usage
       test <target>       Transpile, then run target's native tests (ruby only for now).
       run <target>        Transpile, then run main (ruby only for now).
       compare [<target>]  End-to-end Rails-vs-target HTTP compare (wraps scripts/compare).
+      verify             Sequential local checks; --plan previews without execution.
       bench [<target>...] HTTP throughput + RSS benchmark (wraps scripts/bench).
       site                Build the full GitHub Pages site (all targets).
 
@@ -154,7 +158,9 @@ end
 
 DOCTOR_CHECKS = [
   { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: '3.4' },
-  { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare' },
+  { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare, verify' },
+  { key: :git,    label: 'Git',       unlocks: 'verify / verify --plan' },
+  { key: :python, label: 'Python 3',  unlocks: 'optional verify hosted-coverage preview' },
   { key: :node,   label: 'Node',      unlocks: 'typescript target' },
   { key: :sqlite, label: 'SQLite',    unlocks: 'ruby/spinel/rust targets' },
   { key: :rails,  label: 'Rails gem', unlocks: 'fixture' },
@@ -171,6 +177,8 @@ def cmd_doctor(argv)
   versions = {
     ruby:   RUBY_VERSION,
     rust:   version_of(probe('cargo', '--version')),
+    git:    version_of(probe('git', '--version')),
+    python: version_of(probe('python3', '--version')),
     node:   version_of(probe('node', '--version')),
     sqlite: version_of(probe('sqlite3', '--version')),
     rails:  version_of(probe('rails', '--version')),
@@ -194,6 +202,8 @@ def cmd_doctor(argv)
 
   puts ''
   available = ['doctor', 'fetch <target>', 'clean <target | fixture>']
+  available << 'verify --plan' if versions[:git]
+  available << 'verify' if versions[:git] && versions[:rust]
   available << 'fixture' if versions[:rails]
   if versions[:rust]
     available << 'transpile <target>'
@@ -207,7 +217,7 @@ def cmd_doctor(argv)
   puts 'Available now:'
   available.each { |s| puts "  bin/rh #{s}" }
 
-  missing = DOCTOR_CHECKS.reject { |c| c[:key] == :ruby || versions[c[:key]] }
+  missing = DOCTOR_CHECKS.reject { |c| [:ruby, :python].include?(c[:key]) || versions[c[:key]] }
   unless missing.empty?
     puts ''
     puts 'Install to unlock more:'
@@ -223,11 +233,198 @@ end
 def install_hint(key)
   case key
   when :rust   then 'https://rustup.rs'
+  when :git    then 'https://git-scm.com'
+  when :python then 'https://www.python.org (optional for verify)'
   when :node   then 'https://nodejs.org or `brew install node`'
   when :sqlite then 'macOS: preinstalled; Debian/Ubuntu: apt install libsqlite3-dev'
   when :rails  then 'gem install rails'
   when :wrk    then 'macOS: brew install wrk; Debian/Ubuntu: apt install wrk'
   end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: verify — a foreground local check, not an Actions emulator.
+
+# Git hooks can export locations for another repository. Every verification
+# subprocess belongs to this checkout, without changing the caller's env.
+VERIFY_GIT_ENV = %w[GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
+
+def verify_capture(*command, input: '')
+  out, err, status = Open3.capture3(VERIFY_GIT_ENV, *command, stdin_data: input, chdir: ROUNDHOUSE_ROOT)
+  raise ArgumentError, "#{command.first}: #{err.strip}" unless status.success?
+  out
+end
+
+VERIFY_DISK_WARNING_BYTES = 5 * 1024**3
+
+# POSIX df is optional (e.g. native Windows). Measure filesystems, not
+# directory sizes; do not walk large caches or create a missing target dir.
+def verify_disk_space(locations, phase, json)
+  locations.to_h do |name, path|
+    sample = { path: path }
+    begin
+      existing = path
+      until File.exist?(existing)
+        parent = File.dirname(existing)
+        raise ArgumentError, 'no accessible parent directory' if parent == existing
+        existing = parent
+      end
+      sample[:filesystem_path] = existing
+      out, err, status = Open3.capture3({ 'LC_ALL' => 'C' }, 'df', '-P', '-k', existing)
+      raise ArgumentError, "df: #{err.strip}" unless status.success?
+      # Filesystem and mount names can contain spaces; sizes are KiB with -k.
+      row = out.lines.drop(1).last&.chomp&.match(/\A.+?\s+(\d+)\s+\d+\s+(-?\d+)\s+\d+%\s+.+\z/)
+      raise ArgumentError, 'unsupported df output' unless row
+      sample[:total_bytes] = row[1].to_i * 1024
+      sample[:available_bytes] = row[2].to_i * 1024
+      if sample[:available_bytes] < VERIFY_DISK_WARNING_BYTES
+        warn "rh verify: less than 5 GiB available #{phase} (#{name}: #{path}); warning only, no cleanup performed."
+      end
+      unless json
+        puts format('Disk %s (%s): %.2f GiB available / %.2f GiB total — %s',
+          phase, name, sample[:available_bytes].fdiv(1024**3), sample[:total_bytes].fdiv(1024**3), path)
+      end
+    rescue ArgumentError, SystemCallError => e
+      sample[:error] = e.message
+      puts "Disk #{phase} (#{name}): unavailable — #{e.message}" unless json
+    end
+    [name, sample]
+  end
+end
+
+def cmd_verify(argv)
+  tests = []
+  toolchains = []
+  plan_only = json = ignored_tests = false
+  base = 'HEAD'
+  jobs = ENV.fetch('CARGO_BUILD_JOBS', [Etc.nprocessors, 4].min.to_s)
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh verify [--plan] [--base REF] [--test NAME] [--ignored] [--toolchain TARGET] [--json]'
+    o.separator 'Build and run library tests, then only explicit integration/toolchain suites.'
+    o.separator 'This is partial local verification, not the hosted CI floor or merge approval.'
+    o.on('--plan', 'Read-only preview; no Cargo, installs, or test execution') { plan_only = true }
+    o.on('--base REF', 'Compare the working tree with REF (default: HEAD)') { |v| base = v }
+    o.on('--test NAME', 'Integration test stem; repeatable; skips ignored tests by default') { |v| tests << v }
+    o.on('--ignored', 'Run only ignored tests in selected --test suites (not library tests)') { ignored_tests = true }
+    o.on('--toolchain TARGET', 'Run TARGET_toolchain with --ignored; repeatable') { |v| toolchains << v }
+    o.on('--jobs N', 'Cargo workers (default: CARGO_BUILD_JOBS or min(CPUs, 4))') { |v| jobs = v }
+    o.on('--json', 'JSON report on stdout; child output on stderr') { json = true }
+  end.parse!(argv)
+  raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
+  raise ArgumentError, 'jobs must be a positive integer' unless jobs.match?(/\A[1-9]\d*\z/)
+  raise ArgumentError, '--ignored requires at least one --test suite' if ignored_tests && tests.empty?
+  suites = tests.map { |name| [name, ignored_tests] } + toolchains.map { |name| ["#{name}_toolchain", true] }
+  suites.uniq.each do |name, _ignored|
+    unless name.match?(/\A[A-Za-z0-9_-]+\z/) && File.file?(File.join(ROUNDHOUSE_ROOT, 'tests', "#{name}.rs"))
+      raise ArgumentError, "unknown test suite: #{name.inspect}"
+    end
+  end
+
+  head = verify_capture('git', 'rev-parse', 'HEAD').strip
+  base_sha = verify_capture('git', 'rev-parse', '--verify', '--end-of-options', "#{base}^{commit}").strip
+  unless verify_capture('git', 'diff', '--name-only', '--diff-filter=U', '-z').empty?
+    raise ArgumentError, 'resolve unmerged paths before verification'
+  end
+  changes = (verify_capture('git', 'diff', '--name-only', '--no-renames', '-z', base_sha, '--').split("\0") +
+    verify_capture('git', 'ls-files', '--others', '--exclude-standard', '-z').split("\0")).uniq.sort
+  # Import the repository's policy directly: no duplicated owner routing and
+  # no GitHub event, API lookup, reuse receipt, or bytecode-cache side effects.
+  policy = <<~PYTHON
+    import json, runpy, sys
+    policy = runpy.run_path(sys.argv[1])
+    print(json.dumps(policy['select'](json.load(sys.stdin))))
+  PYTHON
+  hosted = hosted_error = nil
+  begin
+    hosted = JSON.parse(verify_capture('python3', '-B', '-c', policy,
+      File.join(ROUNDHOUSE_ROOT, 'scripts', 'ci-plan.py'), input: JSON.generate(changes)))
+    unless hosted.is_a?(Hash) && hosted['jobs'].is_a?(Array)
+      raise ArgumentError, 'unsupported hosted coverage format'
+    end
+  rescue ArgumentError, SystemCallError, JSON::ParserError => e
+    hosted = nil
+    hosted_error = e.message
+  end
+  commands = [['cargo', 'test', '--locked', '--lib', '--', '--test-threads=1']]
+  suites.uniq.each do |name, ignored|
+    command = ['cargo', 'test', '--locked', '--test', name, '--']
+    command << '--ignored' if ignored
+    commands << command + ['--test-threads=1']
+  end
+  build_env = {
+    'CARGO_BUILD_JOBS' => jobs,
+    'CARGO_INCREMENTAL' => ENV.fetch('CARGO_INCREMENTAL', '0')
+  }
+  # Record caller-selected size/speed tradeoffs without inventing a profile
+  # or overriding Cargo configuration when these settings are absent.
+  %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_PROFILE_DEV_STRIP CARGO_PROFILE_TEST_STRIP
+    CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL].each do |key|
+    build_env[key] = ENV[key] if ENV.key?(key)
+  end
+  missing = %w[real-blog store].reject { |name| File.directory?(File.join(ROUNDHOUSE_ROOT, 'fixtures', name)) }
+  report = {
+    scope: 'partial local verification; hosted coverage is informational, not executed',
+    head: head, base: base_sha, changes: changes, build_environment: build_env,
+    prerequisites: ['Pinned Rust via rust-toolchain.toml, Ruby and test gems; selected toolchains must be installed'],
+    missing_fixtures: missing, hosted_coverage: hosted, hosted_coverage_error: hosted_error,
+    checks: commands.map { |command| { command: command, status: 'not-run' } },
+    disk_space: { warning_threshold_bytes: VERIFY_DISK_WARNING_BYTES, before: nil, after: nil },
+    status: plan_only ? 'planned' : 'blocked'
+  }
+  unless json
+    puts "Local verification at #{head} (working tree included); not hosted CI."
+    puts(hosted ? "Hosted selection (not executed): #{hosted.fetch('jobs').join(', ')}" : "Hosted selection unavailable: #{hosted_error}")
+    puts "Missing fixtures: #{missing.join(', ')} — see bin/rh fixture and scripts/create-store" unless missing.empty?
+    commands.each { |command| puts "  #{command.shelljoin}" }
+  end
+  rc = 0
+  unless plan_only
+    lock_path = verify_capture('git', 'rev-parse', '--git-path', 'rh-verify.lock').strip
+    File.open(File.expand_path(lock_path, ROUNDHOUSE_ROOT), File::RDWR | File::CREAT, 0o600) do |lock|
+      unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+        raise ArgumentError, 'another verify run owns this worktree; wait for it to finish'
+      end
+      locations = { workspace: ROUNDHOUSE_ROOT }
+      begin
+        # Cargo resolves CARGO_TARGET_DIR and .cargo/config.toml itself.
+        metadata = JSON.parse(verify_capture('cargo', 'metadata', '--format-version', '1', '--no-deps', '--offline', '--locked'))
+        raise ArgumentError, 'unsupported Cargo metadata format' unless metadata.is_a?(Hash)
+        target = metadata.fetch('target_directory')
+        raise ArgumentError, 'unsupported Cargo target directory' unless target.is_a?(String) && !target.empty?
+        locations[:cargo_target] = File.expand_path(target, ROUNDHOUSE_ROOT)
+      rescue ArgumentError, SystemCallError, JSON::ParserError, KeyError => e
+        report[:disk_space][:cargo_target_error] = e.message
+        puts "Cargo target disk location unavailable: #{e.message}" unless json
+      end
+      report[:disk_space][:before] = verify_disk_space(locations, 'before', json)
+      report[:status] = 'passed'
+      report[:checks].each do |check|
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        begin
+          system(VERIFY_GIT_ENV.merge(build_env), *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
+          status = $?
+          rc = status.exitstatus || 128 + status.termsig
+        rescue Errno::ENOENT => e
+          warn e.message
+          rc = 127
+        end
+        check[:seconds] = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3)
+        check[:exit] = rc
+        check[:status] = rc.zero? ? 'passed' : 'failed'
+        unless rc.zero?
+          report[:status] = 'failed'
+          break
+        end
+      end
+      report[:disk_space][:after] = verify_disk_space(locations, 'after', json)
+    end
+  end
+  puts(json ? JSON.pretty_generate(report) : "Local checks: #{report[:status]}; unexecuted hosted gates remain unverified.")
+  rc
+rescue OptionParser::ParseError, ArgumentError, SystemCallError, JSON::ParserError => e
+  warn "rh verify: #{e.message}"
+  2
 end
 
 # ---------------------------------------------------------------------

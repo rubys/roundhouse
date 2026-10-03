@@ -33,6 +33,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
 
 APP="$HOME/git/once-campfire"
 OUT=""
@@ -49,6 +50,20 @@ while [[ $# -gt 0 ]]; do
         *)           APP="$1"; shift ;;
     esac
 done
+
+# Resolve relative APP/--out against the caller's cwd before any work, so
+# ROUNDHOUSE_BIN and the cargo fallback (both run under REPO_ROOT) see the
+# same absolute paths the shell will open after emit.
+abs_path() {
+    local p="$1" d b
+    [[ -z "$p" || "$p" = /* ]] && { printf '%s' "$p"; return 0; }
+    d="$(dirname "$p")"
+    b="$(basename "$p")"
+    mkdir -p "$d" 2>/dev/null || true
+    printf '%s/%s' "$(cd "$d" && pwd)" "$b"
+}
+APP="$(abs_path "$APP")"
+OUT="$(abs_path "$OUT")"
 
 [[ -d "$APP" ]] || { echo "campfire-walk: no app at $APP" >&2; exit 2; }
 command -v sqlite3 >/dev/null || { echo "campfire-walk: needs the sqlite3 CLI" >&2; exit 2; }
@@ -78,8 +93,8 @@ trap cleanup EXIT INT TERM
 
 step "transpiling $APP → $OUT (target: ruby)"
 rm -rf "$OUT"
-(cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-    --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" |
+roundhouse_run \
+    --target ruby "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" |
     tail -1
 echo "  emit diagnostics: $OUT.log"
 

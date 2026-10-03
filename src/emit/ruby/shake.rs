@@ -33,7 +33,7 @@
 //!
 //! Kill switch: `ROUNDHOUSE_NO_TREESHAKE=1` skips the pass entirely.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Methods Ruby (or the runtime idiom) dispatches without a textual
 /// call site: constructors via `.new`, `to_s` via interpolation,
@@ -90,7 +90,7 @@ fn is_framework_runtime(path: &str) -> bool {
 /// identifier (operator defs like `def [](k)` return None and are
 /// never candidates). Handles `def self.name` and both `def name(...)`
 /// and `def name;`/bare forms.
-fn def_line_name(line: &str) -> Option<String> {
+fn def_line_name(line: &str) -> Option<&str> {
     let t = line.trim_start();
     let rest = t.strip_prefix("def ")?;
     let rest = rest.strip_prefix("self.").unwrap_or(rest);
@@ -113,44 +113,42 @@ fn def_line_name(line: &str) -> Option<String> {
     if name_end < bytes.len() && bytes[name_end] == b'=' {
         return None;
     }
-    Some(rest[..name_end].to_string())
+    Some(&rest[..name_end])
 }
 
 /// `.rbs` sig line → declared method name (`def name: ...`).
-fn sig_line_name(line: &str) -> Option<String> {
+fn sig_line_name(line: &str) -> Option<&str> {
     def_line_name(line.trim_end_matches(|c| c != ':').trim_end_matches(':'))
         .or_else(|| {
             let t = line.trim_start();
             let rest = t.strip_prefix("def ")?;
             let rest = rest.strip_prefix("self.").unwrap_or(rest);
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if name.is_empty() {
+            let end = rest
+                .bytes()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                .count();
+            if end == 0 {
                 None
             } else {
-                let rest_after = &rest[name.len()..];
-                let name = match rest_after.chars().next() {
-                    Some('?') | Some('!') => format!("{name}{}", &rest_after[..1]),
-                    _ => name,
+                let end = match rest.as_bytes().get(end) {
+                    Some(b'?') | Some(b'!') => end + 1,
+                    _ => end,
                 };
-                Some(name)
+                Some(&rest[..end])
             }
         })
 }
 
-/// Identifier tokens (with a trailing `?`/`!` when present) on a line.
-fn tokens(line: &str, out: &mut HashSet<String>) {
+/// Add identifier tokens, except the name introduced on this def/sig line.
+/// Exclusion must not erase a usage already found on another line.
+fn tokens<'a>(line: &'a str, out: &mut HashSet<&'a str>, defined: Option<&str>) {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let mut end = i;
@@ -162,7 +160,10 @@ fn tokens(line: &str, out: &mut HashSet<String>) {
                     end = i + 1;
                 }
             }
-            out.insert(line[start..end].to_string());
+            let token = &line[start..end];
+            if Some(token) != defined {
+                out.insert(token);
+            }
         } else {
             i += 1;
         }
@@ -187,7 +188,7 @@ fn delete_defs(content: &str, names: &HashSet<&str>) -> (String, usize) {
                 continue;
             }
         };
-        if !names.contains(name.as_str()) {
+        if !names.contains(name) {
             i += 1;
             continue;
         }
@@ -272,7 +273,7 @@ fn delete_sigs(content: &str, names: &HashSet<&str>) -> String {
             skipping = false;
         }
         if let Some(name) = sig_line_name(line) {
-            if names.contains(name.as_str()) {
+            if names.contains(name) {
                 skipping = true;
                 continue;
             }
@@ -295,32 +296,39 @@ pub fn shake_tree(
     if std::env::var("ROUNDHOUSE_NO_TREESHAKE").as_deref() == Ok("1") {
         return;
     }
+    // Only candidate Ruby files and their RBS sidecars can change. Keep
+    // every RBS file in the rescanned group to avoid sidecar bookkeeping.
+    // File paths and indices stay fixed throughout this invocation.
+    let rescan: Vec<bool> = files.iter().map(|(path, _)| {
+        path.ends_with(".rbs")
+            || (path.ends_with(".rb")
+                && (is_framework_runtime(path) || path.starts_with("app/models/")))
+    }).collect();
+    let mut stable_usage: HashSet<String> = HashSet::new();
     let mut total_runtime = 0usize;
     let mut total_synth = 0usize;
-    for _pass in 0..10 {
+    for pass in 0..10 {
         // Usage universe: every token on every line of every file,
         // EXCEPT the name being introduced on a def/sig line itself.
-        let mut usage: HashMap<String, usize> = HashMap::new();
-        for (path, content) in files.iter() {
-            let is_rb = path.ends_with(".rb");
-            let is_rbs = path.ends_with(".rbs");
-            if !is_rb && !is_rbs {
+        // Borrow tokens from the current files; the drop sets own their
+        // names, so these borrows end before any file is rewritten.
+        // Only membership matters: occurrence counts and per-line
+        // deduplication do not affect whether a method is unreachable.
+        let mut usage = HashSet::new();
+        let mut stable_tokens = HashSet::new();
+        for ((path, content), &rescan) in files.iter().zip(&rescan) {
+            if !rescan && (pass != 0 || !path.ends_with(".rb")) {
                 continue;
             }
+            let is_rb = path.ends_with(".rb");
+            let out = if rescan { &mut usage } else { &mut stable_tokens };
             for line in content.lines() {
                 let defined = if is_rb {
                     def_line_name(line)
                 } else {
                     sig_line_name(line)
                 };
-                let mut toks = HashSet::new();
-                tokens(line, &mut toks);
-                if let Some(d) = defined {
-                    toks.remove(&d);
-                }
-                for t in toks {
-                    *usage.entry(t).or_default() += 1;
-                }
+                tokens(line, out, defined);
             }
         }
 
@@ -338,14 +346,17 @@ pub fn shake_tree(
             let mut dead: HashSet<String> = HashSet::new();
             for line in content.lines() {
                 if let Some(name) = def_line_name(line) {
-                    if EXEMPT.contains(&name.as_str()) {
+                    if EXEMPT.contains(&name) {
                         continue;
                     }
-                    if model && !synth_shakeable.contains(&name) {
+                    if model && !synth_shakeable.contains(name) {
                         continue;
                     }
-                    if usage.get(&name).copied().unwrap_or(0) == 0 {
-                        dead.insert(name);
+                    if !usage.contains(name)
+                        && !stable_tokens.contains(name)
+                        && !stable_usage.contains(name)
+                    {
+                        dead.insert(name.to_owned());
                     }
                 }
             }
@@ -355,6 +366,11 @@ pub fn shake_tree(
         }
         if drops.is_empty() {
             break;
+        }
+        if pass == 0 {
+            // Own each distinct stable name only if rewrites require
+            // another pass. Nothing is cached across invocations.
+            stable_usage = stable_tokens.into_iter().map(str::to_owned).collect();
         }
 
         for (idx, dead, runtime) in drops {
@@ -383,5 +399,121 @@ pub fn shake_tree(
             "roundhouse: treeshake ({label}): dropped {total_runtime} runtime defs + \
              {total_synth} synthesized model defs (text-level, whole-tree name scan)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_tokens_preserve_suffixes_operator_boundaries_and_line_deduplication() {
+        let mut found = HashSet::new();
+        tokens("ready! ready!=other next? next? _keep", &mut found, None);
+        assert_eq!(
+            found,
+            HashSet::from(["ready!", "ready", "other", "next?", "_keep"])
+        );
+    }
+
+    #[test]
+    fn definition_exclusion_keeps_prior_roots_and_other_calls_on_the_same_line() {
+        let mut found = HashSet::new();
+        tokens("kept", &mut found, None);
+        tokens("def kept; kept; leaf; end", &mut found, Some("kept"));
+        tokens("def orphan; orphan; twig; end", &mut found, Some("orphan"));
+        assert_eq!(found, HashSet::from(["kept", "def", "leaf", "end", "twig"]));
+    }
+
+    #[test]
+    fn borrowed_definition_names_preserve_writer_and_signature_boundaries() {
+        for (line, expected) in [
+            ("  def self.live!(x)", Some("live!")),
+            ("def ready?; true; end", Some("ready?")),
+            ("def value=(x)", None),
+            ("def [](key)", None),
+            ("def café", Some("caf")),
+        ] {
+            assert_eq!(def_line_name(line), expected, "{line}");
+        }
+        for (line, expected) in [
+            ("  def self.live!: () -> Hash[Symbol, Foo::Bar]", Some("live!")),
+            ("def ready?: () -> bool", Some("ready?")),
+            ("def value=: (Integer) -> Integer", Some("value")),
+            ("def bare!", Some("bare!")),
+            ("def []: (String) -> Integer", None),
+        ] {
+            assert_eq!(sig_line_name(line), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn rewritten_files_are_rescanned_until_orphans_and_their_signatures_disappear() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def dead; leaf; end\n  def leaf; 9; end\n  def live!; 3; end\n  def mentioned?; 4; end\n  def initialize; 7; end\nend\n".into()),
+            ("sig/runtime/active_record/probe.rbs".into(),
+             "module Probe\n  def dead: () -> Integer\n          | () -> String\n  def leaf: () -> Integer\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n".into()),
+            ("app/entry.rb".into(), "Probe.live!\ndeadly\n# mentioned? is a textual root\n".into()),
+        ];
+        let entry = files[2].clone();
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(
+            files[0].1,
+            "module Probe\n  def live!; 3; end\n  def mentioned?; 4; end\n  def initialize; 7; end\nend\n"
+        );
+        assert_eq!(
+            files[1].1,
+            "module Probe\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n"
+        );
+        assert_eq!(files[2], entry);
+    }
+
+    #[test]
+    fn stable_roots_exclude_definitions_and_are_recomputed_for_each_invocation() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def external!; 1; end\n  def unused?; 2; end\nend\n".into()),
+            ("app/models/probe.rb".into(),
+             "class Probe\n  def generated?; 3; end\n  def user_method; 4; end\nend\n".into()),
+            ("test/roots.rb".into(),
+             "# external! is a textual root\ndef generated?; false; end\n".into()),
+        ];
+        let roots = files[2].clone();
+        let synth = HashSet::from(["generated?".into()]);
+        shake_tree(&mut files, &synth, "test");
+        assert_eq!(files[0].1, "module Probe\n  def external!; 1; end\nend\n");
+        assert_eq!(files[1].1, "class Probe\n  def user_method; 4; end\nend\n");
+        assert_eq!(files[2], roots);
+
+        files[2].1 = "def generated?; false; end\n".into();
+        shake_tree(&mut files, &synth, "test");
+        assert_eq!(files[0].1, "module Probe\nend\n");
+        assert_eq!(files[1].1, "class Probe\n  def user_method; 4; end\nend\n");
+    }
+
+    #[test]
+    fn rewritten_sidecars_stop_rooting_orphans_on_later_passes() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def stale; 1; end\n  def orphan; leaf; end\n  def leaf; 5; end\nend\n".into()),
+            ("sig/runtime/active_record/probe.rbs".into(),
+             "module Probe\n  def stale: () -> Integer # orphan\n           | () -> String # leaf\n  def orphan: () -> Integer\n  def leaf: () -> Integer\nend\n".into()),
+        ];
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(files[0].1, "module Probe\nend\n");
+        assert_eq!(files[1].1, "module Probe\nend\n");
+    }
+
+    #[test]
+    fn cascading_drops_preserve_the_ten_pass_snapshot_limit() {
+        let mut body = String::from("module Probe\n");
+        for step in 0..10 {
+            body.push_str(&format!("  def step{step}; step{}; end\n", step + 1));
+        }
+        body.push_str("  def step10; 7; end\nend\n");
+        let mut files = vec![("runtime/active_record/probe.rb".into(), body)];
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(files[0].1, "module Probe\n  def step10; 7; end\nend\n");
     }
 }

@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn limit_one_without_single_record_emits_ARRAY_hydrate() {
+    fn limit_one_without_single_record_emits_array_hydrate() {
         // The regression this field exists for. `Model.all.limit(1)`
         // renders `LIMIT 1` and returns an Array of at most one — it is
         // NOT `find_by`. Keying the hydrate shape off the limit handed

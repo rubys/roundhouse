@@ -54,6 +54,13 @@ SPINEL11 = [
 ]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+PROJECT_BUILDERS = {
+    "ruby_runtime_files": "interpreted",
+    "jruby_runtime_files": "interpreted",
+    "ruby_family_runtime_files": "interpreted",
+    "spinel_files": "ruby-family",
+    "spin_shape": "ruby-family",
+}
 
 
 def native_coverage(path):
@@ -158,7 +165,7 @@ def archive_and_campfire_jobs(path, interpreter_only):
     return jobs
 
 
-def select(paths, *, draft=False, full=False, publish=False):
+def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
     if draft:
         return finish(
             BASE[:2],
@@ -175,6 +182,16 @@ def select(paths, *, draft=False, full=False, publish=False):
     wasm = site = spinel = writebook = False
     reasons = []
     for path in paths:
+        if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
+            targets.update(("ruby", "jruby"))
+            smoke.update(("ruby", "jruby"))
+            writebook = True
+            if project_scope == "ruby-family":
+                spinel = True
+                jobs_selected.update(SPINEL11)
+                spinel_tests.update(SPINEL_TESTS)
+            reasons.append(f"{path}: proven {project_scope} assembly bodies only")
+            continue
         if path.startswith((".github/", ".cargo/")) or path in {
             "scripts/ci-plan.py",
             "scripts/ci-reuse.py",
@@ -183,6 +200,7 @@ def select(paths, *, draft=False, full=False, publish=False):
             "tests/ci_archive_evidence_test.py",
             "tests/workflow_yaml_parses.rs",
             "tests/ci_policy_workflow.rs",
+            "tests/ci_fixture_workflow.rs",
             "src/project.rs",
             "src/bin/roundhouse.rs",
             "Cargo.toml",
@@ -358,7 +376,68 @@ def git(*args):
     return subprocess.check_output(["git", *args])
 
 
-def changed_paths(event, event_name, sha):
+def project_change_scope(before, after):
+    """Narrow only body-only edits in known builders; all other bytes must match.
+
+    This is not a Rust parser. Only indented bodies without raw strings or
+    block comments qualify; unknown shapes/signatures/items retain full CI.
+    """
+    pattern = re.compile(
+        r"(?P<header>^fn (?P<name>"
+        + "|".join(sorted(PROJECT_BUILDERS))
+        + r")\([^{};]*\{\n)(?P<body>(?:[ \t]+[^\n]*\n|\n)*)^}\n",
+        re.MULTILINE,
+    )
+    # Exclude function-looking text in Rust literals/comments. Block comments
+    # (including nested ones) are deliberately unsupported, not half-parsed.
+    literals = re.compile(
+        r'//[^\n]*|\b[bc]?r(?P<hash>#+)"[\s\S]*?"(?P=hash)'
+        r'|"(?:\\[\s\S]|[^"\\])*"'
+        r"|'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'"
+        r"|/\*"
+    )
+    bodies = []
+    skeletons = []
+    for source in (before, after):
+        found = {}
+        excluded = list(literals.finditer(source))
+        if any(token[0] == "/*" for token in excluded):
+            return None
+        lexical = literals.sub(lambda token: re.sub(r"[^\n]", " ", token[0]), source)
+
+        def mask(match):
+            if any(token.start() <= match.start() < token.end() for token in excluded):
+                return match[0]
+            prefix = lexical[: match.start()]
+            if any(
+                prefix.count(left) != prefix.count(right)
+                for left, right in [("{", "}"), ("(", ")"), ("[", "]")]
+            ):
+                return match[0]  # Nested/macro input is not a top-level builder.
+            name, body = match["name"], match["body"]
+            code = "\n".join(
+                line for line in body.splitlines() if not line.lstrip().startswith("//")
+            )
+            if name in found or re.search(r'(?<!\w)[bc]?r#*"|/\*', code):
+                raise ValueError("ambiguous project assembly body")
+            found[name] = body
+            return match["header"] + "}\n"
+
+        try:
+            skeletons.append(pattern.sub(mask, source))
+        except ValueError:
+            return None
+        bodies.append(found)
+    if skeletons[0] != skeletons[1] or bodies[0].keys() != bodies[1].keys():
+        return None
+    changed = {name for name in bodies[0] if bodies[0][name] != bodies[1][name]}
+    if changed:
+        scopes = {PROJECT_BUILDERS[name] for name in changed}
+        return "ruby-family" if "ruby-family" in scopes else "interpreted"
+    return None
+
+
+def changed_inputs(event, event_name, sha):
     if not SHA.fullmatch(sha) or git("rev-parse", "HEAD").decode().strip() != sha:
         raise ValueError("checkout is not the event SHA")
     if event_name == "pull_request":
@@ -376,15 +455,26 @@ def changed_paths(event, event_name, sha):
         except subprocess.CalledProcessError:
             git("fetch", "--no-tags", "--depth=1", "origin", base)
     else:
-        return []
+        return [], None
     # Renames become a deletion and addition; both ownership sets are selected.
-    return [
+    paths = [
         p.decode("utf-8")
         for p in git("diff", "--name-only", "--no-renames", "-z", base, sha).split(
             b"\0"
         )
         if p
     ]
+    scope = None
+    if "src/project.rs" in paths:
+        entries = [
+            git("ls-tree", ref, "--", "src/project.rs").split() for ref in (base, sha)
+        ]
+        if all(entry and entry[0] == b"100644" for entry in entries):
+            scope = project_change_scope(
+                git("show", f"{base}:src/project.rs").decode("utf-8"),
+                git("show", f"{sha}:src/project.rs").decode("utf-8"),
+            )
+    return paths, scope
 
 
 def check_results(plan, needs, *, compact=False):
@@ -454,10 +544,13 @@ def main():
     )
     reason = None
     try:
-        paths = changed_paths(event, event_name, os.environ["GITHUB_SHA"])
+        paths, project_scope = changed_inputs(
+            event, event_name, os.environ["GITHUB_SHA"]
+        )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
-        paths, full, reason = (
+        paths, project_scope, full, reason = (
             [],
+            None,
             True,
             f"Unknown changed inputs: {e}; running full validation",
         )
@@ -468,7 +561,13 @@ def main():
         or event_name not in {"schedule", "workflow_dispatch"}
     ):
         raise ValueError("publication is only allowed by canonical main's full caller")
-    plan = select(paths, draft=pr.get("draft", False), full=full, publish=publish)
+    plan = select(
+        paths,
+        draft=pr.get("draft", False),
+        full=full,
+        publish=publish,
+        project_scope=project_scope,
+    )
     if reason:
         plan["reasons"].append(reason)
     spinel = os.environ.get("CI_SPINEL_REVISION", "")

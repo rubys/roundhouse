@@ -87,9 +87,11 @@ debug = 1
 [profile.dev.package."*"]
 debug = false
 
-# Same treatment for the test profile, which is what `cargo test` builds.
+# Hundreds of integration-test binaries link the library independently.
+# Keep file/line backtraces, not the module metadata that `debug = 1`
+# repeats in every binary. Code remains unoptimized, including stack frames.
 [profile.test]
-debug = 1
+debug = "line-tables-only"
 
 [profile.test.package."*"]
 debug = false

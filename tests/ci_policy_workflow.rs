@@ -1,6 +1,251 @@
 use std::fs;
 
 #[test]
+fn unit_batches_all_targets_without_reducing_coverage() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let unit = &ci["jobs"]["unit"];
+    assert!(unit.get("if").is_none());
+    assert!(unit.get("continue-on-error").is_none());
+    assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
+    assert_eq!(
+        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
+        Some("unpacked")
+    );
+    assert!(ci["env"].get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO").is_none());
+    let steps = unit["steps"].as_sequence().unwrap();
+    let tests = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("Build and run all test targets in batches")
+        })
+        .expect("batch every lib/bin/integration target through Cargo");
+    assert!(steps[tests].get("if").is_none());
+    assert!(steps[tests].get("continue-on-error").is_none());
+    let body = steps[tests]["run"].as_str().unwrap();
+    assert!(body.contains("--out \"$RUNNER_TEMP/unit-resources/tests\" --"));
+    assert!(body.contains("python3 scripts/ci-unit-tests.py"));
+    assert!(
+        !body.contains("cargo test --locked --all-targets"),
+        "all-target peak must not rebuild every integration executable at once"
+    );
+    let timings = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-build-timings"))
+        .expect("retain build timings for investigation");
+    assert_eq!(timings["if"].as_str(), Some("always()"));
+    assert_eq!(
+        timings["with"]["path"].as_str(),
+        Some("target/cargo-timings/")
+    );
+    let bench = steps
+        .iter()
+        .find(|step| {
+            step["name"].as_str()
+                == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
+        })
+        .expect("retain the independent dev-profile stack-overflow gate");
+    assert!(bench.get("if").is_none());
+    assert!(bench.get("continue-on-error").is_none());
+    let body = bench["run"].as_str().unwrap();
+    assert!(body.contains("bash -euo pipefail -c"));
+    assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
+    assert!(body.contains("cargo run --quiet --bin emit_preview -- --target"));
+    let resources = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .expect("retain phase samples even when a command fails");
+    assert_eq!(resources["if"].as_str(), Some("always()"));
+    assert_eq!(
+        resources["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/unit-resources/")
+    );
+    // #317: current-run debug compiler for Campfire consumers.
+    assert_eq!(
+        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
+    );
+    let stage = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
+        .expect("stage the debug bin after tests/bench emission");
+    let stage_body = stage["run"].as_str().unwrap();
+    assert!(stage_body.contains("cargo build --locked --bin roundhouse"));
+    assert!(stage_body.contains("roundhouse-debug-bin/identity.txt"));
+    assert!(stage_body.contains("profile=debug"));
+    assert!(stage_body.contains("source_sha=${GITHUB_SHA}"));
+    let upload = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .expect("upload the staged debug binary");
+    assert!(upload["uses"]
+        .as_str()
+        .unwrap()
+        .starts_with("actions/upload-artifact@"));
+    assert_eq!(
+        upload["with"]["name"].as_str(),
+        Some("roundhouse-debug-bin")
+    );
+    assert_eq!(upload["with"]["retention-days"].as_u64(), Some(1));
+    let resources_pos = steps
+        .iter()
+        .position(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .unwrap();
+    let stage_pos = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
+        .unwrap();
+    let upload_pos = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .unwrap();
+    assert!(resources_pos < stage_pos && stage_pos < upload_pos);
+}
+
+#[test]
+fn campfire_consumers_require_unit_debug_binary_and_do_not_rebuild() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for job_name in ["campfire-compare", "campfire-conformance"] {
+        let job = &ci["jobs"][job_name];
+        assert_eq!(job["needs"][0].as_str(), Some("unit"));
+        assert_eq!(job["needs"][1].as_str(), Some("plan"));
+        let expected_if = format!(
+            "${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{job_name}') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}}}"
+        );
+        assert_eq!(
+            job["if"].as_str(),
+            Some(expected_if.as_str()),
+            "{job_name}"
+        );
+        let steps = job["steps"].as_sequence().unwrap();
+        assert!(
+            steps.iter().all(|step| {
+                step["uses"]
+                    .as_str()
+                    .map(|u| !u.contains("setup-rust") && !u.contains("rust-cache"))
+                    .unwrap_or(true)
+            }),
+            "{job_name} must not install Rust; it consumes the unit binary"
+        );
+        let download = steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|u| u.starts_with("actions/download-artifact@"))
+                    && step["with"]["name"].as_str() == Some("roundhouse-debug-bin")
+            })
+            .unwrap_or_else(|| panic!("{job_name}: download shared binary"));
+        assert_eq!(
+            download["with"]["path"].as_str(),
+            Some("roundhouse-debug-bin")
+        );
+        let stage = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+            .unwrap_or_else(|| panic!("{job_name}: stage shared binary"));
+        let body = stage["run"].as_str().unwrap();
+        assert!(body.contains("chmod +x roundhouse-debug-bin/roundhouse"));
+        assert!(body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"));
+        assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"));
+        assert!(body.contains("source_sha=${GITHUB_SHA}"));
+        assert!(body.contains("profile=debug"));
+        // No cargo in the job body outside comments.
+        let runs: Vec<_> = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+        for run in &runs {
+            for line in run.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                assert!(
+                    !trimmed.contains("cargo run") && !trimmed.contains("cargo build"),
+                    "{job_name} must not rebuild roundhouse: {trimmed}"
+                );
+            }
+        }
+    }
+
+    // Conformance strict-emit must exec ROUNDHOUSE_BIN, not cargo.
+    let conf = &ci["jobs"]["campfire-conformance"];
+    let strict = conf["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
+        .expect("strict-emit ceiling");
+    let strict_run = strict["run"].as_str().unwrap();
+    assert!(strict_run.contains("test -x \"$ROUNDHOUSE_BIN\""));
+    assert!(strict_run.contains("\"$ROUNDHOUSE_BIN\""));
+    assert!(!strict_run
+        .lines()
+        .any(|l| !l.trim().starts_with('#') && l.contains("cargo run")));
+}
+
+#[test]
+#[cfg(all(target_os = "linux", debug_assertions))]
+fn test_backtraces_retain_library_and_integration_source_locations() {
+    const PROBE: &str = "ROUNDHOUSE_TEST_BACKTRACE_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        // The child runs outside the checkout: this deliberately panics in
+        // first-party library code, with an integration-test frame above it.
+        roundhouse::fixtures::real_blog();
+        panic!("missing-fixture probe unexpectedly returned");
+    }
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-backtrace-{}-{unique}", std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "test_backtraces_retain_library_and_integration_source_locations",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("RUST_BACKTRACE", "1")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    fs::remove_dir(&root).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{stderr}");
+    for source in ["src/fixtures.rs:", "tests/ci_policy_workflow.rs:"] {
+        // The panic header includes a location even without debug info.
+        // Require symbolicated stack frames, not just that header.
+        assert!(
+            stderr.lines().any(|line| line.trim_start().starts_with("at ") && line.contains(source)),
+            "missing file/line backtrace for {source}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn resource_and_unit_batch_helpers_preserve_failures_and_contracts() {
+    for test in ["tests/ci_resources_test.py", "tests/ci_unit_tests_test.py"] {
+        let result = std::process::Command::new("python3")
+            .args(["-B", test, "-v"])
+            .output()
+            .expect("CI helper tests require python3");
+        assert!(
+            result.status.success(),
+            "{test}:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
 fn routing_and_required_results_reject_false_green() {
     for test in ["tests/ci_plan_test.py", "tests/ci_archive_evidence_test.py"] {
         let result = std::process::Command::new("python3")
@@ -71,6 +316,68 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert_eq!(ci["permissions"]["contents"].as_str(), Some("read"));
     assert!(ci["permissions"].get("pages").is_none());
     assert!(ci["permissions"].get("id-token").is_none());
+}
+
+#[test]
+fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let cached_jobs: std::collections::BTreeSet<_> = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .iter()
+        .filter(|(_, job)| {
+            job["steps"].as_sequence().unwrap().iter().any(|step| {
+                step["uses"] == "actions/setup-node@v5" && step["with"]["cache"] == "npm"
+            })
+        })
+        .map(|(name, _)| name.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cached_jobs,
+        std::collections::BTreeSet::from(["browser-smoke-typescript", "build-site"])
+    );
+    for (job, lockfile, preparations) in [
+        (
+            "browser-smoke-typescript",
+            "tests/browser_smoke/package-lock.json",
+            [
+                "Install harness deps",
+                "Emit and build current SharedWorker project",
+            ],
+        ),
+        (
+            "build-site",
+            "e2e/package-lock.json",
+            [
+                "Build static asset graph for archives",
+                "Build selected archives or the complete site",
+            ],
+        ),
+    ] {
+        let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
+        let setup = steps
+            .iter()
+            .position(|step| step["uses"] == "actions/setup-node@v5")
+            .unwrap();
+        assert!(steps[setup].get("if").is_none());
+        assert_eq!(steps[setup]["with"]["cache"], "npm");
+        let inputs: Vec<_> = steps[setup]["with"]["cache-dependency-path"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(inputs, [lockfile, "src/emit/typescript/package.rs"]);
+        assert!(inputs
+            .iter()
+            .all(|input| std::path::Path::new(input).is_file()));
+        for name in preparations {
+            let prepare = steps.iter().position(|step| step["name"] == name).unwrap();
+            assert!(setup < prepare);
+            assert!(steps[prepare].get("if").is_none());
+            assert!(steps[prepare].get("continue-on-error").is_none());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -182,13 +489,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         "smoke-campfire",
         "smoke-campfire-docker",
     ] {
-        assert!(
-            report["needs"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(|need| need.as_str() == Some(dependency))
-        );
+        assert!(report["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|need| need.as_str() == Some(dependency)));
     }
     let report_steps = report["steps"].as_sequence().unwrap();
     assert_eq!(
@@ -209,13 +514,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
     );
 
     let assemble = &jobs["assemble-site"];
-    assert!(
-        assemble["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(assemble["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
     let steps = assemble["steps"].as_sequence().unwrap();
     let verify = steps.iter().position(|step| step["run"].as_str() == Some("python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json")).expect("archive verification step");
     let pages = steps
@@ -227,13 +530,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
-    assert!(
-        jobs["ci-summary"]["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(jobs["ci-summary"]["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
 }
 
 #[test]
@@ -294,12 +595,10 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
-    assert!(
-        deploy["steps"][0]["run"]
-            .as_str()
-            .unwrap()
-            .contains("$VALIDATED_SHA")
-    );
+    assert!(deploy["steps"][0]["run"]
+        .as_str()
+        .unwrap()
+        .contains("$VALIDATED_SHA"));
 }
 
 #[cfg(unix)]

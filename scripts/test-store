@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run only the Rails Guide's own tests, on a fresh or restored Store.
+# The authentication generator's tests are Rails' upstream responsibility.
+# Usage: scripts/test-store [app-path] (default: fixtures/store)
+set -e
+cd "${1:-fixtures/store}"
+BUNDLE_FROZEN=true bundle install --quiet
+bin/rails test test/models/product_test.rb test/mailers/product_mailer_test.rb

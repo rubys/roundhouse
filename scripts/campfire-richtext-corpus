@@ -35,6 +35,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 LANE=ruby
@@ -121,8 +122,8 @@ else
         "$APP/" "$WORK/app/"
     ruby "$REPO_ROOT/tests/richtext_corpus/overlay.rb" "$WORK/app" >/dev/null
     OUT="$WORK/emit"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target "$LANE" "$WORK/app" -o "$OUT" --allow-unsupported) 2>"$WORK/transpile.log" | tail -1
+    roundhouse_run \
+        --target "$LANE" "$WORK/app" -o "$OUT" --allow-unsupported 2>"$WORK/transpile.log" | tail -1
     if [[ "$LANE" == spinel ]]; then
         spinel_link_path
         step "building the binary"

@@ -51,6 +51,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
 SPEC_DIR="$REPO_ROOT/e2e/campfire"
 
 APP="$HOME/git/once-campfire"
@@ -105,8 +106,8 @@ else
     # `roundhouse -o` does not wipe, and a stale file from an older emit
     # outlives the run that wrote it. Always start clean.
     rm -rf "$OUT"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    roundhouse_run \
+        --target ruby "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
     step "building static assets (make assets)"

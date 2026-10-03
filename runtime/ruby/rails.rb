@@ -495,6 +495,14 @@ module Rails
     def vips_blocked_operations
       []
     end
+
+    # `config.default_per_page = N` inside `Kaminari.configure` in an
+    # initializer: the page size `Relation#page` applies. Lifted at
+    # ingest onto the reopen like the settings above; Kaminari's own
+    # default when the app configures none.
+    def kaminari_default_per_page
+      25
+    end
   end
 end
 

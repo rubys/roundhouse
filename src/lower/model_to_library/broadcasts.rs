@@ -699,10 +699,8 @@ fn rewrite_self_broadcast(
     ))
 }
 
-/// A resolved record streamable: which class it names, and the
-/// expression that produced it.
+/// The expression that produced a resolved record streamable.
 struct OwnerRef {
-    singular: String,
     expr: Expr,
 }
 
@@ -751,10 +749,10 @@ fn streamables(
                 }
                 let singular = crate::naming::snake_case(target.0.as_str());
                 parts.push(Streamable::Record {
-                    singular: singular.clone(),
+                    singular,
                     id: read_id(var_ref(owner_local())),
                 });
-                owner = Some(OwnerRef { singular, expr: arg.clone() });
+                owner = Some(OwnerRef { expr: arg.clone() });
             }
             _ => return decline_opt(span, "streamable is not a literal or a belongs_to"),
         }
