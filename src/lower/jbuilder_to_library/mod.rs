@@ -38,6 +38,9 @@
 //!  10. `if c … else … end` and the `if`/`unless` modifiers around any
 //!      of the above                    → the same `if`, each branch's
 //!                                       pairs appended inside it
+//!  11. `begin … rescue … end`          → the same `begin`; a `rescue`
+//!                                       first drops a pair the body
+//!                                       left half-written
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -57,7 +60,7 @@
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal, RescueClause};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::singularize;
 use crate::span::Span;
@@ -413,6 +416,12 @@ enum JbStmt<'a> {
         then_branch: &'a Expr,
         else_branch: &'a Expr,
     },
+    /// `begin … rescue … end` (no `else`, no `ensure`) — the same
+    /// `begin`, the body's pairs and each `rescue`'s appended inside it.
+    Guarded {
+        body: &'a Expr,
+        rescues: &'a [RescueClause],
+    },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -696,6 +705,9 @@ fn emit_pairs(
                 ));
                 sep = if then_sep == else_sep { then_sep } else { Sep::Unknown };
             }
+            JbStmt::Guarded { body, rescues } => {
+                sep = emit_guarded(body, rescues, ctx, out, sep);
+            }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
             }
@@ -707,7 +719,97 @@ fn emit_pairs(
     sep
 }
 
+/// `begin … rescue … end` around pairs, with Jbuilder's outcome when
+/// the body raises: the pairs it finished stay, and the rescue's pairs
+/// follow them.
+///
+///   io_mark = io.length
+///   begin
+///     io << "\"id\":"
+///     io << JsonBuilder.encode_value(widget.id)
+///     io_mark = io.length
+///     …
+///   rescue StandardError
+///     io.slice!(io_mark, io.length)
+///     io << "," if !(io.end_with?("{"))
+///     io << "\"error\":"
+///     …
+///   end
+///
+/// Jbuilder sets a pair only once its value is computed, so a raise
+/// inside one leaves nothing of it; here the key (and its comma) is
+/// already appended by then, which is what the mark after each finished
+/// statement is for. A rescue starts from the comma state of any mark,
+/// and the state after the whole statement is that of the body's end or
+/// any rescue's end.
+fn emit_guarded(
+    body: &Expr,
+    rescues: &[RescueClause],
+    ctx: &Ctx,
+    out: &mut Vec<Expr>,
+    sep: Sep,
+) -> Sep {
+    let mark = Symbol::from(format!("{}_mark", ctx.accumulator));
+    let length = || {
+        send(Some(var_ref(Symbol::from(ctx.accumulator.as_str()))), "length", Vec::new(), None, false)
+    };
+    let set_mark = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: mark.clone() }, value: length() },
+        )
+    };
+    let merge = |a: Sep, b: Sep| if a == b { a } else { Sep::Unknown };
+
+    out.push(set_mark());
+    let mut body_out: Vec<Expr> = Vec::new();
+    let mut at_mark = sep;
+    let mut state = sep;
+    for stmt in branch_stmts(body) {
+        state = emit_pairs(&[classify(stmt)], &[stmt], ctx, &mut body_out, state);
+        body_out.push(set_mark());
+        at_mark = merge(at_mark, state);
+    }
+
+    let mut after = state;
+    let mut clauses: Vec<RescueClause> = Vec::new();
+    for clause in rescues {
+        let mut appends = vec![send(
+            Some(var_ref(Symbol::from(ctx.accumulator.as_str()))),
+            "slice!",
+            vec![var_ref(mark.clone()), length()],
+            None,
+            true,
+        )];
+        let stmts = branch_stmts(&clause.body);
+        let classified: Vec<JbStmt<'_>> = stmts.iter().map(|s| classify(s)).collect();
+        let end = emit_pairs(&classified, &stmts, ctx, &mut appends, at_mark);
+        after = merge(after, end);
+        clauses.push(RescueClause {
+            classes: clause.classes.clone(),
+            binding: clause.binding.clone(),
+            body: seq(appends),
+        });
+    }
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::BeginRescue {
+            body: seq(body_out),
+            rescues: clauses,
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        },
+    ));
+    after
+}
+
 fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
+    if let ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } = &*stmt.node {
+        if !rescues.is_empty() {
+            return JbStmt::Guarded { body, rescues };
+        }
+    }
     if let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node {
         return JbStmt::Cond { cond, then_branch, else_branch };
     }
@@ -1515,6 +1617,22 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 })
                 .collect(),
         },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: rewrite_ivars_to_locals(body),
+                rescues: rescues
+                    .iter()
+                    .map(|r| RescueClause {
+                        classes: r.classes.clone(),
+                        binding: r.binding.clone(),
+                        body: rewrite_ivars_to_locals(&r.body),
+                    })
+                    .collect(),
+                else_branch: else_branch.as_ref().map(rewrite_ivars_to_locals),
+                ensure: ensure.as_ref().map(rewrite_ivars_to_locals),
+                implicit: *implicit,
+            }
+        }
         other => other.clone(),
     };
     Expr::new(expr.span, new_node)
