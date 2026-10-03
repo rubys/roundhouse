@@ -741,11 +741,17 @@ an already-encoded body, `render plain: v.as_json_str, content_type:
 target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
 writer the compiled lane does. Demand-gated and type-gated: only a class
 the analyzer typed at a `render json:` site is given the pair. A value
-with no writer — a Hash literal, a Relation, a class with its own
+with no writer — a collection containing objects or temporal values, a Relation, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
 encoder, CRuby-only and loud elsewhere; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
+
+Inline Hash/Array payloads whose inferred contents are JSON primitives use
+the target's existing `JSON.generate` encoder, including nested primitive
+collections. Unknown values and values requiring Rails `as_json` hooks do
+not take this path. The generic `render_json_primitives` regression runs on
+CRuby and compiled Spinel and retains a nested-Time serialization control.
 
 ### Active Storage: rows and bytes are modeled, variants are a seam
 

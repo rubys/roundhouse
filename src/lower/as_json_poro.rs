@@ -66,8 +66,9 @@
 //! records (`render json: @stories`, an `Array[Story]` or a
 //! `Relation[Story]`) is a JSON array of each record's text.
 //!
-//! What keeps the runtime encoder, CRuby-only as before: a Hash
-//! literal, a value the analyzer could not type, and a model whose
+//! Primitive-only Hash/Array values use JSON.generate in the controller
+//! rewrite. What keeps the runtime encoder, CRuby-only as before: a
+//! collection containing objects or temporal values, an untyped value, and a model whose
 //! `as_json` is outside the two idioms or has a value with no encoding
 //! here (a nested record, a Hash).
 
