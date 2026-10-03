@@ -6535,6 +6535,7 @@ fn walk_dir_into(
 pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    crate::analyze::Analyzer::new(&app).analyze(&mut app);
     // Preflight every requested output before touching an existing site
     // or writing even the individually exempt Blog archive.
     for target in BuildTarget::ALL {

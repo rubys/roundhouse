@@ -653,6 +653,8 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
             ExprNode::Lambda {
                 params: vec![],
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body,
                 block_style: roundhouse::expr::BlockStyle::Do,
             },

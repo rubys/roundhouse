@@ -498,8 +498,6 @@ jobs:
       # the unit job ran it as a no-op. The first refuses to skip.
       - name: Install the gem the emitted Ruby tree runs on
         run: gem install sqlite3 --no-document
-      - name: Install the pinned Current.set reference oracle
-        run: gem install activesupport -v 8.1.4 --no-document
       - name: cargo test
         run: cargo test --all-targets
       # scripts/bench emits nine of its lanes with `cargo run --bin

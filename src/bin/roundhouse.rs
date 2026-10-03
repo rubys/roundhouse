@@ -329,9 +329,6 @@ fn run_transpile(
             return Err(format!("ingest {}: {e}", input.display()));
         }
     };
-    // Roda bypasses shared lowering; use the same raw/generated-site
-    // boundary before any output, independently of allow_unsupported.
-    roundhouse::lower::current_set::guard_output(&app, target.as_str())?;
     // Analyze + the post-analyze shared lowerings — type-directed IR
     // rewrites every target consumes (blank-predicate grounding,
     // `Time.current`). The returned residue diagnostics (sites a pass
@@ -349,6 +346,9 @@ fn run_transpile(
     } else {
         roundhouse::session::analyze_and_lower(&mut app)
     };
+    // Same hard output boundary as `project::target_files`, independent
+    // of --allow-unsupported. Roda keeps ingest-shaped IR here.
+    roundhouse::lower::current_set::guard_output(&app, target.as_str())?;
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).

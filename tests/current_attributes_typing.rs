@@ -198,10 +198,17 @@ end
     let tree = [
         ("app/models/current.rb", CURRENT),
         ("app/lib/scope_probe.rb", source),
-    ].into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
     let mut app = ingest_app_from_tree(tree).expect("synthetic ingest");
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
-    let probe = app.library_classes.iter().find(|c| c.name.0.as_str() == "ScopeProbe").unwrap();
+    let probe = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ScopeProbe")
+        .unwrap();
     let mut failures = Vec::new();
     for (name, expected) in [
         ("result", Ty::Int),
@@ -210,29 +217,59 @@ end
         ("break_result", Ty::Int),
         ("downstream", Ty::Bool),
     ] {
-        let method = probe.methods.iter().find(|m| m.name.as_str() == name).unwrap();
-        println!("{name}: body={:?}; signature={:?}", method.body.ty, method.signature);
+        let method = probe
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        println!(
+            "{name}: body={:?}; signature={:?}",
+            method.body.ty, method.signature
+        );
         if method.body.ty.as_ref() != Some(&expected) {
-            failures.push(format!("{name}: expected {expected:?}, got {:?}", method.body.ty));
+            failures.push(format!(
+                "{name}: expected {expected:?}, got {:?}",
+                method.body.ty
+            ));
         }
     }
     fn collect_context_reads(e: &Expr, out: &mut Vec<Ty>) {
         if let ExprNode::Var { name, .. } = &*e.node {
             if name.as_str() == "context" {
-                if let Some(ty) = &e.ty { out.push(ty.clone()); }
+                if let Some(ty) = &e.ty {
+                    out.push(ty.clone());
+                }
             }
         }
-        e.node.for_each_child(&mut |c| collect_context_reads(c, out));
+        e.node
+            .for_each_child(&mut |c| collect_context_reads(c, out));
     }
-    let shadow = probe.methods.iter().find(|m| m.name.as_str() == "shadow").unwrap();
+    let shadow = probe
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "shadow")
+        .unwrap();
     let mut bindings = Vec::new();
     collect_context_reads(&shadow.body, &mut bindings);
     println!("shadow block context reads: {bindings:?}");
-    if bindings != vec![Ty::Class { id: roundhouse::ident::ClassId("Current".into()), args: vec![] }] {
-        failures.push(format!("shadow block should bind Current, not outer Int: {bindings:?}"));
+    if bindings
+        != vec![Ty::Class {
+            id: roundhouse::ident::ClassId("Current".into()),
+            args: vec![],
+        }]
+    {
+        failures.push(format!(
+            "shadow block should bind Current, not outer Int: {bindings:?}"
+        ));
     }
-    let errors: Vec<_> = diagnose(&app).into_iter().filter(|d| d.severity == roundhouse::diagnostic::Severity::Error).map(|d| d.to_string()).collect();
-    if !errors.is_empty() { failures.push(format!("source errors: {errors:?}")); }
+    let errors: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.to_string())
+        .collect();
+    if !errors.is_empty() {
+        failures.push(format!("source errors: {errors:?}"));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -333,9 +370,15 @@ class OtherSet
 end
 "#;
     let tree = [
-        ("app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes\n attribute :user, :account\nend"),
+        (
+            "app/models/current.rb",
+            "class Current < ActiveSupport::CurrentAttributes\n attribute :user, :account\nend",
+        ),
         ("app/lib/scope_probe.rb", source),
-    ].into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
     let mut app = ingest_app_from_tree(tree).expect("synthetic ingest");
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let mut failures = Vec::new();
@@ -346,9 +389,20 @@ end
         ("OverrideProbe", "included", Ty::Str),
         ("OverrideProbe", "unrelated", Ty::Str),
     ] {
-        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == owner).unwrap();
-        let method = class.methods.iter().find(|m| m.name.as_str() == name).unwrap();
-        println!("{owner}.{name}: body={:?}; signature={:?}", method.body.ty, method.signature);
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == owner)
+            .unwrap();
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        println!(
+            "{owner}.{name}: body={:?}; signature={:?}",
+            method.body.ty, method.signature
+        );
         // A conservative nil arm is allowed; excluding the native value
         // from a closed type is not truthful inference.
         let contains_required = match &method.body.ty {
@@ -357,57 +411,110 @@ end
             _ => false,
         };
         if !contains_required {
-            failures.push(format!("{owner}.{name}: native value requires {required:?}, got {:?}", method.body.ty));
+            failures.push(format!(
+                "{owner}.{name}: native value requires {required:?}, got {:?}",
+                method.body.ty
+            ));
         }
     }
-    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ScopeProbe").unwrap();
+    let class = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ScopeProbe")
+        .unwrap();
     let refusals = roundhouse::lower::current_set::source_refusals(&app);
-    for (name, reason) in [
-        ("loop_tail", "loop result ownership"),
-        ("loop_assignment", "loop result ownership"),
-        ("nested_call_tail", "nested block-call result ownership"),
-        ("nested_call_argument", "nested block-call result ownership"),
-        ("nested_block", "nested block-call result ownership"),
-        ("forwarded_lambda", "converted or forwarded block operands"),
-        ("inner_forwarded_lambda", "converted or forwarded inner blocks"),
-    ] {
-        let method = class.methods.iter().find(|m| m.name.as_str() == name).unwrap();
-        // These frozen native String-result failures are now explicit
-        // unsupported controls, including propagation through non-tail
-        // assignments and call arguments. Do not infer an invented
-        // framework result or borrow a nested break to make them pass.
-        assert!(refusals.iter().any(|d|
-            !d.span.is_synthetic() && d.span.file == method.body.span.file
-                && d.span.start >= method.body.span.start && d.span.end <= method.body.span.end
+    for (name, reason) in [("forwarded_lambda", "converted or forwarded block operands")] {
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        assert!(
+            refusals.iter().any(|d| !d.span.is_synthetic()
+                && d.span.file == method.body.span.file
+                && d.span.start >= method.body.span.start
+                && d.span.end <= method.body.span.end
                 && d.message.contains(reason)
-                && d.severity == roundhouse::diagnostic::Severity::Error
-        ), "{name}: expected source-located refusal: {refusals:?}");
+                && d.severity == roundhouse::diagnostic::Severity::Error),
+            "{name}: expected source-located refusal: {refusals:?}"
+        );
     }
-    // The discarded inner result still types its enclosing block as
-    // Int, not String. Sound narrowing rejects the shape; it does not
-    // misattribute the inner break to Current.set.
-    let nested = class.methods.iter().find(|m| m.name.as_str() == "nested_block").unwrap();
-    let roundhouse::ExprNode::Send { block: Some(block), .. } = &*nested.body.node else { panic!("scope call") };
-    let roundhouse::ExprNode::Lambda { body, .. } = &*block.node else { panic!("scope block") };
+    // Nested each/while keep their own owners. Current.set's result is
+    // the attached block, not a borrowed inner break.
+    let nested = class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "nested_block")
+        .unwrap();
+    let roundhouse::ExprNode::Send {
+        block: Some(block), ..
+    } = &*nested.body.node
+    else {
+        panic!("scope call")
+    };
+    let roundhouse::ExprNode::Lambda { body, .. } = &*block.node else {
+        panic!("scope block")
+    };
     assert_eq!(body.ty, Some(Ty::Int));
-    let method = class.methods.iter().find(|m| m.name.as_str() == "nonlocal_return").unwrap();
+    for name in [
+        "loop_tail",
+        "loop_assignment",
+        "nested_call_tail",
+        "nested_call_argument",
+        "nested_block",
+        "inner_forwarded_lambda",
+    ] {
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        assert!(
+            refusals.iter().all(|d| d.span.file != method.body.span.file
+                || d.span.end < method.body.span.start
+                || d.span.start > method.body.span.end),
+            "{name} should not be a Current.set source refusal: {refusals:?}"
+        );
+    }
+    let method = class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "nonlocal_return")
+        .unwrap();
     if !matches!(&method.signature, Some(Ty::Fn { ret, .. }) if **ret == Ty::Str) {
-        failures.push(format!("nonlocal return must belong to method: {:?}", method.signature));
+        failures.push(format!(
+            "nonlocal return must belong to method: {:?}",
+            method.signature
+        ));
     }
     // Include-only modules are absent from LibraryClass today. Do not
     // fabricate framework semantics across that missing ancestry. The
     // native override returns String, but this probe does not claim the
     // separate include-only module inference/emission gap is supported.
-    let transitive = app.library_classes.iter().find(|c| c.name.0.as_str() == "OverrideProbe").unwrap()
-        .methods.iter().find(|m| m.name.as_str() == "transitive").unwrap();
+    let transitive = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "OverrideProbe")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "transitive")
+        .unwrap();
     println!("unknown-ancestry override type: {:?}", transitive.body.ty);
     if transitive.body.ty == Some(Ty::Int) {
         failures.push("unknown-ancestry override was incorrectly typed from its block".to_string());
     }
     let before = ruby::emit_expr(&transitive.body);
     roundhouse::lower::current_set::apply_current_set_lowering(&mut app);
-    let after = app.library_classes.iter().find(|c| c.name.0.as_str() == "OverrideProbe").unwrap()
-        .methods.iter().find(|m| m.name.as_str() == "transitive").unwrap();
+    let after = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "OverrideProbe")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "transitive")
+        .unwrap();
     if ruby::emit_expr(&after.body) != before {
         failures.push("unknown-ancestry override must remain its original call".to_string());
     }

@@ -37,15 +37,9 @@ cargo test --test framework_tests_ruby -- --ignored # framework runtime's
 # framework_tests_{crystal,kotlin,rust,spinel,swift,typescript} likewise
 ```
 
-The mandatory native `Current.set` generated-project regression uses
-Ruby with `gem install activesupport -v 8.1.4 --no-document` for its
-independent Rails reference oracle; the emitted project needs no Rails.
-
-`Current.set` output preflight resolves untyped bare literal candidates
-by cloning and analyzing the whole App in isolation, preserving the raw
-input needed by Roda. Each boundary repeats this work when necessary;
-multi-target callers can multiply its time and memory cost. This is known
-scaling debt, not a cached or bounded-cost per-site lookup.
+`Current.set` output preflight may clone and analyze the whole App when
+raw IR still has untyped constant receivers, so multi-target callers can
+repeat that work. This is known scaling debt, not a cached per-site cost.
 
 The default test suite is the forcing function and must pass before
 any commit. Toolchain and framework tests are `#[ignore]`-gated so a

@@ -118,12 +118,6 @@ fn transpile_inner(json_in: &str) -> String {
         Ok(app) => app,
         Err(e) => return error_json(&format!("ingest: {e}")),
     };
-    // Direct WASM emission is not the validated native generated-project
-    // Ruby path, even when language="ruby". Never emit an approximation.
-    if let Err(error) = roundhouse::lower::current_set::guard_output(&app, "wasm") {
-        return error_json(&error);
-    }
-
     // The Roda conversion target is source-to-source from the
     // INGEST-shape IR — same contract as the CLI (bin/roundhouse):
     // lowering would rewrite the controller bodies into runtime

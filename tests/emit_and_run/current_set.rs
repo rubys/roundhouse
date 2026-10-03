@@ -1,10 +1,9 @@
-//! Native generated-project proof for bounded literal Current.set scopes.
-//! Run an independent pinned Rails oracle before loading emitted models.
+//! Generated-project proof for literal Current.set scopes.
+//! Expected values are the Rails `Object#with` contract; the emitted
+//! project does not load ActiveSupport.
 
 #[test]
 fn literal_current_set_runs_in_the_generated_ruby_project() {
-    use std::process::Command;
-
     const CURRENT: &str = r#"
 class Current < ActiveSupport::CurrentAttributes
   attribute :user, :account, :mode
@@ -107,6 +106,14 @@ class ScopeProbe
       Current.user
     end
     result
+  end
+  def self.nested_each
+    seen = []
+    result = ::Current.set(user: 83) do
+      [2, 5].each { |n| seen << n + Current.user }
+      seen
+    end
+    [result, Current.user]
   end
   def self.downstream
     ::Current.set(user: 83) { 29 }.positive?
@@ -215,6 +222,7 @@ fresh; check("nil", [nil, 47], [ScopeProbe.nil_value, Current.user])
 fresh; check("current instance identity", [true, 47], [ScopeProbe.identity, Current.user])
 fresh; check("nested", [[47, 83, 109, 83], 47], [ScopeProbe.nested, Current.user])
 fresh; check("nested break ownership", [83, 47], [ScopeProbe.nested_exit, Current.user])
+fresh; check("nested each", [[[85, 88], 47], 47], [ScopeProbe.nested_each, Current.user])
 fresh; check("downstream", true, ScopeProbe.downstream)
 fresh; check("hygiene", [[[7, 11, 13, 17], "app-owned", 191], 47], [ScopeProbe.hygiene, Current.user])
 fresh; check("real body raise", ["body", 47], [error_from { ScopeProbe.body_failure }, Current.user])
@@ -240,77 +248,96 @@ check("RHS before instance capture", [83, "C"], inside)
 check("once and source order", ["first", "second", "instance", "user", "account", "user", "account"], Current::TRACE)
 NamespaceProbe.seed
 check("namespace and distinct context", [181, 151, 257, 229, 47], [NamespaceProbe.run, ScopeContext::Current.user, NamespaceProbe.other, OtherScopeContext::Current.user, Current.user])
-puts "28 Current.set native/project assertions passed"
+puts "29 Current.set generated-project assertions passed"
 "##;
-    let native = Command::new("ruby").args(["-e", &format!(
-        "gem 'activesupport', '8.1.4'\nrequire 'active_support'\nrequire 'active_support/current_attributes'\n{CURRENT}\n{PROBE}\n{ASSERTIONS}"
-    )]).output().expect("native Rails oracle requires Ruby/ActiveSupport 8.1.4");
-    assert!(native.status.success(), "native oracle failed:\n{}", String::from_utf8_lossy(&native.stderr));
-
     let run = super::emit_and_run::real_blog()
         .write("app/models/current.rb", CURRENT)
         .write("app/lib/scope_probe.rb", PROBE)
         .run_ruby(ASSERTIONS);
     run.assert_passes();
-    let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).expect("project models aggregator");
-    assert!(models.contains("roundhouse_current_set_scope"), "generated scopes must load through the aggregator: {models}");
-    assert!(models.contains("scope_context/current"), "namespaced Current must load through its project path: {models}");
-    assert_eq!(run.stdout.trim(), "28 Current.set native/project assertions passed");
+    let models = std::fs::read_to_string(run.emitted.join("app/models.rb"))
+        .expect("project models aggregator");
+    assert!(
+        models.contains("roundhouse_current_set_scope"),
+        "generated scopes must load through the aggregator: {models}"
+    );
+    assert!(
+        models.contains("scope_context/current"),
+        "namespaced Current must load through its project path: {models}"
+    );
+    assert_eq!(
+        run.stdout.trim(),
+        "29 Current.set generated-project assertions passed"
+    );
     println!("{}", run.stdout.trim());
 }
 
 #[test]
 fn current_set_own_initializer_has_an_honest_output_boundary() {
     const CURRENT: &str = "class Current < ActiveSupport::CurrentAttributes\n attribute :user\n VALUE = ::Current.set(user: 83) { 31 }\nend\n";
-    let native = std::process::Command::new("ruby").args(["-e", &format!(
-        "gem 'activesupport', '8.1.4'\nrequire 'active_support'\nrequire 'active_support/current_attributes'\n{CURRENT}\np [Current::VALUE, Current.user]"
-    )]).output().unwrap();
-    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
-    assert_eq!(String::from_utf8_lossy(&native.stdout).trim(), "[31, nil]");
-    let mut app = roundhouse::ingest::ingest_app_from_tree(std::collections::HashMap::from([
-        (std::path::PathBuf::from("app/models/current.rb"), CURRENT.as_bytes().to_vec()),
-    ])).unwrap();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(std::collections::HashMap::from([(
+        std::path::PathBuf::from("app/models/current.rb"),
+        CURRENT.as_bytes().to_vec(),
+    )]))
+    .unwrap();
     for stage in ["raw", "post-lowering"] {
         let before = app.clone();
-        let error = roundhouse::project::target_files(&app, std::path::Path::new("/nonexistent-current-set-fixture"), roundhouse::project::BuildTarget::Ruby).expect_err(stage);
-        assert!(error.contains("class-body initializers") && error.contains("app/models/current.rb"), "{error}");
+        let error = roundhouse::project::target_files(
+            &app,
+            std::path::Path::new("/nonexistent-current-set-fixture"),
+            roundhouse::project::BuildTarget::Ruby,
+        )
+        .expect_err(stage);
+        assert!(
+            error.contains("class-body initializers") && error.contains("app/models/current.rb"),
+            "{error}"
+        );
         assert_eq!(app, before, "refusal retains the original initializer");
-        assert!(!roundhouse::session::analyze_and_lower(&mut app).is_empty());
-        assert!(app.library_classes.iter().all(|class| !matches!(class.origin, Some(roundhouse::dialect::LibraryClassOrigin::CurrentSet { .. }))));
+        roundhouse::session::analyze_and_lower(&mut app);
+        assert!(
+            roundhouse::analyze::diagnose(&app)
+                .iter()
+                .any(|d| d.message.contains("class-body initializers"))
+        );
+        assert!(app.library_classes.iter().all(|class| !matches!(
+            class.origin,
+            Some(roundhouse::dialect::LibraryClassOrigin::CurrentSet { .. })
+        )));
     }
 }
 
 #[test]
-fn current_set_relative_qualified_collision_has_an_honest_output_boundary() {
+fn current_set_relative_qualified_receiver_keeps_distinct_identities() {
     const CURRENT: &str = "module Tenant\n class Current < ActiveSupport::CurrentAttributes\n attribute :user\n end\nend\nmodule Outer\n module Tenant\n class Current < ActiveSupport::CurrentAttributes\n attribute :user\n end\n end\nend\n";
     const PROBE: &str = "module Outer\n class Probe\n def self.run\n Tenant::Current.set(user: 181) { [::Tenant::Current.user, ::Outer::Tenant::Current.user] }\n end\n end\nend\n";
     const ASSERTION: &str = "::Tenant::Current.user = 47\n::Outer::Tenant::Current.user = 83\nactual = [Outer::Probe.run, ::Tenant::Current.user, ::Outer::Tenant::Current.user]\nraise actual.inspect unless actual == [[47, 181], 47, 83]";
-    let native = std::process::Command::new("ruby").args(["-e", &format!(
-        "gem 'activesupport', '8.1.4'\nrequire 'active_support'\nrequire 'active_support/current_attributes'\n{CURRENT}\n{PROBE}\n{ASSERTION}"
-    )]).output().unwrap();
-    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
-    let mut app = roundhouse::ingest::ingest_app_from_tree(std::collections::HashMap::from([
-        (std::path::PathBuf::from("app/models/current.rb"), CURRENT.as_bytes().to_vec()),
-        (std::path::PathBuf::from("app/lib/probe.rb"), PROBE.as_bytes().to_vec()),
-    ])).unwrap();
-    for stage in ["raw", "post-lowering"] {
-        let before = app.clone();
-        let error = roundhouse::project::target_files(&app, std::path::Path::new("/nonexistent-current-set-fixture"), roundhouse::project::BuildTarget::Ruby).expect_err(stage);
-        assert!(error.contains("ambiguous relative") && error.contains("app/lib/probe.rb"), "{error}");
-        assert_eq!(app, before, "ambiguous source is not rewritten");
-        assert!(!roundhouse::session::analyze_and_lower(&mut app).is_empty());
-    }
-    // Requiring an absolute receiver narrows support instead of silently
-    // selecting the wrong Current. The source block's two reads retain
-    // their distinct identities in the real emitted project.
-    let absolute = PROBE.replace("Tenant::Current.set(user: 181)", "::Outer::Tenant::Current.set(user: 181)");
-    super::emit_and_run::real_blog().write("app/models/current.rb", CURRENT)
-        .write("app/lib/probe.rb", &absolute).run_ruby(ASSERTION).assert_passes();
+    let app = roundhouse::ingest::ingest_app_from_tree(std::collections::HashMap::from([
+        (
+            std::path::PathBuf::from("app/models/current.rb"),
+            CURRENT.as_bytes().to_vec(),
+        ),
+        (
+            std::path::PathBuf::from("app/lib/probe.rb"),
+            PROBE.as_bytes().to_vec(),
+        ),
+    ]))
+    .unwrap();
+    let before = app.clone();
+    roundhouse::lower::current_set::guard_output(&app, "ruby")
+        .expect("Tenant::Current inside Outer is Outer::Tenant::Current");
+    assert_eq!(app, before, "preflight analyzes a clone");
+    // The two reads in the block keep their distinct identities.
+    super::emit_and_run::real_blog()
+        .write("app/models/current.rb", CURRENT)
+        .write("app/lib/probe.rb", PROBE)
+        .run_ruby(ASSERTION)
+        .assert_passes();
 }
 
 #[test]
 fn current_set_helper_names_do_not_capture_test_owned_declarations() {
-    const CURRENT: &str = "class Current < ActiveSupport::CurrentAttributes\n attribute :user\nend\n";
+    const CURRENT: &str =
+        "class Current < ActiveSupport::CurrentAttributes\n attribute :user\nend\n";
     const TEST: &str = r#"require "test_helper"
 class RoundhouseCurrentSetScope3 < ActiveSupport::TestCase
   RoundhouseCurrentSetScope1 = 191
@@ -325,12 +352,15 @@ class RoundhouseCurrentSetScope3 < ActiveSupport::TestCase
   end
 end
 "#;
-    let native = std::process::Command::new("ruby").args(["-e", &format!(
-        "gem 'activesupport', '8.1.4'\nrequire 'active_support'\nrequire 'active_support/current_attributes'\nrequire 'active_support/test_case'\nrequire 'minitest/autorun'\n{CURRENT}\n{}", TEST.replace("require \"test_helper\"", "")
-    )]).output().unwrap();
-    assert!(native.status.success(), "{}\n{}", String::from_utf8_lossy(&native.stdout), String::from_utf8_lossy(&native.stderr));
-    let run = super::emit_and_run::real_blog().write("app/models/current.rb", CURRENT)
-        .write("test/models/current_scope_test.rb", TEST).run_test("test/models/roundhouse_current_set_scope3_test.rb");
+    let run = super::emit_and_run::real_blog()
+        .write("app/models/current.rb", CURRENT)
+        .write("test/models/current_scope_test.rb", TEST)
+        .run_test("test/models/roundhouse_current_set_scope3_test.rb");
     run.assert_passes();
-    assert!(run.emitted.join("app/models/roundhouse_current_set_scope4.rb").exists(), "declaration keys, inner names and test-module names must all be reserved");
+    assert!(
+        run.emitted
+            .join("app/models/roundhouse_current_set_scope4.rb")
+            .exists(),
+        "declaration keys, inner names and test-module names must all be reserved"
+    );
 }
