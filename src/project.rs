@@ -6534,89 +6534,6 @@ fn walk_dir_into(
     Ok(())
 }
 
-/// Walk `src` recursively, routing `.rb` files under `rb_prefix` and
-/// `.rbs` files under `rbs_prefix`. Other extensions and dotfiles are
-/// skipped. Splits `runtime/ruby/<sub>/` between the load-path tree
-/// (`runtime/`) and the typed sidecar tree (`sig/runtime/`) in one pass.
-fn walk_dir_partitioned(
-    src: &Path,
-    rb_prefix: &str,
-    rbs_prefix: &str,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    if !src.exists() {
-        return Err(format!("missing {}/", src.display()));
-    }
-    let mut stack: Vec<(PathBuf, String)> = vec![(src.to_path_buf(), String::new())];
-    while let Some((dir, sub)) = stack.pop() {
-        for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
-            let entry = entry.map_err(|e| format!("read entry: {e}"))?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
-            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            let nested = format!("{sub}{name_str}");
-            if ty.is_dir() {
-                stack.push((path, format!("{nested}/")));
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let prefix = match ext {
-                "rb" => rb_prefix,
-                "rbs" => rbs_prefix,
-                _ => continue,
-            };
-            let content = match fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            out.push((format!("{prefix}{nested}"), content));
-        }
-    }
-    Ok(())
-}
-
-/// Walk `src` non-recursively, collecting only files whose extension
-/// is in `exts`. Used to gather `runtime/spinel/*.rb` without
-/// recursing into `runtime/spinel/{scaffold,test}` (those are walked
-/// separately into different output prefixes).
-fn walk_dir_flat(
-    src: &Path,
-    exts: &[&str],
-    prefix: &str,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    for entry in fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| format!("read entry: {e}"))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext_match = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|e| exts.contains(&e))
-            .unwrap_or(false);
-        if !ext_match {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| format!("non-utf8 filename: {}", path.display()))?;
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        out.push((format!("{prefix}{name}"), content));
-    }
-    Ok(())
-}
-
 /// Orchestrates the `--site` mode of the `roundhouse` binary: for
 /// every `BuildTarget`, produce `_site/browse/<lang>.{json,tgz,zip}`,
 /// and copy the static landing-page assets (`site/`) plus the
@@ -7259,7 +7176,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_seed_file_is_REPLACED_not_preserved() {
+    fn a_stale_seed_file_is_replaced_not_preserved() {
         // The inverse of the old contract, and the point of the change:
         // spinel/ruby/jruby pick up the scaffold's copy by directory
         // walk, and that copy held the BLOG's rows for every app.

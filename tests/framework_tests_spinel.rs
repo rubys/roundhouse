@@ -50,8 +50,8 @@ fn copy_tree(src: &Path, dst: &Path) {
 }
 
 /// Move every `<scratch>/{runtime,test}/**/*.rbs` to
-/// `<scratch>/sig/{runtime,test}/<rel>.rbs`. Same pattern as
-/// `spinel_toolchain.rs::reroute_runtime_rbs_to_sig`.
+/// `<scratch>/sig/{runtime,test}/<rel>.rbs` to match the shipped
+/// project's sidecar layout.
 fn reroute_rbs_to_sig(scratch: &Path) {
     fn walk(dir: &Path, src_root: &Path, sig_root: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else { return; };
