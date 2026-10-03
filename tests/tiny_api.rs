@@ -51,6 +51,7 @@ const APP_FILES: &[&str] = &[
     "main.rb",
     "app/controllers/application_controller.rb",
     "app/controllers/widgets_controller.rb",
+    "app/controllers/formats_controller.rb",
     "app/models/application_record.rb",
     "app/models/widget.rb",
     "app/models/widget/invalid.rb",
@@ -271,6 +272,29 @@ puts "TINY API UNROUTED OK"
 "#,
     );
     assert_ran(&output, &scratch, "TINY API UNROUTED OK");
+}
+
+/// Literal JSON paths, formatted resources, and unknown routes use the shared router.
+#[test]
+#[ignore = "requires CRuby + scaffold bundle"]
+fn cruby_gate_literal_json_routes_match() {
+    let (output, scratch) = run_on_cruby(
+        "literal-json-routes",
+        r#"{
+  "/feed.json" => "literal",
+  "/formats" => "collection",
+  "/formats.json" => "collection",
+  "/formats/42.json" => "42"
+}.each do |path, expected|
+  status, _, body = request("GET", path)
+  raise "GET #{path}: #{status} #{body}" unless status == 200 && body == expected
+end
+status, = request("GET", "/missing.json")
+raise "unknown JSON route matched" unless status == 404
+puts "LITERAL JSON ROUTES OK"
+"#,
+    );
+    assert_ran(&output, &scratch, "LITERAL JSON ROUTES OK");
 }
 
 /// The models the controller serves, driven directly: a minted uuid
@@ -528,6 +552,26 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Native HTTP dispatch preserves literal JSON routes and ordinary format suffixes.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_gate_literal_json_routes_match() {
+    let scratch = build_app("literal-json-routes");
+    let server = Server::start(&scratch);
+    for (path, expected) in [
+        ("/feed.json", "literal"),
+        ("/formats", "collection"),
+        ("/formats.json", "collection"),
+        ("/formats/42.json", "42"),
+    ] {
+        let (status, _, body) = server.request("GET", path, "");
+        assert_eq!((status, body.as_str()), (200, expected), "GET {path}: {}", server.log());
+    }
+    assert_eq!(server.request("GET", "/missing.json", "").0, 404);
+    drop(server);
+    std::fs::remove_dir_all(scratch).expect("clean passing tree");
 }
 
 /// The app entry builds with `spin build`, the binary boots and serves

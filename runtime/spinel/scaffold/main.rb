@@ -281,6 +281,8 @@ module Main
     0
   end
 
+  # Serve static files or dispatch the complete request path through Router,
+  # preserving literal suffix routes while negotiating the response format.
   def self.dispatch(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
@@ -317,8 +319,9 @@ module Main
     request_path = req.path
     if request_path.end_with?(".json")
       request_format = :json
-      request_path = request_path[0...-5]
     end
+    # Router.match owns format-suffix matching and its literal-path fallback.
+    # Passing the full path also lets an explicit `/feed.json` route match.
     # Turbo Stream is negotiated by the Accept header, not by a path
     # suffix — a Turbo-driven form POST asks for
     # `text/vnd.turbo-stream.html`. Checked after the suffix so an
