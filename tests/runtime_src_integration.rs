@@ -157,6 +157,8 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::Retry
         | N::Redo
         | N::ForwardArgs
+        | N::ForwardKeywords
+        | N::Defined { .. }
         | N::SelfRef => {}
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
@@ -259,6 +261,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);

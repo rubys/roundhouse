@@ -45,7 +45,8 @@
 //! ordering.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::span::{FileId, SourceFile};
 
@@ -57,11 +58,42 @@ thread_local! {
 struct Registry {
     files: Vec<SourceFile>,
     by_path: HashMap<String, FileId>,
+    root: Option<PathBuf>,
+    parsed: HashMap<usize, ParsedSource>,
+}
+
+struct ParsedSource {
+    lines: Vec<usize>,
+    reserved_locals: HashSet<String>,
 }
 
 /// Clear the registry for a fresh whole-app ingest.
 pub fn reset() {
     SOURCES.with(|s| *s.borrow_mut() = Registry::default());
+}
+
+/// Whole-app ingest supplies the real root once; source identities and
+/// diagnostic spans stay unchanged, while `__FILE__` can be relocatable.
+/// Hold the guard through ingest so early errors cannot leak its root.
+#[must_use]
+pub(super) fn set_root(root: &Path) -> impl Drop {
+    struct ClearRoot;
+    impl Drop for ClearRoot {
+        fn drop(&mut self) {
+            SOURCES.with(|s| s.borrow_mut().root = None);
+        }
+    }
+    SOURCES.with(|s| s.borrow_mut().root = Some(root.to_path_buf()));
+    ClearRoot
+}
+
+pub(super) fn relative_path(path: &str) -> String {
+    SOURCES.with(|s| {
+        let reg = s.borrow();
+        let path = Path::new(path);
+        reg.root.as_ref().and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path).to_string_lossy().into_owned()
+    })
 }
 
 /// Record a source file and return its `FileId` (1-based). Idempotent
@@ -105,6 +137,58 @@ pub fn file_id(path: &str) -> FileId {
     })
 }
 
+/// 1-based line number for a byte offset into `path`'s registered
+/// source, including ERB's translated template offsets. `None` when `path`
+/// was never registered (a bare `roundhouse-ast -e` snippet that
+/// bypassed `ingest_ruby_program`/`register`), so the caller can fall
+/// back rather than mis-report line 1.
+pub fn line_at(path: &str, offset: usize) -> Option<u32> {
+    SOURCES.with(|s| {
+        let reg = s.borrow();
+        let id = *reg.by_path.get(path)?;
+        let file = reg.files.get((id.0 as usize).checked_sub(1)?)?;
+        Some(file.text.as_bytes()[..offset.min(file.text.len())].iter()
+            .filter(|&&b| b == b'\n').count() as u32 + 1)
+    })
+}
+
+/// Track the actual parsed bytes separately from first-text-wins span sources.
+/// Prism locations borrow this input: its address identifies a live version,
+/// even when several versions of the same filename are being ingested.
+pub(super) fn register_parse(source: &[u8]) {
+    let lines = source.iter().enumerate().filter_map(|(offset, &byte)|
+        (byte == b'\n').then_some(offset)).collect();
+    // Reserve compiler-style identifiers throughout the input, including
+    // parameters and later assignments outside the expression being lowered.
+    // Strings/comments may conservatively reserve a name too; no user binding
+    // may be captured just because it is outside this node's source slice.
+    let reserved_locals = source.split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+        .filter(|word| word.starts_with(b"__"))
+        .map(|word| String::from_utf8_lossy(word).into_owned()).collect();
+    SOURCES.with(|s| {
+        s.borrow_mut().parsed.insert(source.as_ptr() as usize, ParsedSource { lines, reserved_locals });
+    });
+}
+
+pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> {
+    let offset = location.start_offset();
+    // Recover only the input's identity, never dereference an adjusted pointer.
+    let source = location.as_slice().as_ptr() as usize - offset;
+    SOURCES.with(|s| s.borrow().parsed.get(&source)
+        .map(|parsed| parsed.lines.partition_point(|&newline| newline < offset) as u32 + 1))
+}
+
+/// Check a generated local against the actual parse, not first-text-wins spans.
+/// Direct expression callers without the parse wrapper still reserve names
+/// in their supplied node; whole-file entry points reserve the entire input.
+pub(super) fn generated_local_is_reserved(location: &ruby_prism::Location<'_>, name: &str) -> bool {
+    let source = location.as_slice().as_ptr() as usize - location.start_offset();
+    SOURCES.with(|s| s.borrow().parsed.get(&source)
+        .is_some_and(|parsed| parsed.reserved_locals.contains(name)))
+        || location.as_slice().split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+            .any(|word| word == name.as_bytes())
+}
+
 /// The registered path for a `FileId`; `None` for the synthetic
 /// sentinel or an id from another ingest.
 pub fn path_of(id: FileId) -> Option<String> {
@@ -123,6 +207,8 @@ pub fn drain() -> Vec<SourceFile> {
     SOURCES.with(|s| {
         let mut reg = s.borrow_mut();
         reg.by_path.clear();
+        reg.root = None;
+        reg.parsed.clear();
         std::mem::take(&mut reg.files)
     })
 }
@@ -160,6 +246,47 @@ mod tests {
     fn unregistered_path_is_the_synthetic_sentinel() {
         reset();
         assert_eq!(file_id("nope.rb"), FileId(0));
+    }
+
+    #[test]
+    fn line_at_counts_newlines_up_to_the_offset() {
+        reset();
+        register("a.rb", "one\ntwo\nthree\n");
+        assert_eq!(line_at("a.rb", 0), Some(1));
+        assert_eq!(line_at("a.rb", 4), Some(2)); // start of "two"
+        assert_eq!(line_at("a.rb", 8), Some(3)); // start of "three"
+        assert_eq!(line_at("nope.rb", 0), None);
+        drain();
+    }
+
+    #[test]
+    fn parsed_line_indices_follow_live_inputs_and_clear_on_drain() {
+        reset();
+        let first = super::super::prism::parse(b"1\n__LINE__", "probe.rb");
+        let second = super::super::prism::parse(b"\n\n__LINE__", "probe.rb");
+        let a = first.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        let b = second.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        assert_eq!(line_at_parse(&a), Some(2));
+        assert_eq!(line_at_parse(&b), Some(3));
+        assert!(snapshot().is_empty(), "parse metadata must not allocate file identities");
+        drain();
+        assert_eq!(line_at_parse(&a), None);
+        assert_eq!(line_at_parse(&b), None);
+    }
+
+    #[test]
+    fn generated_names_follow_the_live_parse_and_clear_on_drain() {
+        reset();
+        let first = super::super::prism::parse(b"__mw_0=11; __mw_0_1=22; a, *b, c=[11,22,33]", "probe.rb");
+        let second = super::super::prism::parse(b"a, *b, c=[11,22,33]", "probe.rb");
+        let a = first.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        let b = second.node().as_program_node().unwrap().statements().body().iter().last().unwrap().location();
+        assert!(generated_local_is_reserved(&a, "__mw_0"));
+        assert!(generated_local_is_reserved(&a, "__mw_0_1"));
+        assert!(!generated_local_is_reserved(&a, "__mw_0_2"));
+        assert!(!generated_local_is_reserved(&b, "__mw_0"));
+        drain();
+        assert!(!generated_local_is_reserved(&a, "__mw_0"));
     }
 
     #[test]

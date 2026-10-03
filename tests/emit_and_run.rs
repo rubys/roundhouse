@@ -3290,6 +3290,303 @@ end
         .assert_passes();
 }
 
+/// Gap #18.1: Tim Tischler's trailing keyword-hash enum runtime pin.
+#[test]
+fn enum_keyword_hash_mapping_predicate_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"kind\", default: \"kind\", null: false\n    t.integer \"priority\", default: 17, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "has_many :comments, dependent: :destroy\n",
+            "has_many :comments, dependent: :destroy\n\n  enum :kind, kind: 'kind', other: 'other'\n  enum :priority, pending: 17, priority: 41\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <p id=\"kind-predicate\"><%= @article.kind? %></p>\n  <p id=\"priority-predicate\"><%= @article.priority? %></p>",
+        )
+        .run_ruby(r#"
+article = Article.create!(title: "Enum control", body: "A sufficiently long body")
+raise "enum default predicate is false" unless article.kind?
+article.kind = "other"
+raise "enum predicate ignored its value" if article.kind?
+raise "bare integer mapping lost stored values" unless Article.priorities == {"pending" => 17, "priority" => 41}
+raise "integer enum default label is wrong" unless article.pending?
+raise "column predicate shadowed enum comparison" if article.priority?
+article.priority = 41
+raise "integer label predicate is false" unless article.priority?
+raise "integer label predicate ignored its value" if article.pending?
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn anonymous_keywords_run_without_capturing_user_bindings() {
+    const METHODS: &str = r#"
+  def self.pr197_forward(label, __fwd_kwargs, **)
+    [label - __fwd_kwargs, pr197_sink(**)]
+  end
+  def self.pr197_sink(factor:, offset: 2)
+    factor * 3 + offset
+  end
+  def self.pr197_local_collision(**)
+    __fwd_kwargs = {factor: 99}
+    pr197_sink(**)
+  end
+  def pr197_instance(label, __fwd_kwargs, **)
+    [label - __fwd_kwargs, pr197_instance_sink(**)]
+  end
+  def pr197_instance_sink(factor:, offset: 2)
+    factor * 3 + offset
+  end
+"#;
+    let library = format!("class KeywordProbe\n{METHODS}end\n");
+    emit_and_run::real_blog()
+        .write("app/services/keyword_probe.rb", &library)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n{METHODS}"))
+        .run_ruby(r#"
+[Article, KeywordProbe].each do |owner|
+  raise "keyword packet captured a local" unless owner.pr197_local_collision(factor: 7) == 23
+  raise "class keyword packet captured a positional" unless owner.pr197_forward(11, 4, factor: 7, offset: 5) == [7, 26]
+  raise "class keyword default lost" unless owner.pr197_forward(11, 4, factor: 7) == [7, 23]
+  instance = owner.new
+  raise "instance keyword packet captured a positional" unless instance.pr197_instance(11, 4, factor: 7, offset: 5) == [7, 26]
+  raise "instance keyword default lost" unless instance.pr197_instance(11, 4, factor: 7) == [7, 23]
+  begin
+    owner.pr197_forward(11, 4)
+    raise "missing required keyword accepted"
+  rescue ArgumentError
+  end
+end
+"#).assert_passes();
+}
+
+#[test]
+fn anonymous_keywords_forward_empty_and_false_values_through_super() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_parent.rb", r#"class KeywordParent
+  def call(factor: false, offset: nil, **)
+    [factor, offset]
+  end
+end
+class KeywordChild < KeywordParent
+  def call(**)
+    super(**)
+  end
+end
+"#)
+        .run_ruby(r#"
+probe = KeywordChild.new
+raise "empty keyword packet changed defaults" unless probe.call == [false, nil]
+raise "false or nil keyword was dropped" unless probe.call(factor: nil, offset: false) == [nil, false]
+"#).assert_passes();
+}
+
+#[test]
+fn destructuring_preserves_user_bindings_and_expression_values() {
+    const TEMPLATE: &str = r#"class HygieneProbe
+  def self.targets
+    a, *TARGET, c = [11, 22, 33]
+    [a, TARGET, c]
+  end
+  def self.scope(PARAM)
+    a, *middle, c = [11, 22, 33]
+    [a, middle, c, PARAM]
+  end
+  def self.expression
+    (a, *middle, c = [11, 22, 33, 44])
+  end
+  def self.instance_targets
+    @a, *@middle, @c = [*[11, 22], 33, 44]
+    [@a, @middle, @c]
+  end
+end
+"#;
+    // Deliberately collide with both span-derived stems. Parameter names
+    // change later offsets, so settle the source before ingesting it.
+    let mut target = "__target".to_string();
+    let mut param = "__param".to_string();
+    let source = loop {
+        let source = TEMPLATE.replace("TARGET", &target).replace("PARAM", &param);
+        let next_target = format!("__mw_{}", source.find("a, *").unwrap());
+        let next_param = format!("__mw_{}", source.find("a, *middle").unwrap());
+        if target == next_target && param == next_param { break source }
+        target = next_target;
+        param = next_param;
+    };
+    const ASSERTIONS: &str = r#"
+raise "temporary captured rest target" unless HygieneProbe.targets == [11, [22], 33]
+raise "temporary captured a parameter" unless HygieneProbe.scope(41) == [11, [22], 33, 41]
+raise "assignment expression lost RHS" unless HygieneProbe.expression == [11, 22, 33, 44]
+raise "ivar targets or array splat changed" unless HygieneProbe.instance_targets == [11, [22, 33], 44]
+"#;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{source}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog().write("app/services/hygiene_probe.rb", &source)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn post_rest_destructuring_handles_short_arrays_and_evaluates_once() {
+    const SOURCE: &str = r#"class DestructureProbe
+  def self.first_value
+    @calls ||= 0
+    @calls = @calls + 1
+    11
+  end
+  def self.short
+    a, *b, c, d = [first_value, 22]
+    [a, b, c, d, @calls]
+  end
+  def self.empty
+    a, *b, c, d = []
+    [a, b, c, d]
+  end
+  def self.one
+    a, *b, c, d = [11]
+    [a, b, c, d]
+  end
+  def self.exact
+    a, *b, c, d = [11, 22, 33]
+    [a, b, c, d]
+  end
+  def self.long
+    a, *b, c, d = [11, 22, 33, 44, 55]
+    [a, b, c, d]
+  end
+  def self.discard
+    a, *, c, d = [11, 22]
+    [a, c, d]
+  end
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {short: [11, [], 22, nil, 1], empty: [nil, [], nil, nil], one: [11, [], nil, nil], exact: [11, [], 22, 33], long: [11, [22, 33], 44, 55], discard: [11, 22, nil]}
+expected.each do |method, want|
+  got = DestructureProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog()
+        .write("app/services/destructure_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn class_variable_compound_writes_share_the_read_storage() {
+    emit_and_run::real_blog()
+        .write("app/services/counter_probe.rb", r#"class CounterProbe
+  @@count = nil
+  def next_value
+    @@count ||= 11
+    @@count = @@count + 3
+    @@count
+  end
+  def operators
+    @@count += 7
+    @@count -= 3
+    @@count &&= @@count + 2
+    @@count
+  end
+  def skip
+    @@count = false
+    @@count &&= explode
+    @@count
+  end
+  def explode
+    raise "short circuit evaluated RHS"
+  end
+  def self.current
+    @@count
+  end
+end
+class CounterChild < CounterProbe
+end
+"#)
+        .run_ruby(r#"
+raise "native nil initializer was dropped" unless CounterProbe.current.nil? && CounterChild.current.nil?
+raise "compound write and read used different storage" unless CounterChild.new.next_value == 14
+raise "class reader used per-class storage" unless CounterProbe.current == 14 && CounterChild.current == 14
+raise "class variable storage split across inheritance" unless CounterProbe.new.next_value == 17
+raise "class reader lost the shared update" unless CounterProbe.current == 17 && CounterChild.current == 17
+raise "compound operators changed" unless CounterChild.new.operators == 23
+raise "operator storage split across inheritance" unless CounterProbe.current == 23
+raise "false RHS was evaluated" unless CounterProbe.new.skip == false
+raise "shared false storage lost" unless CounterChild.current == false
+"#).assert_passes();
+}
+
+#[test]
+fn defined_guards_and_source_literals_run_after_emission() {
+    emit_and_run::real_blog()
+        .write("app/services/guard_probe.rb", r#"class GuardProbe
+  VALUE = 11
+  def self.constants
+    [defined?(GuardProbe), defined?(GuardProbe::VALUE), defined?(MissingPr197), defined?(GuardProbe::MissingPr197)]
+  end
+  def self.uninvoked
+    raise "defined? invoked its terminal method"
+  end
+  def self.calls
+    defined?(self.uninvoked)
+  end
+  def self.location
+    [__FILE__, __LINE__]
+  end
+  def self.value
+    11
+  end
+  def self.predicates
+    [defined?(self.uninvoked.nil?), defined?(self.value.nil?), defined?(self.value.present?)]
+  end
+  def self.simple
+    [defined?(self), defined?(nil), defined?(true), defined?(false), defined?(17), defined?(MissingOuterPr197::Inner)]
+  end
+  def classvars
+    before = defined?(@@value)
+    @@value = nil
+    [before, defined?(@@value)]
+  end
+  def visible
+    11
+  end
+  private
+  def hidden
+    raise "private query invoked method"
+  end
+end
+class GuardChild < GuardProbe
+  def self.calls
+    defined?(super)
+  end
+  def queries
+    [defined?(self.visible), defined?(self.hidden)]
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "constant guard changed" unless GuardProbe.constants == ["constant", "constant", nil, nil]
+raise "method guard changed" unless GuardProbe.calls == "method"
+raise "super guard changed" unless GuardChild.calls == "super"
+raise "source identity changed" unless GuardProbe.location == ["app/services/guard_probe.rb", 13]
+raise "predicate query was lowered or evaluated as a normal call" unless GuardProbe.predicates == [nil, "method", "method"]
+raise "static descriptors became booleans" unless GuardProbe.simple == ["self", "nil", "true", "false", "expression", nil]
+raise "nil class variable was confused with absence" unless GuardProbe.new.classvars == [nil, "class variable"]
+raise "inherited or private method query changed" unless GuardChild.new.queries == ["method", nil]
+"#).assert_passes();
+}
+
 /// A routed action with a template and no method behind it: Rails runs
 /// `show` whether or not `def show` exists, so `before_action
 /// :set_article, only: %i[show …]` still feeds `articles/show`. `check`

@@ -28,7 +28,7 @@
 //! that contract so every emitter builds the same root set.
 
 use crate::dialect::{LibraryClass, LibraryFunction};
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, RescueClause};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -262,79 +262,21 @@ where
     F: FnMut(Option<&Ty>, &Symbol),
 {
     match &*e.node {
-        ExprNode::Send { recv, method, args, block, .. } => {
+        ExprNode::Send { recv, method, .. } => {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             visit(recv_ty, method);
-            if let Some(r) = recv {
-                walk_sends(r, visit);
-            }
-            for a in args {
-                walk_sends(a, visit);
-            }
-            if let Some(b) = block {
-                walk_sends(b, visit);
-            }
         }
-        ExprNode::Apply { fun, args, block } => {
-            walk_sends(fun, visit);
-            for a in args {
-                walk_sends(a, visit);
-            }
-            if let Some(b) = block {
-                walk_sends(b, visit);
-            }
-        }
-        ExprNode::Seq { exprs } => {
-            for x in exprs {
-                walk_sends(x, visit);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_sends(cond, visit);
-            walk_sends(then_branch, visit);
-            walk_sends(else_branch, visit);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_sends(left, visit);
-            walk_sends(right, visit);
-        }
-        ExprNode::Array { elements, .. } => {
-            for el in elements {
-                walk_sends(el, visit);
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_sends(k, visit);
-                walk_sends(v, visit);
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    walk_sends(expr, visit);
-                }
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_sends(body, visit),
-        // `method(:name)` / `recv.method(:name)` — a bound-method
-        // VALUE, not an invocation, but the referenced method must
-        // stay reachable: nothing else in the tree names it as a
-        // Send, and treeshaking it away would leave the runtime
-        // `Method` object dangling. Same conservative (name-only)
-        // resolution as an unresolved-receiver Send when `recv` is
-        // `None` (implicit self).
+        // A bound-method value must keep its referenced method reachable too.
         ExprNode::MethodRef { recv, name } => {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             visit(recv_ty, name);
-            if let Some(r) = recv {
-                walk_sends(r, visit);
-            }
         }
-        ExprNode::Let { value, body, .. } => {
-            walk_sends(value, visit);
-            walk_sends(body, visit);
-        }
+        _ => {}
+    }
+    match &*e.node {
+        // Keep the existing target/pattern policy during this structural
+        // refactor: index expressions, multi-write targets and case patterns
+        // were not surveyed by this walker. Widening them is separate work.
         ExprNode::Assign { target, value }
         | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
@@ -342,51 +284,7 @@ where
             }
             walk_sends(value, visit);
         }
-        ExprNode::Yield { args } => {
-            for a in args {
-                walk_sends(a, visit);
-            }
-        }
-        ExprNode::Raise { value } => walk_sends(value, visit),
-        ExprNode::RescueModifier { expr, fallback } => {
-            walk_sends(expr, visit);
-            walk_sends(fallback, visit);
-        }
-        ExprNode::Return { value } => walk_sends(value, visit),
-        ExprNode::Super { args } => {
-            if let Some(args) = args {
-                for a in args {
-                    walk_sends(a, visit);
-                }
-            }
-        }
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            walk_sends(body, visit);
-            for r in rescues {
-                let RescueClause { classes, body, .. } = r;
-                for c in classes {
-                    walk_sends(c, visit);
-                }
-                walk_sends(body, visit);
-            }
-            if let Some(b) = else_branch {
-                walk_sends(b, visit);
-            }
-            if let Some(b) = ensure {
-                walk_sends(b, visit);
-            }
-        }
-        ExprNode::Next { value } | ExprNode::Break { value } => {
-            if let Some(v) = value {
-                walk_sends(v, visit);
-            }
-        }
-        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk_sends(value, visit),
         ExprNode::MultiAssign { value, .. } => walk_sends(value, visit),
-        ExprNode::While { cond, body, .. } => {
-            walk_sends(cond, visit);
-            walk_sends(body, visit);
-        }
         ExprNode::Case { scrutinee, arms } => {
             walk_sends(scrutinee, visit);
             for arm in arms {
@@ -396,23 +294,10 @@ where
                 walk_sends(&arm.body, visit);
             }
         }
-        ExprNode::Range { begin, end, .. } => {
-            if let Some(b) = begin {
-                walk_sends(b, visit);
-            }
-            if let Some(e) = end {
-                walk_sends(e, visit);
-            }
-        }
-        ExprNode::Cast { value, .. } => walk_sends(value, visit),
-        ExprNode::Lit { .. }
-        | ExprNode::Var { .. }
-        | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. }
-        | ExprNode::Retry
-        | ExprNode::Redo
-        | ExprNode::ForwardArgs
-        | ExprNode::SelfRef => {}
+        // Existence queries still need the queried methods to survive
+        // treeshaking, even though they are not ordinary evaluated children.
+        ExprNode::Defined { operand } => walk_sends(operand, visit),
+        _ => e.node.for_each_child(&mut |child| walk_sends(child, visit)),
     }
 }
 
@@ -608,4 +493,62 @@ pub fn filter_runtime_class(class: &LibraryClass, reach: &Reachability) -> Libra
         false
     });
     filtered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{Arm, Pattern};
+    use crate::span::Span;
+
+    fn expr(node: ExprNode) -> Expr {
+        Expr::new(Span::synthetic(), node)
+    }
+
+    fn call(name: &str) -> Expr {
+        expr(ExprNode::Send { recv: None, method: Symbol::from(name), args: vec![],
+            block: None, parenthesized: true })
+    }
+
+    #[test]
+    fn send_survey_preserves_opaque_queries_method_refs_and_existing_target_policy() {
+        let mut receiver = call("query_receiver");
+        receiver.ty = Some(Ty::Str);
+        let query = expr(ExprNode::Defined { operand: expr(ExprNode::Send {
+            recv: Some(receiver), method: Symbol::from("queried"),
+            args: vec![call("query_argument")], block: Some(call("query_block")), parenthesized: true,
+        }) });
+        let mut ordinary_children = 0;
+        query.node.for_each_child(&mut |_| ordinary_children += 1);
+        assert_eq!(ordinary_children, 0, "defined? is opaque to ordinary walkers");
+        let mut receiver = call("reference_receiver");
+        receiver.ty = Some(Ty::Int);
+        let body = expr(ExprNode::Seq { exprs: vec![
+            query,
+            expr(ExprNode::MethodRef { recv: Some(receiver), name: Symbol::from("referenced") }),
+            expr(ExprNode::Assign {
+                target: LValue::Index { recv: call("index_receiver"), index: call("ignored_index") },
+                value: call("assigned_value"),
+            }),
+            expr(ExprNode::MultiAssign {
+                targets: vec![LValue::Attr { recv: call("ignored_multi_target"), name: Symbol::from("slot") }],
+                value: call("multi_value"),
+            }),
+            expr(ExprNode::Case {
+                scrutinee: call("scrutinee"),
+                arms: vec![Arm { pattern: Pattern::Expr { expr: call("ignored_pattern") },
+                    guard: Some(call("guard")), body: call("case_body") }],
+            }),
+        ] });
+        let mut seen = Vec::new();
+        walk_sends(&body, &mut |ty, name| seen.push((ty.cloned(), name.as_str().to_owned())));
+        let expected = ["queried", "query_receiver", "query_argument", "query_block",
+            "referenced", "reference_receiver", "index_receiver", "assigned_value",
+            "multi_value", "scrutinee", "guard", "case_body"];
+        assert_eq!(seen.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(), expected);
+        assert_eq!(seen[0].0, Some(Ty::Str));
+        assert_eq!(seen[4].0, Some(Ty::Int));
+        assert!(seen.iter().enumerate().filter(|(i, _)| !matches!(i, 0 | 4))
+            .all(|(_, (ty, _))| ty.is_none()));
+    }
 }

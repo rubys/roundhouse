@@ -418,6 +418,7 @@ fn survey_accessor_refusal_preserves_other_dsl_enums_modules_and_genuine_gaps() 
     attr_accessor :scratch
     private :scratch
     defined?(OptionalFeature)
+    defined?(self.optional_feature(11))
   end
 end
 module ExtraChecks
@@ -436,7 +437,9 @@ end
     let gaps = survey::drain();
     let app = result.expect("survey must keep unrelated declarations");
     assert!(gaps.iter().any(|gap| gap.to_string().contains("concern attr_accessor")), "{gaps:?}");
-    assert!(gaps.iter().any(|gap| gap.to_string().contains("`defined?` only supports bareword")), "{gaps:?}");
+    // Constant queries are now supported. Keep a genuinely unsupported
+    // call shape so this still pins preservation of independent gaps.
+    assert!(gaps.iter().any(|gap| gap.to_string().contains("defined? calls with arguments")), "{gaps:?}");
     let model = &app.models[0];
     assert_eq!(model.associations().count(), 1);
     assert_eq!(model.validations().count(), 1);

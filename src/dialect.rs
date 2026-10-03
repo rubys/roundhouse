@@ -790,6 +790,10 @@ pub struct LibraryClass {
     /// Ordered, statically resolved class-instance-variable writes.
     /// Unlike instance fields these belong to the receiving class object:
     /// methods inherit, but their initialized values do not.
+    /// Also carries native `@@name = nil` assignments, whose LValue::Var
+    /// retains its sigil and shared inheritance storage. The historical
+    /// field name is kept for IR compatibility; these are modeled class-side
+    /// assignments, never unmodeled DSL calls.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub class_ivar_initializers: Vec<Expr>,
     /// Schema columns this class stores that the DB declares NULLABLE.

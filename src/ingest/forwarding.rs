@@ -82,10 +82,14 @@ pub(super) fn reject_entrypoint(
     file: &str,
     context: &str,
 ) -> IngestResult<()> {
-    if parse(def).anonymous == Some(AnonymousFormal::Forwarding) {
+    if let Some(formal) = parse(def).anonymous {
+        let kind = match formal {
+            AnonymousFormal::Forwarding => "full forwarding",
+            AnonymousFormal::KeywordRest => "anonymous keyword forwarding",
+        };
         return Err(IngestError::Unsupported {
             file: file.into(),
-            message: format!("full forwarding declaration on a {context} is not preserved yet"),
+            message: format!("{kind} declaration on a {context} is not preserved yet"),
         });
     }
     Ok(())

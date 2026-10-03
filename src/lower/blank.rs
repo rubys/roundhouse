@@ -499,6 +499,8 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
         | ExprNode::SelfRef
         | ExprNode::Retry
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::Redo => {}
     }
 

@@ -122,6 +122,19 @@ pub fn ingest_template(
     let (compiled, map) = compile(source);
     let mut body = ingest_ruby_program(&compiled, file)?;
     erb::translate_spans(&mut body, &map);
+    // `__LINE__` was parsed at a compiled-Ruby offset, whereas the
+    // registry holds the template. Resolve it only after span translation;
+    // ordinary integer literals keep their source value.
+    fn template_lines(expr: &mut crate::expr::Expr, source: &str) {
+        if let crate::expr::ExprNode::Lit { value: crate::expr::Literal::Int { value } } = &mut *expr.node
+            && source.get(expr.span.start as usize..expr.span.end as usize) == Some("__LINE__")
+        {
+            *value = source.as_bytes()[..expr.span.start as usize].iter()
+                .filter(|&&b| b == b'\n').count() as i64 + 1;
+        }
+        expr.node.for_each_child_mut(&mut |child| template_lines(child, source));
+    }
+    template_lines(&mut body, source);
 
     Ok(View {
         name: Symbol::from(name),

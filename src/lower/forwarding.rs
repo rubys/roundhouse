@@ -31,6 +31,6 @@ pub(super) fn apply(app: &mut App) -> Vec<Diagnostic> {
         }
         e.node.for_each_child_mut(&mut |c| project(c, plans));
     }
-    super::for_each_forwarding_body(app, &mut |e| project(e, &plans));
+    super::for_each_emit_body(app, &mut |e| project(e, &plans));
     diagnostics
 }

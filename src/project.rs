@@ -928,6 +928,33 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// Report syntax whose runtime contract is currently native Ruby only.
+fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::{ExprNode, LValue};
+        let construct = match &*expr.node {
+            ExprNode::ForwardKeywords => Some("anonymous keyword forwarding"),
+            ExprNode::Defined { .. } => Some("runtime defined? query"),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with("@@") => Some("class variable write"),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
+            _ => None,
+        };
+        if let Some(construct) = construct {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), construct,
+                "native Ruby semantics have no verified implementation on this target",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
@@ -938,6 +965,7 @@ pub fn target_files(
     report_unsupported_keys(app, target);
     report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
+    report_native_ruby_syntax(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {

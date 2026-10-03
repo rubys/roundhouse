@@ -504,31 +504,33 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
 
 #[test]
 fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
-    let controller = roundhouse::ingest::ingest_controller(
-        b"class ProbeController < ApplicationController\n def call(...)\n 11\n end\nend",
-        "probe_controller.rb",
-    )
-    .expect_err("controller forwarding is outside this slice");
-    assert!(controller.to_string().contains("forwarding declaration"));
-    for name in ["setup", "test_forwarding"] {
-        let source =
-            format!("class ProbeTest < ActiveSupport::TestCase\n def {name}(...)\n 11\n end\nend");
-        let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
-            .expect_err("test entrypoint forwarding is outside this slice");
-        assert!(err.to_string().contains("forwarding declaration"));
+    for formal in ["...", "**"] {
+        let source = format!("class ProbeController < ApplicationController\n def call({formal})\n 11\n end\nend");
+        let controller = roundhouse::ingest::ingest_controller(source.as_bytes(), "probe_controller.rb")
+            .expect_err("controller forwarding is outside this slice");
+        assert!(controller.to_string().contains("forwarding declaration"));
+        for name in ["setup", "test_forwarding"] {
+            let source = format!("class ProbeTest < ActiveSupport::TestCase\n def {name}({formal})\n 11\n end\nend");
+            let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
+                .expect_err("test entrypoint forwarding is outside this slice");
+            assert!(err.to_string().contains("forwarding declaration"));
+        }
     }
 }
 
 #[test]
-fn anonymous_keyword_call_forwarding_is_still_a_separate_gap() {
-    let source = b"class Probe\n def call(__fwd_kwargs, **)\n target(__fwd_kwargs, **)\n end\nend";
-    let error = roundhouse::ingest::ingest_library_class(source, "probe.rb")
-        .expect_err("declaration retention does not implement bare ** call forwarding");
-    assert!(
-        error
-            .to_string()
-            .contains("anonymous `**` keyword forwarding not yet supported")
-    );
+fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
+    for source in [
+        "class Probe; def call(__fwd_kwargs, **); missing(__fwd_kwargs, **); end; end",
+        "class Probe; def target(**options); options; end; def call(**); target(**); end; end",
+        "class Probe; def target; 7; end; def call(**); target(**); end; end",
+    ] {
+        let mut app = analyzed(source);
+        let lower = roundhouse::session::analyze_and_lower(&mut app);
+        let errors: Vec<_> = diagnose(&app).into_iter().chain(lower)
+            .filter(|d| d.severity == Severity::Error).collect();
+        assert!(errors.iter().any(|d| d.message.contains("keyword forwarding")), "{source}: {errors:?}");
+    }
 }
 
 #[test]
