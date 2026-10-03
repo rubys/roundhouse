@@ -140,9 +140,17 @@ pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
             (crate::naming::snake_case(m.name.0.as_str()), stems)
         })
         .collect();
+    // MODELS are out of scope: a model has no view helpers, so a bare
+    // `tag` there is its own reader (`belongs_to :tag` → `tag.user_id`),
+    // never the TagBuilder. Rewritten, it compiled to
+    // `"<user-id></user-id>"`. Taken out for the walk and put back, so
+    // `for_each_hook_body` stays the one list of bodies every other pass
+    // shares.
+    let model_bodies = std::mem::take(&mut app.models);
     super::for_each_hook_body(app, &mut |body| {
         rewrite(body, &models, &helpers, &sti_stems, &mut diags)
     });
+    app.models = model_bodies;
     diags
 }
 
