@@ -224,7 +224,6 @@ class Routing(unittest.TestCase):
         cases = {
             "runtime/spinel/web_push_crypto.rb": "spinel_web_push_crypto",
             "runtime/spinel/signed_cookies.rbs": "rails_compat_vectors_spinel",
-            "runtime/spinel/sqlite_adapter.rb": "spinel_db_lease",
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
@@ -263,6 +262,12 @@ class Routing(unittest.TestCase):
                 "rails_compat_vectors_spinel",
             ],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
+            "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
+            "runtime/spinel/db.rb": ["spinel_db_lease", "spinel_stmt_cache_lru"],
+            "runtime/spinel/sqlite_adapter.rb": ["spinel_db_lease", "spinel_stmt_cache_lru"],
+            "runtime/spinel/active_support_time_parsing.rb": [
+                "spinel_db_lease", "spinel_stmt_cache_lru"
+            ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
         }
@@ -291,7 +296,8 @@ class Routing(unittest.TestCase):
             ["runtime/spinel/web_push_crypto.rb", "runtime/spinel/sqlite_adapter.rb"]
         )
         self.assertEqual(
-            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease"]
+            plan["spinel_tests"],
+            ["spinel_web_push_crypto", "spinel_db_lease", "spinel_stmt_cache_lru"],
         )
 
     def test_wasm_changes_have_no_archive_or_spinel_fanout(self):

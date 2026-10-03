@@ -37,6 +37,7 @@ SPINEL_TESTS = [
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
+    "spinel_stmt_cache_lru",
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -107,6 +108,7 @@ def native_coverage(path):
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
             owned_tests.add("spinel_db_lease")
+            owned_tests.add("spinel_stmt_cache_lru")
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
         if (

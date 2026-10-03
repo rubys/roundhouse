@@ -361,19 +361,32 @@ class DbConn
   end
 
   # Return a cached prepared stmt for `sql`, preparing+caching on miss.
-  # Linear scan over a ptr-keyed structure spinel would not type; the hit
-  # rate is what matters here, not the lookup's constant.
+  # Search from the most-recent end of the concretely typed Stmt array.
+  # Hits move to that end so repeated hot lookups stop at the first entry.
   #
   # EVERY prepared stmt goes into @entries, with no cap check. That is
   # what makes `Db.finalize`'s reset-don't-close correct for all of them:
   # a stmt this method hands back is always reachable for reuse, and
   # always finalizable at `trim!`. Capping HERE is what leaked.
   def prepare_cached(sql)
-    i = 0
-    while i < @entries.length
+    last = @entries.length - 1
+    i = last
+    while i >= 0
       e = @entries[i]
-      return e.ptr if e.sql == sql
-      i += 1
+      if e.sql == sql
+        # Move in place: keep the array's concrete element type and the
+        # statement pointer, including any cursor currently using it.
+        if i < last
+          j = i
+          while j < last
+            @entries[j] = @entries[j + 1]
+            j += 1
+          end
+          @entries[last] = e
+        end
+        return e.ptr
+      end
+      i -= 1
     end
     # `SQL.stmt_out` is ONE 8-byte out-buffer for the whole process (an
     # `ffi_buffer`, static C storage). Under parallel OS workers two
@@ -406,7 +419,7 @@ class DbConn
   # are none.
   #
   # Keeps the CAP most-recent entries — the tail, since `prepare_cached`
-  # appends. With per-value keys (bind gate off) recency is the best
+  # appends misses and moves hits there. With per-value keys recency is the best
   # available proxy for reuse; with shapes the whole set fits and this
   # never fires. Rebuilds the array rather than deleting in place: a fresh
   # Array whose first push is a Stmt types concretely, which is the same
