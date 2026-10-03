@@ -2056,6 +2056,12 @@ fn can_respond_within(
     found
 }
 
+fn calls_super(body: &Expr) -> bool {
+    let mut found = matches!(&*body.node, ExprNode::Super { .. });
+    body.node.for_each_child(&mut |c| found = found || calls_super(c));
+    found
+}
+
 /// ApplicationController baseline — methods every action body may
 /// reference via implicit-self dispatch. Signatures are loose
 /// (`Untyped` for kwargs, return Nil for terminal helpers); refining
@@ -2396,6 +2402,28 @@ fn action_to_method(
     } else {
         None
     };
+    // A responding helper may be inherited, and may delegate:
+    // `Api::BaseController` defines `sign_in_and_render` and a subclass
+    // action's whole body is a call to it, or to a helper that calls
+    // it. Each receiverless call resolves to its nearest definition —
+    // the controller's own, then its ancestors' — and is followed. A
+    // definition that calls `super` brings the next one with it.
+    let can_respond_via_helper = {
+        let chain = ancestor_chain(controller, all_controllers_for_params);
+        let resolve = |name: &Symbol| -> Option<Expr> {
+            let mut bodies = Vec::new();
+            for c in std::iter::once(controller).chain(chain.iter().rev().copied()) {
+                let Some(m) = c.actions().find(|m| &m.name == name) else { continue };
+                bodies.push(m.body.clone());
+                if !calls_super(&m.body) {
+                    break;
+                }
+            }
+            (!bodies.is_empty())
+                .then(|| Expr::new(Span::synthetic(), ExprNode::Seq { exprs: bodies }))
+        };
+        can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
+    };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
     let (body, deferred_tail) = lower_action_body(
         &a.body,
@@ -2412,6 +2440,7 @@ fn action_to_method(
         shadows,
         route_id_segments,
         deferred_renders.contains(&a.name),
+        can_respond_via_helper,
         inherited_spec,
         formats_template.as_ref(),
         &inheritor_modules,
@@ -2627,6 +2656,7 @@ fn lower_action_body(
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     defer_implicit_render: bool,
+    can_respond_via_helper: bool,
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
@@ -2678,9 +2708,10 @@ fn lower_action_body(
     // check. Gated on actually calling such a helper rather than applied
     // everywhere, so a body with no terminal anywhere keeps the bare tail
     // it has always emitted.
-    let responds_via_helper = privs
-        .iter()
-        .any(|p| has_toplevel_terminal(&p.body) && body_calls_method(body, &p.name));
+    let responds_via_helper = can_respond_via_helper
+        || privs
+            .iter()
+            .any(|p| has_toplevel_terminal(&p.body) && body_calls_method(body, &p.name));
     // Does ANY template exist for this action, in any format?
     //
     // Rails' `default_render` splits three ways and only the last is a

@@ -834,6 +834,86 @@ fn an_include_from_an_included_block_brings_its_own_included_items() {
         .assert_passes();
 }
 
+/// An action whose whole body is a call to a rendering helper defined
+/// on a PARENT controller. The default response appended to the action
+/// must be guarded by `performed?`, as it is for a helper on the
+/// action's own controller, or it overwrites what the helper rendered.
+#[test]
+fn an_action_responding_through_an_inherited_helper_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    render_title(Article.find(params[:id]))\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through the base controller's helper\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same, one call further: the action calls an inherited helper
+/// that delegates to the inherited helper that renders.
+#[test]
+fn an_action_responding_through_a_delegating_inherited_helper_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def report(article)\n    render_title(article)\n  end\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    report(Article.find(params[:id]))\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through a delegating helper\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same when the nearest helper is an override that reaches the
+/// rendering one through `super`.
+#[test]
+fn an_action_responding_through_an_override_calling_super_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    render_title(Article.find(params[:id]))\n  end\n\n  private\n\n  def render_title(article)\n    super\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through super\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
 /// Integer serialization is not blindly String#to_i: nonnumeric labels
 /// must not alias an existing row zero. Invalid IDs still count toward the
 /// array finder's required cardinality, except when pagination excludes them.
