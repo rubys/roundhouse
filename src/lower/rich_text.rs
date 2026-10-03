@@ -232,6 +232,9 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: body_col.clone(),
             receiver: MethodReceiver::Instance,
@@ -260,6 +263,9 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("body="),
             receiver: MethodReceiver::Instance,
@@ -296,6 +302,9 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("body_before_type_cast"),
             receiver: MethodReceiver::Instance,
@@ -761,20 +770,6 @@ fn eq_zero(recv: Expr) -> Expr {
     )
 }
 
-/// `<expr> == ""`.
-fn eq_empty_str(recv: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("=="),
-            args: vec![lit_str(String::new())],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
 fn ivar(name: &str) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from(name) })
 }
@@ -898,6 +893,9 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name,
             receiver: MethodReceiver::Class,

@@ -113,7 +113,7 @@ fn transpile_inner(json_in: &str) -> String {
     roundhouse::ingest::survey::activate();
     let (result, parse_diags) =
         roundhouse::ingest::prism::scope(|| ingest_app_from_tree(tree));
-    let gaps = roundhouse::ingest::survey::drain();
+    let mut gaps = roundhouse::ingest::survey::drain();
     let mut app = match result {
         Ok(app) => app,
         Err(e) => return error_json(&format!("ingest: {e}")),
@@ -156,6 +156,7 @@ fn transpile_inner(json_in: &str) -> String {
     // ran, so its walker diagnostics would be all noise.)
     let mut diags = if is_roda { Vec::new() } else { diagnose(&app) };
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+    roundhouse::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
     diags.extend(parse_diags);
     diags.extend(lower_diags);
     let diagnostics: Vec<DiagnosticOut> = diags
@@ -341,7 +342,7 @@ fn analyze_app_inner(json_in: &str) -> String {
     roundhouse::ingest::survey::activate();
     let (result, parse_diags) =
         roundhouse::ingest::prism::scope(|| ingest_app_from_tree(tree));
-    let gaps = roundhouse::ingest::survey::drain();
+    let mut gaps = roundhouse::ingest::survey::drain();
     let mut app = match result {
         Ok(app) => app,
         Err(e) => return error_json(&format!("ingest: {e}")),
@@ -351,6 +352,7 @@ fn analyze_app_inner(json_in: &str) -> String {
 
     let mut diags = diagnose(&app);
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+    roundhouse::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
     roundhouse::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
     diags.extend(parse_diags);
 

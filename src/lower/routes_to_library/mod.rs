@@ -79,6 +79,8 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         module_path: module_path.clone(),
         name: Symbol::from("table"),
         params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body: table_body,
         signature: Some(fn_sig(
             vec![],
@@ -94,6 +96,8 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             module_path,
             name: Symbol::from("root"),
             params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
             body: root_body,
             signature: Some(fn_sig(vec![], route_ty)),
             effects: EffectSet::default(),
@@ -629,6 +633,8 @@ fn build_url_options_function(
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(url_options_helper_name(extras)),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         params: names
             .iter()
             .map(|n| Param::positional(Symbol::from(n.clone())))
@@ -1100,6 +1106,8 @@ fn build_helper_function(
         module_path: module_path.to_vec(),
         name: Symbol::from(helper_name),
         params,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: Some(signature),
         effects: EffectSet::default(),
@@ -2068,11 +2076,14 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from("query_suffix"),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         params: vec![Param {
             name: Symbol::from("params"),
             default: None,
             keyword: false,
             rest: false,
+            forwarding: false,
             from_keyword: false,
             from_kwrest: false,
         }],

@@ -359,10 +359,12 @@ fn declared_as_json_writer(
             PairValue::Reader(name) => {
                 let column = table.and_then(|t| t.columns.iter().find(|c| &c.name == name));
                 if let Some(c) = column {
+                    if c.col_type == crate::schema::ColumnType::Date {
+                        return Ok(PairEncoding::DateColumn);
+                    }
                     if matches!(
                         c.col_type,
                         crate::schema::ColumnType::DateTime
-                            | crate::schema::ColumnType::Date
                             | crate::schema::ColumnType::Time
                     ) {
                         return Ok(PairEncoding::ZonedTime);
@@ -526,6 +528,9 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
         .collect();
     let body = Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false });
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("as_json"),
         receiver: MethodReceiver::Instance,

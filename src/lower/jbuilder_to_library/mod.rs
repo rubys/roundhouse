@@ -275,6 +275,9 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     body.inherit_span(view.body.span);
 
     let mut method = MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Class,
@@ -303,6 +306,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

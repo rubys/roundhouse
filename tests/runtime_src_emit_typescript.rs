@@ -53,10 +53,34 @@ fn inflector_module_transpiles_to_typescript() {
     let methods = parse_methods_with_rbs(&ruby, &rbs).expect("parse");
     let emitted = emit_module(&methods).expect("emit_module");
 
-    // pluralize only: parameterize lives in inflector_ext.rb, the
-    // ruby-family reopen OFF the runtime_loader tables (its
-    // gsub-with-Regexp bodies don't transpile to the strict targets).
-    assert_eq!(emitted, EXPECTED_TS, "emitted TS mismatch");
+    // The legacy Integer entry point remains byte-identical. Formatted
+    // count labels use a second, concrete String entry point; neither
+    // accepts any/unknown. parameterize remains in the family reopen.
+    assert_eq!(emit_method(&methods[0]), EXPECTED_TS);
+    assert!(emitted.starts_with(EXPECTED_TS), "emitted TS mismatch: {emitted}");
+    assert!(emitted.contains("export function pluralize_formatted(count: string, word: string): string"), "{emitted}");
+}
+
+#[test]
+#[ignore = "requires Bun to execute the emitted TypeScript"]
+fn formatted_pluralize_executes_as_typescript() {
+    let ruby = std::fs::read_to_string("runtime/ruby/inflector.rb").unwrap();
+    let rbs = std::fs::read_to_string("runtime/ruby/inflector.rbs").unwrap();
+    let methods = parse_methods_with_rbs(&ruby, &rbs).unwrap();
+    let emitted = emit_module(&methods).unwrap();
+    let probe = r#"
+for (const [count, expected] of [
+  ["1", "1 word"], ["1.00", "1.00 word"], ["01", "01 words"],
+  ["1.01", "1.01 words"], ["1,001", "1,001 words"], ["", " words"],
+  ["2\n1.0\n", "2\n1.0\n word"]
+]) {
+  const actual = pluralize_formatted(count, "word");
+  if (actual !== expected) throw new Error(JSON.stringify({count, actual, expected}));
+}
+"#;
+    let run = std::process::Command::new("bun").arg("-e")
+        .arg(format!("{emitted}\n{probe}")).output().expect("run Bun");
+    assert!(run.status.success(), "{emitted}\n{}", String::from_utf8_lossy(&run.stderr));
 }
 
 /// Phase 1 second target: errors.rb has four classes (RecordNotFound,

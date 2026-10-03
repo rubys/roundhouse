@@ -332,6 +332,7 @@ where
             fallback: map_expr(fallback, f),
         },
         ExprNode::Return { value } => ExprNode::Return { value: map_expr(value, f) },
+        ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat { value: map_expr(value, f) },
         ExprNode::Super { args: Some(args) } => ExprNode::Super {
             args: Some(args.iter().map(|a| map_expr(a, f)).collect()),
         },

@@ -20,6 +20,22 @@ use roundhouse::lower::routes::flatten_routes;
 
 /// (as_name, path) for every named route, in declaration order.
 fn routes_of(routes_rb: &str) -> Vec<(String, String)> {
+    flat_routes_of(routes_rb)
+        .into_iter()
+        .filter(|r| r.named)
+        .map(|r| (r.as_name.clone(), r.path.clone()))
+        .collect()
+}
+
+/// The action of every route, named or not, in declaration order.
+fn actions_of(routes_rb: &str) -> Vec<String> {
+    flat_routes_of(routes_rb)
+        .into_iter()
+        .map(|r| r.action.as_str().to_string())
+        .collect()
+}
+
+fn flat_routes_of(routes_rb: &str) -> Vec<roundhouse::lower::routes::FlatRoute> {
     let tree = vec![
         (
             std::path::PathBuf::from("config/routes.rb"),
@@ -36,10 +52,6 @@ fn routes_of(routes_rb: &str) -> Vec<(String, String)> {
     .collect();
     let app = ingest_app_from_tree(tree).expect("ingest");
     flatten_routes(&app)
-        .into_iter()
-        .filter(|r| r.named)
-        .map(|r| (r.as_name.clone(), r.path.clone()))
-        .collect()
 }
 
 fn find<'a>(routes: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -239,4 +251,54 @@ fn namespace_inside_a_resource_keeps_the_nesting() {
         Some("/users/:user_id/admin/notes"),
         "{r:?}"
     );
+}
+
+#[test]
+fn only_empty_keeps_the_nested_routes_and_drops_the_parents() {
+    // Rails 7.2.4:
+    //   post_summary  GET /posts/:post_id/summary
+    //   account_logos GET /account/logos
+    // `only: []` is a valid, empty restriction, not "no restriction".
+    let r = routes_of(
+        r#"
+  resources :posts, only: [] do
+    resource :summary, only: :show
+  end
+  resource :account, only: [] do
+    resources :logos, only: :index
+  end
+"#,
+    );
+    assert_eq!(
+        r,
+        vec![
+            ("post_summary".to_string(), "/posts/:post_id/summary".to_string()),
+            ("account_logos".to_string(), "/account/logos".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_later_only_overrides_an_earlier_empty_only() {
+    // Rails 7.2.4: post GET /posts/:id — Ruby keeps the LAST of two
+    // duplicate keys, so `only: [:show]` replaces `only: []`.
+    let r = routes_of(
+        r#"
+  resources :posts, only: [], only: [:show]
+"#,
+    );
+    assert_eq!(r, vec![("post".to_string(), "/posts/:id".to_string())]);
+}
+
+#[test]
+fn a_later_empty_except_clears_an_earlier_except() {
+    // Rails 7.2.4: all seven actions — `except: []` replaces
+    // `except: [:show]`, so `show` comes back. The check reads actions,
+    // not names: without `show`, PATCH /posts/:id carries the `post` name.
+    let r = actions_of(
+        r#"
+  resources :posts, except: [:show], except: []
+"#,
+    );
+    assert!(r.iter().any(|a| a == "show"), "{r:?}");
 }

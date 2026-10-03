@@ -41,7 +41,7 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    has_toplevel_terminal, synthesize_deferred_implicit_render, synthesize_implicit_render,
+    has_toplevel_terminal, synthesize_deferred_implicit_render,
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
@@ -499,6 +499,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             );
         }
         for method in &mut methods {
+            if method.receiver == MethodReceiver::Class
+                && controller.class_methods().any(|m| m.name == method.name)
+            {
+                // The analyzer typed these against class-object state.
+                // Controller action rewrites and framework instance ivar
+                // seeding do not apply to this separate receiver domain.
+                // Class-side helper clones still need the instance pipeline.
+                continue;
+            }
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             // Stage 3: now that bodies are typed, rewrite
             // `<typed-params>[:field]` → `<typed-params>.field`.
@@ -566,6 +575,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             origin: None,
             constants: collect_class_constants(controller),
             unknown_calls: collect_delegate_calls(controller),
+            class_ivar_initializers: collect_class_ivar_initializers(controller),
         };
         let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
         lc.methods.extend(forwarders);
@@ -635,10 +645,18 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         origin: None,
         constants: collect_class_constants(controller),
         unknown_calls: collect_delegate_calls(controller),
+        class_ivar_initializers: collect_class_ivar_initializers(controller),
     };
     let forwarders = crate::ingest::delegate::expand_delegates_in_class(&mut lc);
     lc.methods.extend(forwarders);
     lc
+}
+
+fn collect_class_ivar_initializers(controller: &Controller) -> Vec<Expr> {
+    controller.body.iter().filter_map(|item| match item {
+        ControllerBodyItem::ClassIvarInit { expr, .. } => Some(expr.clone()),
+        _ => None,
+    }).collect()
 }
 
 /// Collect class-level constant definitions (`NAME = <expr>`) from a
@@ -977,6 +995,9 @@ fn subclass_template_hooks(
                 rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
             };
             methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 name_span: crate::span::Span::synthetic(),
                 name: hook.clone(),
                 receiver: MethodReceiver::Instance,
@@ -1013,7 +1034,7 @@ fn build_methods(
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
 ) -> Vec<MethodDef> {
-    let mut methods: Vec<MethodDef> = Vec::new();
+    let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
     // Names this controller's ancestry DEFINES that the route-helper
     // rewrite would otherwise claim by suffix alone.
@@ -2010,7 +2031,8 @@ fn can_respond_within(
             if matches!(
                 method.as_str(),
                 "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
-            ) {
+            ) || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            {
                 *found = true;
                 return;
             }
@@ -2478,11 +2500,14 @@ fn action_to_method(
             (p.name.clone(), ty)
         })
         .collect();
-    let signature = mark_optional(crate::lower::typing::fn_sig(sig_params, ret_ty), &params);
+    let signature = mark_param_kinds(crate::lower::typing::fn_sig(sig_params, ret_ty), &params);
     // All actions (public + private) are Method — bodies are
     // imperative and computed. AttributeReader is reserved for
     // pure ivar-backed reads that can lower to a TS field.
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
@@ -2533,15 +2558,16 @@ fn union_with(a: Ty, b: Ty) -> Ty {
     if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
 }
 
-/// A param with a default is OPTIONAL in the signature — rendered `?T
-/// name` in the RBS — or a caller that leaves it out does not bind.
-fn mark_optional(sig: Ty, params: &[Param]) -> Ty {
+/// Each signature slot takes the kind its `def` declares. A param with
+/// a default is OPTIONAL — rendered `?T name` in the RBS — or a caller
+/// that leaves it out does not bind; a keyword left `Required` is a
+/// positional in the `.rbs`, so the sidecar disagrees with the `def`
+/// beside it and spinel binds the call's kwargs Hash to the first slot.
+fn mark_param_kinds(sig: Ty, params: &[Param]) -> Ty {
     match sig {
         Ty::Fn { params: mut tps, block, ret, effects } => {
             for (tp, p) in tps.iter_mut().zip(params) {
-                if p.default.is_some() && !p.keyword && !p.rest {
-                    tp.kind = crate::ty::ParamKind::Optional;
-                }
+                tp.kind = p.ty_kind();
             }
             Ty::Fn { params: tps, block, ret, effects }
         }
@@ -2676,6 +2702,7 @@ fn lower_action_body(
         || variants.iter().any(|v| {
             view_ivars.contains_key(&(module_key.clone(), format!("{action_name}_{v}")))
         });
+    let html_exists = view_ivars.contains_key(&(module_key.clone(), action_name.to_string()));
     let base = if !is_public {
         unwrapped
     } else if defer_implicit_render || responds_via_helper {
@@ -2683,10 +2710,10 @@ fn lower_action_body(
         // Two reasons to want that: the tail is about to move to the
         // dispatcher because something else (a subclass past `super`) may
         // respond, or a private helper in this body already has.
-        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists)
+        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists, html_exists)
     } else {
         crate::lower::controller::body::synthesize_implicit_render_with_html(
-            &unwrapped, action_name, variants, any_template_exists,
+            &unwrapped, action_name, variants, any_template_exists, html_exists,
         )
     };
     let module_name = views_module_name(controller);

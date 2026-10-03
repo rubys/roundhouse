@@ -328,6 +328,101 @@ module ActiveRecord
       self
     end
 
+    # ---- Kaminari's page / per, over LIMIT / OFFSET ------------------
+    #
+    # The catalog types `page` and `per` as builders and the readers
+    # below as terminals; this is the runtime behind them, with
+    # Kaminari's arithmetic. `count` already leaves LIMIT and OFFSET out
+    # of its SQL (`count_sql`), which is exactly Kaminari's
+    # `total_count`. Not modeled: `padding`, `without_count`,
+    # `max_per_page` / `max_pages`, and the `Kaminari.paginate_array`
+    # wrapper for a loaded Array.
+    #
+    # The readers go through locals rather than doing arithmetic on the
+    # ivars: a runtime ivar reads as `T | Nil` (see `ActionController::
+    # Page`), and Kaminari's own nil cases are the ones guarded here.
+
+    # `page(n)`: page `n` at the app's default page size. A nil, blank,
+    # non-numeric or non-positive `n` is page 1, as Kaminari's `to_i`
+    # makes it.
+    def page(num = nil)
+      per_page = Rails.application.kaminari_default_per_page
+      n = num.to_s.to_i
+      n = 1 if n < 1
+      limit(per_page)
+      offset((n - 1) * per_page)
+    end
+
+    # `per(n)`: the same page at `n` rows. Kaminari leaves the relation
+    # as it is for a nil, blank or negative `n` (its `/^\d/` test), so
+    # `per(params[:per])` without the parameter keeps the default size;
+    # `per(0)` is `limit(0)`.
+    def per(num)
+      text = num.to_s
+      return self unless text.match?(/\A\d/)
+      n = text.to_i
+      return limit(0) if n == 0
+      page_now = current_page
+      limit(n)
+      offset((page_now - 1) * n)
+    end
+
+    def limit_value
+      @limit
+    end
+
+    def offset_value
+      @offset
+    end
+
+    # 1 for a relation that was never paged, where Kaminari divides by
+    # a nil limit; `per(0)` raises, as Kaminari's ZeroPerPageOperation
+    # (a ZeroDivisionError) does.
+    def current_page
+      per_page = @limit
+      return 1 if per_page.nil?
+      raise ZeroDivisionError, "Current page was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      skipped = @offset
+      skipped = 0 if skipped.nil? || skipped < 0
+      skipped / per_page + 1
+    end
+
+    def total_count
+      count
+    end
+
+    # Rounded up; 0 for an empty relation, as in Kaminari, which makes
+    # page 1 of nothing out of range rather than the last page. A
+    # relation that was never paged is one page.
+    def total_pages
+      per_page = @limit
+      return 1 if per_page.nil?
+      raise ZeroDivisionError, "Total pages was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      (total_count + per_page - 1) / per_page
+    end
+
+    def first_page?
+      current_page == 1
+    end
+
+    def last_page?
+      current_page == total_pages
+    end
+
+    def out_of_range?
+      current_page > total_pages
+    end
+
+    def next_page
+      return nil if last_page? || out_of_range?
+      current_page + 1
+    end
+
+    def prev_page
+      return nil if first_page? || out_of_range?
+      current_page - 1
+    end
+
     def group(*parts)
       @records = nil
       # Symbols qualify against this relation's table (Rails renders
@@ -566,7 +661,6 @@ module ActiveRecord
       cached = @records
       return cached.dup unless cached.nil?
       records = load_records
-      @model.preload_associations(records, @includes) if @includes.length > 0
       @records = records
       records.dup
     end
@@ -577,12 +671,14 @@ module ActiveRecord
     # fixed at compile time, so no String-keyed Hash per row. An
     # explicit `select` can project anything, and keeps the Hash path.
     def load_records
-      if @select_sql.nil?
+      records = if @select_sql.nil?
         @model._hydrate_all(select_sql_with(@model._columns_sql))
       else
         rows = ActiveRecord.adapter.select_rows(to_sql)
         rows.map { |row| @model.instantiate(row) }
       end
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
     end
 
     # Implicit array conversion — Rails delegates `to_ary` to the
@@ -1179,13 +1275,68 @@ module ActiveRecord
     # raise for the same reason — an exception a caller rescues must not
     # leave the relation altered.
     def find(id)
-      @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      record = first
-      @wheres.pop
+      return find_ids(id) if id.is_a?(Array)
+      key = @model._cast_primary_key(id)
+      prior_limit = @limit
+      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(key)}"
+      begin
+        @limit = 1
+        rows = load_records
+        record = rows.length == 0 ? nil : rows[0]
+      ensure
+        @limit = prior_limit
+        @wheres.pop
+      end
       if record.nil?
         raise RecordNotFound, "Couldn't find record in #{@model.table_name} with id=#{id}"
       end
       record
+    end
+
+    # Array form: deduplicate BEFORE the column cast, as Rails does.
+    # Unordered relations follow the requested IDs (after slicing by
+    # offset/limit); explicitly ordered relations follow their SQL order.
+    # Read directly rather than through to_a: its loaded cache belongs to
+    # the original relation and must neither mask nor remember this filter.
+    def find_ids(ids)
+      ids = ids.uniq
+      return [] if ids.empty?
+      return [find(ids[0])] if ids.length == 1
+      prior_limit = @limit
+      prior_offset = @offset
+      prior_select = @select_sql
+      expected = ids.length
+      if @orders.empty?
+        ids = ids[prior_offset || 0, prior_limit || ids.length] || []
+        expected = ids.length
+      else
+        expected = prior_limit if !prior_limit.nil? && expected > prior_limit
+        expected = ids.length - prior_offset if !prior_offset.nil? && ids.length - prior_offset < expected
+      end
+      keys = ids.map { |id| @model._cast_primary_key(id) }
+      sql_ids = keys.map { |key| ActiveRecord.adapter.escape_value(key) }.join(", ")
+      @wheres << (keys.empty? ? "1=0" : "#{@table}.#{@model.primary_key} IN (#{sql_ids})")
+      begin
+        if @orders.empty?
+          @limit = nil
+          @offset = nil
+        end
+        @select_sql = "#{prior_select}, #{@table}.#{@model.primary_key}" unless prior_select.nil?
+        rows = load_records
+      ensure
+        @limit = prior_limit
+        @offset = prior_offset
+        @select_sql = prior_select
+        @wheres.pop
+      end
+      if rows.length != expected
+        raise RecordNotFound, "Couldn't find all records in #{@table} with ids=#{ids}"
+      end
+      if @orders.empty?
+        keys.map { |key| rows.find { |row| row.id == key } }
+      else
+        rows
+      end
     end
 
     # A TERMINAL, so its predicate is POPPED — the same rule `find`
@@ -1286,7 +1437,12 @@ module ActiveRecord
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
       sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
       sql = "#{sql} ORDER BY #{@orders.join(", ")}" if @orders.length > 0
-      sql = "#{sql} LIMIT #{@limit}" unless @limit.nil?
+      if !@limit.nil?
+        sql = "#{sql} LIMIT #{@limit}"
+      elsif !@offset.nil?
+        # SQLite needs LIMIT even for offset-only pagination.
+        sql = "#{sql} LIMIT -1"
+      end
       sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
       sql
     end

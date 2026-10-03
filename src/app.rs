@@ -368,6 +368,10 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// Rubydex answers for `sources`, resolved while ingest finished.
+    /// The analyzer resolves the sources itself when this is absent.
+    #[serde(skip)]
+    pub const_resolver: crate::analyze::PreparedConstResolver,
     /// Per-controller resolved request machinery, computed once by
     /// analyze's parent-chain walk and persisted (the self-describing-IR
     /// move: `run_typing_passes` already built these to seed ivars, and
@@ -385,7 +389,8 @@ pub struct App {
     pub root: String,
     /// App-layer roots ingest walked, relative to `root`: `["app"]` for
     /// an ordinary Rails app, `["app", "packs/blog/app", …]` for a
-    /// Packwerk app whose packages carry their own `app/` tree
+    /// Packwerk app whose packages carry their own `app/` tree,
+    /// `["app", "lib/billing/app"]` for one with an in-repo engine
     /// (`ingest::app::app_roots`). `app` is always first; the rest are
     /// sorted. Exists so a consumer (today, `check`'s summary line) can
     /// report what got walked without recomputing it from the VFS.
@@ -683,6 +688,7 @@ impl App {
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
+            const_resolver: Default::default(),
             root: String::new(),
             app_roots: Vec::new(),
         }

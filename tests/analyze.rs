@@ -569,6 +569,7 @@ fn action_aggregate_equals_subtree_fold() {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -689,7 +690,7 @@ fn action_aggregate_equals_subtree_fold() {
             ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { fold(v, acc); }
             }
-            ExprNode::Splat { value } => fold(value, acc),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => fold(value, acc),
             ExprNode::MultiAssign { value, .. } => fold(value, acc),
             ExprNode::While { cond, body, .. } => {
                 fold(cond, acc);
@@ -1017,7 +1018,7 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { collect_ivar_reads(v, out); }
         }
-        ExprNode::Splat { value } => collect_ivar_reads(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_ivar_reads(value, out),
         ExprNode::MultiAssign { value, .. } => collect_ivar_reads(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_ivar_reads(cond, out);
@@ -1033,6 +1034,7 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }
@@ -1202,7 +1204,7 @@ fn collect_bare_name_sends(
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { collect_bare_name_sends(v, out); }
         }
-        ExprNode::Splat { value } => collect_bare_name_sends(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_bare_name_sends(value, out),
         ExprNode::MultiAssign { value, .. } => collect_bare_name_sends(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_bare_name_sends(cond, out);
@@ -1219,6 +1221,7 @@ fn collect_bare_name_sends(
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

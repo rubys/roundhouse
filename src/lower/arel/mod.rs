@@ -341,7 +341,10 @@ fn hoist_value_seqs(e: &mut Expr, hoisted: &mut Vec<Expr>) {
                 hoist_value_child(v, hoisted);
             }
         }
-        ExprNode::Return { value } | ExprNode::Raise { value } | ExprNode::Splat { value } => {
+        ExprNode::Return { value }
+        | ExprNode::Raise { value }
+        | ExprNode::Splat { value }
+        | ExprNode::KeywordSplat { value } => {
             hoist_value_child(value, hoisted);
         }
         ExprNode::Yield { args } => {
@@ -387,6 +390,7 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
@@ -488,6 +492,9 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             }
         }
         ExprNode::Splat { value } => {
+            f(value);
+        }
+        ExprNode::KeywordSplat { value } => {
             f(value);
         }
         ExprNode::MultiAssign { targets, value } => {

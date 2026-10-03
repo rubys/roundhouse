@@ -8,6 +8,15 @@ For deeper architecture and per-stage internals, see [`docs/`](docs/).
 
 ## Build & test
 
+Install Rust through rustup. [`rust-toolchain.toml`](rust-toolchain.toml) pins
+the compiler to **1.98.1** for local builds, CI and release builds; rustup
+selects it automatically, including inside `wasm/`. CI also retains that
+toolchain when testing generated Rust projects outside the checkout.
+Upgrade the pin deliberately, after the native suite and browser WASM gates
+pass. Keep the explicit WASM stack budget in `.cargo/config.toml`: the pin
+is not a replacement for it. `Cargo.toml`'s `rust-version` is the minimum
+supported version, not the selected build toolchain.
+
 ```bash
 cargo build                        # debug build
 cargo build --release              # release build

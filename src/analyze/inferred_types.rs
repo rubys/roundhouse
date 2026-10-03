@@ -160,7 +160,7 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
                 collect_types_expr(v, out);
             }
         }
-        ExprNode::Splat { value } => collect_types_expr(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_types_expr(value, out),
         ExprNode::MultiAssign { targets, value } => {
             collect_types_expr(value, out);
             for target in targets {
@@ -192,6 +192,7 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }

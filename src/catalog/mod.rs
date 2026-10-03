@@ -153,6 +153,9 @@ pub enum ReturnKind {
     SelfOrNil,
     /// Returns `Int`. Example: `Model.count`.
     Int,
+    /// Returns `Int | Nil`. Example: Kaminari's `relation.next_page`,
+    /// nil on the last page.
+    IntOrNil,
     /// Returns `Bool`. Example: `Model.exists?`, `#save`,
     /// `#valid?`, `#persisted?`.
     Bool,
@@ -1254,6 +1257,80 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         effect: EffectClass::DbRead,
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    // Kaminari's paginator readers on a paged relation
+    // (runtime/ruby/active_record/relation.rb). The page arithmetic is
+    // pure over LIMIT/OFFSET; the readers that need the total run the
+    // COUNT.
+    CatalogedMethod {
+        name: "limit_value",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::IntOrNil),
+    },
+    CatalogedMethod {
+        name: "offset_value",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::IntOrNil),
+    },
+    CatalogedMethod {
+        name: "current_page",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
+        name: "total_count",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
+        name: "total_pages",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
+        name: "first_page?",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "last_page?",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "out_of_range?",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "next_page",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::IntOrNil),
+    },
+    CatalogedMethod {
+        name: "prev_page",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::IntOrNil),
     },
     // Terminals — execute the query; result types are exactly what
     // the `array_method` arms produce today.

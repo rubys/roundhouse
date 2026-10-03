@@ -9,3 +9,10 @@
 # walk of a 45-term `||` chain (bf2e160f) and cost the bench page nine
 # lanes.
 RUST_MIN_STACK = "33554432"
+
+[target.wasm32-wasip1]
+# WASM cannot use the CLI's sized worker thread or RUST_MIN_STACK. Its
+# default 1 MiB linear-memory stack overflows ingesting the runtime's
+# 45-term boolean-attribute chain with Rust 1.99 release frames. Give
+# every WASM build the same 32 MiB budget as the native test threads.
+rustflags = ["-C", "link-arg=-z", "-C", "link-arg=stack-size=33554432"]

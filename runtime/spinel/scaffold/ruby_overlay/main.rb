@@ -193,6 +193,11 @@ module Main
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
     controller.request_format = request_format
+    # Rails' "any format": a bare `*/*` Accept (see the spinel
+    # dispatcher's `Main.accepts_any_format?`); a browser's list with a
+    # comma is read as html.
+    accept = request.fetch(:accept, "").to_s
+    controller.accepts_any_format = !accept.include?(",") && accept.split(";", 2)[0].to_s.strip == "*/*"
     # The full request object (CRuby overlay class) — filters read
     # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
     # detaches a plain mutable Hash (callers write scratch keys the real
@@ -392,6 +397,8 @@ if __FILE__ == $PROGRAM_NAME
     # The forgery check's two headers (runtime/request_forgery_protection.rb).
     "HTTP_X_CSRF_TOKEN" => ENV["HTTP_X_CSRF_TOKEN"],
     "HTTP_ORIGIN"       => ENV["HTTP_ORIGIN"],
+    # The HTTP Token/Basic helpers' credentials (runtime/http_authentication.rb).
+    "HTTP_AUTHORIZATION" => ENV["HTTP_AUTHORIZATION"],
     "HTTP_HOST"         => ENV["HTTP_HOST"],
   }
   Main.run(env, $stdin, $stdout)

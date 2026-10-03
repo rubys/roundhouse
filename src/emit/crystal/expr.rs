@@ -248,6 +248,7 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
 /// signal that the lowerer guarantees Builder semantics are safe.
 fn try_string_builder(e: &Expr) -> Option<String> {
     match e.hint? {
+        IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {
                 target: LValue::Var { name, .. }, ..
@@ -285,6 +286,18 @@ fn try_string_builder(e: &Expr) -> Option<String> {
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::ForwardArgs => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "full argument forwarding has no carrier on this target",
+        ),
+        ExprNode::KeywordSplat { .. } => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "keyword argument forwarding has no carrier on this target",
+        ),
         ExprNode::Var { name, .. } => escape_ident(name.as_str()),
         ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::SelfRef => "self".to_string(),

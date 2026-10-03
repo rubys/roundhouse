@@ -60,7 +60,8 @@ oracle: the same URL fetched from Rails and from each target must
 produce the same response — emitted tests, a differential compare
 against live Rails (DOM node for DOM node, JSON value for value), and
 browser end-to-end tests for what a static diff can't reach — and
-every target on the list passes it on every push. →
+the full target matrix runs in scheduled validation, with a compact
+floor and targeted additions on pull requests. →
 [`--target`](docs/guide/transpile.md) · [targets](docs/guide/targets.md)
 · [what of Rails comes through](docs/guide/rails-coverage.md) ·
 [verifying](docs/guide/verifying.md)
@@ -73,7 +74,7 @@ compiled targets it has the closest behavior to Rails by a distance,
 and will for the foreseeable future, because it runs the framework
 runtime itself rather than a translation of it. Basecamp's Campfire
 runs this way — every page and every cable frame compared against
-live Rails on every push, and a
+live Rails in the full validation cycle, and a
 [Docker archive](https://rubys.github.io/roundhouse/apps/campfire.html)
 you can run in minutes. → [Spinel](docs/guide/spinel.md)
 
@@ -106,7 +107,7 @@ the prerequisites.
 - [**Campfire**](https://rubys.github.io/roundhouse/apps/campfire.html)
   — the compiled product, as a Docker archive.
 - [**Browse**](https://rubys.github.io/roundhouse/browse/) — what every
-  emitter produces from the blog fixture, updated on each push.
+  emitter produces from the blog fixture, refreshed by scheduled full validation.
 - [**Bench**](https://rubys.github.io/roundhouse/bench/) — throughput,
   memory and latency across the live targets on a fixed box, against
   Rails as it ships.
@@ -168,13 +169,17 @@ its predecessors; [`WHY.md`](WHY.md) is why do it at all.
 ## Contributing
 
 Issues and pull requests are both welcome, and a PR does not need a
-conversation first: CI runs the whole matrix on every pull request —
-the unit suite, each target's toolchain, the DOM compare against live
-Rails, the Spinel lanes — so a change you can only test partially on
-your machine is tested fully there. The `unit` job gates; the Spinel
-and Campfire jobs marked `continue-on-error` track moving toolchains,
-and red there is a signal to read, not a check to make pass. Setup,
-the test cycle, and what a PR should carry are in
+conversation first: CI runs a compact correctness/runtime floor plus
+targeted checks. Ask a maintainer to apply `ci:full` for full PR validation;
+the label expands tests, never publication. The complete matrix also runs
+freshly every four hours. See [CI coverage](docs/ci-reuse.md) for requesting
+full/fresh validation and the separate publication controls.
+`CI summary` reports selected checks without imposing a merge requirement;
+maintainers decide when to merge. Spinel and Campfire jobs marked
+`continue-on-error` track current Spinel master, and red there is a signal
+to investigate Roundhouse runtime, RBS or packaging as well as possible
+upstream drift—not proof of an upstream fault. Setup, the test cycle,
+and what a PR should carry are in
 [`DEVELOPMENT.md`](DEVELOPMENT.md); the invariants not to break are in
 [`AGENTS.md`](AGENTS.md).
 

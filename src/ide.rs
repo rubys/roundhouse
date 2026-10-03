@@ -1096,6 +1096,7 @@ pub fn render_ty(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "Symbol".to_string(),
+        Ty::Date => "Date".to_string(),
         Ty::Time => "Time".to_string(),
         Ty::Nil => "nil".to_string(),
         // Consumer-facing projection too, and for the same reason as
@@ -4499,5 +4500,4 @@ end
         assert!(traceroute(&app, "NopeController#zap").is_none());
     }
 }
-
 

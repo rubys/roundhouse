@@ -23,24 +23,28 @@ fn main() {
 }
 
 /// Short HEAD of the checkout containing this manifest, with rerun
-/// triggers on the files whose change would move it (`.git/HEAD` and,
-/// when HEAD is symbolic, the branch ref it points at), so a stale stamp
-/// can't survive a commit.
+/// triggers on HEAD and its loose or packed branch ref. Git resolves
+/// these paths because linked worktrees share refs but have their own HEAD.
 fn git_head() -> Option<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
-    let git_dir = root.join(git_dir);
-    let head = git_dir.join("HEAD");
+    let head = git_path(root, "HEAD")?;
     println!("cargo:rerun-if-changed={}", head.display());
     if let Ok(contents) = std::fs::read_to_string(&head) {
         if let Some(rf) = contents.trim().strip_prefix("ref: ") {
-            println!("cargo:rerun-if-changed={}", git_dir.join(rf).display());
+            let loose = git_path(root, rf)?;
+            if loose.exists() {
+                println!("cargo:rerun-if-changed={}", loose.display());
+            } else {
+                // A nonexistent watch makes Cargo rebuild on every run.
+                // Watch the nearest existing parent to detect creation of
+                // a loose ref (including a new nested branch directory).
+                if let Some(parent) = loose.ancestors().skip(1).find(|p| p.exists()) {
+                    println!("cargo:rerun-if-changed={}", parent.display());
+                }
+                if let Some(packed) = git_path(root, "packed-refs").filter(|p| p.exists()) {
+                    println!("cargo:rerun-if-changed={}", packed.display());
+                }
+            }
         }
     }
     let out = Command::new("git")
@@ -51,6 +55,18 @@ fn git_head() -> Option<String> {
         .filter(|o| o.status.success())?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!sha.is_empty()).then_some(sha)
+}
+
+fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-path", name])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let path = String::from_utf8_lossy(&out.stdout);
+    let path = path.trim();
+    (!path.is_empty()).then(|| root.join(path))
 }
 
 /// The `runtime/ruby/` and `runtime/spinel/` trees the ruby and spinel
@@ -74,13 +90,32 @@ fn embed_runtime_files() {
         collect(&dir, top, &mut entries);
     }
     entries.sort();
+    let dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    std::fs::write(dest.join("runtime_files.rs"), runtime_table(entries.iter()))
+        .expect("write runtime_files.rs");
+    // The browser analyzer also needs framework and Spinel shim
+    // declarations. Exclude emit scaffolds and tests from its table.
+    let ruby = entries.iter().filter(|(path, _)| {
+        (path.starts_with("runtime/ruby/") || path.starts_with("runtime/spinel/"))
+            && path.ends_with(".rb")
+            && !path
+                .split('/')
+                .any(|part| part == "test" || part == "scaffold")
+    });
+    std::fs::write(dest.join("runtime_const_sources.rs"), runtime_table(ruby))
+        .expect("write runtime_const_sources.rs");
+}
+
+fn runtime_table<'a>(entries: impl Iterator<Item = &'a (String, PathBuf)>) -> String {
     let mut out = String::from("&[\n");
-    for (rel, abs) in &entries {
-        out.push_str(&format!("    ({rel:?}, include_str!({:?})),\n", abs.display().to_string()));
+    for (rel, abs) in entries {
+        out.push_str(&format!(
+            "    ({rel:?}, include_str!({:?})),\n",
+            abs.display().to_string()
+        ));
     }
     out.push_str("]\n");
-    let dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("runtime_files.rs");
-    std::fs::write(&dest, out).expect("write runtime_files.rs");
+    out
 }
 
 fn collect(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {

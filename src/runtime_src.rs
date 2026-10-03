@@ -15,13 +15,28 @@ use ruby_prism::{Node, parse};
 use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ident::Symbol;
-use crate::ingest::ingest_expr;
+use crate::ident::{ClassId, Symbol};
 use crate::rbs::parse_signatures;
 use crate::span::Span;
 use crate::ty::Ty;
 
 const VIRTUAL_FILE: &str = "<runtime>";
+
+// Each runtime parser projects its artifact before typing: the standalone
+// expression parser below, or the complete library parser. Neither admits
+// native full declarations, so keyword producers keep the existing runtime ABI.
+fn project_runtime_keywords(e: &mut Expr) {
+    if let ExprNode::KeywordSplat { value } = &mut *e.node {
+        *e = std::mem::replace(value, crate::lower::typing::nil_lit());
+    }
+    e.node.for_each_child_mut(&mut project_runtime_keywords);
+}
+
+fn ingest_expr(node: &Node<'_>, file: &str) -> Result<Expr, crate::ingest::IngestError> {
+    let mut expr = crate::ingest::ingest_expr(node, file)?;
+    project_runtime_keywords(&mut expr);
+    Ok(expr)
+}
 
 /// Parse Ruby source and collect module/class-level constant
 /// assignments whose value is a typeable literal. Patterns recognized:
@@ -35,16 +50,20 @@ const VIRTUAL_FILE: &str = "<runtime>";
 /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
 /// table.
 pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<Symbol, Ty>, String> {
+    Ok(parse_module_constant_tables(source, false).0)
+}
+
+type ConstantTypes = std::collections::HashMap<Symbol, Ty>;
+type OwnedConstantTypes = std::collections::HashMap<ClassId, ConstantTypes>;
+
+pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (ConstantTypes, OwnedConstantTypes) {
+    let mut global = ConstantTypes::new();
+    let mut by_owner = OwnedConstantTypes::new();
     let result = parse(source.as_bytes());
-    let mut out = std::collections::HashMap::new();
-    if result.errors().count() > 0 {
-        // Errors will surface elsewhere; return empty here so the caller
-        // doesn't double-report.
-        return Ok(out);
+    if result.errors().count() == 0 {
+        walk_constants(&result.node(), "", &mut global, &mut by_owner, with_owners);
     }
-    let root = result.node();
-    walk_constants(&root, &mut out);
-    Ok(out)
+    (global, by_owner)
 }
 
 /// Parallel to `parse_module_constants` but returns each constant as
@@ -204,40 +223,55 @@ fn collect_constant_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)
     }
 }
 
-fn walk_constants(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
+fn walk_constants(
+    node: &Node<'_>,
+    owner: &str,
+    global: &mut ConstantTypes,
+    by_owner: &mut OwnedConstantTypes,
+    with_owners: bool,
+) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_constant_from_stmt(&stmt, out);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_constant_from_stmt(&stmt, out);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
         }
     }
 }
 
-fn collect_constant_from_stmt(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
-    // Recurse into module/class bodies. Constants commonly live one
-    // level inside `module Foo ... end` or `class Bar ... end`.
+fn collect_constant_from_stmt(
+    node: &Node<'_>,
+    owner: &str,
+    global: &mut ConstantTypes,
+    by_owner: &mut OwnedConstantTypes,
+    with_owners: bool,
+) {
     if let Some(module) = node.as_module_node() {
+        let Ok(name) = std::str::from_utf8(module.name().as_slice()) else { return };
         if let Some(body) = module.body() {
-            walk_constants(&body, out);
+            let nested = join_owner(owner, name);
+            walk_constants(&body, &nested, global, by_owner, with_owners);
         }
         return;
     }
     if let Some(class) = node.as_class_node() {
+        let Ok(name) = std::str::from_utf8(class.name().as_slice()) else { return };
         if let Some(body) = class.body() {
-            walk_constants(&body, out);
+            let nested = join_owner(owner, name);
+            walk_constants(&body, &nested, global, by_owner, with_owners);
         }
         return;
     }
-    // Top-level constant assignment: `CONST = literal[.freeze]?`.
     if let Some(write) = node.as_constant_write_node() {
-        let name_bytes = write.name().as_slice();
-        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
-        let value = write.value();
-        if let Some(ty) = type_of_const_literal(&value) {
-            out.insert(Symbol::new(name_str), ty);
+        let Ok(name) = std::str::from_utf8(write.name().as_slice()) else { return };
+        if let Some(ty) = type_of_const_literal(&write.value()) {
+            let name = Symbol::from(name);
+            if with_owners && !owner.is_empty() {
+                by_owner.entry(ClassId(Symbol::from(owner))).or_default().insert(name.clone(), ty.clone());
+            }
+            global.insert(name, ty);
         }
     }
 }
@@ -413,9 +447,13 @@ pub fn parse_library_with_rbs(
     // method orphan filter). Done up front so the class registry below
     // can be built from typed methods.
     // (Done inside the per-class loop below.)
-    let constants = crate::analyze::ConstScope::global(
-        parse_module_constants(std::str::from_utf8(ruby_src).unwrap_or("")).unwrap_or_default(),
-    );
+    let ruby_text = String::from_utf8_lossy(ruby_src);
+    let (literal_constants, owned_constants) = parse_module_constant_tables(&ruby_text, true);
+    let constants = crate::analyze::ConstScope::global(literal_constants);
+    let class_constants: std::collections::HashMap<_, _> = owned_constants
+        .into_iter()
+        .map(|(owner, own)| (owner, constants.with_own(own)))
+        .collect();
 
     // Step 1: attach RBS signatures to each method, with arity check.
     // After this loop every method has its `signature` populated.
@@ -427,6 +465,13 @@ pub fn parse_library_with_rbs(
             .unwrap_or_default();
 
         for m in &mut lc.methods {
+            if m.params.iter().any(|p| p.forwarding) {
+                return Err(format!("class `{class_name}` method `{}`: full forwarding is outside the typed runtime-source subset", m.name));
+            }
+            project_runtime_keywords(&mut m.body);
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                project_runtime_keywords(default);
+            }
             let sig = class_sigs.remove(&m.name).ok_or_else(|| {
                 format!(
                     "class `{}` method `{}` has no matching RBS signature",
@@ -459,6 +504,12 @@ pub fn parse_library_with_rbs(
         // becomes the attribute it stands in for, plus its zero in
         // `initialize` (see the fn).
         reclassify_abstract_attributes(&mut lc.methods);
+        for (_, value) in &mut lc.constants {
+            project_runtime_keywords(value);
+        }
+        for call in &mut lc.unknown_calls {
+            project_runtime_keywords(call);
+        }
 
         // Drop abstract sigs from the orphan check. Subclass-overridden
         // contract methods declared `%a{abstract}` in the RBS have no
@@ -515,8 +566,13 @@ pub fn parse_library_with_rbs(
     // their return types flow into outer expressions (e.g. `errors`'s
     // `Array[String]` reaches `errors << "..."` so `<<` resolves to
     // `.push()` per the type-aware operator dispatch).
+    // Standalone runtime files lack the declarations in their sibling
+    // files. Their constant values use owner-first lookup with the
+    // legacy bare-name fallback; other class reads keep exact paths without a
+    // partial Rubydex graph that would misreport them as missing.
     let typer = crate::analyze::BodyTyper::new(&class_registry);
     for lc in &mut library_classes {
+        let scope_constants = class_constants.get(&lc.name).unwrap_or(&constants);
         let build_ctx = |m: &MethodDef,
                          ivars: &std::collections::HashMap<Symbol, Ty>|
          -> crate::analyze::Ctx {
@@ -531,7 +587,7 @@ pub fn parse_library_with_rbs(
                 args: vec![],
             });
             ctx.ivar_bindings = ivars.clone();
-            ctx.constants = constants.clone();
+            ctx.constants = scope_constants.clone();
             // Opt in to typer's self-dispatch annotation: bare Sends
             // that resolve through this class's methods get
             // `Some(SelfRef)` written back on their recv. Per-target
@@ -1108,6 +1164,8 @@ fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
             if m.receiver != MethodReceiver::Instance {
                 continue;
             }
+            let unsupported_formals = m.unsupported_formals;
+            let has_anonymous_block = m.has_anonymous_block;
             if m.name == name {
                 let enclosing = m.enclosing_class.as_ref().map(|s| s.as_str().to_string());
                 let sig = m.signature.take();
@@ -1122,6 +1180,8 @@ fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
                 *m = synthesize_writer(name.as_str(), enclosing.as_deref());
                 m.signature = sig;
             }
+            m.unsupported_formals = unsupported_formals;
+            m.has_anonymous_block = has_anonymous_block;
         }
         let Some(zero) = zero else { continue };
         if let Some(init) = methods
@@ -1174,6 +1234,9 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -1211,6 +1274,9 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         },
     );
     MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver: MethodReceiver::Instance,
@@ -1242,6 +1308,10 @@ fn method_def_from(
         MethodReceiver::Instance
     };
 
+    let formals = crate::ingest::forwarding::parse(def);
+    if formals.anonymous == Some(crate::ingest::forwarding::AnonymousFormal::Forwarding) {
+        return Err(format!("method `{name}`: full forwarding is outside the typed runtime-source subset"));
+    }
     let (params, block_param) = method_params(def, name.as_str())?;
 
     let body = match def.body() {
@@ -1250,6 +1320,13 @@ fn method_def_from(
     };
 
     Ok(MethodDef {
+        visibility: if receiver == MethodReceiver::Instance && matches!(name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone") {
+            crate::dialect::MethodVisibility::Private
+        } else {
+            crate::dialect::MethodVisibility::Public
+        },
+        unsupported_formals: formals.unsupported,
+        has_anonymous_block: formals.has_anonymous_block,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver,

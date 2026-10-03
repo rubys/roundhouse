@@ -19,7 +19,7 @@ use super::attr_parts::{
 };
 use super::walker::rewrite_helpers_in_expr;
 use super::{
-    bare_record_name, inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref,
+    bare_record_name, lit_str, lit_sym, route_helpers_call, send, var_ref,
     view_helpers_call, ViewCtx,
 };
 
@@ -136,12 +136,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             Some(view_helpers_call("dom_id", args))
         }
         Pluralize { count, word } => {
-            // spinel-blog uses `Inflector.pluralize` for the count-
-            // labeling form (separate concern from ActiveSupport's
-            // string pluralization helpers).
-            Some(inflector_call(
-                "pluralize",
-                vec![(*count).clone(), (*word).clone()],
+            Some(crate::lower::view::pluralize_helper_call(
+                (*count).clone(), (*word).clone(),
             ))
         }
         Truncate { text, opts } => {

@@ -48,6 +48,7 @@ pub fn emit_method(m: &MethodDef) -> String {
         .params
         .iter()
         .map(|p| match (&p.default, p.keyword) {
+            _ if p.forwarding => "...".to_string(),
             (Some(default), false) => {
                 format!("{} = {}", p.name.as_str(), emit_default(default))
             }
@@ -163,7 +164,12 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
     }
 }
 
-pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
+/// Model IR before Ruby adaptation. Admission uses this same registry,
+/// demand survey and body typer without rendering files or RBS.
+pub(crate) fn materialize_models(
+    app: &App,
+    materialization: crate::lower::model_to_library::Materialization<'_>,
+) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
     // Collect controller `permit(...)` declarations so the model lowerer
     // can synthesize `from_params(p: <Resource>Params)` factories sized
     // to the permitted-fields list. See `controller_to_library/params.rs`.
@@ -194,12 +200,21 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         )
         .0,
     );
-    let mut lcs = crate::lower::model_to_library::lower_models_to_library_classes_unfolding(
+    let lcs = crate::lower::model_to_library::lower_models_inner(
         &app.models,
         &app.schema,
         Vec::new(),
         &params_specs,
         &assoc_scopes,
+        materialization,
+    ).0;
+    (lcs, params_specs)
+}
+
+pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
+    let (mut lcs, params_specs) = materialize_models(
+        app,
+        crate::lower::model_to_library::Materialization::Emit,
     );
     // The sqlite statement handle `Db.prepare` returns is a per-target
     // `Db` primitive: an integer cursor on most adapters (the shared
@@ -214,7 +229,15 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     for lc in &mut lcs {
         relax_from_stmt_handle(lc);
     }
+    apply_model_lowering(&mut lcs, app);
 
+    emit_model_classes(&lcs, app, &params_specs)
+}
+
+/// The existing ordered Ruby IR producers, shared with accessor admission.
+/// Keep their implementations in place: sharing does not require moving
+/// unrelated controller, view and library transformations.
+pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Ruby-family scope lowering: synthesize model scope methods +
     // normalize scope chains before rendering (no-op for scope-free apps).
     library::apply_scope_lowering(&mut lcs, app);
@@ -296,7 +319,13 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // User on campfire's room page, for records that only answer a name.
     // LAST, after every pass that reads or writes `@<assoc>_cache` by name.
     crate::lower::lazy_model_state::apply(&mut lcs, app);
+}
 
+fn emit_model_classes(
+    lcs: &[LibraryClass],
+    app: &App,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+) -> Vec<EmittedFile> {
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
     // in the require chain loads them. Build a (name, anchor) map from
@@ -1710,6 +1739,9 @@ mod method_sig_tests {
     #[test]
     fn emit_method_renders_optional_default_and_block_param() {
         let m = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("get_from_cache"),
             receiver: MethodReceiver::Instance,

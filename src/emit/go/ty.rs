@@ -43,6 +43,7 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
         // the zero Time stands in for nil (same empty-as-absent
         // convention as "" for nilable strings).
         Some(Ty::Time) => "time.Time".to_string(),
+        Some(Ty::Date) => crate::emit::diagnostics::unsupported_date_ty("go"),
         Some(Ty::Hash { key, value }) => {
             format!(
                 "map[{}]{}",
@@ -145,6 +146,7 @@ pub fn go_ty(ty: &Ty) -> String {
         // separate: it catches hand-written-rbs Time in the shared
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "time.Time".to_string(),
+        Ty::Date => crate::emit::diagnostics::unsupported_date_ty("go"),
         Ty::Nil => "struct{}".to_string(),
         // A self type the analyzer should have substituted with the
         // receiving class (see `Ty::SelfInstance`). Reaching here is a

@@ -26,6 +26,7 @@
 mod predicates;
 mod extra_params;
 mod walker;
+pub(crate) mod form_wrapper;
 pub(crate) mod helpers;
 mod partial;
 mod form_with;
@@ -43,6 +44,7 @@ use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
 use self::extra_params::collect_extra_params;
+use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
 /// Bulk entry: lower every view, then type their bodies against a
@@ -180,6 +182,8 @@ pub fn flatten_lcs_to_functions(
                 module_path: module_path.clone(),
                 name: m.name.clone(),
                 params: m.params.clone(),
+                unsupported_formals: m.unsupported_formals,
+                has_anonymous_block: m.has_anonymous_block,
                 body: m.body.clone(),
                 signature: m.signature.clone(),
                 effects: m.effects.clone(),
@@ -353,8 +357,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // from the body: a body-reads-the-stem heuristic also fires on a
     // BLOCK parameter, which is how `rooms/layouts/_form` — whose
     // `form_with … do |form|` binds `form` — briefly lost its `yield` arg.
+    //
+    // The arg is a positional param, so a reserved-word `as:` (`as:
+    // :for`) goes through `safe_local`, as its reads do.
     let arg_name = view_key_of(view)
         .and_then(|k| lx.collection_element_locals.get(&k).cloned())
+        .map(|local| crate::naming::safe_local(&local))
         .unwrap_or_else(|| {
             infer_view_arg(stem, dir, base.starts_with('_'), known_models)
         });
@@ -387,6 +395,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
+    // An app override owns pluralize, including nested ERB calls.
+    // Qualify it before the framework classifier consumes bare Sends.
+    if let Some(owner) = app.helper_method_index.get(&Symbol::from("pluralize")) {
+        fn qualify_pluralize(e: &mut Expr, owner: &ClassId) {
+            e.node.for_each_child_mut(&mut |c| qualify_pluralize(c, owner));
+            if let ExprNode::Send { recv, method, .. } = &mut *e.node {
+                if recv.is_none() && method.as_str() == "pluralize" {
+                    *recv = Some(Expr::new(e.span, ExprNode::Const {
+                        path: owner.0.as_str().split("::").map(Symbol::from).collect(),
+                    }));
+                }
+            }
+        }
+        qualify_pluralize(&mut rewritten, owner);
+    }
     rewrite_defined_to_nil_check(&mut rewritten);
     // `local_assigns[:x]` → the bare local `x`. Same place and the same
     // reason as the line above: `collect_extra_params` has already
@@ -761,6 +784,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // View methods render HTML — they're functions in the spinel
     // sense (return String), so Method is the right kind.
     let mut method = MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: method_name,
         receiver: MethodReceiver::Class,
@@ -795,6 +821,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -1340,6 +1367,13 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("pluralize"),
         fn_sig(
             vec![(Symbol::from("count"), Ty::Int), (Symbol::from("word"), Ty::Str)],
+            Ty::Str,
+        ),
+    );
+    inf.class_methods.insert(
+        Symbol::from("pluralize_formatted"),
+        fn_sig(
+            vec![(Symbol::from("count"), Ty::Str), (Symbol::from("word"), Ty::Str)],
             Ty::Str,
         ),
     );
@@ -2951,103 +2985,6 @@ pub(crate) fn dynamic_partial_pools(
         .collect()
 }
 
-/// A helper method that is nothing but a wrapper around a form helper
-/// which YIELDS A BUILDER, with the caller's block forwarded through —
-/// campfire's `def composer_form_tag(room, &) = form_with(model: …, url:
-/// …, &)`.
-pub(super) struct FormWrapperHelper {
-    /// The wrapper's own parameters, in declaration order, each with
-    /// its DEFAULT when it has one. `**options` ingests as a trailing
-    /// positional defaulting to `{}` (see the keyword_rest arm in
-    /// `ingest::library_class`), so a call that passes no options is
-    /// short by one argument and has to bind the default rather than
-    /// decline — campfire calls `profile_form_with @user` twice and
-    /// `profile_form_with @user, class: "…"` once, in the same
-    /// template.
-    pub(super) params: Vec<(Symbol, Option<Expr>)>,
-    /// The `form_with(…)` call its body is, block stripped.
-    pub(super) call: Expr,
-}
-
-/// Which helper methods those are.
-///
-/// The BUILDER-YIELDING part is the whole gate, and it is why these
-/// cannot be handled the way the other block-forwarding wrappers are.
-/// `messages_tag(room, &) = tag.div(…, &)` expands IN PLACE inside the
-/// helper module, calling the forwarded block through `capture(&__blk)`
-/// — that works because the block carries no binding across the call: it
-/// is opaque markup either way.
-///
-/// `form_with` yields a FORM BUILDER, and the block body's `form
-/// .rich_text_area :body` calls are macro-inlined at lower time against
-/// that binding (the runtime FormBuilder is retired by design). Leave
-/// the two halves apart and the view's block has an unbound `form` while
-/// the helper has a `form_with` nothing defines — which is exactly the
-/// NoMethodError campfire's room page died on. Bringing the call to the
-/// block is the only shape where both halves are visible at once.
-///
-/// Deliberately narrow, two ways. The body must be that ONE call and
-/// nothing else, so splicing it is a substitution rather than an
-/// inlining — campfire's `auto_submit_form_with` computes a `data` hash
-/// first and is left alone (its one call site passes no block, so it
-/// needs nothing). And a wrapper taking `*args` / `**params` is
-/// declined: campfire's `profile_form_with(model, **params, &)` splats
-/// the caller's options INTO the `form_with` kwargs, and merging a
-/// splat through the substitution is its own job with its own test.
-/// Those three `users/profiles` sites keep the shape they have today.
-fn form_wrapper_helpers(app: &App) -> std::collections::HashMap<String, FormWrapperHelper> {
-    /// Form helpers whose block takes a builder the body then calls.
-    const BUILDER_YIELDING: &[&str] = &["form_with", "form_for", "fields_for"];
-    let mut out = std::collections::HashMap::new();
-    for lc in &app.library_classes {
-        for m in &lc.methods {
-            let Some(blk) = m.block_param.as_ref() else { continue };
-            // A one-statement def body arrives as a single-element Seq.
-            let body = match &*m.body.node {
-                ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
-                _ => &m.body,
-            };
-            let ExprNode::Send { recv: None, method, args, block: Some(b), .. } = &*body.node
-            else {
-                continue;
-            };
-            if !BUILDER_YIELDING.contains(&method.as_str()) {
-                continue;
-            }
-            // The body's block must BE the forwarded parameter — a
-            // literal block would already be expandable in place.
-            if !matches!(&*b.node, ExprNode::Var { name, .. } if *name == blk.name) {
-                continue;
-            }
-            // A splat parameter has no positional slot to substitute.
-            if m.params.iter().any(|p| p.rest) {
-                continue;
-            }
-            out.insert(
-                m.name.as_str().to_string(),
-                FormWrapperHelper {
-                    params: m
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), p.default.clone()))
-                        .collect(),
-                    call: Expr::new(
-                        body.span,
-                        ExprNode::Send {
-                            recv: None,
-                            method: method.clone(),
-                            args: args.clone(),
-                            block: None,
-                            parenthesized: true,
-                        },
-                    ),
-                },
-            );
-        }
-    }
-    out
-}
-
 /// Map each strict-locals partial to its FULL declared locals (record
 /// first, then the keyword tail). Keyed by the same ViewKey space as
 /// `partial_name_to_key`, so a render site resolving a partial name can
@@ -3629,6 +3566,7 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
@@ -3735,7 +3673,9 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
                 rewrite_defined_to_nil_check(v);
             }
         }
-        ExprNode::Splat { value } => rewrite_defined_to_nil_check(value),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            rewrite_defined_to_nil_check(value)
+        }
         ExprNode::MultiAssign { value, .. } => rewrite_defined_to_nil_check(value),
         ExprNode::While { cond, body, .. } => {
             rewrite_defined_to_nil_check(cond);
@@ -4297,7 +4237,7 @@ pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     }
     let recv = Expr::new(
         Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
+        ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
     );
     // Trailing-kwargs vs explicit-Hash decision happens in the body
     // typer's `normalize_trailing_kwargs` — it consults the receiver
@@ -4372,14 +4312,6 @@ pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
 pub(super) fn member_path_call(ctx: &ViewCtx, name: &str, member: Expr) -> Expr {
     let takes_member = ctx.route_helper_arity.get(name).is_none_or(|n| *n > 0);
     route_helpers_call(name, if takes_member { vec![member] } else { Vec::new() })
-}
-
-pub(super) fn inflector_call(method: &str, args: Vec<Expr>) -> Expr {
-    let recv = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("Inflector")] },
-    );
-    send(Some(recv), method, args, None, true)
 }
 
 /// A `Send` constructor that makes the parenthesized flag explicit on

@@ -112,6 +112,10 @@ end
     @last_page = Story.recent.last_page
     @page_before = Story.recent.page_before(Story.first)
     @page_around = Story.page_around(Story.first)
+    @found_one = Story.recent.find(2)
+    @found_many = Story.recent.find([3, 1])
+    @found_normalized = Story.recent.find(Array(params[:id]))
+    @found_array_repr = Story.filtered(1).find([3, 1])
   end
 
   def build_probe
@@ -339,4 +343,15 @@ fn view_iteration_over_materialized_list_still_types_element() {
     }
     walk(&view.body, &mut found_title_str);
     assert!(found_title_str, "story.title should type as Str in the view");
+}
+
+#[test]
+fn find_result_depends_on_the_id_container() {
+    let app = analyzed_app();
+    let record = Ty::Class { id: story(), args: vec![] };
+    assert_eq!(ivar_ty(&app, "found_one"), record);
+    let records = Ty::Array { elem: Box::new(record) };
+    assert_eq!(ivar_ty(&app, "found_many"), records);
+    assert_eq!(ivar_ty(&app, "found_normalized"), records);
+    assert_eq!(ivar_ty(&app, "found_array_repr"), records);
 }

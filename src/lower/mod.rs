@@ -27,6 +27,7 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod fixtures;
+pub(crate) mod forwarding;
 pub mod functionalize;
 pub mod model_associations;
 pub mod persistence;
@@ -281,6 +282,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Deletes provably-dead `false && …` tails before any pass can
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
+    // Preserve native full destinations; ordinary keyword producers
+    // rejoin the legacy projection before any argument-rewriting pass.
+    ("forwarding_keywords", &["bool_fold"]),
     // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
@@ -632,6 +636,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // which only kwrest_forward rewrites — and that one leaves no
     // trailing kwargs Hash behind, so the two cannot both fire.
     ("helper_kwargs", &["kwrest_forward"]),
+    // Keep owner-local form attribute computations inside their helper before
+    // the view walker substitutes builder wrappers across module boundaries.
+    ("form_wrapper_owners", &["helper_kwargs"]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -726,6 +733,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
+    diags.extend(forwarding::apply(app));
+    ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
@@ -872,7 +881,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("and_return");
     case_lambda::apply_case_lambda_lowering(app);
     ran!("case_lambda");
-    first_or_create::apply_first_or_create_lowering(app);
+    diags.extend(first_or_create::apply_first_or_create_lowering(app));
     ran!("first_or_create");
     attr_or_assign::apply_attr_or_assign_lowering(app);
     ran!("attr_or_assign");
@@ -942,6 +951,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
+    view_to_library::form_wrapper::preserve_argument_owners(app, registry);
+    ran!("form_wrapper_owners");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
@@ -1308,6 +1319,41 @@ pub(crate) fn for_each_hook_body_ref(
     }
 }
 
+// One inventory for the extra emit-bound roots the hook walker intentionally
+// excludes. Keep the mutable projection and immutable survey in lockstep.
+macro_rules! forwarding_roots {
+    ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
+        for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
+        for tm in & $($mutable)? $app.test_modules {
+            if let Some(setup) = tm.setup.$option() { $f(setup); }
+            for test in & $($mutable)? tm.tests { $f(& $($mutable)? test.body); }
+            for (_, value) in & $($mutable)? tm.constants { $f(value); }
+            for method in & $($mutable)? tm.helpers {
+                $f(& $($mutable)? method.body);
+                for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+            }
+            for class in & $($mutable)? tm.inner_classes {
+                for method in & $($mutable)? class.methods {
+                    $f(& $($mutable)? method.body);
+                    for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+                }
+                for (_, value) in & $($mutable)? class.constants { $f(value); }
+                for call in & $($mutable)? class.unknown_calls { $f(call); }
+            }
+        }
+    }
+}
+
+pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    for_each_hook_body(app, f);
+    forwarding_roots!(app, f, iter_mut, as_mut, mut);
+}
+
+pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+    for_each_hook_body_ref(app, f);
+    forwarding_roots!(app, f, iter, as_ref);
+}
+
 pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };
@@ -1395,6 +1441,9 @@ pub fn module_funcs_to_library_class(
     let methods: Vec<MethodDef> = funcs
         .iter()
         .map(|f| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: f.unsupported_formals,
+            has_anonymous_block: f.has_anonymous_block,
             name_span: crate::span::Span::synthetic(),
             name: f.name.clone(),
             receiver: MethodReceiver::Class,
@@ -1419,6 +1468,7 @@ pub fn module_funcs_to_library_class(
         origin: None,
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 

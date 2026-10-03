@@ -414,6 +414,7 @@ fn emit_stmts(stmts: &[Expr]) -> String {
 /// three tagged sites, so nothing else observes its iolist shape.
 fn try_string_builder(e: &Expr) -> Option<String> {
     match e.hint? {
+        IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => match &*e.node {
             ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(format!("{name} = []")),
             _ => None,
@@ -2479,6 +2480,7 @@ mod tests {
                 origin: None,
                 constants: Vec::new(),
                 unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
             }
         }
         fn const_ref(path: &[&str]) -> Expr {
@@ -2553,6 +2555,9 @@ mod tests {
         fn syn(node: ExprNode) -> Expr { Expr::new(crate::span::Span::synthetic(), node) }
         fn m(name: &str, params: &[&str], body: Expr) -> MethodDef {
             MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 name_span: crate::span::Span::synthetic(),
                 name: sym(name),
                 receiver: MethodReceiver::Instance,
@@ -2600,6 +2605,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
@@ -2806,6 +2812,9 @@ mod tests {
         });
         // `def truncate(s, length = 30, omission = "...")` on ViewHelpers.
         let truncate = MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("truncate"),
             receiver: MethodReceiver::Class,
@@ -2833,6 +2842,7 @@ mod tests {
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
         };
         clear_modules();
         register_modules(std::iter::once(&vh));

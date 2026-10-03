@@ -18,6 +18,37 @@ use crate::ty::Ty;
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
 impl<'a> BodyTyper<'a> {
+    /// `record[:column]` / `read_attribute(:column)` (and their writer
+    /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
+    /// can only describe their fallback shape, but a literal key and a
+    /// concrete model receiver make the exact column type available.
+    pub(super) fn column_attribute_access_ty(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        let model = match recv_ty? {
+            Ty::Class { id, .. } => id,
+            _ => return None,
+        };
+        let key_arg = match method.as_str() {
+            "[]" | "read_attribute" if args.len() == 1 => &args[0],
+            "[]=" | "write_attribute" if args.len() == 2 => &args[0],
+            _ => return None,
+        };
+        let methods = &self.classes().get(model)?.instance_methods;
+        match &*key_arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                methods.get(value).cloned()
+            }
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+                methods.get(&Symbol::from(value.as_str())).cloned()
+            }
+            _ => None,
+        }
+    }
+
     /// `pluck(:col)` / `pick(:col)` on a relation over a known model.
     ///
     /// The class-side registration in `analyze/mod.rs` types these
@@ -195,20 +226,30 @@ impl<'a> BodyTyper<'a> {
         new_ctx
     }
 
-    /// The class named by a `builder:` keyword, when the call carries one
-    /// and it is a plain constant. `::Foo` and `Foo` name the same class.
-    fn form_builder_id(args: &[Expr]) -> Option<ClassId> {
-        let expr = args.iter().find_map(|a| {
+    /// Form options can still carry source keyword provenance during inference.
+    /// Borrow their value without projecting or consuming the call argument.
+    fn form_option<'e>(args: &'e [Expr], name: &str) -> Option<&'e Expr> {
+        args.iter().find_map(|a| {
+            let a = match &*a.node {
+                ExprNode::KeywordSplat { value } => value,
+                _ => a,
+            };
             let ExprNode::Hash { entries, .. } = &*a.node else { return None };
             entries.iter().find_map(|(k, v)| match &*k.node {
                 ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
-                    if value.as_str() == "builder" =>
+                    if value.as_str() == name =>
                 {
                     Some(v)
                 }
                 _ => None,
             })
-        })?;
+        })
+    }
+
+    /// The class named by a `builder:` keyword, when the call carries one
+    /// and it is a plain constant. `::Foo` and `Foo` name the same class.
+    fn form_builder_id(args: &[Expr]) -> Option<ClassId> {
+        let expr = Self::form_option(args, "builder")?;
         let ExprNode::Const { path } = &*expr.node else { return None };
         let joined = path
             .iter()
@@ -225,17 +266,7 @@ impl<'a> BodyTyper<'a> {
 /// `Product?` still builds a form for a Product. `None` for URL forms.
     fn form_model_ty(method: &Symbol, args: &[Expr]) -> Option<Ty> {
     let model_expr = if method.as_str() == "form_with" {
-        args.iter().find_map(|a| {
-            let ExprNode::Hash { entries, .. } = &*a.node else { return None };
-            entries.iter().find_map(|(k, v)| match &*k.node {
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
-                    if value.as_str() == "model" =>
-                {
-                    Some(v)
-                }
-                _ => None,
-            })
-        })?
+        Self::form_option(args, "model")?
     } else {
         args.first().filter(|a| !matches!(&*a.node, ExprNode::Hash { .. }))?
     };
@@ -501,6 +532,11 @@ impl<'a> BodyTyper<'a> {
     ) {
         use crate::expr::ExprNode;
         use crate::ty::ParamKind;
+        // Producer provenance must survive until the source declaration
+        // selects native forwarding or the ordinary lowering projection.
+        if args.iter().any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. })) {
+            return;
+        }
         let Some(last) = args.last_mut() else { return };
         let ExprNode::Hash { kwargs, .. } = &mut *last.node else { return };
         if !*kwargs {
@@ -807,6 +843,11 @@ impl<'a> BodyTyper<'a> {
             // of Ruby's own guarantees about the answer.
             Some(Ty::Untyped) => conversion_fallback(method).unwrap_or(Ty::Untyped),
             Some(Ty::Class { id, args }) => {
+                if id.0.as_str() == "Date" {
+                    if let Some(ty) = date_constructor(method, call_args) {
+                        return ty;
+                    }
+                }
                 // `Range` is modeled as `Ty::Class { id: "Range", args:
                 // [elem] }` (see the body-typer's `ExprNode::Range` arm),
                 // not a dedicated `Ty` variant, so its methods live in a
@@ -830,6 +871,16 @@ impl<'a> BodyTyper<'a> {
                 // registry, which would leave it an unresolved `Ty::Var`.
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_time" {
                     return Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+                }
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
+                    return Ty::Union { variants: vec![Ty::Date, Ty::Nil] };
+                }
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_date" {
+                    return if matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Date)) {
+                        Ty::Str
+                    } else {
+                        Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                    };
                 }
                 // `ActiveSupport.db_now` — the write-side sibling:
                 // current UTC time in Rails' exact storage form
@@ -1134,6 +1185,9 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Array { elem }) => {
                 let elem: &Ty = elem;
+                if is_model_relation_elem(elem) && array_find(method, args, block_ret) {
+                    return Ty::Array { elem: Box::new(elem.clone()) };
+                }
                 // A relation delegates scope/builder calls to its element
                 // model, so `user.comments.active` and `Story.where(..).hottest`
                 // chain: any class method that returns a relation
@@ -1272,7 +1326,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
                 }
-                if counted_first_last(method, args) {
+                if counted_first_last(method, args) || array_find(method, args, block_ret) {
                     return Ty::Array {
                         elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
                     };
@@ -1393,6 +1447,7 @@ impl<'a> BodyTyper<'a> {
             // inference gap) rather than the parent-chain walk — `Time`
             // has no user-defined ancestors in this corpus.
             Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
+            Some(Ty::Date) => date_method(method, args).unwrap_or_else(unknown),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Float) => float_method(method),
             Some(Ty::Bool) => bool_method(method),
@@ -1615,10 +1670,8 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
 /// like `story.created_at.strftime(...)` dispatches against. The `Time`
 /// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
 /// flattens onto the same table, so the class-side constructors live
-/// here too. Date / DateTime columns also fold into `Ty::Time` (its
-/// method surface is a superset for everything the corpus calls); a
-/// dedicated `date_method` can split them out if a Date-only method ever
-/// surfaces. Returns `None` for unmodeled methods so dispatch falls
+/// here too. DateTime/time-of-day columns also use `Ty::Time`;
+/// date-only columns have their own table. Returns `None` for unmodeled methods so dispatch falls
 /// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
     let time = || Ty::Time;
@@ -1639,7 +1692,8 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         | "prev_month" | "next_month" | "last_month" | "months_ago" | "months_since"
         | "prev_year" | "next_year" | "last_year" | "years_ago" | "years_since"
         | "change" | "advance" | "ago" | "since" | "from_now"
-        | "round" | "floor" | "ceil" | "to_date" | "to_datetime" => time(),
+        | "round" | "floor" | "ceil" | "to_datetime" => time(),
+        "to_date" => Ty::Date,
         // `Time - x` is `Time` for a Duration arg but a Float for a
         // Time arg — the receiver-only dispatch can't disambiguate, so
         // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
@@ -1651,7 +1705,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         },
         // String renderings.
         "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
-        | "strftime" | "httpdate" | "rfc822" | "rfc2822" | "ctime" | "asctime" | "inspect"
+        | "strftime" | "httpdate" | "rfc822" | "ctime" | "asctime" | "inspect"
         | "zone" => Ty::Str,
         // Integer components / epoch seconds / spaceship.
         "to_i" | "tv_sec" | "tv_usec" | "tv_nsec" | "year" | "month" | "mon"
@@ -1669,6 +1723,46 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         _ => return None,
     };
     Some(ty)
+}
+
+/// Ruby's native date-only surface. Do not inherit the Time table:
+/// Date has neither epoch seconds nor a zone, and only Date supports >>.
+fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    // Every core Date argument is optional. Reject known wrong types
+    // and excess arguments rather than declaring a crashing call clean.
+    let numeric = Ty::Union { variants: vec![Ty::Int, Ty::Float] };
+    let expected: Vec<Ty> = match method.as_str() {
+        "new" | "civil" => vec![numeric.clone(), numeric.clone(), numeric.clone(), numeric],
+        "parse" => vec![Ty::Str, Ty::Bool, numeric],
+        "strptime" => vec![Ty::Str, Ty::Str, numeric],
+        "iso8601" => vec![Ty::Str, numeric],
+        "today" => vec![numeric],
+        _ => return None,
+    };
+    let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
+        None | Some(Ty::Var { .. } | Ty::Untyped) => true,
+        Some(actual) => actual == expected || matches!(expected, Ty::Union { variants } if variants.contains(actual)),
+    };
+    Some(if args.len() <= expected.len()
+        && args.iter().zip(&expected).all(|(a, t)| accepts(a.ty.as_ref(), t)) {
+        Ty::Date
+    } else {
+        unknown()
+    })
+}
+
+fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    Some(match method.as_str() {
+        ">>" | "<<" if args.len() == 1
+            && args[0].ty.as_ref().is_none_or(|t| matches!(t, Ty::Int | Ty::Var { .. })) => Ty::Date,
+        "to_date" => Ty::Date,
+        "to_time" => Ty::Time,
+        "year" | "month" | "mon" | "day" | "mday" | "wday" | "yday" => Ty::Int,
+        "iso8601" | "xmlschema" | "to_s" | "strftime" | "inspect" => Ty::Str,
+        "<" | ">" | "<=" | ">=" | "leap?" | "monday?" | "tuesday?" | "wednesday?"
+        | "thursday?" | "friday?" | "saturday?" | "sunday?" => Ty::Bool,
+        _ => return None,
+    })
 }
 
 /// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,
@@ -1716,6 +1810,11 @@ fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
         )
 }
 
+fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
+    method.as_str() == "find" && block_ret.is_none() && args.len() == 1
+        && matches!(args[0].ty, Some(Ty::Array { .. }))
+}
+
 /// Is this array element type a model relation's element — a single
 /// model class, or a union of model classes (a relation threaded
 /// through a helper that several models share)? Used to gate the
@@ -1750,6 +1849,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         }
         ReturnKind::SelfOrNil => union_of(elem.clone(), Ty::Nil),
         ReturnKind::Int => Ty::Int,
+        ReturnKind::IntOrNil => union_of(Ty::Int, Ty::Nil),
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
         ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },

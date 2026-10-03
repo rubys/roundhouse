@@ -113,6 +113,9 @@ require_relative "runtime/redirect_back"
 # The real forgery check behind the shared `verify_authenticity_token`
 # — a reopen of ActionController::Base, ruby-family only (see the file).
 require_relative "runtime/request_forgery_protection"
+# Rails' HTTP Token and Basic auth helpers — another reopen of
+# ActionController::Base, ruby-family only (see the file).
+require_relative "runtime/http_authentication"
 # The signatures on the session and flash cookies — the helpers the two
 # dispatchers restore and persist those cookies through (see the file).
 require_relative "runtime/signed_cookies"
@@ -173,6 +176,7 @@ require_relative "runtime/typed_store"
 # JSON sibling of the line above. After runtime/json_builder, whose
 # string escaper it uses.
 require_relative "runtime/schematized_json"
+require_relative "runtime/json_column"
 require_relative "runtime/action_mailer"
 # App-code gem dependencies, guarded so apps that don't use them (the
 # blog) boot without the gems installed. The list itself lives in
@@ -254,4 +258,3 @@ ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
 # between them count on this line having run before any dispatch.
 require_relative "app/models"
 require_relative "app/views"
-

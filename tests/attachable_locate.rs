@@ -85,7 +85,7 @@ fn an_instance_extend_stubs_the_test_that_reaches_for_it() {
     // written against the object it produced — and the test beside
     // it is untouched.
     assert!(
-        test.contains("  def test_dynamic\n    raise \"roundhouse: Object#extend not supported (all targets)\"\n  end\n"),
+        test.contains("  def test_dynamic\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
         "the dynamic test should be the raise:\n{test}"
     );
     assert!(!test.contains(".extend"), "no extend survives into the emit:\n{test}");
@@ -210,6 +210,28 @@ fn the_tolerant_from_node_reopen_becomes_the_permitted_list() {
         locator.contains("    def self.permitted_without_signature\n      [\"User\"]\n    end\n"),
         "generated list:\n{locator}"
     );
+}
+
+#[test]
+fn a_recognized_reopen_does_not_hide_an_unsupported_include_in_the_same_hook() {
+    let source = TOLERANT_REOPEN.replacen(
+        "ActiveSupport.on_load(:action_text_content) do",
+        "ActiveSupport.on_load(:action_text_content) do\n  include ActionText::HasMarkdown",
+        1,
+    );
+    roundhouse::ingest::survey::activate();
+    let app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("lib/rails_ext/action_text_attachables.rb", &source),
+    ]);
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(app.attachable_unsigned_models, vec![roundhouse::Symbol::from("User")]);
+    assert_eq!(gaps.len(), 1, "only the include is unsupported: {gaps:?}");
+    let message = gaps[0].to_string();
+    assert!(message.contains("on_load(:action_text_content)"), "{message}");
+    assert!(message.contains("include ActionText::HasMarkdown"), "{message}");
+    assert!(message.contains("mixin installation is unsupported"), "{message}");
 }
 
 #[test]

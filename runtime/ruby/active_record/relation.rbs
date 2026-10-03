@@ -43,6 +43,21 @@ module ActiveRecord
     def order!: (*untyped parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
+    # Kaminari's pagination surface (see the .rb): `page` / `per` take
+    # whatever the request handed over (a params String, an Integer or
+    # nil) and read it through `to_s`.
+    def page: (?untyped num) -> Relation
+    def per: (untyped num) -> Relation
+    def limit_value: () -> Integer?
+    def offset_value: () -> Integer?
+    def current_page: () -> Integer
+    def total_count: () -> Integer
+    def total_pages: () -> Integer
+    def first_page?: () -> bool
+    def last_page?: () -> bool
+    def out_of_range?: () -> bool
+    def next_page: () -> Integer?
+    def prev_page: () -> Integer?
     def group: (*untyped parts) -> Relation
     def having: (untyped condition, *untyped args) -> Relation
     def joins: (untyped spec) -> Relation
@@ -171,7 +186,8 @@ module ActiveRecord
     def pluck: (untyped col) -> Array[untyped]
     def pick: (untyped col) -> untyped
     def ids: () -> Array[Integer]
-    def find: (Integer id) -> untyped
+    def find: (Integer | String | Array[Integer | String] id) -> untyped
+    def find_ids: (Array[Integer | String] ids) -> Array[untyped]
     def find_by: (untyped conditions) -> untyped
     def find_by!: (untyped conditions) -> untyped
     def first_or_initialize: () -> untyped

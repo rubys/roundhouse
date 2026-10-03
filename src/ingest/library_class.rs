@@ -17,10 +17,11 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
+use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
-    find_all_modules_with_scope, find_first_class, flatten_statements, module_name_path,
-    symbol_value,
+    find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
+    flatten_statements, module_name_path, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -298,6 +299,7 @@ pub(super) fn library_class_and_struct_base(
             origin: None,
             constants,
             unknown_calls,
+            class_ivar_initializers: Vec::new(),
         },
         base,
     ))
@@ -483,7 +485,10 @@ fn synth_sorbet_enum_methods(owner: &ClassId, members: &[SorbetEnumMember]) -> V
         name_span: Span::synthetic(),
         name: Symbol::from(name),
         receiver,
+        visibility: if name == "initialize" { crate::dialect::MethodVisibility::Private } else { crate::dialect::MethodVisibility::Public },
         params,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -819,7 +824,10 @@ fn synth_sorbet_struct_methods(
         name_span: Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Private,
         params,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: assigns }),
         signature: None,
         effects: EffectSet::default(),
@@ -896,7 +904,10 @@ fn synth_struct_equality(owner: &ClassId, members: &[SorbetStructMember]) -> Met
         name_span: Span::synthetic(),
         name: Symbol::from("=="),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: vec![Param::positional(Symbol::from("other"))],
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body: condition,
         signature: None,
         effects: EffectSet::default(),
@@ -994,7 +1005,10 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Private,
         params,
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: assigns }),
         signature: None,
         effects: EffectSet::default(),
@@ -1017,6 +1031,7 @@ fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
         }),
         constants: Vec::new(),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
@@ -1039,8 +1054,9 @@ fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
+    let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
     let (includes, methods, constants, unknown_calls) =
-        walk_decl_body(module.body(), &owner, file, false)?;
+        walk_decl_body_with_visibility(module.body(), &owner, file, false, &visibility)?;
     Ok(LibraryClass {
         name: owner,
         is_module: true,
@@ -1051,6 +1067,7 @@ fn library_class_from_module_node_with_scope(
         origin: None,
         constants,
         unknown_calls,
+        class_ivar_initializers: Vec::new(),
     })
 }
 
@@ -1144,11 +1161,6 @@ const SORBET_ANNOTATIONS: &[&str] = &[
 ];
 
 const POSITION_SENSITIVE_MARKERS: &[&str] = &[
-    "private",
-    "public",
-    "protected",
-    "private_class_method",
-    "public_class_method",
     "private_constant",
     "public_constant",
     "require",
@@ -1178,7 +1190,7 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 /// singleton must open exactly that parameter (not a differently-named
 /// local or an ivar) — so this never mis-attributes unrelated method-
 /// body metaprogramming as includer class methods (invariant 6).
-fn included_hook_class_methods_body<'pr>(
+pub(super) fn included_hook_class_methods_body<'pr>(
     def: &ruby_prism::DefNode<'pr>,
 ) -> Option<ruby_prism::Node<'pr>> {
     let param_name = included_hook_parameter(def)?;
@@ -1245,6 +1257,17 @@ fn walk_decl_body<'pr>(
     file: &str,
     force_class_receiver: bool,
 ) -> IngestResult<DeclBody> {
+    let visibility = Visibility::resolve(body.as_ref(), file, None)?;
+    walk_decl_body_with_visibility(body, owner, file, force_class_receiver, &visibility)
+}
+
+fn walk_decl_body_with_visibility<'pr>(
+    body: Option<ruby_prism::Node<'pr>>,
+    owner: &ClassId,
+    file: &str,
+    force_class_receiver: bool,
+    visibility: &Visibility,
+) -> IngestResult<DeclBody> {
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
@@ -1256,6 +1279,9 @@ fn walk_decl_body<'pr>(
     // receiver to Class. Doesn't affect nested `class`/`module` bodies
     // — they get their own walk_decl_body recursion.
     let mut module_function_active = false;
+    // `extend self` exposes methods with their instance visibility; unlike
+    // module_function, it neither makes a public copy nor ends at `private`.
+    let mut extend_self_active = false;
     // Names from the `module_function :a, :b` form, plus the positions
     // of the direct `def`s in this body they may promote. Tracking
     // positions (rather than searching `methods` by name at the end)
@@ -1271,7 +1297,20 @@ fn walk_decl_body<'pr>(
     let statements = flatten_statements(b);
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
-    for stmt in statements {
+    for statement in statements {
+        let definition = visibility::definition(&statement).map(|d| d.as_node());
+        let stmt = definition.as_ref().unwrap_or(&statement);
+        if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
+            // Only bare instance-visibility markers end Ruby's module_function
+            // mode. Named and inline forms don't change that lexical mode.
+            let call = statement.as_call_node().unwrap();
+            if call.arguments().is_none()
+                && matches!(constant_id_str(&call.name()), "public" | "protected" | "private")
+            {
+                module_function_active = false;
+            }
+            continue;
+        }
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
         // declares its members inside a block, so the constants are one
         // level deeper than every other class-body constant. They are
@@ -1355,7 +1394,7 @@ fn walk_decl_body<'pr>(
             // `included` method of its own.
             if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                 let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                    walk_decl_body(Some(singleton_body), owner, file, true)?;
+                    walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
@@ -1366,7 +1405,14 @@ fn walk_decl_body<'pr>(
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
-            if force_class_receiver || module_function_active {
+            visibility.apply(&statement, &mut m);
+            if module_function_active && m.receiver == MethodReceiver::Instance {
+                // The retained singleton copy is public even if the original
+                // instance definition is private/protected. extend self shares
+                // the original method instead and must retain its visibility.
+                m.visibility = crate::dialect::MethodVisibility::Public;
+            }
+            if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
             direct_def_positions.push(methods.len());
@@ -1377,7 +1423,7 @@ fn walk_decl_body<'pr>(
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
             let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                walk_decl_body(sc.body(), owner, file, true)?;
+                walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?;
             includes.extend(inner_includes);
             methods.extend(inner_methods);
             constants.extend(inner_constants);
@@ -1396,7 +1442,7 @@ fn walk_decl_body<'pr>(
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
                 let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                    walk_decl_body(m.body(), owner, file, true)?;
+                    walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
                 includes.extend(inner_includes);
                 methods.extend(inner_methods);
                 constants.extend(inner_constants);
@@ -1415,7 +1461,7 @@ fn walk_decl_body<'pr>(
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
                         let (inner_includes, inner_methods, inner_constants, inner_unknown) =
-                            walk_decl_body(block.body(), owner, file, true)?;
+                            walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?;
                         includes.extend(inner_includes);
                         methods.extend(inner_methods);
                         constants.extend(inner_constants);
@@ -1489,10 +1535,14 @@ fn walk_decl_body<'pr>(
                             let want_reader = kw.ends_with("_reader") || kw.ends_with("_accessor");
                             let want_writer = kw.ends_with("_writer") || kw.ends_with("_accessor");
                             if want_reader {
-                                methods.push(synth_attr_reader(owner, name, recv));
+                                let mut method = synth_attr_reader(owner, name, recv);
+                                visibility.apply(&statement, &mut method);
+                                methods.push(method);
                             }
                             if want_writer {
-                                methods.push(synth_attr_writer(owner, name, recv));
+                                let mut method = synth_attr_writer(owner, name, recv);
+                                visibility.apply(&statement, &mut method);
+                                methods.push(method);
                             }
                         }
                     }
@@ -1511,10 +1561,10 @@ fn walk_decl_body<'pr>(
                             alias_source(&call, &methods, force_class_receiver).unwrap();
                         let mut copy = methods[source].clone();
                         copy.name = Symbol::from(to.as_str());
+                        visibility.apply(&statement, &mut copy);
                         methods.push(copy);
                     }
-                    // `extend self` — the OTHER spelling of the same
-                    // idea, and the one campfire's
+                    // `extend self` — the spelling campfire's
                     // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
                     // makes every instance method a singleton method
                     // too, so `PrivateNetworkGuard.resolve(host)` reaches
@@ -1524,9 +1574,8 @@ fn walk_decl_body<'pr>(
                     // left `Opengraph::Metadata.from_url` fetching
                     // nothing at all.
                     //
-                    // Same treatment as bare `module_function`: our
-                    // targets call these as `Mod.x(...)`, so only the
-                    // class-method form is needed.
+                    // Our targets retain only the class-method form, but
+                    // unlike module_function, it keeps instance visibility.
                     "extend"
                         if call
                             .arguments()
@@ -1536,7 +1585,7 @@ fn walk_decl_body<'pr>(
                             })
                             .unwrap_or(false) =>
                     {
-                        module_function_active = true;
+                        extend_self_active = true;
                     }
                     "module_function" => {
                         // Bare `module_function` (no args) — flip the
@@ -1633,6 +1682,7 @@ fn walk_decl_body<'pr>(
                 .any(|n| n == methods[*pos].name.as_str())
             {
                 methods[*pos].receiver = MethodReceiver::Class;
+                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
                 promoted.push(methods[*pos].name.clone());
             }
         }
@@ -1734,7 +1784,10 @@ pub(crate) fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: Method
         name_span: crate::span::Span::synthetic(),
         name: name.clone(),
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -1792,7 +1845,10 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
         name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params: vec![Param::positional(value_param)],
+        unsupported_formals: None,
+        has_anonymous_block: false,
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -1811,6 +1867,7 @@ pub(super) fn ingest_library_method(
 ) -> IngestResult<crate::dialect::MethodDef> {
     use crate::dialect::{MethodDef, MethodReceiver};
 
+    let formals = super::forwarding::parse(def);
     let name = Symbol::from(constant_id_str(&def.name()));
     let receiver = if def.receiver().is_some() {
         MethodReceiver::Class
@@ -1878,6 +1935,10 @@ pub(super) fn ingest_library_method(
         // repairs the call, and the marks are the only record that
         // these slots were not positional in the source.
         let keeps_keywords = params.iter().any(|p| p.rest)
+            // Nameless `**` must keep the adjacent keyword group too:
+            // a flattened optional would otherwise bind its default
+            // while the keyword disappears into this rest slot.
+            || formals.anonymous == Some(super::forwarding::AnonymousFormal::KeywordRest)
             || pn
                 .keywords()
                 .iter()
@@ -1944,25 +2005,14 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        let beside_positional_rest = params.iter().any(|p| p.rest && !p.keyword);
-                        if keeps_keywords && !beside_positional_rest {
+                        if keeps_keywords {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
-                            // (`def call(server_context:, arguments = {})`).
+                            // and dropping it beside `*args` changes the
+                            // rest array even when the keyword-rest is unread.
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
-                            params.push(p);
-                        } else if beside_positional_rest {
-                            // Beside a positional `*rest` the caller's
-                            // keywords already land in the rest, so the
-                            // slot is marked and dropped below unless the
-                            // body reads it (tests/initializer_defined_constants).
-                            // When it is read, `(*args, opts = {})` does
-                            // not parse, so it stays a real `**kwrest`.
-                            let mut p = Param::keyword(Symbol::from(s), None);
-                            p.rest = true;
-                            p.from_kwrest = true;
                             params.push(p);
                         } else {
                             let mut p = Param::with_default(
@@ -1999,23 +2049,16 @@ pub(super) fn ingest_library_method(
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
-    // `def f(*args, **opts)` — the `**opts` flattening above (a trailing
-    // `opts = {}`) cannot follow a rest param: `(*args, opts = {})` does
-    // not parse. With a rest param present a caller's keywords already
-    // land in it as a trailing Hash, so when the body never reads the
-    // kwrest the slot carries nothing and is dropped. Lobsters'
-    // `Telebugs` no-ops (`def self.user *args, **kwargs; end`) are the
-    // shape. A body that does read it keeps the slot, as a real
-    // `**kwrest` (see above).
-    if params.iter().any(|p| p.rest) {
-        params.retain(|p| !p.from_kwrest || expr_reads_local(&body, &p.name));
-    }
+    params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
         name,
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params,
+        unsupported_formals: formals.unsupported,
+        has_anonymous_block: formals.has_anonymous_block,
         body,
         signature: None,
         effects: crate::effect::EffectSet::default(),
@@ -2330,14 +2373,26 @@ pub struct ConcernClassMethodSpans {
     pub methods: Vec<Span>,
     pub bridges: Vec<Span>,
     pub has_nested_carrier: bool,
+    /// Literal framework identity and calls that require it to be installed.
+    /// Finite configuration uses these; factory bridge splicing is unchanged.
+    pub concern_extensions: Vec<Span>,
+    pub concern_calls: Vec<Span>,
+    pub has_other_extensions: bool,
 }
 
-pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<ConcernClassMethodSpans> {
+pub fn ingest_concern_class_method_spans(
+    source: &[u8],
+    file: &str,
+) -> (Vec<ConcernClassMethodSpans>, HashSet<ClassId>) {
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
-            if let Some(def) = stmt.as_def_node() {
-                out.push(super::util::def_name_span(&def, file));
+            if let Some(def) = visibility::definition(&stmt) {
+                // The carrier's instance definitions become includer
+                // class methods. Its own singletons do not cross.
+                if def.receiver().is_none() {
+                    out.push(super::util::def_name_span(&def, file));
+                }
             }
         }
     }
@@ -2345,7 +2400,7 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();
-    for (scope, module) in find_all_modules_with_scope(&root) {
+    for (scope, module) in find_all_module_declarations_with_scope(&root) {
         let Some(name_path) = module_name_path(&module) else { continue };
         // A nested `ClassMethods` is reported under its PARENT, which is
         // the module an app actually includes.
@@ -2360,6 +2415,9 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
         let mut spans: Vec<Span> = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
+        let mut concern_extensions = Vec::new();
+        let mut concern_calls = Vec::new();
+        let mut has_other_extensions = false;
         for stmt in flatten_statements(body) {
             if let Some(m) = stmt.as_module_node() {
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
@@ -2369,6 +2427,29 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 continue;
             }
             if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none() {
+                    let loc = call.location();
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: loc.start_offset() as u32,
+                        end: loc.end_offset() as u32,
+                    };
+                    match constant_id_str(&call.name()) {
+                        "extend" => {
+                            if call.block().is_none() && call.arguments().is_some_and(|args| {
+                                args.arguments().len() == 1 && args.arguments().iter().any(|arg| {
+                                    constant_path_of(&arg).is_some_and(|p| p.join("::") == "ActiveSupport::Concern")
+                                })
+                            }) {
+                                concern_extensions.push(span);
+                            } else {
+                                has_other_extensions = true;
+                            }
+                        }
+                        "class_methods" | "include" | "prepend" => concern_calls.push(span),
+                        _ => {}
+                    }
+                }
                 if call.receiver().is_none()
                     && constant_id_str(&call.name()) == "class_methods"
                 {
@@ -2385,7 +2466,7 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
-            if let Some(def) = stmt.as_def_node() {
+            if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);
                 }
@@ -2394,16 +2475,136 @@ pub fn ingest_concern_class_method_spans(source: &[u8], file: &str) -> Vec<Conce
                 }
             }
         }
-        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier {
+        if !spans.is_empty() || !bridges.is_empty() || has_nested_carrier
+            || !concern_extensions.is_empty() || has_other_extensions
+        {
             out.push(ConcernClassMethodSpans {
                 owner: id,
                 methods: spans,
                 bridges,
                 has_nested_carrier,
+                concern_extensions,
+                concern_calls,
+                has_other_extensions,
             });
         }
     }
-    out
+    // Framework identity must not depend on which declarations survive
+    // library-shape ingestion. This walk records binding barriers only;
+    // it neither evaluates constants nor executes class bodies.
+    let mut shadows = HashSet::new();
+    framework_shadow_scopes(&root, &mut shadows);
+    (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
+}
+
+fn framework_shadow_scopes(
+    node: &ruby_prism::Node<'_>,
+    out: &mut HashSet<Vec<String>>,
+) {
+    struct Shadows<'a> {
+        scope: Vec<String>,
+        out: &'a mut HashSet<Vec<String>>,
+    }
+    impl Shadows<'_> {
+        fn literal_path(node: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+            if let Some(read) = node.as_constant_read_node() {
+                return Some(vec![constant_id_str(&read.name()).to_string()]);
+            }
+            let path = node.as_constant_path_node()?;
+            let mut names = path.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p))?;
+            names.push(constant_id_str(&path.name()?).to_string());
+            Some(names)
+        }
+        fn binding(&mut self, node: &ruby_prism::Node<'_>) {
+            let name = node.as_constant_write_node().map(|n| n.name())
+                .or_else(|| node.as_constant_or_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_and_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_operator_write_node().map(|n| n.name()))
+                .or_else(|| node.as_constant_target_node().map(|n| n.name()));
+            if let Some(name) = name {
+                if constant_id_str(&name) == "ActiveSupport" {
+                    self.out.insert(self.scope.clone());
+                }
+                if self.scope == ["ActiveSupport"] && constant_id_str(&name) == "Concern" {
+                    self.out.insert(Vec::new());
+                }
+            }
+            let target = node.as_constant_path_write_node().map(|n| n.target().as_node())
+                .or_else(|| node.as_constant_path_or_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_and_write_node().map(|n| n.target().as_node()))
+                .or_else(|| node.as_constant_path_operator_write_node().map(|n| n.target().as_node()));
+            let (path, name) = if let Some(target) = target {
+                (Self::literal_path(&target), target.as_constant_path_node().and_then(|n| n.name()))
+            } else if let Some(target) = node.as_constant_path_target_node() {
+                let mut path = target.parent().map_or(Some(Vec::new()), |p| Self::literal_path(&p));
+                if let (Some(path), Some(name)) = (&mut path, target.name()) {
+                    path.push(constant_id_str(&name).to_string());
+                }
+                (path, target.name())
+            } else {
+                return;
+            };
+            let Some(path) = path else {
+                if name.is_some_and(|n| matches!(constant_id_str(&n), "ActiveSupport" | "Concern")) {
+                    self.out.insert(Vec::new());
+                }
+                return;
+            };
+            let parent = match path.as_slice() {
+                [parent @ .., name] if name == "ActiveSupport" => Some(parent),
+                [parent @ .., namespace, name] if namespace == "ActiveSupport" && name == "Concern" => Some(parent),
+                _ => None,
+            };
+            if let Some(parent) = parent {
+                self.out.insert(parent.to_vec());
+                let mut relative = self.scope.clone();
+                relative.extend_from_slice(parent);
+                self.out.insert(relative);
+            }
+        }
+        fn declaration(&mut self, path: ruby_prism::Node<'_>, body: Option<ruby_prism::Node<'_>>, class: bool) {
+            use super::util::constant_path_is_rooted;
+            let Some(names) = Self::literal_path(&path) else {
+                // A dynamic namespace cannot establish a safe lookup scope.
+                self.out.insert(Vec::new());
+                return;
+            };
+            let outer = self.scope.clone();
+            if path.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+                self.scope.clear();
+            }
+            self.scope.extend(names);
+            // Only a root module reopening preserves the framework identity;
+            // nested declarations and class declarations remain barriers.
+            if self.scope.last().is_some_and(|name| name == "ActiveSupport")
+                && (self.scope.len() > 1 || class)
+            {
+                self.out.insert(self.scope[..self.scope.len() - 1].to_vec());
+            }
+            if self.scope.as_slice() == ["ActiveSupport", "Concern"] {
+                self.out.insert(Vec::new());
+            }
+            if let Some(body) = body {
+                ruby_prism::Visit::visit(self, &body);
+            }
+            self.scope = outer;
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Shadows<'_> {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) { self.binding(&node); }
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.declaration(node.constant_path(), node.body(), false);
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(superclass) = node.superclass() { self.visit(&superclass); }
+            self.declaration(node.constant_path(), node.body(), true);
+        }
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if let Some(receiver) = node.receiver() { self.visit(&receiver); }
+        }
+    }
+    ruby_prism::Visit::visit(&mut Shadows { scope: Vec::new(), out }, node);
 }
 
 pub fn ingest_concern_filters(
@@ -2557,26 +2758,40 @@ pub type ConcernModelItems = (
     Vec<(ClassId, Vec<(Symbol, Vec<(String, crate::expr::Literal)>)>)>,
 );
 
-pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
-    use crate::dialect::ModelBodyItem;
-
-    fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
-        for stmt in flatten_statements(body) {
-            if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none()
-                    && constant_id_str(&call.name()) == "with_options"
-                {
-                    if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
-                        if let Some(inner) = block.body() {
-                            walk_dsl_stmts(inner, out);
-                        }
-                        continue;
+fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
+    for stmt in flatten_statements(body) {
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none()
+                && constant_id_str(&call.name()) == "with_options"
+            {
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    if let Some(inner) = block.body() {
+                        walk_dsl_stmts(inner, out);
                     }
+                    continue;
                 }
             }
-            out.push(stmt);
         }
+        out.push(stmt);
     }
+}
+
+/// Only blocks with a retained candidate have a per-includer refusal gate.
+/// Reuse the collector's traversal and IR recognizer, not a broader AST search.
+pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId, file: &str) -> bool {
+    let mut stmts = Vec::new();
+    walk_dsl_stmts(body, &mut stmts);
+    super::survey::without_recording(|| {
+        stmts.iter().any(|stmt| {
+            super::model::ingest_model_body_items(stmt, owner, file, Vec::new())
+                .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+        })
+    })
+}
+
+pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
+    use super::concern_accessors::{decline, is_candidate, is_supported};
+    use crate::dialect::ModelBodyItem;
 
     let result = parse(source);
     let root = result.node();
@@ -2598,8 +2813,11 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
             }
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
+            let direct = flatten_statements(block_body);
+            let block_start = items.len();
+            let mut unclaimed = false;
             let mut stmts = Vec::new();
-            walk_dsl_stmts(block_body, &mut stmts);
+            walk_dsl_stmts(block.body().unwrap(), &mut stmts);
             for inner in stmts {
                 // `enum` inside `included do` belongs to every includer
                 // exactly like an association does — campfire declares
@@ -2618,6 +2836,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                         Ok(None) => {}
                         Err(err) => {
                             super::survey::record(&err);
+                            unclaimed = true;
                             continue;
                         }
                     }
@@ -2629,7 +2848,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // one field of several.
                 match super::model::ingest_model_body_items(&inner, &id, file, Vec::new()) {
                     Ok(parsed) => {
-                        for item in parsed {
+                        for mut item in parsed {
                             match item {
                                 ModelBodyItem::Association { .. }
                                 | ModelBodyItem::Scope { .. }
@@ -2645,17 +2864,42 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                                 // includer. Other Unknowns stay with the
                                 // module.
                                 ModelBodyItem::Unknown { .. } => {
+                                    if is_candidate(&item) {
+                                        if !is_supported(&item) {
+                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
+                                        } else if !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset()) {
+                                            decline(&mut item, "inside with_options is not modeled");
+                                        }
+                                    }
                                     if unknown_is_block_callback(&item)
                                         || unknown_is_model_macro(&item)
+                                        || is_candidate(&item)
                                     {
                                         items.push(item);
+                                    } else if !matches!(&item, ModelBodyItem::Unknown { expr, .. }
+                                        if matches!(&*expr.node, crate::expr::ExprNode::Lit { .. }))
+                                    {
+                                        unclaimed = true;
                                     }
                                 }
-                                _ => {}
+                                _ => unclaimed = true,
                             }
                         }
                     }
-                    Err(err) => super::survey::record(&err),
+                    Err(err) => {
+                        super::survey::record(&err);
+                        unclaimed = true;
+                    }
+                }
+            }
+            // A dropped statement can alter a carried accessor's
+            // visibility or definition. Defer the refusal until a
+            // model actually includes it; dormant blocks stay inert.
+            if unclaimed && items[block_start..].iter().any(is_candidate) {
+                for item in &mut items[block_start..] {
+                    if is_candidate(item) {
+                        decline(item, "alongside unmodeled included-block statements is not supported");
+                    }
                 }
             }
         }
@@ -2794,29 +3038,6 @@ pub(super) fn expand_props_bases(app: &mut crate::App) {
         synthesized.append(&mut lc.methods);
         lc.methods = synthesized;
     }
-}
-
-/// Does `expr` read the local `name` anywhere (a bare identifier ingests
-/// as a `Var`, or as a receiverless zero-arg `Send` when ingest could not
-/// tell it was a local)?
-fn expr_reads_local(expr: &Expr, name: &Symbol) -> bool {
-    let hit = match &*expr.node {
-        ExprNode::Var { name: n, .. } => n == name,
-        ExprNode::Send { recv: None, method, args, block: None, .. } => {
-            method == name && args.is_empty()
-        }
-        _ => false,
-    };
-    if hit {
-        return true;
-    }
-    let mut found = false;
-    expr.node.for_each_child(&mut |c| {
-        if !found && expr_reads_local(c, name) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Ruby reserved words: a parameter with one of these names is only

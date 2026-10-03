@@ -157,7 +157,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     let (ingest_result, parse_diags) =
         crate::timings::phase("ingest", || crate::ingest::prism::scope(|| ingest_app(path)));
 
-    let survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
+    let mut survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
 
     let mut app = match ingest_result {
         Ok(app) => app,
@@ -194,6 +194,9 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // notes with the root cause attached so the error count below means
     // "findings", not "shadows of the gaps listed at the end".
     crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &survey_errors);
+    if continue_on_error {
+        crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut survey_errors);
+    }
     // Likewise a dispatch on a gem the analyzer does not model — the
     // census below names the gems, this labels the diagnostics.
     crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
@@ -226,9 +229,10 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     }
     // Which app-layer roots ingest actually walked — silent for the
     // common one-root case (so the fixtures' expected output stays
-    // unchanged), printed for a Packwerk app so a run proves
-    // `packs/*/app` (or `components/*`, `engines/*`) was in scope
-    // rather than silently limited to the root `app/`.
+    // unchanged), printed for a Packwerk app or one with an in-repo
+    // engine so a run proves `packs/*/app` (or `components/*`,
+    // `engines/*`, `lib/<engine>/app`) was in scope rather than
+    // silently limited to the root `app/`.
     if app.app_roots.len() > 1 {
         const MAX_SHOWN: usize = 8;
         let shown: Vec<&str> = app.app_roots.iter().take(MAX_SHOWN).map(String::as_str).collect();

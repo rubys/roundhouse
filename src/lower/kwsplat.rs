@@ -134,8 +134,10 @@ struct Signatures {
 }
 
 pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
+    // This public pass is also used outside the complete hook pipeline.
+    // Project ordinary producers through the same source contract first.
+    let mut diags = super::forwarding::apply(app);
     let sigs = collect_signatures(app);
-    let mut diags = Vec::new();
     super::for_each_hook_body(app, &mut |body| rewrite(body, &sigs, &mut diags));
     apply_to_test_modules(app, &mut diags);
     diags
@@ -342,6 +344,13 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
 /// The same question with the callee's parameter list already in hand.
 fn erased_splat_against(args: &[Expr], params: &[Param]) -> Option<ErasedSplat> {
     let last = args.last()?;
+    // Full packets are explicit source facts, not erased hash expressions
+    // from which this pass can recover an anonymous keyword splat.
+    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. }))
+        || params.iter().any(|p| p.forwarding)
+    {
+        return None;
+    }
     // A literal keyword list already renders as keywords.
     if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) {
         return None;

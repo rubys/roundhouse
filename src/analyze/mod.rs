@@ -25,16 +25,21 @@
 
 mod alba;
 mod body;
+mod class_configuration;
 pub(crate) use body::string_answers;
+pub(crate) use body::ConstResolverTask;
+pub use body::PreparedConstResolver;
 pub mod async_color;
 pub mod attribution;
 pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 mod registry;
+mod test_module;
 mod render;
 mod effects;
 mod diagnostics;
+pub(crate) mod forwarding;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
@@ -52,6 +57,8 @@ pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
 use std::collections::{BTreeSet, HashMap};
+use rubydex::model::identity_maps::IdentityHashMap;
+use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
@@ -62,7 +69,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Row, Ty};
+use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -91,6 +98,10 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Method names the host fold copied onto each MODULE from its
+    /// includers (see `fold_host_surfaces`). Kept out of what the
+    /// concern fold copies back down, and rewritten every round.
+    host_folded: HashMap<ClassId, BTreeSet<Symbol>>,
     /// Methods whose body ends in `.inquiry` — the evidence
     /// [`inquiry::is_inquiry_predicate`] needs to answer
     /// `content_type.attachment?` as Bool on a `Str` receiver.
@@ -110,12 +121,11 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
-    /// `body::ConstIndex` over `classes`, with the class count it was
-    /// built at. The registry only grows, so a count change is exactly
-    /// when it goes stale.
-    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
+    /// Resolved once from the source snapshot supplied to `Analyzer::new`.
+    const_resolver: std::sync::Arc<body::ConstResolver>,
+    /// Inferred values keyed by Rubydex declaration IDs, not by names.
+    typed_constants: IdentityHashMap<DeclarationId, Ty>,
 }
-
 
 impl Analyzer {
     /// Build an analyzer with the default database adapter
@@ -771,15 +781,23 @@ impl Analyzer {
             }
         }
 
+        // Test helpers are source methods, not a surface invented by test
+        // emission. Register their real identities and declarations before
+        // source typing; inferred returns converge in the same registry as
+        // ordinary application methods.
+        test_module::register(&mut classes, app);
+
         Self {
             classes,
             current_attribute_classes: crate::current_set::scoped_classes(app),
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
+            host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
-            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
+            const_resolver: app.const_resolver.for_sources(&app.sources),
+            typed_constants: IdentityHashMap::default(),
         }
     }
 
@@ -789,19 +807,8 @@ impl Analyzer {
         BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
             .with_current_attributes(&self.current_attribute_classes)
-            .with_const_index(self.const_index())
-    }
-
-    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
-        let mut slot = self.const_index.lock().unwrap();
-        if let Some((count, index)) = &*slot {
-            if *count == self.classes.len() {
-                return index.clone();
-            }
-        }
-        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
-        *slot = Some((self.classes.len(), index.clone()));
-        index
+            .with_const_resolver(self.const_resolver.clone())
+            .with_typed_constants(&self.typed_constants)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -851,8 +858,8 @@ impl Analyzer {
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
         for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
-            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -861,7 +868,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
+            crate::timings::phase(format_args!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -927,7 +934,7 @@ impl Analyzer {
         self.type_direct_helper_bodies(app);
         self.type_rails_application_body(app);
 
-        self.stamp_inferred_library_signatures(app);
+        self.stamp_inferred_method_signatures(app);
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -1091,7 +1098,7 @@ impl Analyzer {
     }
 
     /// Post-fixpoint: write what inference discovered into the
-    /// `MethodDef.signature` of every library-class method, so the
+    /// `MethodDef.signature` of library methods and source test helpers, so the
     /// emitted RBS carries it (`errors_for: (Comment | Story | …) ->
     /// String?` instead of `(untyped) -> untyped`) and AOT targets can
     /// dispatch inside the body. Self-describing IR: the body typer
@@ -1120,17 +1127,18 @@ impl Analyzer {
     ///   `Var`/`Untyped`/absent return render exactly what the untyped
     ///   fallback renders, so skipping keeps the output byte-identical
     ///   rather than routing it through a second code path.
-    fn stamp_inferred_library_signatures(&self, app: &mut App) {
-        for lc in &mut app.library_classes {
-            let registered = self.classes.get(&lc.name);
-            for method in &mut lc.methods {
+    fn stamp_inferred_method_signatures(&self, app: &mut App) {
+        for (owner, methods) in app.library_classes.iter_mut().map(|lc| (&lc.name, &mut lc.methods))
+            .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
+            let registered = self.classes.get(owner);
+            for method in methods {
                 if method.signature.is_some() {
                     continue;
                 }
                 if method.name.as_str() == "initialize" {
                     continue;
                 }
-                let key = (lc.name.clone(), method.name.clone());
+                let key = (owner.clone(), method.name.clone());
                 let inferred = self.inferred_params.get(&key);
                 let has_params = inferred
                     .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
@@ -1194,32 +1202,30 @@ impl Analyzer {
         }
     }
 
-    /// Collect every app-level constant (`CONST = <value>`) declared in a
-    /// model or controller body, type its value, and build a global
-    /// name→type registry keyed by the constant's last path segment — the
-    /// shape `ExprNode::Const` dispatch consults (`Vote::COMMENT_REASONS`
-    /// looks up `COMMENT_REASONS`). This is the cross-class channel: a
-    /// constant declared in `Vote` resolves when referenced from a
-    /// controller, a view, another model, or seeds — none of which the
-    /// per-class `extract_*_const_assignments` tables reach.
-    ///
-    /// Typed as a small fixpoint so a constant defined in terms of another
-    /// (`ALL_COMMENT_REASONS = COMMENT_REASONS.merge(...).freeze`) resolves
-    /// once its dependency does. A name declared in two classes with
-    /// conflicting types is dropped as ambiguous: a bare reference can't
-    /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
-    /// `Ty::Var` results are skipped — uninformative, and registering them
-    /// would only mask the `Const` fallback without adding signal.
+    /// Type each app constant value. Rubydex already owns the constant
+    /// names and their lexical resolution, so source reads use its
+    /// `DeclarationId` to find these inferred types. The bare-name map
+    /// remains only for generated expressions without Ruby source.
+    /// The rounds continue until no value changes, so `B = A` can use
+    /// the value of `A` from the round before.
     fn build_constant_registry(
         &self,
         app: &App,
-    ) -> (HashMap<Symbol, Ty>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
-        // (defining class's self_ty, last-segment name, cloned value expr).
-        let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
+    ) -> (HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>) {
+        // Ingest can move a constant to another IR owner: a file-level
+        // constant goes to the first class of its file. The declaration
+        // ID comes from the source position, not from the owner.
+        let declaration_id = |name: &Symbol, value: &Expr| {
+            self.const_resolver.constant_declaration(value.span, name.as_str())
+        };
+        // (defining class, last-segment name, Rubydex ID, value,
+        // eligible for the production generated-expression fallback).
+        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr, bool)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
             if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
                 if let Some(last) = path.last() {
-                    entries.push((self_ty, last.clone(), value.clone()));
+                    let id = declaration_id(last, value);
+                    entries.push((self_ty, last.clone(), id, value.clone(), true));
                 }
             }
         };
@@ -1250,25 +1256,41 @@ impl Analyzer {
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
-                entries.push((
-                    Ty::Class { id: lc.name.clone(), args: vec![] },
-                    name.clone(),
-                    value.clone(),
-                ));
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
+            }
+        }
+        // Original source tests use the same DeclarationId contract.
+        // Their constants participate in the value fixpoint, but must
+        // not change the bare-name fallback used by production views.
+        for module in &app.test_modules {
+            for (owner, constants) in std::iter::once((&module.name, &module.constants))
+                .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
+            {
+                for (name, value) in constants {
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+                }
             }
         }
 
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-        // Cap matches the outer analyze fixpoint; one level of constant
-        // dependency needs two passes, the cap leaves slack.
-        for _ in 0..4 {
+        let mut resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+        // Each round can type one more link of a `B = A` chain, so n
+        // values need at most n + 1 rounds when no value changes after
+        // it is typed. A cycle (`A = B`, `B = A`) never types and stays
+        // unknown, and the read reports it. The bound also stops values
+        // that change on each round.
+        for _ in 0..=entries.len() {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
+            let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
             let shared = body::ConstScope::global(map.clone());
-            for (self_ty, name, value) in entries.iter_mut() {
-                if ambiguous.contains(name) {
-                    continue;
-                }
+            let typer = BodyTyper::new(&self.classes)
+                .with_inquirers(&self.inquirers)
+                .with_const_resolver(self.const_resolver.clone())
+                .with_typed_constants(&resolved);
+            for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
@@ -1277,8 +1299,14 @@ impl Analyzer {
                     annotate_self_dispatch: false,
                     in_view: false,
                 };
-                let ty = self.body_typer().analyze_expr(value, &ctx);
+                let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                if let Some(id) = id {
+                    next_resolved.insert(*id, ty.clone());
+                }
+                if !*production || ambiguous.contains(name) {
                     continue;
                 }
                 match next.get(name) {
@@ -1290,39 +1318,16 @@ impl Analyzer {
                     }
                 }
             }
-            for a in &ambiguous {
-                next.remove(a);
+            for name in &ambiguous {
+                next.remove(name);
             }
-            if next == map {
+            if next == map && next_resolved == resolved {
                 break;
             }
             map = next;
+            resolved = next_resolved;
         }
-        // The same types, kept per owning class as well: a qualified
-        // read can then be answered exactly, including for a name two
-        // classes both define — which the map above has to drop.
-        let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = body::ConstScope::global(map.clone());
-        for (self_ty, name, value) in entries.iter_mut() {
-            let owner = match &self_ty {
-                Ty::Class { id, .. } => id.clone(),
-                _ => continue,
-            };
-            let ctx = Ctx {
-                self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
-                constants: shared.clone(),
-                annotate_self_dispatch: false,
-                in_view: false,
-            };
-            let ty = self.body_typer().analyze_expr(value, &ctx);
-            if matches!(ty, Ty::Var { .. }) {
-                continue;
-            }
-            per_class.entry(owner).or_default().insert(name.clone(), ty);
-        }
-        (map, per_class)
+        (map, resolved)
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -1332,18 +1337,12 @@ impl Analyzer {
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
     fn run_typing_passes(&mut self, app: &mut App) {
-        // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
-        // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
-        // and seeds so cross-class constant references resolve to the
-        // value's type instead of the `Ty::Class { id: ConstName }`
-        // fallback. Seeded under each class's own constants (own shadows
-        // global on a name clash).
-        let (global_constants, class_constants) = self.build_constant_registry(app);
-        // Shared by every context below — see `Ctx::constants`.
-        let global_constants = body::ConstScope::global(global_constants);
-        for (id, constants) in class_constants {
-            self.classes.entry(id).or_default().constants.extend(constants);
-        }
+        // Source-backed constant reads use Rubydex declaration IDs.
+        // A bare-name fallback remains for generated expressions without
+        // a Ruby source reference.
+        let (fallback, resolved_values) = self.build_constant_registry(app);
+        self.typed_constants = resolved_values;
+        let global_constants = body::ConstScope::global(fallback);
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
@@ -1448,6 +1447,8 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .map(|lc| (lc.name.clone(), lc.includes.clone()))
             .collect();
+
+        self.analyze_class_configuration(&mut app.controllers);
 
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
@@ -2154,7 +2155,7 @@ impl Analyzer {
                 // helper that itself calls another ivar-writing helper is
                 // not chased (the direct-call case is what recurs). Own
                 // and before_action assignments already present win.
-                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
                 // Only own-class sites are consumed below, so helper
                 // attribution is irrelevant — an empty index keeps
                 // this walk exactly as before.
@@ -2361,6 +2362,7 @@ impl Analyzer {
                     }
                 }
             }
+
         }
         // Flush Phase B's refinements. Later rounds of the whole-program
         // fixpoint read them back through `layer` above, which is what
@@ -2825,7 +2827,7 @@ impl Analyzer {
                     reseeded.insert(name, seeded);
                 }
                 let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
+                    self_ty: class_ctx.self_ty.clone(),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false,
@@ -3106,6 +3108,11 @@ impl Analyzer {
             .iter()
             .map(|(view, locals)| (view.clone(), locals.clone()))
             .collect();
+
+        // Type the ORIGINAL test scopes, before source contracts inspect
+        // them. Emission later clones/rewrites these bodies; it is too late
+        // for that typing to establish a source admission fact.
+        self.type_test_modules(app, &global_constants);
 
         // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
         // ivars, no before-action scaffolding. Just an expression
@@ -3397,6 +3404,17 @@ impl Analyzer {
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
         }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                let ret = self.method_return_ty(&module.name, method);
+                let class = self.classes.entry(module.name.clone()).or_default();
+                let table = match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &mut class.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &mut class.class_methods,
+                };
+                Self::register_method_return(table, &method.name, ret.as_ref());
+            }
+        }
         // Controllers: harvest each action/helper method's return type so a
         // sibling call (`@story = find_story`) resolves. Conservative like
         // library classes — only concrete (non-Var) bodies are registered;
@@ -3405,6 +3423,11 @@ impl Analyzer {
         // no class-receiver variant).
         for controller in &app.controllers {
             let class_id = &controller.name;
+            for method in controller.class_methods() {
+                let ret = self.method_return_ty(class_id, method);
+                let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
+                Self::register_method_return(target, &method.name, ret.as_ref());
+            }
             for action in controller.actions() {
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
@@ -3422,6 +3445,7 @@ impl Analyzer {
 
         self.harvest_block_value_methods(app);
         self.fold_concern_surfaces(app);
+        self.fold_host_surfaces(app);
         self.fold_current_attribute_forwarders(app);
     }
 
@@ -3530,14 +3554,14 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .filter_map(|lc| {
                 let cls = self.classes.get(&lc.name)?;
-                Some((
-                    lc.name.clone(),
-                    (
-                        cls.instance_methods.clone(),
-                        cls.class_methods.clone(),
-                        cls.includes.clone(),
-                    ),
-                ))
+                // What the host fold lent the module is the includers'
+                // own surface; copying it back down would only hand an
+                // includer a stale answer about itself.
+                let mut inst = cls.instance_methods.clone();
+                if let Some(lent) = self.host_folded.get(&lc.name) {
+                    inst.retain(|name, _| !lent.contains(name));
+                }
+                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
             })
             .collect();
         if module_surfaces.is_empty() {
@@ -3582,6 +3606,101 @@ impl Analyzer {
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
                 }
+            }
+        }
+    }
+
+    /// Host fold: the other direction of `fold_concern_surfaces`. A
+    /// concern's methods run on its includer, so a bare call in one
+    /// (`resume_session` in `Impersonation`) may name a method the
+    /// module never defines — the includer does, or a sibling concern
+    /// the includer also mixes in. With ONE includer the module's
+    /// bodies are typed with that class as `self` and the call resolves
+    /// there. With several, `self` stays the module (a union `self` is
+    /// a poly cliff on every send) and the call fell to `untyped`,
+    /// which then spread: Rails' authentication concern split across
+    /// two modules left `current_user` as `User | untyped` in every
+    /// controller that read it.
+    ///
+    /// So lend the module the answer when there is exactly one: a name
+    /// the module's bodies call on implicit `self`, that the module
+    /// does not define, and that EVERY includer resolves to the same
+    /// type. Includers that disagree, or one that lacks the method,
+    /// leave the call as it was. Runs after the concern fold, so an
+    /// includer's surface already carries its other concerns' methods.
+    fn fold_host_surfaces(&mut self, app: &App) {
+        let modules: BTreeSet<&ClassId> =
+            app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
+        if modules.is_empty() {
+            return;
+        }
+        // Module → the non-module classes that include it, transitively.
+        let mut hosts: HashMap<ClassId, BTreeSet<ClassId>> = HashMap::new();
+        for (id, cls) in &self.classes {
+            if modules.contains(id) || cls.includes.is_empty() {
+                continue;
+            }
+            let mut queue = cls.includes.clone();
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if modules.contains(&m) {
+                    hosts.entry(m.clone()).or_default().insert(id.clone());
+                }
+                for n in self.classes.get(&m).map(|c| c.includes.as_slice()).unwrap_or_default() {
+                    if seen.insert(n.clone()) {
+                        queue.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        fn bare_calls(e: &Expr, out: &mut BTreeSet<Symbol>) {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                out.insert(method.clone());
+            }
+            e.node.for_each_child(&mut |c| bare_calls(c, out));
+        }
+
+        for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+            let lent_before = self.host_folded.remove(&lc.name).unwrap_or_default();
+            let mut lent = BTreeSet::new();
+            let mut agreed: Vec<(Symbol, Ty)> = Vec::new();
+            // A sole includer is `self` in the module's bodies already.
+            if let Some(hosts) = hosts.get(&lc.name).filter(|h| h.len() > 1) {
+                let mut called = BTreeSet::new();
+                for method in &lc.methods {
+                    bare_calls(&method.body, &mut called);
+                }
+                let own = self.classes.get(&lc.name);
+                for name in called {
+                    if own.is_some_and(|c| c.instance_methods.contains_key(&name))
+                        && !lent_before.contains(&name)
+                    {
+                        continue; // the module's own answer
+                    }
+                    let mut answers = hosts.iter().map(|h| {
+                        self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
+                    });
+                    let Some(Some(first)) = answers.next() else { continue };
+                    if first.is_unknown() || !answers.all(|a| a == Some(first)) {
+                        continue;
+                    }
+                    agreed.push((name, first.clone()));
+                }
+            }
+            let cls = self.classes.entry(lc.name.clone()).or_default();
+            for name in &lent_before {
+                cls.instance_methods.remove(name);
+            }
+            for (name, ty) in agreed {
+                cls.instance_methods.insert(name.clone(), ty);
+                lent.insert(name);
+            }
+            if !lent.is_empty() {
+                self.host_folded.insert(lc.name.clone(), lent);
             }
         }
     }
@@ -3782,7 +3901,7 @@ impl Analyzer {
         // description of the argument list that disagrees with the
         // `def`. campfire's `next_involvement_for` emitted exactly
         // that, and spinel gave the param an `sp_SymPolyHash *`.
-        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)> = Vec::new();
+        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
         let params_by_method = Self::param_shapes(app);
         for model in &app.models {
             for method in model.methods() {
@@ -3797,9 +3916,29 @@ impl Analyzer {
                 self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
             }
         }
+        let mut test_sites = Vec::new();
+        for module in &app.test_modules {
+            if let Some(setup) = &module.setup {
+                self.collect_send_sites(setup, Some(&module.name), helpers, &mut test_sites);
+            }
+            for body in module.helpers.iter().flat_map(|method| {
+                method.params.iter().filter_map(|param| param.default.as_ref())
+                    .chain(std::iter::once(&method.body))
+            })
+                .chain(module.tests.iter().map(|test| &test.body)) {
+                self.collect_send_sites(body, Some(&module.name), helpers, &mut test_sites);
+            }
+        }
+        let test_sites = test_sites.into_iter().filter_map(|(class, method, args, kwargs)| {
+            self.test_helper_owner(app, &class, &method)
+                .map(|owner| (owner, method, args, kwargs))
+        }).collect();
         for controller in &app.controllers {
             for action in controller.actions() {
                 self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
+            }
+            for method in controller.class_methods() {
+                self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
             }
         }
         for view in &app.views {
@@ -3809,31 +3948,37 @@ impl Analyzer {
             self.collect_send_sites(seeds, None, helpers, &mut sites);
         }
 
-        for (class_id, method, arg_tys, kw_tys) in sites {
-            let arg_tys = Self::place_keyword_args(
-                params_by_method.get(&(class_id.clone(), method.clone())),
-                arg_tys,
-                kw_tys,
-            );
-            // Cross-reference against MethodDef.params to know the
-            // arity. If the called method's params can't be located,
-            // still accumulate up to arg count under the same key —
-            // RBS-only methods don't have a MethodDef but do have an
-            // Fn signature, and inferred_params can extend either way.
-            let arity = arg_tys.len();
-            let entry = self
-                .inferred_params
-                .entry((class_id.clone(), method.clone()))
-                .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
-            if entry.len() < arity {
-                entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+        for (phase, sites) in [sites, test_sites].into_iter().enumerate() {
+            if phase == 1 {
+                // Production signatures keep their production callers' shape.
+                // Fold before adding test-owned observations: a same-named test
+                // helper must not feed an included production concern either.
+                self.fold_concern_param_sites(app);
             }
-            for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                *slot = unify_param_ty(slot.clone(), observed);
+            for (class_id, method, arg_tys, kw_tys) in sites {
+                let arg_tys = Self::place_keyword_args(
+                    params_by_method.get(&(class_id.clone(), method.clone())),
+                    arg_tys,
+                    kw_tys,
+                );
+                // Cross-reference against MethodDef.params to know the
+                // arity. If the called method's params can't be located,
+                // still accumulate up to arg count under the same key —
+                // RBS-only methods don't have a MethodDef but do have an
+                // Fn signature, and inferred_params can extend either way.
+                let arity = arg_tys.len();
+                let entry = self
+                    .inferred_params
+                    .entry((class_id.clone(), method.clone()))
+                    .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
+                if entry.len() < arity {
+                    entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+                }
+                for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
+                    *slot = unify_param_ty(slot.clone(), observed);
+                }
             }
         }
-
-        self.fold_concern_param_sites(app);
     }
 
     /// The param-table twin of `fold_concern_surfaces`.
@@ -3953,8 +4098,8 @@ impl Analyzer {
         }
     }
 
-    /// Every (class, method) pair's parameter NAMES and whether each
-    /// binds by keyword — the shape `place_keyword_args` needs to put a
+    /// Every (class, method) pair's parameter names and canonical kinds
+    /// — the shape `place_keyword_args` needs to put a
     /// call's kwargs on the right slots.
     ///
     /// Keyed the way `inferred_params` is, by (class, method) with no
@@ -3963,11 +4108,13 @@ impl Analyzer {
     /// POISONED rather than picked: placing keywords from the wrong
     /// `def` is worse than leaving the hash where it sits, which is the
     /// behaviour that stood before this table existed.
-    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), Vec<(Symbol, bool)>> {
-        let mut out: HashMap<(ClassId, Symbol), Option<Vec<(Symbol, bool)>>> = HashMap::new();
+    fn param_shapes(app: &App) -> HashMap<(ClassId, Symbol), ParamShape> {
+        let mut out: HashMap<(ClassId, Symbol), Option<ParamShape>> = HashMap::new();
         let mut record = |class: &ClassId, m: &crate::dialect::MethodDef| {
-            let shape: Vec<(Symbol, bool)> =
-                m.params.iter().map(|p| (p.name.clone(), p.keyword)).collect();
+            let shape = ParamShape {
+                slots: m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect(),
+                keywords_by_kind: false,
+            };
             out.entry((class.clone(), m.name.clone()))
                 .and_modify(|slot| {
                     if slot.as_ref() != Some(&shape) {
@@ -3984,6 +4131,39 @@ impl Analyzer {
         for lc in &app.library_classes {
             for m in &lc.methods {
                 record(&lc.name, m);
+            }
+        }
+        for module in &app.test_modules {
+            for method in &module.helpers {
+                record(&module.name, method);
+            }
+        }
+        // A controller helper's keywords are call-site evidence too:
+        // without its shape, `describe(name: "gear", count: 2)` against
+        // `def describe(name:, count:)` typed the first slot with the
+        // whole kwargs Hash. Same slot order the controller lowering
+        // builds: positionals, optionals, keywords, `**rest`.
+        for controller in &app.controllers {
+            for a in controller.actions() {
+                let mut shape: Vec<(Symbol, ParamKind)> =
+                    a.params.fields.iter().map(|(n, _)| (n.clone(), ParamKind::Required)).collect();
+                shape.extend(a.opt_params.iter().map(|(n, _)| (n.clone(), ParamKind::Optional)));
+                shape.extend(
+                    a.kw_params.iter().map(|(n, d)| (n.clone(), ParamKind::Keyword { required: d.is_none() })),
+                );
+                if let Some(n) = &a.kwrest_param {
+                    shape.push((n.clone(), ParamKind::KeywordRest));
+                }
+                // Controller lowering keeps every keyword a keyword, so a
+                // key binds by kind here, never to a same-named positional.
+                let shape = ParamShape { slots: shape, keywords_by_kind: true };
+                out.entry((controller.name.clone(), a.name.clone()))
+                    .and_modify(|slot| {
+                        if slot.as_ref() != Some(&shape) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(shape));
             }
         }
         out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
@@ -4011,18 +4191,63 @@ impl Analyzer {
     /// not pass an optional keyword is no evidence about its type, and
     /// `unify_param_ty` reads `Var` as exactly that.
     fn place_keyword_args(
-        shape: Option<&Vec<(Symbol, bool)>>,
+        shape: Option<&ParamShape>,
         mut arg_tys: Vec<Ty>,
-        kw_tys: Vec<(Symbol, Ty)>,
+        kw: SiteKeywords,
     ) -> Vec<Ty> {
+        if let Some(shape) = shape.filter(|s| s.keywords_by_kind) {
+            if kw.group {
+                if let Some(placed) = Self::bind_keyword_group(shape, &arg_tys, &kw.keys) {
+                    return placed;
+                }
+            }
+        }
+        let kw_tys = kw.keys;
         if kw_tys.is_empty() {
+            // Ingest erases ** forwarding to the Hash expression itself.
+            // A whole bundle cannot prove an individual named keyword's
+            // value. Mask only those slots, without moving observations:
+            // keyword-rest DOES bind the Hash, and positional/default/rest
+            // parameters keep their existing inference contract.
+            if let Some(shape) = shape {
+                for (observed, (_, kind)) in arg_tys.iter_mut().zip(&shape.slots) {
+                    if matches!(kind, ParamKind::Keyword { .. }) {
+                        *observed = Ty::Var { var: crate::ident::TyVar(0) };
+                    }
+                }
+            }
             return arg_tys;
         }
-        let Some(params) = shape else {
+        let Some(shape) = shape else {
             return arg_tys;
         };
-        let slot_of = |key: &Symbol| params.iter().position(|(n, _kw)| n == key);
-        if !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
+        let params = &shape.slots;
+        // Where a shape keeps its keywords as keywords (a controller
+        // helper's), Ruby binds a key only to a keyword slot:
+        // `h("text", a: 2)` against `def h(a, **opts)` is `a = "text"`,
+        // `opts = {a: 2}`. Positional slots still count for the index.
+        let slot_of = |key: &Symbol| {
+            params.iter().position(|(n, kind)| {
+                n == key && (!shape.keywords_by_kind || matches!(kind, ParamKind::Keyword { .. }))
+            })
+        };
+        // A key no parameter names still leaves the hash alone, unless
+        // the slot it would land on is a named keyword: Ruby never binds
+        // a kwargs hash to one, so `tagged(label: x, tone: y)` against
+        // `def tagged(label:, **rest)` types `label` from `x` and leaves
+        // `tone` to the `**rest` it binds to. `**rest` itself is not
+        // such a slot: when the hash lands there (`h(1, x: 2)` against
+        // `def h(a, **opts)`), Ruby binds `opts` to exactly that hash,
+        // so the observation stays where it is. Every slot from the
+        // hash's own position on counts, not just that one: with no
+        // positional passed, `h(label: 1, tone: 2)` against `def h(prefix
+        // = nil, label:, **rest)` binds `label`, never `prefix`.
+        let supplied_positionals = arg_tys.len().saturating_sub(1);
+        let lands_on_keyword = params
+            .iter()
+            .skip(supplied_positionals)
+            .any(|(_, kind)| matches!(kind, ParamKind::Keyword { .. }));
+        if !lands_on_keyword && !kw_tys.iter().all(|(k, _)| slot_of(k).is_some()) {
             return arg_tys;
         }
         arg_tys.pop();
@@ -4037,6 +4262,62 @@ impl Analyzer {
         arg_tys
     }
 
+    /// A controller helper's call whose last argument is its keyword
+    /// group, placed the way Ruby binds it: the positionals fill the
+    /// positional slots in order, a key fills the keyword slot that
+    /// names it, and the group as a whole never fills a positional.
+    /// `spread(1, x: 2)` against `def spread(a, b = nil, **rest)` is
+    /// `b = nil`, `rest = {x: 2}`; `forwarded(**opts)` against `def
+    /// forwarded(prefix = nil, label:, **rest)` leaves `prefix` at its
+    /// default. The Hash goes to `**rest` only when no named keyword
+    /// can take part of it, so `**rest` binds exactly that hash, as in
+    /// `h(1, x: 2)` against `def h(a, **opts)`; a `**splat`'s unknown
+    /// keys leave every named keyword `Var`.
+    ///
+    /// `None` when the shape takes no keywords at all: Ruby then passes
+    /// the group as one positional Hash (`def p(a, b = nil)` called
+    /// `p(1, x: 2)` is `b = {x: 2}`), the rule the caller already has.
+    fn bind_keyword_group(
+        shape: &ParamShape,
+        arg_tys: &[Ty],
+        keys: &[(Symbol, Ty)],
+    ) -> Option<Vec<Ty>> {
+        let params = &shape.slots;
+        let is_named = |kind: &ParamKind| matches!(kind, ParamKind::Keyword { .. });
+        let has_named = params.iter().any(|(_, kind)| is_named(kind));
+        let rest = params
+            .iter()
+            .position(|(_, kind)| matches!(kind, ParamKind::KeywordRest));
+        if rest.is_none() && !has_named {
+            return None;
+        }
+        let (hash, positionals) = arg_tys.split_last()?;
+        let unseen = Ty::Var {
+            var: crate::ident::TyVar(0),
+        };
+        let mut out = vec![unseen; params.len()];
+        let positional_slots = params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, kind))| matches!(kind, ParamKind::Required | ParamKind::Optional))
+            .map(|(i, _)| i);
+        for (i, t) in positional_slots.zip(positionals) {
+            out[i] = t.clone();
+        }
+        for (key, t) in keys {
+            if let Some(i) = params
+                .iter()
+                .position(|(n, kind)| n == key && is_named(kind))
+            {
+                out[i] = t.clone();
+            }
+        }
+        if let (Some(i), false) = (rest, has_named) {
+            out[i] = hash.clone();
+        }
+        Some(out)
+    }
+
     /// Walk one expression tree, collecting (class_id, method, arg_tys)
     /// for every Send whose receiver type is known. Used by
     /// `unify_params_from_call_sites`. The receiver's type was set by
@@ -4048,7 +4329,7 @@ impl Analyzer {
         expr: &Expr,
         self_class: Option<&ClassId>,
         helpers: &HashMap<Symbol, ClassId>,
-        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, Vec<(Symbol, Ty)>)>,
+        out: &mut Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)>,
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
@@ -4102,7 +4383,7 @@ impl Analyzer {
                     // the value binds to, and one such key disqualifies
                     // the whole hash (an incomplete map would place
                     // some keywords and silently drop the rest).
-                    let kw_tys = match args.last().map(|a| &*a.node) {
+                    let keys = match args.last().map(|a| &*a.node) {
                         Some(ExprNode::Hash { entries, kwargs: true }) => {
                             let mut pairs = Vec::with_capacity(entries.len());
                             let mut all_sym = true;
@@ -4130,6 +4411,14 @@ impl Analyzer {
                         }
                         _ => Vec::new(),
                     };
+                    // Whether the last argument is the call's keyword
+                    // group at all: a `k: v` list or one with a
+                    // `**splat`, never a positional `{…}` literal.
+                    let group = matches!(
+                        args.last().map(|a| &*a.node),
+                        Some(ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })
+                    );
+                    let kw_tys = SiteKeywords { group, keys };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -4238,7 +4527,9 @@ impl Analyzer {
             ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.collect_send_sites(v, self_class, helpers, out); }
             }
-            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, helpers, out),
+            ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+                self.collect_send_sites(value, self_class, helpers, out)
+            }
             ExprNode::MultiAssign { value, .. } => {
                 self.collect_send_sites(value, self_class, helpers, out)
             }
@@ -4257,6 +4548,7 @@ impl Analyzer {
             | ExprNode::Const { .. }
             | ExprNode::Retry
             | ExprNode::Redo
+            | ExprNode::ForwardArgs
             | ExprNode::SelfRef => {}
         }
     }
@@ -4568,6 +4860,7 @@ pub(crate) fn instantiate_return_kind(
         ReturnKind::ArrayOfSelf => Ty::Array { elem: Box::new(self_ty()) },
         ReturnKind::SelfOrNil => Ty::Union { variants: vec![self_ty(), Ty::Nil] },
         ReturnKind::Int => Ty::Int,
+        ReturnKind::IntOrNil => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::HashSymStr => Ty::Hash {
             key: Box::new(Ty::Sym),
@@ -5365,6 +5658,28 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
         }
     }
     out
+}
+
+/// A call's trailing keyword arguments as `collect_send_sites` saw them.
+#[derive(Clone, Debug)]
+struct SiteKeywords {
+    /// The last argument is the keyword group (`k: v` or `**splat`).
+    group: bool,
+    /// Its `key: value` pairs, by name; empty when any key is not a
+    /// literal symbol (a `**splat` included).
+    keys: Vec<(Symbol, Ty)>,
+}
+
+/// A method's declared parameter slots, in declaration order, as
+/// `place_keyword_args` reads them.
+#[derive(Debug, PartialEq)]
+struct ParamShape {
+    slots: Vec<(Symbol, ParamKind)>,
+    /// True when every keyword in `slots` is still declared a keyword,
+    /// so a call's key binds only to a `ParamKind::Keyword` slot. False
+    /// for shapes whose optional keywords ingest may have lowered to
+    /// positionals-with-default, which a key must still find by name.
+    keywords_by_kind: bool,
 }
 
 /// A parameter's type from what the call sites passed AND what its

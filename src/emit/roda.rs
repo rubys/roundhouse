@@ -1093,6 +1093,37 @@ fn emit_terminal_body(
         return;
     };
 
+    // Template-only actions are newly routable, but this source converter
+    // does not implement the callback dispatcher. Do not turn a formerly
+    // missing action into a page served without its policy callbacks.
+    // Conservatively reject callback-bearing ancestry, including block
+    // callbacks and scoped/skipped declarations, until it is converted.
+    if action.name_span.is_synthetic() {
+        let mut current = Some(controller);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = current {
+            if !seen.insert(&c.name) || c.body.iter().any(|item| match item {
+                ControllerBodyItem::Filter { .. } => true,
+                ControllerBodyItem::Unknown { expr, .. } => matches!(
+                    &*expr.node,
+                    ExprNode::Send { recv: None, method, .. }
+                        if crate::ingest::controller::is_lambda_filter_macro(method.as_str())
+                            || method.as_str() == "around_action"
+                ),
+                _ => false,
+            }) {
+                out.push_str(&format!(
+                    "{pad}# ROUNDHOUSE-TODO: template-only action callbacks are not converted ({}#{})\n{pad}r.halt [501, {{}}, [\"ROUNDHOUSE-TODO: template-only action callbacks are not converted\"]]\n",
+                    route.controller.0, route.action
+                ));
+                return;
+            }
+            current = c.parent.as_ref().and_then(|parent| {
+                ctx.app.controllers.iter().find(|ancestor| &ancestor.name == parent)
+            });
+        }
+    }
+
     let body = convert_body(route, controller, action, ctx, bindings);
 
     // A partially converted body is a DRAFT, not a working route:

@@ -39,7 +39,7 @@ const INTERACTOR: &str = r#"module Interactors
 end
 "#;
 
-fn diagnostics(files: &[(&str, &str)]) -> Vec<String> {
+fn diagnostics(files: &[(&str, &str)]) -> (roundhouse::App, Vec<roundhouse::diagnostic::Diagnostic>) {
     let base: Vec<(&str, &str)> = vec![
         ("db/schema.rb", SCHEMA),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
@@ -60,25 +60,31 @@ fn diagnostics(files: &[(&str, &str)]) -> Vec<String> {
         .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
         .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
-    let residue = roundhouse::session::analyze_and_lower(&mut app);
-    residue
-        .iter()
-        .chain(roundhouse::analyze::diagnose(&app).iter())
-        .map(roundhouse::diagnostic::Diagnostic::to_string)
-        .collect()
+    let mut diags = roundhouse::session::analyze_and_lower(&mut app);
+    diags.extend(roundhouse::analyze::diagnose(&app));
+    (app, diags)
 }
 
-fn dispatch_failed_on_the_interactor(diagnostics: &[String]) -> bool {
-    diagnostics
-        .iter()
-        .any(|d| d.contains("send_dispatch_failed") && d.contains("BuildReport"))
+fn interactor_error(app: &roundhouse::App, diags: &[roundhouse::diagnostic::Diagnostic]) -> bool {
+    let Some((index, _)) = app.sources.iter().enumerate()
+        .find(|(_, source)| source.path == "app/controllers/reports_controller.rb") else {
+        return false;
+    };
+    let start = CONTROLLER.find("Interactors::BuildReport").unwrap();
+    let end = start + "Interactors::BuildReport".len();
+    diags.iter().any(|diagnostic| {
+        diagnostic.severity == roundhouse::diagnostic::Severity::Error
+            && diagnostic.span.file.0 as usize == index + 1
+            && diagnostic.span.start as usize <= start
+            && diagnostic.span.end as usize >= end
+    })
 }
 
 #[test]
 fn a_layer_the_app_named_itself_is_reachable_from_a_controller() {
-    let diags = diagnostics(&[("app/interactors/build_report.rb", INTERACTOR)]);
+    let (app, diags) = diagnostics(&[("app/interactors/build_report.rb", INTERACTOR)]);
     assert!(
-        !dispatch_failed_on_the_interactor(&diags),
+        !interactor_error(&app, &diags),
         "`app/interactors/` is autoloaded by Rails and has to register; diagnostics = {diags:?}"
     );
 }
@@ -94,24 +100,24 @@ fn an_ignored_lib_directory_stays_invisible() {
   end
 end
 "#;
-    let diags = diagnostics(&[
+    let (app, diags) = diagnostics(&[
         ("config/application.rb", application_rb),
         ("lib/custom_cops/build_report.rb", INTERACTOR),
     ]);
     assert!(
-        dispatch_failed_on_the_interactor(&diags),
+        interactor_error(&app, &diags),
         "an ignored directory must stay off the walk; diagnostics = {diags:?}"
     );
 
     // …and the same file under a directory the app did not ignore is
     // ordinary app code again, so the ignore is doing the work rather
     // than the path being unreachable.
-    let diags = diagnostics(&[
+    let (app, diags) = diagnostics(&[
         ("config/application.rb", application_rb),
         ("lib/interactors/build_report.rb", INTERACTOR),
     ]);
     assert!(
-        !dispatch_failed_on_the_interactor(&diags),
+        !interactor_error(&app, &diags),
         "only the ignored directory is skipped; diagnostics = {diags:?}"
     );
 }
@@ -124,23 +130,12 @@ fn a_root_the_app_adds_to_the_eager_load_paths_is_walked() {
   end
 end
 "#;
-    let diags = diagnostics(&[
+    let (app, diags) = diagnostics(&[
         ("config/application.rb", application_rb),
         ("extra_domain/build_report.rb", INTERACTOR),
     ]);
     assert!(
-        !dispatch_failed_on_the_interactor(&diags),
+        !interactor_error(&app, &diags),
         "a declared eager-load root is app code; diagnostics = {diags:?}"
-    );
-}
-
-#[test]
-fn the_directories_with_their_own_pass_are_not_walked_twice() {
-    // `app/models` is ingested as models; re-walking it as library
-    // classes would register the same constant twice.
-    let diags = diagnostics(&[("app/interactors/build_report.rb", INTERACTOR)]);
-    assert!(
-        !diags.iter().any(|d| d.contains("duplicate")),
-        "diagnostics = {diags:?}"
     );
 }

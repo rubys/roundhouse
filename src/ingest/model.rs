@@ -15,6 +15,7 @@ use crate::ty::{Row, Ty};
 use crate::{ClassId, Symbol, TableRef};
 
 use super::expr::ingest_expr;
+use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
     find_first_class, flatten_statements, source_has_blank_line, string_value, symbol_or_string_value,
@@ -157,6 +158,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let mut enums: IndexMap<Symbol, Vec<(String, Literal)>> = IndexMap::new();
     let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
+    let visibility = Visibility::resolve(class.body().as_ref(), file, None)?;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         // Constants the class body assigns, for `enum :x, CONST`.
@@ -181,7 +183,13 @@ pub(super) fn ingest_model_with_enum_constants(
                 enum_constants.resolve(node, &enum_owners)
             }
         };
-        for stmt in stmts {
+        for statement in stmts {
+            let definition = visibility::definition(&statement).map(|d| d.as_node());
+            let stmt = definition.as_ref().unwrap_or(&statement);
+            if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
+                prev_end = Some(statement.location().end_offset());
+                continue;
+            }
             // Explicit names override convention before schema binding.
             // Like primary_key, the setter is consumed: lowering already
             // synthesizes table_name from Model::table for every target.
@@ -242,7 +250,7 @@ pub(super) fn ingest_model_with_enum_constants(
             // can't. Library classes get the same treatment one level
             // down, in `walk_decl_body`.
             if let Some(sc) = stmt.as_singleton_class_node() {
-                match ingest_singleton_class_methods(&sc, file) {
+                match ingest_singleton_class_methods(&sc, file, &visibility) {
                     Ok(methods) => {
                         let mut leading = leading;
                         let mut blank = leading_blank;
@@ -296,6 +304,11 @@ pub(super) fn ingest_model_with_enum_constants(
             // attribute; only the first carries the blank line that
             // separated the declaration from what came before it.
             for (i, mut item) in items.into_iter().enumerate() {
+                if let ModelBodyItem::Method { method, .. } = &mut item {
+                    visibility.apply(&statement, method);
+                } else if let ModelBodyItem::Unknown { .. } = &item {
+                    visibility.check_model_item(&statement, file)?;
+                }
                 item.set_leading_blank_line(leading_blank && i == 0);
                 body.push(item);
             }
@@ -761,7 +774,10 @@ pub(super) fn expand_enum_decl(
                 name_span: crate::span::Span::synthetic(),
                 name: Symbol::from(name),
                 receiver: MethodReceiver::Instance,
+                visibility: crate::dialect::MethodVisibility::Public,
                 params: Vec::new(),
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 block_param: None,
                 body,
                 signature: None,
@@ -819,7 +835,7 @@ pub(super) fn expand_enum_decl(
                     args: vec![Expr::new(
                         span,
                         ExprNode::Lit {
-                            value: if reads_label { Literal::Str { value: label.clone() } } else { value },
+                            value: if reads_label { Literal::Str { value: all_labels.iter().find(|(_, stored)| stored == &value).map(|(canonical, _)| canonical.clone()).unwrap_or_else(|| label.clone()) } } else { value },
                         },
                     )],
                     block: None,
@@ -850,7 +866,10 @@ pub(super) fn expand_enum_decl(
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from(crate::naming::pluralize_snake(&column)),
             receiver: MethodReceiver::Class,
+            visibility: crate::dialect::MethodVisibility::Public,
             params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
             block_param: None,
             body: mapping_hash,
             signature: None,
@@ -1095,41 +1114,22 @@ fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, S
 }
 
 /// Expand a model's `class << self … end` into the class methods it
-/// declares. Only `def`s are recognized: a visibility marker or an
-/// `attr_accessor` in there means something about the *singleton*
-/// scope that a flattened list of methods can't carry, so refuse it
-/// loudly rather than silently apply it to the instance side.
+/// declares. Visibility has already been resolved in lexical order;
+/// unsupported singleton statements still fail rather than disappearing.
 fn ingest_singleton_class_methods(
     sc: &ruby_prism::SingletonClassNode<'_>,
     file: &str,
+    visibility: &Visibility,
 ) -> IngestResult<Vec<crate::dialect::MethodDef>> {
     use crate::dialect::MethodReceiver;
 
     let Some(body) = sc.body() else { return Ok(Vec::new()) };
     let mut methods: Vec<crate::dialect::MethodDef> = Vec::new();
-    for stmt in super::util::flatten_statements(body) {
-        // A bare `private` (or `protected` / `public`) inside the
-        // singleton block is a VISIBILITY MARKER, not a statement with
-        // a body. Visibility is not modeled on a lowered class method
-        // (everything a body can reach, it reaches), so the marker is
-        // skipped rather than refused — and refusing it dropped the
-        // WHOLE MODEL at ingest, since `ingest_model` propagates the
-        // error for the file.
-        //
-        // Found by an STI probe: campfire's `Rooms::Direct` writes one
-        // above `find_for`, and it only surfaced once that class was
-        // classified as a model rather than a library class (the
-        // library-class walk has always tolerated the marker). Any
-        // model with a `class << self … private … end` block hits it.
+    for statement in super::util::flatten_statements(body) {
+        let definition = visibility::definition(&statement).map(|d| d.as_node());
+        let stmt = definition.as_ref().unwrap_or(&statement);
         if let Some(call) = stmt.as_call_node() {
-            let bare_marker = call.receiver().is_none()
-                && call.arguments().is_none()
-                && call.block().is_none()
-                && matches!(
-                    std::str::from_utf8(call.name().as_slice()).unwrap_or(""),
-                    "private" | "protected" | "public"
-                );
-            if bare_marker {
+            if visibility::marker(&call) {
                 continue;
             }
             // `deprecate(name: { message: …, deprecator: … })` — pure
@@ -1173,6 +1173,7 @@ fn ingest_singleton_class_methods(
                                 let mut alias = target.clone();
                                 alias.name = Symbol::from(new_name);
                                 alias.name_span = Span::synthetic();
+                                visibility.apply(&statement, &mut alias);
                                 methods.push(alias);
                                 continue;
                             }
@@ -1189,6 +1190,7 @@ fn ingest_singleton_class_methods(
         };
         let mut method = ingest_method(&def, file)?;
         method.receiver = MethodReceiver::Class;
+        visibility.apply(&statement, &mut method);
         methods.push(method);
     }
     Ok(methods)
@@ -1200,6 +1202,7 @@ pub(super) fn ingest_method(
 ) -> IngestResult<crate::dialect::MethodDef> {
     use crate::dialect::{MethodDef, MethodReceiver};
 
+    let formals = super::forwarding::parse(def);
     let name = Symbol::from(constant_id_str(&def.name()));
     // `def self.foo` / `def Post.foo` have explicit receivers; plain `def foo`
     // is an instance method.
@@ -1320,6 +1323,11 @@ pub(super) fn ingest_method(
         crate::dialect::Param::positional(Symbol::from(name))
     });
 
+    // Only full `...` or nameless `**` enters this canonical seam.
+    // Named rest/keyword-rest above and the separate block slot stay
+    // source-owned; no forwarding packet is expanded into local names.
+    params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
+
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -1329,7 +1337,10 @@ pub(super) fn ingest_method(
         name_span: super::util::def_name_span(def, file),
         name,
         receiver,
+        visibility: crate::dialect::MethodVisibility::Public,
         params,
+        unsupported_formals: formals.unsupported,
+        has_anonymous_block: formals.has_anonymous_block,
         body,
         signature: None,
         effects: EffectSet::pure(),
@@ -2053,16 +2064,17 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
+        ColumnType::Date => Ty::Date,
+        ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
-        // A `json` column is stored TEXT and nothing parses it: the
-        // Row field, hydration, `[]`, `attributes` and the adapter's
-        // escape all move the serialized string. `Hash[String, String]`
-        // was a declaration no synthesized path implemented. What gives
-        // such a column STRUCTURE is a `has_json` declaration, and that
-        // is modeled as typed per-key accessors over this text
-        // (`lower::has_json`), not as a Hash the whole column decodes to.
-        ColumnType::Json => Ty::Str,
+        // Rails exposes a schema-less JSON value here: it may be an
+        // Array, Hash, scalar, or nil, so neither String nor one fixed
+        // container type is honest. The emitted model keeps serialized
+        // text in its DB slot and decodes/encodes at the public accessor
+        // boundary (`JsonColumn`); analysis uses the deliberate gradual
+        // type. A `has_json` declaration adds its stronger per-key schema
+        // separately in `lower::has_json`.
+        ColumnType::Json => Ty::Untyped,
         ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
@@ -2085,7 +2097,7 @@ mod singleton_visibility_tests {
     /// file's ingest ("unsupported statement inside `class << self`"),
     /// which drops the model rather than the marker.
     #[test]
-    fn a_visibility_marker_in_a_singleton_block_is_skipped_not_refused() {
+    fn a_visibility_marker_in_a_singleton_block_is_resolved_not_refused() {
         let model = ingest(
             "class Thing < ApplicationRecord\n  \
              class << self\n    \
@@ -2104,6 +2116,11 @@ mod singleton_visibility_tests {
             })
             .collect();
         assert_eq!(names, vec!["visible", "hidden"], "both singleton methods survive");
+        let visibility: Vec<_> = model.body.iter().filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. } => Some(method.visibility),
+            _ => None,
+        }).collect();
+        assert_eq!(visibility, vec![crate::dialect::MethodVisibility::Public, crate::dialect::MethodVisibility::Private]);
     }
 
     /// A statement the walk genuinely cannot read still refuses — the

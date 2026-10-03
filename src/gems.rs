@@ -21,6 +21,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The `remote:` of every `PATH` section in a `Gemfile.lock`, lock
+/// order — the directories of the app's path-sourced gems
+/// (`gem "billing", path: "lib/billing"` locks as `remote: lib/billing`),
+/// as written: relative to the lockfile unless the Gemfile gave an
+/// absolute path.
+pub fn lock_path_remotes(text: &str) -> Vec<String> {
+    let mut remotes = Vec::new();
+    let mut in_path = false;
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            in_path = line.trim() == "PATH";
+        } else if in_path {
+            if let Some(remote) = line.strip_prefix("  remote: ") {
+                remotes.push(remote.trim().to_string());
+            }
+        }
+    }
+    remotes
+}
+
 /// A parsed `Gemfile.lock`: every resolved spec and the direct
 /// dependencies.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -431,6 +451,26 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("kredis", &["kredis_string", "kredis_integer", "kredis_boolean", "kredis_list", "kredis_unique_list", "kredis_set", "kredis_hash", "kredis_flag", "kredis_counter", "kredis_json", "kredis_datetime"]),
 ];
 
+/// Class-body DSLs whose methods are named by the author's own
+/// arguments (`event :publish` → `publish!`, `may_publish?`), so no
+/// fixed `SURFACES` list can name them. Attribution reads the names off
+/// the declaration instead (`analyze::attribution::generated_methods`).
+/// Each DSL lists the gems that provide it, most specific first.
+pub(crate) const GENERATING_DSLS: &[(&str, &[&str])] = &[
+    ("aasm", &["aasm"]),
+    ("state_machine", &["state_machines-activerecord", "state_machines", "state_machine"]),
+];
+
+/// The gem in `lock` that provides a generating DSL, if any does.
+pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static str> {
+    GENERATING_DSLS
+        .iter()
+        .filter(|(name, _)| *name == dsl)
+        .flat_map(|(_, gems)| gems.iter())
+        .find(|gem| lock.has(gem))
+        .copied()
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).
@@ -647,6 +687,35 @@ BUNDLED WITH
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
         assert_eq!(gem_claiming_method(&lock, "friendly_id"), None, "friendly_id is not in this lock");
+    }
+
+    #[test]
+    fn lock_path_remotes_reads_only_path_sources() {
+        let lock = "\
+GIT
+  remote: https://github.com/acme/widgets.git
+  revision: abc123
+  specs:
+    widgets (1.0.0)
+
+PATH
+  remote: lib/billing
+  specs:
+    billing (0.1.0)
+      rails
+
+PATH
+  remote: ../shared
+  specs:
+    shared (0.1.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rails (8.0.2)
+";
+        assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
+        assert!(lock_path_remotes(LOCK).is_empty());
     }
 }
 

@@ -104,6 +104,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         else {
             continue;
         };
+        if perform.params.iter().any(|p| p.forwarding) {
+            diags.push(Diagnostic::unsupported(perform.name_span, None, "full forwarding job wrapper",
+                "the generated job wrapper cannot preserve a full forwarding packet"));
+            continue;
+        }
         if perform.params.iter().any(|p| p.keyword) {
             diags.push(residue(&perform, "keyword parameters do not forward positionally"));
             continue;

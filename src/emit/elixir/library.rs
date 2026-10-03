@@ -438,6 +438,7 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => false,
         ExprNode::Send { recv, method, args, block, .. } => {
             (recv.is_none() && args.is_empty() && method.as_str() == name)
@@ -489,6 +490,7 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
         ExprNode::Raise { value }
         | ExprNode::Return { value }
         | ExprNode::Splat { value }
+        | ExprNode::KeywordSplat { value }
         | ExprNode::Cast { value, .. } => references_var(value, name),
         ExprNode::RescueModifier { expr, fallback } => {
             references_var(expr, name) || references_var(fallback, name)

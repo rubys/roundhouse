@@ -42,7 +42,9 @@ pub fn ingest_sorbet_signatures(source: &[u8]) -> HashMap<ClassId, HashMap<Symbo
         None,
         false,
         &HashMap::new(),
+        &HashMap::new(),
         &mut out,
+        source,
     );
     out
 }
@@ -57,7 +59,9 @@ fn walk(
     scope: Option<&str>,
     in_singleton_class: bool,
     aliases: &HashMap<String, Ty>,
+    rbs_aliases: &crate::rbs::AliasTable,
     out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
+    source: &[u8],
 ) {
     // The `sig` immediately above a `def` is the one that applies to
     // it; anything else between them (a comment is not a statement,
@@ -87,7 +91,8 @@ fn walk(
                     // order of alias and `sig` in the file does not
                     // matter; an enclosing scope's aliases stay visible.
                     let inner = collect_type_aliases(&statements, aliases);
-                    walk(&statements, Some(&name), false, &inner, out);
+                    let inner_rbs = scoped_rbs_aliases(source, class.location(), &statements, rbs_aliases);
+                    walk(&statements, Some(&name), false, &inner, &inner_rbs, out, source);
                 }
             }
             pending = None;
@@ -99,7 +104,8 @@ fn walk(
                 if let Some(body) = body.as_statements_node() {
                     let statements = body.body().iter().collect::<Vec<_>>();
                     let inner = collect_type_aliases(&statements, aliases);
-                    walk(&statements, Some(&name), false, &inner, out);
+                    let inner_rbs = scoped_rbs_aliases(source, module.location(), &statements, rbs_aliases);
+                    walk(&statements, Some(&name), false, &inner, &inner_rbs, out, source);
                 }
             }
             pending = None;
@@ -114,7 +120,7 @@ fn walk(
         if let Some(singleton) = statement.as_singleton_class_node() {
             if let Some(body) = singleton.body() {
                 if let Some(body) = body.as_statements_node() {
-                    walk(&body.body().iter().collect::<Vec<_>>(), scope, true, aliases, out);
+                    walk(&body.body().iter().collect::<Vec<_>>(), scope, true, aliases, rbs_aliases, out, source);
                 }
             }
             pending = None;
@@ -123,6 +129,13 @@ fn walk(
         if let Some(def) = statement.as_def_node() {
             if let (Some(sig), Some(scope)) = (pending.take(), scope) {
                 if let Some(ty) = signature_ty(&statements[sig], &def, in_singleton_class, aliases) {
+                    out.entry(ClassId(Symbol::new(scope)))
+                        .or_default()
+                        .insert(Symbol::new(constant_id_str(&def.name())), ty);
+                }
+            }
+            else if let Some(scope) = scope {
+                if let Some(ty) = rbs_comment_signature(source, &def, in_singleton_class, rbs_aliases) {
                     out.entry(ClassId(Symbol::new(scope)))
                         .or_default()
                         .insert(Symbol::new(constant_id_str(&def.name())), ty);
@@ -543,14 +556,7 @@ fn sorbet_ty(
                 .iter()
                 .map(|a| sorbet_ty(&a, self_is_instance, aliases))
                 .collect::<Option<_>>()?;
-            return match (container.as_str(), args.as_slice()) {
-                ("T::Array", [elem]) => Some(Ty::Array { elem: Box::new(elem.clone()) }),
-                ("T::Hash", [key, value]) => Some(Ty::Hash {
-                    key: Box::new(key.clone()),
-                    value: Box::new(value.clone()),
-                }),
-                _ => None,
-            };
+            return crate::rbs::sorbet_generic_ty(&container, &args);
         }
         // `T.nilable(X)`, `T.any(A, B)`, `T.untyped`
         let receiver = index.receiver()?;
@@ -595,7 +601,194 @@ fn named_ty(name: &str) -> Ty {
         "Symbol" => Ty::Sym,
         "TrueClass" | "FalseClass" => Ty::Bool,
         "NilClass" => Ty::Nil,
-        "Time" | "Date" | "DateTime" | "ActiveSupport::TimeWithZone" => Ty::Time,
+        "Date" => Ty::Date,
+        "Time" | "DateTime" | "ActiveSupport::TimeWithZone" => Ty::Time,
         _ => Ty::Class { id: ClassId(Symbol::new(name)), args: Vec::new() },
     }
+}
+
+/// The `Ty::Fn` an RBS inline comment declares for a `def`:
+///
+/// ```ruby
+/// #: (::Shop, ActionDispatch::Request) -> void
+/// def initialize(shop, request)
+/// ```
+///
+/// The comment lines are the contiguous run directly above the `def`
+/// (other `#` comments may sit among them: `# @override`). `#:` starts
+/// the signature and `#|` continues it. RBS leaves positional
+/// parameters unnamed; the def names them, so the two are paired in
+/// order and anything that does not pair up (a different count or
+/// kind, a keyword the def does not have) drops the signature rather
+/// than mistyping a parameter.
+fn rbs_comment_signature(
+    source: &[u8],
+    def: &ruby_prism::DefNode<'_>,
+    in_singleton_class: bool,
+    rbs_aliases: &crate::rbs::AliasTable,
+) -> Option<Ty> {
+    let text = rbs_comment_text(source, def.location().start_offset())?;
+    // A `#: type name = ...` comment is a declaration, not a signature.
+    if text.starts_with("type ") {
+        return None;
+    }
+    let receiver = if in_singleton_class || def.receiver().is_some() { "self." } else { "" };
+    let wrapped = format!("class X\n  def {receiver}m: {text}\nend\n");
+    let sigs = crate::rbs::parse_signatures_with_aliases(&wrapped, rbs_aliases).ok()?;
+    let Ty::Fn { params: declared, block, ret, effects } = sigs.methods.into_iter().next()?.1 else {
+        return None;
+    };
+    let (declared_block, declared): (Vec<Param>, Vec<Param>) =
+        declared.into_iter().partition(|p| matches!(p.kind, ParamKind::Block));
+    let def_params = match def.parameters() {
+        Some(parameters) => {
+            if parameters.posts().iter().next().is_some() {
+                return None;
+            }
+            def_parameters(&parameters)?
+        }
+        None => Vec::new(),
+    };
+    let def_block = def_params.iter().find(|(_, k)| matches!(k, ParamKind::Block));
+    let def_params: Vec<&(String, ParamKind)> =
+        def_params.iter().filter(|(_, k)| !matches!(k, ParamKind::Block)).collect();
+    if def_params.len() != declared.len() {
+        return None;
+    }
+    let mut declared: Vec<Option<Param>> = declared.into_iter().map(Some).collect();
+    let mut next_positional = 0;
+    let mut params = Vec::new();
+    for (name, kind) in def_params {
+        let index = if matches!(kind, ParamKind::Keyword { .. }) {
+            declared.iter().position(|candidate| candidate.as_ref().is_some_and(|param| {
+                matches!(param.kind, ParamKind::Keyword { .. }) && param.name.as_str() == name
+            }))?
+        } else {
+            let index = (next_positional..declared.len()).find(|&index| {
+                declared[index].as_ref().is_some_and(|param| !matches!(param.kind, ParamKind::Keyword { .. }))
+            })?;
+            next_positional = index + 1;
+            index
+        };
+        let decl = declared[index].take()?;
+        if *kind != decl.kind {
+            return None;
+        }
+        params.push(Param { name: Symbol::new(name), ty: decl.ty, kind: kind.clone() });
+    }
+    if declared.into_iter().any(|param| param.is_some()) {
+        return None;
+    }
+    if let Some((name, _)) = def_block {
+        let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped);
+        params.push(Param { name: Symbol::new(name), ty, kind: ParamKind::Block });
+    }
+    Some(Ty::Fn { params, block, ret, effects })
+}
+
+/// The `#: type name = ...` aliases a class or module body declares,
+/// layered over the enclosing scope's (`outer`); a name declared again
+/// shadows the outer one.
+///
+/// Sorbet's RBS comments spell a type alias as a comment in the body
+/// (`#: type object_type = ::User`, continued with `#|`) and refer to
+/// it by name from any signature below. Resolve each scope before walking
+/// nested bodies so an inherited alias keeps its original dependencies
+/// even when a child shadows one. Nested class and module bodies are skipped: an alias
+/// declared there is not visible here.
+fn scoped_rbs_aliases(
+    source: &[u8],
+    body: ruby_prism::Location<'_>,
+    statements: &[Node<'_>],
+    outer: &crate::rbs::AliasTable,
+) -> crate::rbs::AliasTable {
+    let mut out = outer.clone();
+    let Ok(text) = std::str::from_utf8(source) else { return out };
+    let nested: Vec<(usize, usize)> = statements
+        .iter()
+        .filter_map(|s| {
+            let location = s.as_class_node().map(|c| c.location()).or_else(|| s.as_module_node().map(|m| m.location()))?;
+            Some((location.start_offset(), location.end_offset()))
+        })
+        .collect();
+    let mut offset = body.start_offset();
+    let Some(region) = text.get(body.start_offset()..body.end_offset()) else { return out };
+    let mut current: Option<String> = None;
+    let mut declarations: Vec<String> = Vec::new();
+    for line in region.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if nested.iter().any(|(s, e)| start >= *s && start < *e) {
+            declarations.extend(current.take());
+            continue;
+        }
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("#:").map(str::trim).filter(|r| r.starts_with("type ")) {
+            declarations.extend(current.take());
+            current = Some(rest.to_string());
+        } else if let (Some(rest), Some(open)) = (trimmed.strip_prefix("#|"), current.as_mut()) {
+            open.push(' ');
+            open.push_str(rest.trim());
+        } else {
+            declarations.extend(current.take());
+        }
+    }
+    declarations.extend(current);
+    let mut local: Vec<(String, String)> = Vec::new();
+    for declaration in declarations {
+        let name: String = declaration["type ".len()..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        out.remove(&name);
+        local.retain(|(existing, _)| *existing != name);
+        local.push((name, declaration));
+    }
+    // Parse independently: a malformed unused declaration must not discard
+    // valid aliases or signatures elsewhere in the same body.
+    let parsed: Vec<_> = local.iter()
+        .filter_map(|(_, declaration)| ruby_rbs::node::parse(declaration).ok())
+        .collect();
+    let members: Vec<_> = parsed.iter().flat_map(|s| s.declarations().iter()).collect();
+    crate::rbs::resolve_aliases(&members, None, &out)
+}
+
+/// The signature text of the `#:` / `#|` comment lines directly above
+/// the line holding byte `def_start`.
+fn rbs_comment_text(source: &[u8], def_start: usize) -> Option<String> {
+    let text = std::str::from_utf8(source).ok()?;
+    let before = text.get(..def_start)?;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text[..line_start].lines().rev() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            break;
+        }
+        lines.push(trimmed);
+    }
+    lines.reverse();
+    let mut sig = String::new();
+    let mut open = false;
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("#:") {
+            // A second `#:` opens another declaration; only the last
+            // block counts, matching what sits nearest the def.
+            sig.clear();
+            sig.push_str(rest.trim());
+            open = true;
+        } else if let Some(rest) = line.strip_prefix("#|") {
+            if open {
+                sig.push(' ');
+                sig.push_str(rest.trim());
+            }
+        } else {
+            open = false;
+        }
+    }
+    (!sig.is_empty()).then_some(sig)
 }

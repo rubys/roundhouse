@@ -447,10 +447,10 @@ fn maybe_register_enum(stmt: &str, enum_types: &mut HashSet<String>) {
 // ---------------------------------------------------------------------
 
 /// `CREATE [UNIQUE] INDEX [name] ON table [USING method] (cols) [WHERE
-/// …]`. The `WHERE` partial-index clause is dropped the same way
-/// schema.rb's own `add_index …, where: "…"` option is (never carried
-/// into `Index`) — parity, not a new gap. An expression column
-/// (`lower(name)`, `COALESCE(…)`, an operator expression) has no
+/// …]`. The `WHERE` predicate is kept as written, as schema.rb's
+/// `where:` is: on a unique index it limits which rows must be
+/// distinct. An expression column (`lower(name)`, `COALESCE(…)`, an
+/// operator expression) has no
 /// `Symbol` to hold it, so the whole index is skipped rather than
 /// ledgered: it costs the DDL nothing (indexes don't feed column
 /// typing) and ledgering one line per such index would swamp the
@@ -501,11 +501,24 @@ fn handle_create_index(stmt: &str, schema: &mut Schema) {
         return;
     }
 
+    // pg_dump puts the predicate last, after any `INCLUDE`, `NULLS NOT
+    // DISTINCT`, `WITH` or `TABLESPACE`, so it is the rest of the
+    // statement.
+    let words = top_level_words(after_table);
+    let predicate = word_seq_pos_after(&words, close, &["WHERE"])
+        .map(|pos| after_table[pos + "WHERE".len()..].trim().to_string())
+        .filter(|p| !p.is_empty());
+
     if let Some(table) = schema.tables.get_mut(&table_sym) {
         // An index over a column the walk dropped cannot apply — same
         // retain-filter `ingest_schema` uses (see `table_from_create_table`).
         if cols.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-            table.indexes.push(Index { name: Symbol::from(index_name), columns: cols, unique });
+            table.indexes.push(Index {
+                name: Symbol::from(index_name),
+                columns: cols,
+                unique,
+                predicate,
+            });
         }
     }
 }
@@ -747,10 +760,25 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 /// statement text (still possibly containing embedded comments deeper
 /// in, which the quote/comment-aware scanners below handle wherever
 /// they walk it).
+///
+/// The `\restrict <key>` and `\unrestrict <key>` lines that open and
+/// close a dump from pg_dump 18 (and 17.6, 16.10, 15.14, 14.19, 13.22)
+/// go too. They are psql meta-commands: one line each, with no `;`, so
+/// the split glues each onto the statement after it. They change no
+/// schema; Rails 7.2.3 and 8.0.3 onward strip them from the dump.
 fn strip_leading_comment_banner(raw: &str) -> &str {
     let mut s = raw;
     loop {
         let t = s.trim_start();
+        if t.starts_with("\\restrict ") || t.starts_with("\\unrestrict ") {
+            match t.find('\n') {
+                Some(nl) => {
+                    s = &t[nl + 1..];
+                    continue;
+                }
+                None => return "",
+            }
+        }
         if let Some(after) = t.strip_prefix("--") {
             match after.find('\n') {
                 Some(nl) => {

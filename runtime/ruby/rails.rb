@@ -70,14 +70,21 @@ module Rails
       @base = base
     end
 
-    def join(part)
-      AppPath.new(@base + "/" + part)
+    # Pathname#join takes any number of parts
+    # (`Rails.root.join("source", "posts")`), and with none it answers
+    # the path itself.
+    def join(*parts)
+      if parts.empty?
+        self
+      else
+        AppPath.new(@base + "/" + parts.join("/"))
+      end
     end
 
     # `Rails.root + "storage/x"` — Pathname#+ is a path join, not string
     # concatenation, so it is `join` under another name.
     def +(part)
-      AppPath.new(@base + "/" + part)
+      join(part)
     end
 
     def to_s
@@ -487,6 +494,14 @@ module Rails
 
     def vips_blocked_operations
       []
+    end
+
+    # `config.default_per_page = N` inside `Kaminari.configure` in an
+    # initializer: the page size `Relation#page` applies. Lifted at
+    # ingest onto the reopen like the settings above; Kaminari's own
+    # default when the app configures none.
+    def kaminari_default_per_page
+      25
     end
   end
 end

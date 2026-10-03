@@ -25,6 +25,8 @@
 #                    Default: build the site into a temp dir via build-site.
 #   --tgz PATH       Use a specific archive tarball (overrides --site-dir).
 #   --keep           Don't delete the work dir on exit (debug).
+#   --work-dir DIR   Extract into a new named directory (CI witnesses).
+#   --extract-blocks README DIR  Only extract runnable blocks into a new DIR.
 #
 # Environment overrides:
 #   SMOKE_MIN_TESTS  Override the § Test executed-count floor for this run.
@@ -40,14 +42,19 @@ TARGET=""
 SITE_DIR=""
 TGZ=""
 KEEP=0
+WORK_DIR=""
 EXPLAIN=""
+EXTRACT_README=""
+EXTRACT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --site-dir)     SITE_DIR="$2"; shift 2 ;;
         --tgz)          TGZ="$2";      shift 2 ;;
         --keep)         KEEP=1;        shift ;;
+        --work-dir)     WORK_DIR="$2"; shift 2 ;;
         --explain-count) EXPLAIN="$2"; shift 2 ;;
+        --extract-blocks) EXTRACT_README="$2"; EXTRACT_DIR="$3"; shift 3 ;;
         -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         -*)         echo "unknown flag: $1" >&2; exit 2 ;;
         *)
@@ -155,9 +162,41 @@ if [[ -n "$EXPLAIN" ]]; then
     exit 0
 fi
 
+extract_readme_blocks() {
+    # One file per runnable ```sh block, in document order. Run and
+    # Regenerate are excluded because they require a server or transpiler.
+    mkdir "$2"
+    awk -v dir="$2" '
+        /^## /    { section = substr($0, 4) }
+        /^```sh$/ {
+            if (section != "Run" && section != "Regenerate") {
+                slug = section
+                gsub(/[^A-Za-z0-9]+/, "-", slug)
+                n++
+                file = sprintf("%s/%02d--%s.sh", dir, n, slug)
+                collecting = 1
+            }
+            next
+        }
+        /^```$/   { collecting = 0; next }
+        collecting { print > file }
+    ' "$1"
+}
+
+if [[ -n "$EXTRACT_README" ]]; then
+    extract_readme_blocks "$EXTRACT_README" "$EXTRACT_DIR"
+    exit 0
+fi
+
 [[ -z "$TARGET" ]] && { echo "usage: scripts/smoke [options] TARGET" >&2; exit 2; }
 
-WORK="$(mktemp -d -t roundhouse-smoke.XXXXXX)"
+if [[ -n "$WORK_DIR" ]]; then
+    # Never reuse a prepared extraction or silently delete somebody's files.
+    mkdir "$WORK_DIR"
+    WORK="$WORK_DIR"
+else
+    WORK="$(mktemp -d -t roundhouse-smoke.XXXXXX)"
+fi
 cleanup() {
     local code=$?
     if (( KEEP )); then
@@ -195,22 +234,7 @@ ok "extracted ($APP_DIR)"
 # awk tracks the current `## ` heading; blocks under Run / Regenerate
 # are skipped (foreground server / needs the transpiler).
 BLOCKS="$WORK/.smoke-blocks"
-mkdir -p "$BLOCKS"
-awk -v dir="$BLOCKS" '
-    /^## /    { section = substr($0, 4) }
-    /^```sh$/ {
-        if (section != "Run" && section != "Regenerate") {
-            slug = section
-            gsub(/[^A-Za-z0-9]+/, "-", slug)
-            n++
-            file = sprintf("%s/%02d--%s.sh", dir, n, slug)
-            collecting = 1
-        }
-        next
-    }
-    /^```$/   { collecting = 0; next }
-    collecting { print > file }
-' "$APP_DIR/README.md"
+extract_readme_blocks "$APP_DIR/README.md" "$BLOCKS"
 
 shopt -s nullglob
 block_files=("$BLOCKS"/*.sh)

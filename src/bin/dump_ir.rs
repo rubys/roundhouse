@@ -510,6 +510,7 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             f(cond); visit_subexprs(cond, f);
@@ -596,7 +597,9 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { f(v); visit_subexprs(v, f); }
         }
-        ExprNode::Splat { value } => { f(value); visit_subexprs(value, f); }
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
+            f(value); visit_subexprs(value, f);
+        }
         ExprNode::MultiAssign { value, .. } => { f(value); visit_subexprs(value, f); }
         ExprNode::While { cond, body, .. } => {
             f(cond); visit_subexprs(cond, f);

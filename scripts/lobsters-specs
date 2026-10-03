@@ -243,7 +243,7 @@ else
   emit_info["warnings"] = diags.count { |k, _| k == "warning" }
   emit_info["by_kind"] = diags.group_by { |_, k| k }.transform_values(&:size)
                               .sort_by { |_, n| -n }.to_h
-  emit_info["files"] = err[/wrote (\d+) files/, 1]&.to_i
+  emit_info["files"] = err[/(?:wrote|emitted) (\d+) files/, 1]&.to_i
 end
 emit_info["path"] = emit_tree
 

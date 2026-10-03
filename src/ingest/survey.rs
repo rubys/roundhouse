@@ -42,6 +42,17 @@ pub fn is_active() -> bool {
     SURVEY_STATE.with(|s| s.borrow().is_some())
 }
 
+/// Probe with the same strict/survey parsing semantics, without publishing
+/// duplicate errors. Preserve all entries recorded before the probe.
+pub(super) fn without_recording<T>(f: impl FnOnce() -> T) -> T {
+    let length = SURVEY_STATE.with(|s| s.borrow().as_ref().map(Vec::len));
+    let result = f();
+    if let Some(length) = length {
+        SURVEY_STATE.with(|s| s.borrow_mut().as_mut().unwrap().truncate(length));
+    }
+    result
+}
+
 /// Push an ingest error into the per-thread collector. No-op if
 /// survey mode isn't active (so callers can record unconditionally).
 pub fn record(err: &IngestError) {

@@ -206,6 +206,15 @@ module ActiveRecord
       upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning)
     end
 
+    # The predicate of the unique index on `columns` (sorted, joined with
+    # ", ") when that index is partial, else "". The lowering overrides it
+    # for a model whose table has one. `upsert_all` adds it to the
+    # conflict target, as Rails does: SQLite matches a partial index only
+    # through its `WHERE`.
+    def self._conflict_predicate(columns)
+      ""
+    end
+
     # `Model.upsert_all(rows, …)` → SQLite's
     # `INSERT … ON CONFLICT (target) DO UPDATE SET …`.
     #
@@ -249,8 +258,11 @@ module ActiveRecord
       end
       action = assigns.nil? ? "DO NOTHING" : "DO UPDATE SET #{assigns}"
 
+      predicate = _conflict_predicate(target_names.sort.join(", "))
+      conflict_where = predicate == "" ? "" : " WHERE #{predicate}"
+
       sql = "INSERT INTO #{table_name} (#{cols.join(", ")}) VALUES #{tuples.join(", ")}" \
-            " ON CONFLICT (#{target_names.join(", ")}) #{action}"
+            " ON CONFLICT (#{target_names.join(", ")})#{conflict_where} #{action}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
     end
@@ -342,6 +354,13 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).none
     end
 
+    # Kaminari's class-side entry point, `Model.page(n)`: the same page
+    # of a fresh Relation (Relation#page). Ruby-family-only for the
+    # reason `where` above is.
+    def self.page(num = nil)
+      ActiveRecord::Relation.new(self).page(num)
+    end
+
     # Rails-shape `first` fallback, same story as `where`/`all` above:
     # spec/dynamic call sites reach the class method directly
     # (`Category.first` in lobsters' specs); lowered call sites don't
@@ -368,6 +387,17 @@ module ActiveRecord
     # their models always carry the emitted override.
     def self._hydrate_all(sql)
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
+    end
+
+    # Finder inputs cast according to the schema's primary-key type,
+    # not the caller's Ruby type. This conversion belongs beside the
+    # ruby-family Relation; strict runtimes don't ship that class.
+    def self._cast_primary_key(id)
+      return id.to_s if _string_primary_key
+      # ActiveModel::Type::Integer serializes nonnumeric Strings as nil,
+      # not zero. Numeric prefixes ("0x", "31-slug") still use to_i.
+      return nil if id.is_a?(String) && !id.match?(/\A\s*[+-]?\d/)
+      id.to_i
     end
 
     # Rails' `update_attribute`: one writer, then save WITHOUT

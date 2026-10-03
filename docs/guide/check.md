@@ -29,8 +29,46 @@ plus anything `config/application.rb` adds to `config.autoload_paths`
 or `config.eager_load_paths`. `config.autoload_lib(ignore: %w[assets
 tasks])` is honored: a directory the app takes off its own load path
 is off the walk as well, which is where a RuboCop cop or a test-support
-tree under `app/` goes if you do not want it analyzed. Packwerk's
-`packs/*/app/*` layout is not walked yet.
+tree under `app/` goes if you do not want it analyzed.
+
+A Packwerk app (`packwerk.yml` or `packs.yml` at the root) contributes
+each selected package's `app/` and `lib/` trees.
+Roundhouse expands brace alternatives in `package_paths`, such as
+`"{,components,components/*/,components/*/*/}"`.
+
+Roundhouse also reads `PATH` entries from `Gemfile.lock`.
+These entries come from `path:` declarations in the Gemfile:
+
+```ruby
+gem "billing", path: "components/billing"
+```
+
+Each in-repository path gem contributes its `lib/` tree, even without
+an `app/` directory or a `Rails::Engine` subclass.
+An engine also contributes its `app/` tree when its `lib/` declares
+a `Rails::Engine` subclass.
+Roundhouse identifies that superclass from the Ruby syntax tree.
+It does not require a folder named `components`, `packs`, or `lib`.
+
+Roundhouse rejects paths outside the application and paths with parent-directory references.
+It accepts absolute paths inside the application.
+It excludes symbolic links throughout selected path gem trees.
+These rules also prevent linked engine declarations and directory cycles.
+
+When an app has multiple `app/` roots, `check` prints those roots.
+The app's own templates shadow engine or package templates with the
+same name and format, as in Rails. Other roots are sorted by path;
+their relative precedence is a deterministic approximation, not Rails'
+engine load order. Collisions between non-host roots therefore need
+manual checking.
+Roundhouse does not read an engine's own `config/routes.rb` yet.
+The host's `mount` of the engine remains a dropped route.
+
+Routed templates without an explicit controller method participate in
+the shared callback dispatcher. The separate Rails-to-Roda converter
+does not implement that dispatcher: template-only routes on a
+callback-bearing controller or ancestor remain fail-closed with a 501
+and a `ROUNDHOUSE-TODO`, even if callbacks are scoped or skipped.
 
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <
@@ -107,6 +145,15 @@ from them.
 ingester does not recognize yet are recorded and skipped rather than
 aborting, and a deduplicated list of them is printed at the end.
 
+Some declaration limits can only be established after type inference.
+Rejected Alba source-property serializers also appear in this ledger,
+with an `analysis:` prefix and their source location. A resolved direct
+`alba` dependency adds gem attribution; without that evidence the entry
+names only the Alba-shaped subset. These admission failures remain
+`error[unsupported]` and exit 1: a coverage entry is not executable
+serializer support. Alba declarations rejected during ingest still
+exit 2, but `--continue` prints their partial survey ledger.
+
 Without it (the default, also spelled `--strict`), ingest stops at the
 first unrecognized construct and exits 2. That is the right mode for an
 app you expect roundhouse to cover completely — a CI gate that should
@@ -115,6 +162,10 @@ look at an unfamiliar codebase.
 
 `ROUNDHOUSE_INGEST_SURVEY=1` in the environment is the same as
 `--continue`; useful where the command line is not yours to edit.
+
+## Measure a slow check
+
+Set `ROUNDHOUSE_TIMINGS=1` before `roundhouse check`. The command prints elapsed time for ingest, analysis, diagnosis, and each inference round. It also prints the Rubydex index, resolve, and answer steps, and the time that ingest waits for Rubydex. It also prints peak RSS on macOS and Linux. The command does not print measurements by default.
 
 ## A clean run
 

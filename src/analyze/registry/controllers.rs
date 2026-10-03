@@ -191,38 +191,49 @@ pub(in crate::analyze) fn register(
         }
         app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
-    // HTTP Basic auth: yields the credentials the client sent and
-    // answers what the block decided — or renders the 401 challenge
-    // itself when there were none. Registered with BOTH block
-    // parameters, because a block yielding two values that names one
-    // leaves the second bound to nothing and everything compared
-    // against it untyped.
-    app_ctrl.class_methods.insert(
-        Symbol::from("authenticate_or_request_with_http_basic"),
-        Ty::Fn {
-            params: Vec::new(),
-            block: Some(Box::new(Ty::Fn {
-                params: vec![
-                    crate::ty::Param {
-                        name: Symbol::from("username"),
-                        ty: Ty::Str,
-                        kind: crate::ty::ParamKind::Required,
-                    },
-                    crate::ty::Param {
-                        name: Symbol::from("password"),
-                        ty: Ty::Str,
-                        kind: crate::ty::ParamKind::Required,
-                    },
-                ],
-                block: None,
-                ret: Box::new(Ty::Bool),
-                effects: crate::effect::EffectSet::default(),
-            })),
-            // The block's verdict, or the challenge it renders instead.
-            ret: Box::new(Ty::Untyped),
+    // HTTP Basic and Token auth (runtime/spinel/http_authentication.rb):
+    // each yields the credentials the client sent and answers what the
+    // block decided; the `or_request` forms render the 401 challenge
+    // themselves when there were none or the block refused. Registered
+    // with BOTH block parameters, because a block yielding two values
+    // that names one leaves the second bound to nothing and everything
+    // compared against it untyped.
+    let yields_two = |first: (&str, Ty), second: (&str, Ty), verdict: Ty| Ty::Fn {
+        params: Vec::new(),
+        block: Some(Box::new(Ty::Fn {
+            params: [first, second]
+                .into_iter()
+                .map(|(name, ty)| crate::ty::Param {
+                    name: Symbol::from(name),
+                    ty,
+                    kind: crate::ty::ParamKind::Required,
+                })
+                .collect(),
+            block: None,
+            ret: Box::new(verdict),
             effects: crate::effect::EffectSet::default(),
-        },
-    );
+        })),
+        // The block's verdict, or nil once the challenge is rendered.
+        ret: Box::new(Ty::Untyped),
+        effects: crate::effect::EffectSet::default(),
+    };
+    let str_hash = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    for m in ["authenticate_or_request_with_http_basic", "authenticate_with_http_basic"] {
+        app_ctrl.class_methods.insert(
+            Symbol::from(m),
+            yields_two(("username", Ty::Str), ("password", Ty::Str), Ty::Bool),
+        );
+    }
+    for m in ["authenticate_or_request_with_http_token", "authenticate_with_http_token"] {
+        app_ctrl.class_methods.insert(
+            Symbol::from(m),
+            // A Token block usually answers the authenticated record.
+            yields_two(("token", Ty::Str), ("options", str_hash()), Ty::Untyped),
+        );
+    }
+    for m in ["request_http_basic_authentication", "request_http_token_authentication"] {
+        app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
+    }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
     // `cookies` is the cookie jar: string values in and out,

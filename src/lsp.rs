@@ -640,26 +640,53 @@ fn run_and_publish(
 ) {
     let (diags, analysis) = run_analysis(root, &request.overlay);
     let diags = gate(diags, request.settings);
-    if let Some(analysis) = analysis {
+    let config_path = root.join("roundhouse.yml");
+    let config_uri = path_to_uri(&config_path);
+    let config_diags = match &analysis {
+        Err(IngestError::Parse { file, message })
+            if canonical(Path::new(file)) == canonical(&config_path) =>
+        {
+            vec![LspDiagnostic {
+                range: LspRange::default(),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("roundhouse".to_string()),
+                message: message.clone(),
+                ..Default::default()
+            }]
+        }
+        _ => Vec::new(),
+    };
+    // The config is not an App source. Publish it separately, including
+    // when no good snapshot exists or the config is not open in the editor.
+    let open: Vec<_> = request
+        .open
+        .into_iter()
+        .filter(|uri| Some(uri) != config_uri.as_ref())
+        .collect();
+    if let Ok(analysis) = analysis {
         let analysis = Arc::new(analysis);
         if let Ok(mut slot) = shared.lock() {
             *slot = Some(Arc::clone(&analysis));
         }
-        publish(sender, &analysis.app, &request.open, diags);
+        publish(sender, &analysis.app, &open, diags);
     } else if let Ok(slot) = shared.lock() {
         // Hard ingest failure (rare under Prism error recovery): keep
         // the last good snapshot for queries, surface what we captured.
         if let Some(analysis) = slot.clone() {
             drop(slot);
-            publish(sender, &analysis.app, &request.open, diags);
+            publish(sender, &analysis.app, &open, diags);
         }
+    }
+    if let Some(uri) = config_uri {
+        // An empty list also clears a configuration error after recovery.
+        let _ = publish_for(sender, &uri, config_diags);
     }
 }
 
 fn run_analysis(
     root: &Path,
     overlay: &HashMap<PathBuf, String>,
-) -> (Vec<RhDiagnostic>, Option<Analysis>) {
+) -> (Vec<RhDiagnostic>, Result<Analysis, IngestError>) {
     let vfs = OverlayVfs { disk: FsVfs::new(), overlay };
     // Survey mode: degrade past unsupported constructs (every real app
     // has some) with a placeholder + recorded gap instead of aborting
@@ -672,7 +699,7 @@ fn run_analysis(
     crate::ingest::survey::activate();
     let (result, mut parse_diags) =
         crate::ingest::prism::scope(|| ingest_app_with_vfs(&vfs, root));
-    let gaps = crate::ingest::survey::drain();
+    let mut gaps = crate::ingest::survey::drain();
     match result {
         Ok(mut app) => {
             let mut analyzer = Analyzer::new(&app);
@@ -680,13 +707,14 @@ fn run_analysis(
             let registry = analyzer.class_registry().clone();
             let mut diags = diagnose(&app);
             crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+            crate::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
             crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
             diags.append(&mut parse_diags);
-            (diags, Some(Analysis { app, registry, gaps, analyzer }))
+            (diags, Ok(Analysis { app, registry, gaps, analyzer }))
         }
         Err(err) => {
             eprintln!("roundhouse-lsp: ingest failed: {err}");
-            (parse_diags, None)
+            (parse_diags, Err(err))
         }
     }
 }
@@ -984,6 +1012,9 @@ impl Vfs for OverlayVfs<'_> {
     fn is_dir(&self, path: &Path) -> bool {
         self.disk.is_dir(path)
     }
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.disk.is_symlink(path)
+    }
 }
 
 #[cfg(test)]
@@ -1035,6 +1066,69 @@ mod tests {
         let t = "user.po";
         assert_eq!(ide::word_start(t, t.len()), 5);
         assert_eq!(ide::word_start(t, 5), 5, "empty word right after the dot");
+    }
+
+    #[test]
+    fn test_path_config_errors_are_published_and_clear_after_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "roundhouse_lsp_config_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let config = root.join("roundhouse.yml");
+        std::fs::write(&config, "test_paths: test/unit\n").unwrap();
+        let uri = path_to_uri(&config).unwrap();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let shared: SharedAnalysis = Arc::new(Mutex::new(None));
+        let request = |overlay| AnalyzeRequest {
+            overlay,
+            // Configuration errors must be visible even with only Ruby files open.
+            open: Vec::new(),
+            settings: Settings::default(),
+        };
+        let config_diagnostics = || {
+            receiver
+                .try_iter()
+                .filter_map(|msg| {
+                    let Message::Notification(notification) = msg else { return None };
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(notification.params).unwrap();
+                    (params.uri == uri).then_some(params.diagnostics)
+                })
+                .last()
+                .expect("configuration diagnostics notification")
+        };
+
+        // A bad on-disk configuration is reported before a first good snapshot exists.
+        run_and_publish(&root, request(HashMap::new()), &sender, &shared);
+        let errors = config_diagnostics();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert!(errors[0].message.contains("sequence"), "{errors:?}");
+        assert!(shared.lock().unwrap().is_none());
+
+        // Unsaved valid content overrides disk, clears the error, and installs a snapshot.
+        let valid = HashMap::from([(config.clone(), "test_paths: []\n".to_string())]);
+        run_and_publish(&root, request(valid.clone()), &sender, &shared);
+        assert!(config_diagnostics().is_empty());
+        let last_good = shared.lock().unwrap().clone().unwrap();
+
+        // A subsequent invalid edit reports its error without replacing the last-good app.
+        let invalid = HashMap::from([(config, "test_paths: [../outside]\n".to_string())]);
+        run_and_publish(&root, request(invalid), &sender, &shared);
+        let errors = config_diagnostics();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("app-relative"), "{errors:?}");
+        assert!(Arc::ptr_eq(&last_good, shared.lock().unwrap().as_ref().unwrap()));
+
+        run_and_publish(&root, request(valid), &sender, &shared);
+        assert!(config_diagnostics().is_empty());
+        assert!(!Arc::ptr_eq(&last_good, shared.lock().unwrap().as_ref().unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Drive one completion round: full-sync the buffer to `text`, then

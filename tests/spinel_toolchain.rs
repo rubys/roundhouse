@@ -31,39 +31,39 @@ use roundhouse::analyze::Analyzer;
 
 use roundhouse::ingest::ingest_app;
 
-fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+#[path = "support/class_configuration.rs"]
+mod class_configuration;
+#[path = "support/rails_root_join.rs"]
+mod rails_root_join;
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn finite_concern_class_configuration_runs_natively() {
+    for (overlay, assertions) in [
+        (class_configuration::overlay(), class_configuration::ASSERTIONS),
+        (class_configuration::empty_overlay(), class_configuration::EMPTY_ASSERTIONS),
+    ] {
+        let run = overlay.run_spinel(assertions);
+        run.assert_passes();
+        assert!(run.stdout.contains("finite class configuration contract passed"));
+    }
 }
 
-/// Move every `<scratch>/{runtime,test}/**/*.rbs` to
-/// `<scratch>/sig/{runtime,test}/<rel>.rbs`. Mirrors the top-level
-/// Makefile's RUBY_OUT layout (f6d2b87): one `sig/` root for both
-/// hand-authored RBS (runtime tree + test_helper) and roundhouse-emitted
-/// app RBS.
-fn reroute_runtime_rbs_to_sig(scratch: &Path) {
-    fn walk(dir: &Path, src_root: &Path, sig_root: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return; };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, src_root, sig_root);
-            } else if path.extension().and_then(|s| s.to_str()) == Some("rbs") {
-                let rel = path.strip_prefix(src_root).expect("under src root");
-                let dst = sig_root.join(rel);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent).expect("mkdir sig parent");
-                }
-                std::fs::rename(&path, &dst).expect("mv .rbs to sig/");
-            }
-        }
-    }
-    let runtime_dir = scratch.join("runtime");
-    let sig_runtime = scratch.join("sig").join("runtime");
-    walk(&runtime_dir, &runtime_dir, &sig_runtime);
+/// The native half of `emit_and_run::rails_root_join_takes_any_number_of_parts`:
+/// the fixtures never call `join` with more than one part, so no other
+/// Spinel lane compiles the variadic `Rails::AppPath#join`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn rails_root_join_takes_any_number_of_parts_natively() {
+    let run = rails_root_join::overlay().run_spinel(rails_root_join::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("Rails.root.join contract passed"));
+}
 
-    let test_dir = scratch.join("test");
-    let sig_test = scratch.join("sig").join("test");
-    walk(&test_dir, &test_dir, &sig_test);
+fn scratch_dir(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -140,4 +140,149 @@ fn real_blog_spinel_tests_pass() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+/// Exercise the shipped CLI/spin package, not the pre-spin_shape test overlay.
+#[test]
+#[ignore = "requires spin and spinel on PATH plus SQLite/jemalloc development libraries"]
+fn identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds() {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn snapshot(root: &Path, dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+        let mut files = BTreeMap::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(snapshot(root, &path));
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (
+                        fs::read(&path).unwrap(),
+                        fs::metadata(&path).unwrap().modified().unwrap(),
+                    ),
+                );
+            }
+        }
+        files
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = scratch_dir(&format!("repeat-{}-{unique}", std::process::id()));
+    let fixture = scratch.join("source");
+    let dest = scratch.join("output");
+    copy_tree(roundhouse::fixtures::real_blog(), &fixture);
+    fs::write(fixture.join("public/freshness.bin"), [0xff, 0x00, 0x80]).unwrap();
+    let emit = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", "spinel"])
+            .arg(&fixture)
+            .arg("-o")
+            .arg(&dest)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "strict emit failed: {stderr}");
+        stderr
+    };
+    let build = || {
+        let output = Command::new("spin")
+            .args(["build", "blog"])
+            .current_dir(&dest)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "spin build failed:\n{stdout}\n{stderr}"
+        );
+        eprintln!("{stdout}{stderr}");
+        (stdout, stderr)
+    };
+
+    let first_emit = emit();
+    let generated = snapshot(&dest, &dest);
+    assert!(generated.contains_key(Path::new("spin.toml")));
+    assert!(
+        generated
+            .keys()
+            .any(|p| p.extension().is_some_and(|e| e == "rbs"))
+    );
+    assert_eq!(
+        generated[Path::new("public/freshness.bin")].0,
+        [0xff, 0x00, 0x80]
+    );
+    assert!(
+        first_emit.contains(&format!("emitted {} files", generated.len())),
+        "{first_emit}"
+    );
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog\n"), "{stdout}");
+    assert!(
+        stderr.contains("bin/blog.rb -> "),
+        "compiler invocation missing: {stderr}"
+    );
+    let executable = dest.join("build/bin/blog");
+    let built_at = fs::metadata(&executable).unwrap().modified().unwrap();
+
+    // Spinel compares integer seconds with a strict >. Waiting makes the
+    // old unconditional writer reliably invalidate the already built binary.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(emit(), first_emit);
+    let repeated = snapshot(&dest, &dest);
+    for (path, expected) in &generated {
+        assert_eq!(&repeated[path], expected, "{}", path.display());
+    }
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog (up to date)"), "{stdout}");
+    assert!(
+        !stderr.contains("bin/blog.rb -> "),
+        "unexpected compiler invocation: {stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&executable).unwrap().modified().unwrap(),
+        built_at
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+    let source = fixture.join("app/controllers/articles_controller.rb");
+    let before = fs::read_to_string(&source).unwrap();
+    let after = before.replace(
+        "Article was successfully created.",
+        "Article was successfully changed.",
+    );
+    assert_ne!(
+        before, after,
+        "fixture no longer contains the mutation literal"
+    );
+    fs::write(source, after).unwrap();
+    emit();
+    let ruby = Path::new("app/controllers/articles_controller.rb");
+    let changed = fs::read(dest.join(ruby)).unwrap();
+    assert_ne!(
+        changed, generated[ruby].0,
+        "source change must reach generated Ruby"
+    );
+    assert!(String::from_utf8_lossy(&changed).contains("Article was successfully changed."));
+    assert_eq!(
+        fs::metadata(dest.join("spin.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        generated[Path::new("spin.toml")].1
+    );
+    let (stdout, stderr) = build();
+    assert!(stdout.contains("build blog\n"), "{stdout}");
+    assert!(
+        stderr.contains("bin/blog.rb -> "),
+        "changed Ruby did not invoke compiler: {stderr}"
+    );
+    assert!(fs::metadata(&executable).unwrap().modified().unwrap() > built_at);
+    fs::remove_dir_all(scratch).unwrap();
 }

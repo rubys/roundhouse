@@ -671,7 +671,10 @@ fn each_block_mutates_param(body: &Expr, param: &str) -> bool {
             ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk(value, param),
             ExprNode::Lambda { body, .. } => walk(body, param),
             ExprNode::Let { value, body, .. } => walk(value, param) || walk(body, param),
-            ExprNode::Return { value } | ExprNode::Raise { value } | ExprNode::Splat { value } => {
+            ExprNode::Return { value }
+            | ExprNode::Raise { value }
+            | ExprNode::Splat { value }
+            | ExprNode::KeywordSplat { value } => {
                 walk(value, param)
             }
             ExprNode::BoolOp { left, right, .. } => walk(left, param) || walk(right, param),
@@ -1325,4 +1328,3 @@ pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
     *ctx.declared_vars.borrow_mut() = snapshot;
     r
 }
-

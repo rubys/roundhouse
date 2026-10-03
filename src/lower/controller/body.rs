@@ -763,7 +763,7 @@ fn add_format_kwarg(args: &[Expr], fmt: &str, span: Span) -> Vec<Expr> {
 /// action with both a jbuilder and a `.turbo_stream.erb` template gets
 /// both. Empty means html only.
 pub fn synthesize_implicit_render(body: &Expr, action_name: &str, variants: &[&str]) -> Expr {
-    synthesize_implicit_render_with_html(body, action_name, variants, true)
+    synthesize_implicit_render_with_html(body, action_name, variants, true, true)
 }
 
 /// `html_template_exists = false` makes the HTML fallback `head
@@ -783,17 +783,15 @@ pub fn synthesize_implicit_render_with_html(
     action_name: &str,
     variants: &[&str],
     html_template_exists: bool,
+    html_exists: bool,
 ) -> Expr {
     if has_toplevel_terminal(body) {
         return body.clone();
     }
     // Build the chain inside-out so the FIRST variant ends up as the
     // outermost test.
-    let mut terminal = if html_template_exists {
-        render_symbol_send(action_name, body.span)
-    } else {
-        head_no_content(body.span)
-    };
+    let mut terminal =
+        html_fallback(action_name, body.span, variants, html_template_exists, html_exists);
     for fmt in variants.iter().rev() {
         let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
         terminal = Expr::new(
@@ -836,6 +834,60 @@ pub fn synthesize_implicit_render_with_html(
     append_statement(body, terminal)
 }
 
+/// What the implicit render does when no variant arm matched — the
+/// request is html as far as the arms can tell.
+///
+/// - An html template exists: render it.
+/// - Some other format's template exists (`any_template_exists`):
+///   Rails' `default_render` renders a template when one exists for a
+///   format the request accepts. A bare `Accept: */*` — an
+///   `XMLHttpRequest` or `fetch` that set none, campfire's attachment
+///   uploader — accepts every format, so the action's other template
+///   renders (`create.turbo_stream.erb` answering an upload, which
+///   Rails serves 200). Chosen in Rails' Mime registration order, js
+///   before json before turbo_stream. Asked of the controller as
+///   `accepts_any_format`, which the dispatcher sets. Any other request
+///   keeps the render that resolves to MissingTemplate — Rails'
+///   UnknownFormat, approximated (see `controller_to_library`).
+/// - No template at all: `head :no_content`, Rails' "No template found".
+fn html_fallback(
+    action_name: &str,
+    span: Span,
+    variants: &[&str],
+    any_template_exists: bool,
+    html_exists: bool,
+) -> Expr {
+    if html_exists {
+        return render_symbol_send(action_name, span);
+    }
+    if !any_template_exists {
+        return head_no_content(span);
+    }
+    let any_fmt = ["js", "json", "turbo_stream"]
+        .into_iter()
+        .find(|f| variants.contains(f));
+    let Some(fmt) = any_fmt else {
+        return render_symbol_send(action_name, span);
+    };
+    Expr::new(
+        span,
+        ExprNode::If {
+            cond: Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("accepts_any_format"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            then_branch: mark_render_format(&render_symbol_send(action_name, span), fmt),
+            else_branch: render_symbol_send(action_name, span),
+        },
+    )
+}
+
 /// The implicit render as a STANDALONE statement, for an action whose
 /// default render has to run in the dispatcher instead of at the end of
 /// its own body (see `actions_reached_by_super`).
@@ -864,8 +916,9 @@ pub fn synthesize_deferred_implicit_render(
     action_name: &str,
     variants: &[&str],
     html_template_exists: bool,
+    html_exists: bool,
 ) -> Expr {
-    match implicit_render_statement(body, action_name, variants, html_template_exists) {
+    match implicit_render_statement(body, action_name, variants, html_template_exists, html_exists) {
         Some(tail) => append_statement(body, tail),
         None => body.clone(),
     }
@@ -876,15 +929,13 @@ pub fn implicit_render_statement(
     action_name: &str,
     variants: &[&str],
     html_template_exists: bool,
+    html_exists: bool,
 ) -> Option<Expr> {
     if has_toplevel_terminal(body) {
         return None;
     }
-    let mut terminal = if html_template_exists {
-        render_symbol_send(action_name, body.span)
-    } else {
-        head_no_content(body.span)
-    };
+    let mut terminal =
+        html_fallback(action_name, body.span, variants, html_template_exists, html_exists);
     for fmt in variants.iter().rev() {
         let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
         terminal = Expr::new(
@@ -936,6 +987,19 @@ pub fn implicit_render_statement(
 const RESPONSE_TERMINALS: &[&str] =
     &["render", "redirect_to", "redirect_back_or_to", "head", "send_data", "send_file"];
 
+/// Rails' HTTP auth helpers that render the 401 challenge when the
+/// credentials are missing or refused. They MIGHT respond, so a filter
+/// calling one needs the preamble's halting check and an action calling
+/// one a guarded default render; they are not in `RESPONSE_TERMINALS`
+/// because on success they leave the response to the action, so
+/// `has_toplevel_terminal` must not count them.
+pub const HTTP_AUTH_CHALLENGES: &[&str] = &[
+    "authenticate_or_request_with_http_basic",
+    "authenticate_or_request_with_http_token",
+    "request_http_basic_authentication",
+    "request_http_token_authentication",
+];
+
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {
         if *found {
@@ -943,6 +1007,7 @@ fn contains_terminal(body: &Expr) -> bool {
         }
         if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
             if RESPONSE_TERMINALS.contains(&method.as_str())
+                || HTTP_AUTH_CHALLENGES.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
             {
                 *found = true;
