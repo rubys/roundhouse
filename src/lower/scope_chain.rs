@@ -1588,7 +1588,7 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
             // cache. Turning those into a fresh `SELECT COUNT(*)` is an
             // N+1 on the benchmark app. Doing it right means teaching the
             // seed to reuse a loaded cache, which is its own commit.
-            if matches!(method.as_str(), "build" | "create" | "create!") {
+            if matches!(method.as_str(), "build" | "new" | "create" | "create!") {
                 if let ExprNode::Send { method: aname, args, .. } = &*r.node {
                     if args.is_empty() && assocs.is_has_many_name(aname) {
                         *found = true;
@@ -1667,7 +1667,7 @@ pub fn mentions_assoc_alias(expr: &Expr, assocs: &AssocRegistry) -> bool {
                 if names.contains(&key)
                     && (is_relation_chain_method(method.as_str())
                         || is_relation_terminal(method.as_str(), args, block.as_ref())
-                        || matches!(method.as_str(), "build" | "create" | "create!"))
+                        || matches!(method.as_str(), "build" | "new" | "create" | "create!"))
                 {
                     *found = true;
                     return;
@@ -3287,7 +3287,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     // surface — the arm below answers them with a
                     // record — but they are the same association hop,
                     // and `mentions_assoc_alias` already counts them.
-                    || matches!(method.as_str(), "build" | "create" | "create!")
+                    || matches!(method.as_str(), "build" | "new" | "create" | "create!")
                 {
                     r = read.clone();
                 }
@@ -3353,7 +3353,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // the plain reader's Array — `create!` for an
                         // instance of Array, found by once-campfire-rust's
                         // model scenario (scripts/campfire-db-differential).
-                        _ if matches!(method.as_str(), "build" | "create" | "create!") => {
+                        _ if matches!(method.as_str(), "build" | "new" | "create" | "create!") => {
                             assoc_owner_seed(ctx, aname, ir, span)
                         }
                         _ => None,
@@ -3369,7 +3369,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // kwargs hash — the corpus forms; Rails merges
                         // the FK over caller attrs, so it appends last).
                         let ctor = match method.as_str() {
-                            "build" => Some("new"),
+                            // `assoc.new(attrs)` is CollectionProxy's alias for
+                            // `build`; it reached the reader's folded Array as
+                            // `Array#new`.
+                            "build" | "new" => Some("new"),
                             "create" => Some("create"),
                             "create!" => Some("create!"),
                             _ => None,
