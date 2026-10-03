@@ -12,6 +12,51 @@ mod class_configuration;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 
+/// Class-root query builders still need a Relation when the entire app
+/// declares no scope or association. In particular, zero-argument `where`
+/// must reach WhereChain rather than Base.where's required argument (#324).
+#[test]
+fn scope_free_model_query_builders_run() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("config/routes.rb", r#"Rails.application.routes.draw do
+  get "/widgets", to: "widgets#index"
+  get "/named", to: "widgets#named"
+end
+"#)
+        .write("app/controllers/widgets_controller.rb", r#"class WidgetsController < ApplicationController
+  def index
+    render plain: Widget.order(:name).limit(1).map { |w| w.name }.join(",")
+  end
+  def named
+    render plain: Widget.where.not(name: nil).order(:name).map { |w| w.name }.join(",")
+  end
+end
+"#)
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "class order lost its relation" unless controller.body == "alpha"
+Widget.create!(name: nil)
+controller = WidgetsController.new
+controller.process_action(:named)
+raise "class where.not lost its relation" unless controller.body == "alpha,beta"
+puts "scope-free query builders passed"
+"#)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [

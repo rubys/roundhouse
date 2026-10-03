@@ -71,7 +71,7 @@ fn emitted(action_body: &str) -> String {
 fn destroy_by_on_a_model_constant_seeds_a_relation() {
     let src = emitted("Subscription.destroy_by(endpoint: params[:endpoint])");
     assert!(
-        src.contains("Subscription.where({ endpoint:")
+        src.contains("ActiveRecord::Relation.new(Subscription).where({ endpoint:")
             && src.contains(".destroy_all"),
         "the terminal rides a seeded Relation:\n{src}"
     );
@@ -81,7 +81,8 @@ fn destroy_by_on_a_model_constant_seeds_a_relation() {
 fn delete_by_takes_the_same_seed() {
     let src = emitted("Subscription.delete_by(endpoint: params[:endpoint])");
     assert!(
-        src.contains("Subscription.where({ endpoint:") && src.contains(".delete_all"),
+        src.contains("ActiveRecord::Relation.new(Subscription).where({ endpoint:")
+            && src.contains(".delete_all"),
         "the terminal rides a seeded Relation:\n{src}"
     );
 }

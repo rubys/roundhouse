@@ -1084,16 +1084,14 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         }
     }
     let models = crate::lower::scope_chain::model_set(&app.models);
-    // …and it can call a terminal that has no home on the model CLASS
-    // (`Push::Subscription.destroy_by(…)`), which reaches nothing at all
-    // without the seed this pass writes. Unlike the three conditions
-    // above it is not a question about a REGISTRY — an app with not one
-    // scope in it can still write that call — so it is surveyed over the
-    // app's own bodies.
-    let mut wants_class_root_terminal = false;
+    // A model-root query needs the same Relation seed even when the app
+    // declares no scopes. Otherwise `Widget.order(...)` reaches no method
+    // and `Widget.where.not(...)` reaches Base.where with no argument.
+    // Keep the whole-app gate consistent with the per-body gate below.
+    let mut wants_model_chain = false;
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
-        wants_class_root_terminal = wants_class_root_terminal
-            || crate::lower::scope_chain::mentions_class_root_terminal(body, &models);
+        wants_model_chain = wants_model_chain
+            || crate::lower::scope_chain::mentions_model_chain_start(body, &models);
     });
     // …and an association read continuing into relation surface
     // (`@user.notifications.offset(n)`) needs the seed whether or not
@@ -1120,7 +1118,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // An app with no scopes at all can still declare an association
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
-        && !wants_class_root_terminal
+        && !wants_model_chain
     {
         return;
     }
