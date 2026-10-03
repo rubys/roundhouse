@@ -10,6 +10,7 @@ pub mod app;
 pub mod builder;
 pub mod bytecode;
 pub mod catalog;
+mod current_set;
 pub mod diagnostic;
 pub mod dialect;
 pub mod effect;

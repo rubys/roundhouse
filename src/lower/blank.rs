@@ -784,6 +784,8 @@ fn try_rewrite_compact_blank(
         ExprNode::Lambda { rest_param: None,
             params: vec![name],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: cond,
             block_style: Default::default(),
         },

@@ -309,6 +309,16 @@ pub enum ExprNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_param: Option<Symbol>,
         block_param: Option<Symbol>,
+        /// Source bindings erased by the current required/rest name
+        /// representation. Consumers must decline these shapes rather
+        /// than silently interpreting a different parameter scope.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        has_unrepresented_bindings: bool,
+        /// This Lambda was converted from a source `&` block operand.
+        /// It is NOT proof of an attached literal block's control owner;
+        /// preserved independently of parameter-binding loss.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_block_pass: bool,
         body: Expr,
         /// Surface form when this Lambda represents a block attached to
         /// a method call (`foo { ... }` vs `foo do ... end`) — or the

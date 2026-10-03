@@ -125,6 +125,26 @@ marked in the output, and the punch list is the inventory. What they
 produce is a survey, not a deployable; a stubbed action renders
 nothing useful.
 
+Literal `CurrentAttributes#set` is the same save/assign/restore pattern
+as `Object#with`: a recognized CurrentAttributes class, literal unique
+keys with represented readers and writers, and an attached source block.
+The original block stays at the call site, so nested `each`, loops,
+`next`, `break`, and enclosing `return` keep ordinary Ruby owners.
+Values evaluate once in source order; per-key setup and restoration
+follow Rails' insertion order, including partial failures. Nested
+supported `Current.set` scopes work.
+
+This is an exception to `--allow-unsupported`: a recognized site that
+cannot be executed refuses **before writing output**. Ruby, JRuby, and
+Spinel share the generated helper; other targets and WASM refuse it.
+The verbatim Blog export is exempt. Converted/forwarded blocks, rest
+parameters, and bindings the IR cannot preserve remain refused. Dynamic
+hashes, no-block forms, and unrelated receivers keep their existing
+diagnostics. Ambiguous or unresolved relative receivers need an absolute
+identity such as `::Tenant::Current.set(...)`. Class-body initializers
+and other unlowered source containers stay outside this slice. Merely
+declaring CurrentAttributes does not trigger refusal.
+
 Before either flag, the `wont_lower` question is worth asking: which
 constructs in this app have no lowering for this target at all. The
 MCP server's [`wont_lower` tool](mcp.md) answers it per target without

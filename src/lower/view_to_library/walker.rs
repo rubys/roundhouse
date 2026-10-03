@@ -381,7 +381,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             block: Some(block),
             ..
         } if method.as_str() == "each" && args.is_empty() => {
-            let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
+            let ExprNode::Lambda { params, rest_param, has_unrepresented_bindings, from_block_pass, body, block_style, .. } = &*block.node else {
                 return vec![todo_io_append("each block shape", stmt.span)];
             };
             let var_name = params
@@ -409,6 +409,8 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 ExprNode::Lambda { rest_param: rest_param.clone(),
                     params: params.clone(),
                     block_param: None,
+                    has_unrepresented_bindings: *has_unrepresented_bindings,
+                    from_block_pass: *from_block_pass,
                     body: inner_body,
                     block_style: *block_style,
                 },
@@ -1134,7 +1136,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         parenthesized,
     } = &*inner.node
     {
-        if let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node {
+        if let ExprNode::Lambda { rest_param, params, block_param, has_unrepresented_bindings, from_block_pass, body, block_style } = &*block.node {
             if block_body_is_template(body) {
                 // NESTED CAPTURES NEED DISTINCT NAMES. A block-with-block
                 // helper (campfire's rooms/show wraps `messages_tag` inside
@@ -1168,6 +1170,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     ExprNode::Lambda { rest_param: rest_param.clone(),
                         params: params.clone(),
                         block_param: block_param.clone(),
+                        has_unrepresented_bindings: *has_unrepresented_bindings,
+                        from_block_pass: *from_block_pass,
                         body: seq(cap_stmts),
                         block_style: *block_style,
                     },
@@ -1596,6 +1600,8 @@ mod tests {
                         rest_param: None,
                         params: Vec::new(),
                         block_param: None,
+                        has_unrepresented_bindings: false,
+                        from_block_pass: false,
                         body: inner,
                         block_style: crate::expr::BlockStyle::Do,
                     },
@@ -1839,6 +1845,8 @@ mod tests {
             ExprNode::Lambda { rest_param: None,
                 params: Vec::new(),
                 block_param: None,
+                has_unrepresented_bindings: false,
+                from_block_pass: false,
                 body: buf_append(str_lit("inner")),
                 block_style: BlockStyle::Do,
             },

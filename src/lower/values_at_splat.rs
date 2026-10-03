@@ -51,6 +51,8 @@ fn rewrite(e: &mut Expr) {
         ExprNode::Lambda { rest_param: None,
             params: vec![key_var],
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: lookup,
             block_style: BlockStyle::Brace,
         },

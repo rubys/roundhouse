@@ -1250,9 +1250,9 @@ pub(crate) fn for_each_hook_body_ref(
                     assoc: crate::dialect::Association::HasMany { extension, .. },
                     ..
                 } => {
-                    for m in extension {
-                        visit_param_defaults(&m.params, f);
-                        f(&m.body);
+                    for method in extension {
+                        visit_param_defaults(&method.params, f);
+                        f(&method.body);
                     }
                 }
                 _ => {}

@@ -346,6 +346,9 @@ fn run_transpile(
     } else {
         roundhouse::session::analyze_and_lower(&mut app)
     };
+    // Same hard output boundary as `project::target_files`, independent
+    // of --allow-unsupported. Roda keeps ingest-shaped IR here.
+    roundhouse::lower::current_set::guard_output(&app, target.as_str())?;
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).

@@ -252,6 +252,8 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         params: Vec::new(),
                         rest_param: None,
                         block_param: None,
+                        has_unrepresented_bindings: false,
+                        from_block_pass: false,
                         body: block_body,
                         block_style: crate::expr::BlockStyle::Do,
                     },

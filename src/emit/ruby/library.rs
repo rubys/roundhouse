@@ -5869,7 +5869,11 @@ fn emit_library_class_decl_inner(
     // calls `initialize`, which reads `Sound::Image`. Those refs would
     // otherwise be classified body-only and left to the aggregator.
     let (eager, deferred) = partition_deferred_constants(lc);
-    let load_time_bodies = !deferred.is_empty();
+    // A compiler-owned Current scope can be invoked by another file's
+    // eager initializer. Its captured Current class must load with the
+    // helper, even though capture occurs inside the run method.
+    let load_time_bodies = !deferred.is_empty()
+        || matches!(lc.origin, Some(crate::dialect::LibraryClassOrigin::CurrentSet { .. }));
 
     // Parent + body-derived `require_relative` headers. Helpers return
     // project-root-anchored paths; we relpath each one against `out_dir`

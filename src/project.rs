@@ -933,6 +933,7 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    crate::lower::current_set::guard_output(app, target.as_str())?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
@@ -3458,6 +3459,7 @@ fn scaffold_readme_to_specimen(files: &mut [(String, String)]) {
 /// `spinel: main.rb: cannot load such file` rather than as anything a
 /// unit test could see. A toolchain test should drive what ships.
 pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
+    crate::lower::current_set::guard_output(app, "spinel")?;
     // The bundled-library requires belong HERE, not only in
     // `spin_shape`. This is the tree `tests/spinel_toolchain.rs`
     // compiles, and without them it compiles something the CLI never
@@ -6544,6 +6546,14 @@ fn walk_dir_into(
 /// (typically `_site/`). The output dir is removed and recreated if
 /// it exists, so callers should pick a dedicated path.
 pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
+    let mut app =
+        ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    crate::analyze::Analyzer::new(&app).analyze(&mut app);
+    // Preflight every requested output before touching an existing site
+    // or writing even the individually exempt Blog archive.
+    for target in BuildTarget::ALL {
+        crate::lower::current_set::guard_output(&app, target.as_str())?;
+    }
     if out.exists() {
         fs::remove_dir_all(out).map_err(|e| format!("clean {}: {e}", out.display()))?;
     }

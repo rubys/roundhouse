@@ -205,6 +205,7 @@ pub struct BodyTyper<'a> {
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
+    current_attribute_classes: Option<&'a crate::current_set::ScopedClasses>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -215,7 +216,18 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, inquirers: None }
+        Self {
+            classes,
+            const_resolver: None,
+            typed_constants: None,
+            inquirers: None,
+            current_attribute_classes: None,
+        }
+    }
+
+    pub(crate) fn with_current_attributes(mut self, classes: &'a crate::current_set::ScopedClasses) -> Self {
+        self.current_attribute_classes = Some(classes);
+        self
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -764,16 +776,32 @@ impl<'a> BodyTyper<'a> {
                         recv_ty = r.ty.clone();
                     }
                 }
+                let current_class = self.current_attribute_classes.and_then(|classes|
+                    crate::current_set::literal_set_site(recv.as_ref(), method, args, block.as_ref(), classes)
+                ).map(|(class, _)| class);
                 let block_ret = if let Some(b) = block {
-                    let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, args, b);
+                    let mut block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, args, b);
+                    if let (Some(id), ExprNode::Lambda { params, .. }) = (&current_class, &*b.node) {
+                        // Rails yields exactly its current instance. A
+                        // required parameter beyond that one receives nil,
+                        // not an outer binding with the same spelling.
+                        for (i, name) in params.iter().enumerate() {
+                            let ty = if i == 0 { Ty::Class { id: id.clone(), args: vec![] } } else { Ty::Nil };
+                            block_ctx.local_bindings.insert(name.clone(), ty);
+                        }
+                    }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
                     // on the body expr itself. `map`/`collect`/similar
                     // use that to determine the output element type.
-                    // `MethodRef` (`&method(:name)`) has no body to
-                    // read from — its own computed type already IS
-                    // the referenced method's return type.
+                    // MethodRef carries the referenced method's return
+                    // type directly rather than in a block body.
                     match &*b.node {
+                        ExprNode::Lambda { body, .. } if current_class.is_some() => {
+                            let mut results = vec![body.ty.clone().unwrap_or_else(unknown)];
+                            current_set_exit_types(body, &mut results);
+                            Some(union_many(results))
+                        }
                         ExprNode::Lambda { body, .. } => body.ty.clone(),
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
                         _ => None,
@@ -781,6 +809,9 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                if current_class.is_some() {
+                    return block_ret.unwrap_or_else(unknown);
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
@@ -1540,6 +1571,24 @@ impl<'a> BodyTyper<'a> {
 
 // Literal / primitive types ---------------------------------------------
 
+/// `set` synchronously yields once, so next and break are values of
+/// this call. Do not borrow exits owned by a nested block or loop.
+/// This is deliberately site-specific, not generic closure inference.
+fn current_set_exit_types(expr: &Expr, out: &mut Vec<Ty>) {
+    match &*expr.node {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            out.push(value.as_ref().map(|v| v.ty.clone().unwrap_or_else(unknown)).unwrap_or(Ty::Nil));
+            if let Some(value) = value {
+                // Evaluating an exit's argument can itself exit this
+                // same block before the outer exit is reached.
+                current_set_exit_types(value, out);
+            }
+        }
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => {}
+        _ => expr.node.for_each_child(&mut |c| current_set_exit_types(c, out)),
+    }
+}
+
 pub(super) fn lit_ty(lit: &Literal) -> Ty {
     match lit {
         Literal::Nil => Ty::Nil,
@@ -2298,6 +2347,8 @@ mod tests {
         synth(ExprNode::Lambda { rest_param: None,
             params: params.into_iter().map(Symbol::from).collect(),
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body,
             block_style: BlockStyle::Do,
         })

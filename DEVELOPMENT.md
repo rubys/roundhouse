@@ -37,6 +37,10 @@ cargo test --test framework_tests_ruby -- --ignored # framework runtime's
 # framework_tests_{crystal,kotlin,rust,spinel,swift,typescript} likewise
 ```
 
+`Current.set` output preflight may clone and analyze the whole App when
+raw IR still has untyped constant receivers, so multi-target callers can
+repeat that work. This is known scaling debt, not a cached per-site cost.
+
 The default test suite is the forcing function and must pass before
 any commit. The test profile uses `line-tables-only` debug information:
 backtraces retain file/line locations without repeating module metadata in

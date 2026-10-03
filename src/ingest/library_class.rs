@@ -671,6 +671,8 @@ fn block_of(param: &str, body: Expr) -> Expr {
             params: vec![Symbol::from(param)],
             rest_param: None,
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body,
             block_style: crate::expr::BlockStyle::Brace,
         },

@@ -156,3 +156,367 @@ fn the_instance_reader_narrows_the_thread_local_to_the_class() {
     let sig = emitted("current.rbs");
     assert!(sig.contains("def self.instance: () -> Current"), "{sig}");
 }
+
+/// Analyze BEFORE lowering: a scoped call needs truthful source types
+/// before a monomorphic emitted block caller can inherit them.
+#[test]
+fn literal_current_set_binds_and_returns_its_owned_block_values() {
+    use roundhouse::{Expr, ExprNode, Ty};
+    let source = r#"
+class ScopeProbe
+  def self.seed
+    Current.user = 47
+  end
+
+  def self.result
+    Current.set(user: 83) { 31 }
+  end
+
+  def self.shadow
+    context = 7
+    Current.set(user: 83) { |context| context.user }
+  end
+
+  def self.two_params
+    extra = "outer"
+    Current.set(user: 83) { |context, extra| extra }
+  end
+
+  def self.next_result
+    Current.set(user: 83) { next 41 }
+  end
+
+  def self.break_result
+    Current.set(user: 83) { break 59 }
+  end
+
+  def self.downstream
+    Current.set(user: 83) { 29 }.positive?
+  end
+end
+"#;
+    let tree = [
+        ("app/models/current.rb", CURRENT),
+        ("app/lib/scope_probe.rb", source),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("synthetic ingest");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let probe = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ScopeProbe")
+        .unwrap();
+    let mut failures = Vec::new();
+    for (name, expected) in [
+        ("result", Ty::Int),
+        ("two_params", Ty::Nil),
+        ("next_result", Ty::Int),
+        ("break_result", Ty::Int),
+        ("downstream", Ty::Bool),
+    ] {
+        let method = probe
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        println!(
+            "{name}: body={:?}; signature={:?}",
+            method.body.ty, method.signature
+        );
+        if method.body.ty.as_ref() != Some(&expected) {
+            failures.push(format!(
+                "{name}: expected {expected:?}, got {:?}",
+                method.body.ty
+            ));
+        }
+    }
+    fn collect_context_reads(e: &Expr, out: &mut Vec<Ty>) {
+        if let ExprNode::Var { name, .. } = &*e.node {
+            if name.as_str() == "context" {
+                if let Some(ty) = &e.ty {
+                    out.push(ty.clone());
+                }
+            }
+        }
+        e.node
+            .for_each_child(&mut |c| collect_context_reads(c, out));
+    }
+    let shadow = probe
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "shadow")
+        .unwrap();
+    let mut bindings = Vec::new();
+    collect_context_reads(&shadow.body, &mut bindings);
+    println!("shadow block context reads: {bindings:?}");
+    if bindings
+        != vec![Ty::Class {
+            id: roundhouse::ident::ClassId("Current".into()),
+            args: vec![],
+        }]
+    {
+        failures.push(format!(
+            "shadow block should bind Current, not outer Int: {bindings:?}"
+        ));
+    }
+    let errors: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.to_string())
+        .collect();
+    if !errors.is_empty() {
+        failures.push(format!("source errors: {errors:?}"));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Controls that a type-only fix can easily get wrong: a set-only
+/// writer must not still type its reader as always nil, and exits
+/// belong to their actual loop/block rather than the outer scope.
+#[test]
+fn literal_current_set_writer_and_exit_ownership_controls() {
+    use roundhouse::Ty;
+    let source = r#"
+class ScopeProbe
+  def self.scoped_writer
+    Current.set(account: "scoped") { |context| context.account }
+  end
+
+  def self.nested_block
+    Current.set(user: 83) { [1].each { break "inner" }; 31 }
+  end
+
+  def self.loop_tail
+    Current.set(user: 83) { while true; break "loop"; end }
+  end
+
+  def self.nested_call_tail
+    Current.set(user: 83) { [1].each { break "inner" } }
+  end
+
+  def self.loop_assignment
+    Current.set(user: 83) { result = while true; break "loop"; end; result }
+  end
+
+  def self.nested_call_argument
+    Current.set(user: 83) { [([1].each { break "inner" })] }
+  end
+
+  def self.forwarded_lambda
+    Current.set(user: 83, &:to_s)
+    "method"
+  end
+
+  def self.inner_forwarded_lambda
+    Current.set(user: 83) { [1].each(&:to_s); "scope" }
+    "method"
+  end
+
+  def self.exit_operand
+    Current.set(user: 83) { next(if true; next "actual"; else; 31; end) }
+  end
+
+  def self.nonlocal_return
+    Current.set(user: 83) { return "method" }
+    raise "unreachable"
+  end
+end
+class OtherCurrent < ActiveSupport::CurrentAttributes
+  attribute :user
+  def self.set(values)
+    "override"
+  end
+end
+class OverrideProbe
+  def self.result
+    OtherCurrent.set(user: 47) { 83 }
+  end
+
+  def self.included
+    IncludedCurrent.set(user: 47) { 83 }
+  end
+
+  def self.transitive
+    TransitiveCurrent.set(user: 47) { 83 }
+  end
+
+  def self.unrelated
+    OtherSet.set(user: 47) { 83 }
+  end
+end
+module ScopeOverride
+  def set(values)
+    "override"
+  end
+end
+module IndirectOverride
+  include ScopeOverride
+end
+class IncludedCurrent < ActiveSupport::CurrentAttributes
+  include ScopeOverride
+  attribute :user
+end
+class TransitiveCurrent < ActiveSupport::CurrentAttributes
+  include IndirectOverride
+  attribute :user
+end
+class OtherSet
+  def self.set(values)
+    "unrelated"
+  end
+end
+"#;
+    let tree = [
+        (
+            "app/models/current.rb",
+            "class Current < ActiveSupport::CurrentAttributes\n attribute :user, :account\nend",
+        ),
+        ("app/lib/scope_probe.rb", source),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("synthetic ingest");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let mut failures = Vec::new();
+    for (owner, name, required) in [
+        ("ScopeProbe", "scoped_writer", Ty::Str),
+        ("ScopeProbe", "exit_operand", Ty::Str),
+        ("OverrideProbe", "result", Ty::Str),
+        ("OverrideProbe", "included", Ty::Str),
+        ("OverrideProbe", "unrelated", Ty::Str),
+    ] {
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == owner)
+            .unwrap();
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        println!(
+            "{owner}.{name}: body={:?}; signature={:?}",
+            method.body.ty, method.signature
+        );
+        // A conservative nil arm is allowed; excluding the native value
+        // from a closed type is not truthful inference.
+        let contains_required = match &method.body.ty {
+            Some(ty) if *ty == required => true,
+            Some(Ty::Union { variants }) => variants.contains(&required),
+            _ => false,
+        };
+        if !contains_required {
+            failures.push(format!(
+                "{owner}.{name}: native value requires {required:?}, got {:?}",
+                method.body.ty
+            ));
+        }
+    }
+    let class = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ScopeProbe")
+        .unwrap();
+    let refusals = roundhouse::lower::current_set::source_refusals(&app);
+    for (name, reason) in [("forwarded_lambda", "converted or forwarded block operands")] {
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        assert!(
+            refusals.iter().any(|d| !d.span.is_synthetic()
+                && d.span.file == method.body.span.file
+                && d.span.start >= method.body.span.start
+                && d.span.end <= method.body.span.end
+                && d.message.contains(reason)
+                && d.severity == roundhouse::diagnostic::Severity::Error),
+            "{name}: expected source-located refusal: {refusals:?}"
+        );
+    }
+    // Nested each/while keep their own owners. Current.set's result is
+    // the attached block, not a borrowed inner break.
+    let nested = class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "nested_block")
+        .unwrap();
+    let roundhouse::ExprNode::Send {
+        block: Some(block), ..
+    } = &*nested.body.node
+    else {
+        panic!("scope call")
+    };
+    let roundhouse::ExprNode::Lambda { body, .. } = &*block.node else {
+        panic!("scope block")
+    };
+    assert_eq!(body.ty, Some(Ty::Int));
+    for name in [
+        "loop_tail",
+        "loop_assignment",
+        "nested_call_tail",
+        "nested_call_argument",
+        "nested_block",
+        "inner_forwarded_lambda",
+    ] {
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == name)
+            .unwrap();
+        assert!(
+            refusals.iter().all(|d| d.span.file != method.body.span.file
+                || d.span.end < method.body.span.start
+                || d.span.start > method.body.span.end),
+            "{name} should not be a Current.set source refusal: {refusals:?}"
+        );
+    }
+    let method = class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "nonlocal_return")
+        .unwrap();
+    if !matches!(&method.signature, Some(Ty::Fn { ret, .. }) if **ret == Ty::Str) {
+        failures.push(format!(
+            "nonlocal return must belong to method: {:?}",
+            method.signature
+        ));
+    }
+    // Include-only modules are absent from LibraryClass today. Do not
+    // fabricate framework semantics across that missing ancestry. The
+    // native override returns String, but this probe does not claim the
+    // separate include-only module inference/emission gap is supported.
+    let transitive = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "OverrideProbe")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "transitive")
+        .unwrap();
+    println!("unknown-ancestry override type: {:?}", transitive.body.ty);
+    if transitive.body.ty == Some(Ty::Int) {
+        failures.push("unknown-ancestry override was incorrectly typed from its block".to_string());
+    }
+    let before = ruby::emit_expr(&transitive.body);
+    roundhouse::lower::current_set::apply_current_set_lowering(&mut app);
+    let after = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "OverrideProbe")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "transitive")
+        .unwrap();
+    if ruby::emit_expr(&after.body) != before {
+        failures.push("unknown-ancestry override must remain its original call".to_string());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

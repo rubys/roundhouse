@@ -24,6 +24,9 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
     }
 }
 
+#[path = "emit_and_run/current_set.rs"]
+mod current_set;
+
 /// The harness itself: the unedited blog emits and its controller
 /// suite, which renders every page, passes.
 #[test]

@@ -38,7 +38,7 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 /// skins that state the denominator (#64: "0 findings" must be
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
-    let mut out = Vec::new();
+    let mut out = crate::current_set::source_refusals(app);
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));

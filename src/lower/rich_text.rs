@@ -702,6 +702,8 @@ fn each_destroy(rows: Expr) -> Expr {
             params: vec![var.clone()],
             rest_param: None,
             block_param: None,
+            has_unrepresented_bindings: false,
+            from_block_pass: false,
             body: no_arg_send(var_ref(var), "destroy"),
             block_style: crate::expr::BlockStyle::Brace,
         },
