@@ -284,6 +284,60 @@ end
     assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
 }
 
+#[test]
+fn a_receiverless_call_in_a_library_class_expands_with_the_bundle_winning() {
+    // `f(k: v, **h)` is `{ k: v }.merge(h)`: the later `**` wins, so the
+    // literal is the default the bundle is read against. The call has no
+    // receiver, so the callee is the class's own instance method.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg(**opts)
+    render_code(size: 2, **opts)
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains(r#"render_code(size: opts.fetch(:size, 2), color: opts.fetch(:color, "black"))"#),
+        "expected the literal read as the bundle's default:\n{out}"
+    );
+    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+}
+
+#[test]
+fn a_literal_merged_with_an_impure_bundle_is_ledgered_not_expanded() {
+    // `**defaults()` after a literal keyword: the bundle is a call, and
+    // expanding would evaluate it once per keyword. The positional Hash
+    // stays and the site is ledgered.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg
+    render_code(size: 2, **defaults())
+  end
+
+  def defaults
+    { color: "red" }
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains("render_code({ size: 2 }.merge(defaults"),
+        "expected the positional bundle left intact:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
+}
+
 /// A TEST CLASS forwarding `**attributes` from one of its own helpers
 /// into another that declares keywords — campfire's
 /// `embed_from(**attributes) = attachment_for(**attributes).attachable`

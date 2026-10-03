@@ -836,6 +836,45 @@ fn an_include_from_an_included_block_brings_its_own_included_items() {
         .assert_passes();
 }
 
+/// `render_code(size: 2, **opts)` into `def render_code(size:, color:
+/// "black")`: a keyword bundle splatted AFTER a literal keyword, in a
+/// receiverless call. Ingest desugars it to `{ size: 2 }.merge(opts)`;
+/// `kwsplat` recovers the keywords, with the literal as the default
+/// the bundle is read against — Ruby lets the later `**` win.
+#[test]
+fn a_keyword_bundle_after_a_literal_keyword_reaches_a_keyword_callee() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def code_svg(**opts)\n    render_code(size: 2, **opts)\n  end\n\n  def render_code(size:, color: \"black\")\n    \"#{title}:#{size}:#{color}\"\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.code_svg(color: \"red\") unless a.code_svg(color: \"red\") == \"Hi:2:red\"\nraise a.code_svg unless a.code_svg == \"Hi:2:black\"\nraise a.code_svg(size: 9) unless a.code_svg(size: 9) == \"Hi:9:black\"",
+        )
+        .assert_passes();
+}
+
+/// The same call where the callee comes from an included concern: the
+/// receiverless send resolves through the model's includes.
+#[test]
+fn a_keyword_bundle_reaches_a_keyword_callee_from_an_included_concern() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/coded.rb",
+            "module Coded\n  extend ActiveSupport::Concern\n\n  def render_code(size:, color: \"black\")\n    \"#{size}:#{color}\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Coded\n\n  def code_svg(**opts)\n    render_code(size: 2, **opts)\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.code_svg(color: \"red\") unless a.code_svg(color: \"red\") == \"2:red\"\nraise a.code_svg unless a.code_svg == \"2:black\"",
+        )
+        .assert_passes();
+}
+
 /// Integer serialization is not blindly String#to_i: nonnumeric labels
 /// must not alias an existing row zero. Invalid IDs still count toward the
 /// array finder's required cardinality, except when pagination excludes them.
