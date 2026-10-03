@@ -25,7 +25,7 @@ use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, send, todo_io_append, view_helpers_call, ViewCtx,
+    nil_lit, seq, noop_io_append, send, todo_io_append, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -431,6 +431,10 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        // A bare literal — most often the synthesized `nil` arm `<% unless
+        // %>` lowers to — renders nothing and does nothing: nothing is
+        // dropped, so no residue line.
+        ExprNode::Lit { .. } => vec![noop_io_append()],
         _ => vec![todo_io_append("unknown stmt", stmt.span)],
     }
 }

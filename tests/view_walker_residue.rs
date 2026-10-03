@@ -122,3 +122,23 @@ fn an_unlowerable_statement_files_residue() {
         res[0].message
     );
 }
+
+/// `<% unless cond %>…<% end %>` reaches the walker as `if cond then nil
+/// else … end`: the `then` arm is a SYNTHESIZED bare `nil`, with no span.
+/// A literal in statement position renders nothing and does nothing, so
+/// there is nothing to drop — but it fell to the catch-all, which filed a
+/// span-less "template statement dropped" line for every `unless` in a
+/// template. A ledger that cries wolf hides the real drops.
+#[test]
+fn an_unless_block_files_no_residue_and_keeps_its_body() {
+    let (body, diags) = emit("<% unless @articles.empty? %>\n<p>listed</p>\n<% end %>\n");
+    assert!(body.contains("<p>listed</p>"), "unless body survives:\n{body}");
+    assert!(residues(&diags).is_empty(), "no residue for a bare literal arm: {diags:?}");
+}
+
+/// The same holds for a literal written in the template itself.
+#[test]
+fn a_literal_statement_files_no_residue() {
+    let (_, diags) = emit("<% nil %>\n<p>x</p>\n");
+    assert!(residues(&diags).is_empty(), "{diags:?}");
+}

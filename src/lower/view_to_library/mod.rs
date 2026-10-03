@@ -4445,6 +4445,13 @@ pub(super) fn todo_io_append(tag: &str, span: crate::span::Span) -> Expr {
              runs no side effect in the emitted view"
         ),
     ));
+    noop_io_append()
+}
+
+/// `io << ""` — a statement that keeps an arm non-empty while rendering
+/// nothing. The catch-all's body without its ledger line, for statements
+/// that genuinely have nothing to drop (a bare literal).
+pub(super) fn noop_io_append() -> Expr {
     send(
         Some(var_ref(Symbol::from("io"))),
         "<<",
