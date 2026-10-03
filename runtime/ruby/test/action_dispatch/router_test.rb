@@ -55,6 +55,18 @@ class RouterTest < Minitest::Test
     assert_nil ActionDispatch::Router.match("PUT", "/articles", TABLE)
   end
 
+  # `match "lookup/:id", to: …, via: :all` lowers to one "ANY" row,
+  # which Rails answers for every request method.
+  def test_any_route_matches_every_method
+    table = [ActionDispatch::Router::Route.new("ANY", "/lookup/:id", :widgets_controller, :show)]
+    m = ActionDispatch::Router.match("DELETE", "/lookup/7", table)
+    raise "expected match" if m.nil?
+    assert_equal :show, m.action
+    m = ActionDispatch::Router.match("GET", "/lookup/7", table)
+    raise "expected match" if m.nil?
+    assert_equal "7", m.path_params["id"]
+  end
+
   def test_returns_nil_when_path_does_not_match
     assert_nil ActionDispatch::Router.match("GET", "/articles/42/edit", TABLE)
     assert_nil ActionDispatch::Router.match("GET", "/foo", TABLE)

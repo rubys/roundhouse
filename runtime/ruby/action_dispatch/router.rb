@@ -173,7 +173,9 @@ module ActionDispatch
       i = 0
       while i < table.length
         route = table[i]
-        if route.verb.to_s == method_upcase
+        # "ANY" is `match …, via: :all`: Rails routes it for every verb.
+        verb = route.verb.to_s
+        if verb == method_upcase || verb == "ANY"
           params = match_parts(route.pattern_parts, path_parts, route.int_params, format)
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
