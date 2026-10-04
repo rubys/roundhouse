@@ -89,6 +89,11 @@ fn polymorphic_targets_see_an_inverse_declared_in_a_concern() {
     };
     let names: Vec<&str> = polymorphic_targets.iter().map(|c| c.0.as_str()).collect();
     assert_eq!(names, vec!["Comment"]);
+    let comment = app.models.iter().find(|m| m.name.0.as_str() == "Comment").unwrap();
+    let Association::HasMany { foreign_key, .. } = comment.associations().next().unwrap() else {
+        panic!("expected HasMany");
+    };
+    assert_eq!(foreign_key.as_str(), "notifiable_id", "an interface key is not owner-derived");
 }
 
 #[test]

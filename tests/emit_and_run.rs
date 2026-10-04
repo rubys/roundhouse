@@ -4117,3 +4117,50 @@ end
         .assert_passes();
 }
 
+/// Interface keys belong to `as:`, even when the Concern name matches it.
+#[test]
+fn a_polymorphic_inverse_from_a_concern_runs() {
+    assert_polymorphic_inverse_from_a_concern_runs("Notifiable");
+}
+
+/// A different Concern name must preserve the same id/type interface.
+#[test]
+fn a_polymorphic_inverse_from_a_differently_named_concern_runs() {
+    assert_polymorphic_inverse_from_a_concern_runs("NotificationOwner");
+}
+
+fn assert_polymorphic_inverse_from_a_concern_runs(concern: &str) {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|",
+            "  create_table \"notifications\", force: :cascade do |t|\n    t.integer \"notifiable_id\"\n    t.string \"notifiable_type\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/notification.rb",
+            "class Notification < ApplicationRecord\n  belongs_to :notifiable, polymorphic: true\n  def owner_title\n    notifiable.title\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/notifiable.rb",
+            &format!("module {concern}\n  extend ActiveSupport::Concern\n  included do\n    has_many :notifications, as: :notifiable\n    has_many :explicit_notifications, class_name: \"Notification\", as: :notifiable, foreign_key: :notifiable_id\n    has_one :first_notification, class_name: \"Notification\", as: :notifiable\n    has_one :last_notification, class_name: \"Notification\", as: :notifiable, foreign_key: :notifiable_id\n  end\nend\n"),
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n  include {concern}\n"),
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Owner", body: "Body text here")
+note = Notification.create!(notifiable_id: article.id, notifiable_type: "Article")
+reloaded = Notification.find(note.id)
+raise "owner id changed" unless reloaded.notifiable_id == article.id
+raise "owner type changed" unless reloaded.notifiable_type == "Article"
+raise "polymorphic read" unless reloaded.owner_title == "Owner"
+raise "inverse read" unless article.notifications.count == 1
+raise "explicit inverse read" unless article.explicit_notifications.count == 1
+raise "default singular inverse read" unless article.first_notification.owner_title == "Owner"
+raise "explicit singular inverse read" unless article.last_notification.owner_title == "Owner"
+"#,
+        )
+        .assert_passes();
+}
