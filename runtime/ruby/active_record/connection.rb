@@ -318,9 +318,12 @@ module ActiveRecord
       h = {}
       columns = self.class.schema_columns
       time_columns = self.class.schema_time_columns
+      date_columns = self.class.schema_date_columns
       only.each do |k|
         next unless columns.include?(k)
-        h[k.to_s] = if time_columns.include?(k)
+        h[k.to_s] = if date_columns.include?(k)
+          ActiveSupport.format_db_date(self[k])
+        elsif time_columns.include?(k)
           ActiveSupport.json_time(self[k])
         else
           self[k]

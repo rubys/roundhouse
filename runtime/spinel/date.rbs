@@ -1,0 +1,51 @@
+# Bounded Date value used by the Spinel runtime for Rails date columns.
+class Date
+  class Error < ArgumentError
+  end
+
+  def initialize: (Integer year, Integer month, Integer day) -> void
+  def self.civil: (Integer year, ?Integer month, ?Integer day) -> Date
+  def self.iso8601: (String value) -> Date
+  def self.parse: (String value, ?bool comp) -> Date
+  def self.strptime: (String value, String format) -> Date
+  def self.today: () -> Date
+  def self.leap_year?: (Integer year) -> bool
+  def self.month_length: (Integer year, Integer month) -> Integer
+
+  def year: () -> Integer
+  def month: () -> Integer
+  def mon: () -> Integer
+  def day: () -> Integer
+  def mday: () -> Integer
+  def leap?: () -> bool
+  def wday: () -> Integer
+  def yday: () -> Integer
+  def sunday?: () -> bool
+  def monday?: () -> bool
+  def tuesday?: () -> bool
+  def wednesday?: () -> bool
+  def thursday?: () -> bool
+  def friday?: () -> bool
+  def saturday?: () -> bool
+  def >>: (Integer months) -> Date
+  def <<: (Integer months) -> Date
+  def shift_months: (Integer amount) -> Date
+  def to_date: () -> Date
+  def to_time: () -> Time
+  def iso8601: () -> String
+  def to_s: () -> String
+  def as_json: (?Hash[untyped, untyped] options) -> String
+  def strftime: (String pattern) -> String
+  def <=>: (Date? other) -> Integer?
+  def ==: (Date? other) -> bool
+  def <: (Date? other) -> bool
+  def <=: (Date? other) -> bool
+  def >: (Date? other) -> bool
+  def >=: (Date? other) -> bool
+end
+
+module ActiveRecord
+  class Base
+    def as_json: (?Hash[Symbol, untyped] options) -> Hash[String, untyped]
+  end
+end

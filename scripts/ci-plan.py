@@ -38,6 +38,7 @@ BASE = [
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
 SPINEL_TESTS = [
+    "date_columns_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
@@ -123,6 +124,8 @@ def native_coverage(path):
             owned_tests.update(("spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"))
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
+        if name in {"date.rb", "date.rbs"}:
+            owned_tests.add("date_columns_spinel")
         if (
             path.startswith("runtime/spinel/")
             and not path.startswith("runtime/spinel/scaffold/")

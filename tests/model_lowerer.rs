@@ -133,13 +133,14 @@ fn article_lowers_with_schema_methods() {
     );
 
     // The non-attr scaffold: table_name, schema_columns,
-    // schema_time_columns, instantiate, initialize, attributes, [], []=,
-    // update.
+    // schema_time_columns, schema_date_columns, instantiate, initialize,
+    // attributes, [], []=, update.
     for expected in [
         "table_name",
         "_table_sql",
         "schema_columns",
         "schema_time_columns",
+        "schema_date_columns",
         "instantiate",
         "initialize",
         "attributes",
@@ -161,6 +162,7 @@ fn article_lowers_with_schema_methods() {
         "_table_sql",
         "schema_columns",
         "schema_time_columns",
+        "schema_date_columns",
         "instantiate",
         "from_row",
         "from_stmt",

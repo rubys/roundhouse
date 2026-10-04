@@ -207,6 +207,23 @@ undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
 
+### Spinel `Date` is a bounded runtime value
+
+The Spinel target defines a small `Date` class in
+`runtime/spinel/date.rb` for Rails date columns. It stores a Gregorian
+year, month, and day; database storage and JSON use `YYYY-MM-DD`, with
+no clock or zone. Its ISO parser accepts only that exact format and
+validates the calendar date.
+
+This is not Ruby's stdlib `date` package. `DateTime`, Julian/Italian
+calendar modes, natural-language and non-ISO parsing, schema date
+defaults, ActiveSupport date extensions, date picker helpers, and date
+predicates are not included. `strftime` implements the date directives
+used by the admitted runtime contract and raises on other directives.
+The compiler continues diagnosing those unsupported paths. JRuby and
+other targets keep their existing Date boundary until they have their
+own runtime.
+
 ### `id` is `0` before save, not `nil` (`""` for a string key)
 
 Each model's own `initialize` seeds `self.id = attrs[:id] || 0` — `||

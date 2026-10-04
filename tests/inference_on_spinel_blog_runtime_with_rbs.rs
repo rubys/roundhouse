@@ -987,7 +987,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to COUNT for strict targets; Relation.exists? forms moved to
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
-    const CEILING: usize = 1400;
+    // 2026-10-05 1400 -> 1407, +7 for the date-column branch in
+    // `_as_json_only` (schema_date_columns and format_db_date). It
+    // preserves the Date JSON form on the Spinel tree while leaving the
+    // DateTime path on json_time; all seven new residuals are in that
+    // shared runtime method's gradual storage boundary.
+    const CEILING: usize = 1407;
 
     assert!(
         all_untyped.len() <= CEILING,

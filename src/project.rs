@@ -726,7 +726,7 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
 /// dynamic backends may never render a type, so a type-position check
 /// alone would silently emit a String/Time or call an absent intrinsic.
 fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
         return Ok(());
     }
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
@@ -3804,6 +3804,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
         ));
+    }
+
+    // Program-defined Date for the Spinel target; the flat walk picks
+    // up its implementation and this sidecar carries its typed surface.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/date.rbs")
+            .map_err(|e| format!("read runtime/spinel/date.rbs: {e}"))?;
+        files.push(("sig/runtime/date.rbs".to_string(), rbs));
     }
 
     // Schema-less json/jsonb column seam. The flat walk emits the Ruby

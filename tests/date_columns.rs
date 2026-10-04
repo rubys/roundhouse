@@ -106,7 +106,6 @@ fn typo_and_cross_domain_operations_remain_errors() {
 }
 
 const UNSUPPORTED: &[BuildTarget] = &[
-    BuildTarget::Spinel,
     BuildTarget::Jruby,
     BuildTarget::Roda,
     BuildTarget::Crystal,
@@ -160,7 +159,35 @@ fn date_target_boundary_rejects_before_reading_or_emitting_files() {
         assert!(model.1.contains("ActiveSupport.parse_db_date(@due_on_raw)"));
         assert!(model.1.contains("ActiveSupport.format_db_date"));
         assert!(!model.1.contains("present_db(@__t_due_on"));
+        assert!(model.1.contains("schema_date_columns"));
     }
+}
+
+#[test]
+fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
+    let mut app = app_with(SCHEMA, include_str!("date_columns_model.rb"));
+    assert!(errors(&mut app).is_empty());
+    let (result, diagnostics) =
+        scope(|| target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel));
+    assert!(result.is_ok(), "{diagnostics:?}");
+    let files = result.unwrap();
+    let runtime = files.iter().find(|(path, _)| path == "runtime/date.rb").unwrap();
+    assert!(runtime.1.contains("class Date"));
+    assert!(
+        files.iter().any(|(path, _)| path == "runtime/date.rbs"),
+        "signature files: {:?}",
+        files.iter().map(|(path, _)| path).filter(|path| path.ends_with(".rbs")).collect::<Vec<_>>()
+    );
+    let model = files
+        .iter()
+        .find(|(path, _)| path == "app/models/calendar_entry.rb")
+        .unwrap();
+    assert!(model.1.contains("ActiveSupport.parse_db_date(@due_on_raw)"));
+    assert!(model.1.contains("ActiveSupport.format_db_date"));
+    assert!(!diagnostics.iter().any(|d| matches!(
+        &d.kind,
+        DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "Date"
+    )));
 }
 
 #[test]

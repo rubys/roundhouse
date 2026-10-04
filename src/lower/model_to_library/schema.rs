@@ -375,6 +375,43 @@ pub(super) fn push_schema_methods(
         block_param: None,
     });
 
+    // def self.schema_date_columns — date-only columns need their own
+    // JSON conversion: their stored value is ISO calendar text, never a
+    // timestamp. Kept separate from schema_time_columns so the runtime
+    // can preserve the two domains without inspecting values.
+    let date_column_array = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: table
+                    .columns
+                    .iter()
+                    .filter(|c| matches!(c.col_type, crate::schema::ColumnType::Date))
+                    .map(|c| lit_sym(c.name.clone()))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        ),
+        Ty::Array { elem: Box::new(Ty::Sym) },
+    );
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("schema_date_columns"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body: date_column_array,
+        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+
     // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
     //
     // The adapter shim returns Hash[Symbol, untyped]; the framework Ruby
