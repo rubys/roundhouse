@@ -50,18 +50,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // real `active_record/base.rb` library file (none in practice)
     // would still win.
     {
-        let mut base = ClassInfo::default();
+        // Prefer `entry().or_default()` so later registration cannot
+        // drop methods we seed here. Raw-SQL helpers live in
+        // `connection.rbs` / `connection.rb` (`sanitize_sql`,
+        // `sanitize_sql_array`, …) — without them on Base, app calls
+        // fail `send_dispatch` even though the runtime defines them
+        // (#400).
+        let base = classes
+            .entry(ClassId(Symbol::from("ActiveRecord::Base")))
+            .or_default();
         for m in [
             "transaction",
             "connection_pool",
             "establish_connection",
         ] {
-            base.class_methods.insert(Symbol::from(m), Ty::Untyped);
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
-        base.class_methods.insert(Symbol::from("connection"), connection_ty());
-        classes
-            .entry(ClassId(Symbol::from("ActiveRecord::Base")))
-            .or_insert(base);
+        base.class_methods
+            .entry(Symbol::from("connection"))
+            .or_insert_with(connection_ty);
+        for m in ["sanitize_sql", "sanitize_sql_array"] {
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
     }
 
     // CollectionProxy — the runtime helper transpiled models use
