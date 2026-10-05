@@ -1034,7 +1034,7 @@ module ActionView
     # a `next unless` — the same kotlin gap sits latent there.)
     def self.render_attrs(attrs)
       return "" if attrs.empty?
-      pairs = []
+      out = +""
       attrs.each do |k, v|
         # The name bindings sit ABOVE the nil guards on purpose: the
         # TypeScript emitter declares a local where it is FIRST
@@ -1053,7 +1053,7 @@ module ActionView
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1071,13 +1071,13 @@ module ActionView
             # Rails (truthy) and is omitted here — no corpus site
             # writes one, and literal sites lower through the
             # compile-time loops, not this method.
-            pairs << " #{name}=\"#{name}\"" unless v.to_s == "false"
+            out << " #{name}=\"#{name}\"" unless v.to_s == "false"
           else
-            pairs << " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
+            out << " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
           end
         end
       end
-      pairs.join
+      out
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,

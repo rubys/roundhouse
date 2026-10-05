@@ -818,7 +818,7 @@ module ActiveRecord
     # projection `select(*specs)` above monomorphic.
     def filter
       out = []
-      to_a.each { |x| out << x if yield x }
+      loaded_records.each { |x| out << x if yield x }
       out
     end
 
@@ -910,7 +910,7 @@ module ActiveRecord
     # contract; lobsters keys tag filters by id).
     def index_by
       h = {}
-      to_a.each { |x| h[yield x] = x }
+      loaded_records.each { |x| h[yield x] = x }
       h
     end
 
@@ -928,8 +928,11 @@ module ActiveRecord
       self
     end
 
+    # Via loaded_records (not to_a): no shallow Array copy of the
+    # memoized rows. to_a keeps its Rails dup contract for callers that
+    # mutate the returned array.
     def map
-      to_a.map { |x| yield x }
+      loaded_records.map { |x| yield x }
     end
 
     # `collect` is Enumerable's second name for `map`, and Rails
@@ -940,7 +943,7 @@ module ActiveRecord
     # definition, not an alias, and a body forwarding to `map` would
     # have to forward the block too.
     def collect
-      to_a.map { |x| yield x }
+      loaded_records.map { |x| yield x }
     end
 
     # `group_by { |rec| key }` — Enumerable's grouping over the
@@ -950,7 +953,7 @@ module ActiveRecord
     # `[]=`-chaining on a maybe-missing key.
     def group_by
       out = {}
-      to_a.each do |rec|
+      loaded_records.each do |rec|
         k = yield rec
         arr = out.fetch(k, nil)
         if arr.nil?
@@ -967,7 +970,7 @@ module ActiveRecord
     # writes `@administrators, @members = users.partition(&:administrator?)`
     # straight off a `User.where(...)`.
     def partition
-      to_a.partition { |x| yield x }
+      loaded_records.partition { |x| yield x }
     end
 
     # `detect { |r| … }` — Enumerable's first match, nil when none.
@@ -1203,7 +1206,7 @@ module ActiveRecord
     # call-sites treat it as the array Rails hands back).
     def all?
       ok = true
-      to_a.each { |x| ok = false unless yield x }
+      loaded_records.each { |x| ok = false unless yield x }
       ok
     end
 
@@ -1247,7 +1250,7 @@ module ActiveRecord
     end
 
     def length
-      to_a.length
+      loaded_records.length
     end
 
     # Rails' `Relation#size`: length when loaded; COUNT when unloaded
