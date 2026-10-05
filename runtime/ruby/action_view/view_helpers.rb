@@ -377,8 +377,14 @@ module ActionView
     end
   
     # ── HTML element helpers ─────────────────────────────────────────
-  
-    def self.link_to(text, href, opts = {})
+
+    # Shared default for helpers that take an optional html-options Hash.
+    # `def f(opts = {})` allocates a fresh Hash on every no-opts call;
+    # a frozen constant does not. Callers that pass options still
+    # allocate at the call site. Methods that delete keys dup first.
+    EMPTY_HTML_OPTS = {}.freeze
+
+    def self.link_to(text, href, opts = EMPTY_HTML_OPTS)
       # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
       # conversion under Crystal. Call sites that use kwargs syntax
       # (`link_to "Show", "/x", class: "btn"`) lift to NamedTuple
@@ -412,7 +418,7 @@ module ActionView
     # link-preview partial links a title only when the preview kept an
     # href, which its `web_url` drops for anything that is not a web URL
     # on another host.
-    def self.link_to_if(condition, text, href, opts = {})
+    def self.link_to_if(condition, text, href, opts = EMPTY_HTML_OPTS)
       return link_to(text, href, opts) if condition
       html_escape(text.to_s)
     end
@@ -455,7 +461,7 @@ module ActionView
     # list because a `next` inside an `each` is not a shape the Rust
     # emitter lowers, and the `delete`s are separate statements because
     # a `delete` USED AS A VALUE types as `Option<Value>` there too.
-    def self.mail_to(email, name = "", opts = {})
+    def self.mail_to(email, name = "", opts = EMPTY_HTML_OPTS)
       cc = opts.fetch(:cc, nil)
       bcc = opts.fetch(:bcc, nil)
       body = opts.fetch(:body, nil)
@@ -483,7 +489,7 @@ module ActionView
     # There's no safe-buffer type in the transpiled runtime, so the
     # Ruby emit path rewrites `link_to(raw(x), ...)` to this variant,
     # which skips the label escape Rails would skip for a safe buffer.
-    def self.link_to_raw(text, href, opts = {})
+    def self.link_to_raw(text, href, opts = EMPTY_HTML_OPTS)
       attrs = render_attrs({ href: href }.merge(opts.to_h))
       "<a#{attrs}>#{text}</a>"
     end
@@ -506,7 +512,7 @@ module ActionView
       parts.join(separator)
     end
   
-    def self.button_to(text, href, opts = {})
+    def self.button_to(text, href, opts = EMPTY_HTML_OPTS)
       # Use `.fetch(k, nil)` instead of bare `opts[:k]`: Ruby's Hash#[]
       # returns nil for missing keys, but Crystal's strict Hash#[]
       # raises KeyError. fetch-with-default produces nil-on-missing in
@@ -585,7 +591,7 @@ module ActionView
       ""
     end
   
-    def self.stylesheet_link_tag(name, opts = {})
+    def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
       href = "/assets/#{name}.css"
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
@@ -596,7 +602,7 @@ module ActionView
     # `javascript_path` (see the `image_path` note on why no digests);
     # absolute paths and URLs pass verbatim. Rails takes a Symbol source
     # too, and a value can hold one, so the source becomes a String here.
-    def self.javascript_include_tag(source, opts = {})
+    def self.javascript_include_tag(source, opts = EMPTY_HTML_OPTS)
       source_s = source.to_s
       name = source_s.include?(".") ? source_s : "#{source_s}.js"
       src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
@@ -699,7 +705,7 @@ module ActionView
     # runtime has no untyped-hash mutation, and the strict targets have no
     # destructuring, so the split lands through explicit indexing rather
     # than `w, h = size.split("x")`.
-    def self.image_tag(source, opts = {})
+    def self.image_tag(source, opts = EMPTY_HTML_OPTS)
       attrs = {}
       size = nil
       opts.to_h.each do |k, v|
@@ -725,7 +731,7 @@ module ActionView
     # content default is nil, NOT "" — `content` is untyped, which
     # lands as C# `object`, and C# rejects any non-null default on a
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
-    def self.content_tag(name, content = nil, opts = {})
+    def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
       "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
     end
@@ -954,7 +960,7 @@ module ActionView
     # is the same target-portable shape `button_to` above uses: a
     # literal Symbol key written into a hash derived from an untyped
     # one is what the strict emitters reject.
-    def self.form_with(opts = {})
+    def self.form_with(opts = EMPTY_HTML_OPTS)
       attrs = opts.to_h.dup
       attrs.delete(:method)
       attrs.delete(:url)

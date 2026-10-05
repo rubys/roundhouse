@@ -26,6 +26,8 @@ module ActionView
     def self.get_slot: (Symbol slot) -> String
     def self.get_yield: () -> String
     def self.set_yield: (String content) -> void
+
+    EMPTY_HTML_OPTS: Hash[untyped, untyped]
   
     # ── escaping / formatting ───────────────────────────────────────
 
