@@ -1130,13 +1130,24 @@ pub fn target_files(
         target,
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
     ) {
-        let synth_shakeable: std::collections::HashSet<String> = app
+        let mut synth_shakeable: std::collections::HashSet<String> = app
             .models
             .iter()
-            .filter_map(|m| app.schema.tables.get(&m.table.0))
-            .flat_map(crate::lower::model_to_library::shakeable_synthesized_names)
+            .flat_map(|m| app.schema.tables.get(&m.table.0).into_iter()
+                .flat_map(|t| crate::lower::model_to_library::shakeable_synthesized_names(t, m)))
             .map(|s| s.as_str().to_string())
             .collect();
+        // Ruby's text-level shake uses a global name set. An optional
+        // predicate on another model must not expose a user's enum override
+        // to shaking; conservatively keep that name on every model.
+        for model in &app.models {
+            for column in model.enums.keys() {
+                let predicate = crate::ident::Symbol::from(format!("{}?", column.as_str()));
+                if crate::lower::model_to_library::model_defines_instance_method(model, &predicate) {
+                    synth_shakeable.remove(predicate.as_str());
+                }
+            }
+        }
         let mut files = files;
         crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
             emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());

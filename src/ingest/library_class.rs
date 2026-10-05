@@ -1583,7 +1583,17 @@ fn walk_decl_body_with_visibility<'pr>(
         // reason — otherwise the same defs would emit twice.
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
-                out.extend(walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?);
+                let class_methods = walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
+                // The recursive walk has already applied cattr/mattr handling.
+                // A surviving native initializer belongs to ClassMethods, not
+                // the enclosing module where these methods are materialized.
+                if !class_methods.class_initializers.is_empty() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "class-variable initialization in module ClassMethods is not modeled".into(),
+                    });
+                }
+                out.extend(class_methods);
                 continue;
             }
         }

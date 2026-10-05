@@ -522,11 +522,17 @@ pub(super) fn push_schema_methods(
 /// against the same column set, so the list can't drift from the
 /// synthesis. Measured (blog + lobsters emits): these families are
 /// where every synthesized-but-dead model method lives.
-pub fn shakeable_synthesized_names(table: &Table) -> Vec<Symbol> {
+pub fn shakeable_synthesized_names(table: &Table, model: &Model) -> Vec<Symbol> {
     let mut names: Vec<Symbol> = Vec::new();
     for col in &table.columns {
-        // Mirrors `synth_column_predicate` (pushed for every column).
-        names.push(Symbol::from(format!("{}?", col.name.as_str())));
+        // Mirror push_schema_methods: an enum's user-defined predicate
+        // was not synthesized and must never be a shake candidate.
+        let predicate = Symbol::from(format!("{}?", col.name.as_str()));
+        if !model.enums.contains_key(&col.name)
+            || !super::associations::model_defines_instance_method(model, &predicate)
+        {
+            names.push(predicate);
+        }
         // Mirrors the two `synth_column_dirty_pred` spellings (both
         // skipped for `id`, which Base answers from its own flag).
         // Shares the synthesizers' own name helpers, so a rename can't

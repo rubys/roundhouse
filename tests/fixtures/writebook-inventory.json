@@ -1189,8 +1189,7 @@
     "Warning|lower_residue|app/models/concerns/positionable.rb:10:32|relation chain stays dynamic (`where` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 1,
     "Warning|lower_residue|app/models/concerns/positionable.rb:11:32|relation chain stays dynamic (`where` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 1,
     "Warning|lower_residue|app/models/concerns/positionable.rb:20:9|reflective `send` left as dynamic dispatch (method-name set not statically enumerable) — strict targets cannot compile a runtime method name": 2,
-    "Warning|lower_residue|app/models/concerns/positionable.rb:24:9|reflective `send` left as dynamic dispatch (method-name set not statically enumerable) — strict targets cannot compile a runtime method name": 2,
-    "Warning|lower_residue|app/models/concerns/positionable.rb:24:9|reflective `send` left as dynamic dispatch (receiver is not an effect-free reader) — strict targets cannot compile a runtime method name": 2,
+    "Warning|lower_residue|app/models/concerns/positionable.rb:24:9|reflective `send` left as dynamic dispatch (method-name set not statically enumerable) — strict targets cannot compile a runtime method name": 4,
     "Warning|lower_residue|app/models/concerns/positionable.rb:8:29|relation chain stays dynamic (`order` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 1,
     "Warning|lower_residue|app/models/demo_content.rb:25:20|relation chain stays dynamic (`load_markdown_page` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 1,
     "Warning|lower_residue|app/models/demo_content.rb:35:9|relation chain stays dynamic (`page` returns Relation[Leaf] — not folded to SQL at transpile time); executes on the runtime Relation in ruby-family targets, unsupported at strict-target emit": 1,
@@ -1215,6 +1214,7 @@
   },
   "emit": {
     "ruby": {
+      "Warning|lower_residue|<synthetic>|scope `start!` (on Session) gets no ActiveRecord::Relation mid-chain delegate: shape on Session is not required positionals only; a mid-chain call raises NoMethodError": 1,
       "Warning|lower_residue|<synthetic>|template statement dropped (unknown stmt) — it contributes no output and runs no side effect in the emitted view": 1,
       "Warning|lower_residue|app/channels/application_cable/connection.rb:5:5|`identified_by` in the body of `ApplicationCable::Connection` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|app/controllers/books_controller.rb:29:7|`respond_to` arm `format.md` dropped (format not modeled) — this action answers every format with its html branch, so a request that negotiates `md` (including a route pinned with `:format => \"md\"`) gets HTML back": 1,
@@ -1292,6 +1292,7 @@
       "Error|unsupported|app/helpers/leaves_helper.rb:11:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
       "Error|unsupported|app/helpers/leaves_helper.rb:19:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
       "Error|unsupported|app/helpers/leaves_helper.rb:2:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
+      "Warning|lower_residue|<synthetic>|scope `start!` (on Session) gets no ActiveRecord::Relation mid-chain delegate: shape on Session is not required positionals only; a mid-chain call raises NoMethodError": 1,
       "Warning|lower_residue|<synthetic>|template statement dropped (unknown stmt) — it contributes no output and runs no side effect in the emitted view": 1,
       "Warning|lower_residue|app/channels/application_cable/connection.rb:5:5|`identified_by` in the body of `ApplicationCable::Connection` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|app/controllers/books_controller.rb:29:7|`respond_to` arm `format.md` dropped (format not modeled) — this action answers every format with its html branch, so a request that negotiates `md` (including a route pinned with `:format => \"md\"`) gets HTML back": 1,

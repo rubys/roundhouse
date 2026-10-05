@@ -63,3 +63,42 @@ fn trailing_keyword_hash_mapping_ingests_with_its_own_values() {
         assert!(matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value == label));
     }
 }
+
+#[test]
+fn unreachable_user_enum_predicates_are_not_synthesized_shake_candidates() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let schema = r#"ActiveRecord::Schema.define do
+  create_table "articles", force: :cascade do |t|
+    t.string "status"
+  end
+  create_table "comments", force: :cascade do |t|
+    t.string "status"
+  end
+end
+"#;
+    let model = r#"class Article < ApplicationRecord
+  enum :status, ready: 'ready'
+  def status?
+    'custom enum predicate survives'
+  end
+end
+"#;
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", schema),
+        ("app/models/article.rb", model),
+        ("app/models/comment.rb", "class Comment < ApplicationRecord; end"),
+    ])).unwrap();
+    for model in &app.models {
+        let table = &app.schema.tables[&model.table.0];
+        let candidates = roundhouse::lower::model_to_library::shakeable_synthesized_names(table, model);
+        assert_eq!(candidates.contains(&Symbol::from("status?")), model.name.0.as_str() == "Comment");
+    }
+    roundhouse::session::analyze_and_lower(&mut app);
+    // Neither model calls status?. Comment still has a synthesized status?
+    // candidate: a global union must not make Article's user method shakeable.
+    for target in [BuildTarget::Typescript, BuildTarget::Ruby] {
+        let files = target_files(&app, roundhouse::fixtures::real_blog(), target).unwrap();
+        assert!(files.iter().any(|(_, source)| source.contains("custom enum predicate survives")),
+            "{target:?} dropped a user-defined enum column predicate");
+    }
+}

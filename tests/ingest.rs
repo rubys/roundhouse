@@ -1949,3 +1949,30 @@ fn case_in_pattern_matching() {
     let e = parse_one(b"y => Integer");
     assert!(matches!(&*e.node, ExprNode::MatchRequired { .. }));
 }
+
+#[test]
+fn nested_class_methods_cannot_relocate_native_initializers() {
+    use roundhouse::ingest::ingest_library_classes;
+    let err = ingest_library_classes(
+        b"module Probe; module ClassMethods; @@flag = nil; def flag; @@flag; end; end; end",
+        "probe.rb",
+    ).expect_err("ClassMethods owns @@flag, not the enclosing Probe");
+    assert!(err.to_string().contains("class-variable initialization in module ClassMethods is not modeled"), "{err}");
+
+    // A cattr in the same body keeps its pre-existing storage approximation.
+    let classes = ingest_library_classes(
+        b"module Probe; module ClassMethods; @@flag = nil; cattr_accessor :flag; def read; @@flag; end; end; end",
+        "probe.rb",
+    ).unwrap();
+    let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+    assert!(probe.class_ivar_initializers.is_empty());
+    assert!(probe.methods.iter().any(|method| method.name.as_str() == "read"));
+
+    // An initializer actually owned by Probe must not be rejected.
+    let classes = ingest_library_classes(
+        b"module Probe; @@flag = nil; module ClassMethods; def flag; @@flag; end; end; end",
+        "probe.rb",
+    ).unwrap();
+    let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+    assert_eq!(probe.class_ivar_initializers.len(), 1);
+}
