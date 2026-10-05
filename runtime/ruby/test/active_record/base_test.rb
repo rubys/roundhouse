@@ -378,6 +378,13 @@ class BaseTest < Minitest::Test
     assert_equal 1, ActiveRecord::Relation.new(Item).limit(2).offset(4).size
   end
 
+  def test_relation_distinct_size_respects_limit_without_collapsing
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    # `SELECT DISTINCT 1 … LIMIT 5` would collapse to one row; size must
+    # still answer the limited distinct cardinality.
+    assert_equal 3, ActiveRecord::Relation.new(Item).distinct.limit(3).size
+  end
+
   def test_relation_distinct_many_and_one_see_separate_rows
     5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
     assert ActiveRecord::Relation.new(Item).distinct.many?

@@ -2084,7 +2084,7 @@ fn js_send_inner(
             Some(Ty::Class { id, .. }) => id.0.as_str(),
             _ => "",
         };
-        let recv_is_string = recv_name == "String";
+        let recv_is_string = matches!(r.ty.as_ref(), Some(Ty::Str)) || recv_name == "String";
         let arg_is_regexp = arg_name == "Regexp" || arg_name == "RegExp";
         let recv_is_regexp = recv_name == "Regexp" || recv_name == "RegExp";
         if recv_is_string || (arg_is_regexp && !recv_is_regexp) {

@@ -1316,7 +1316,12 @@ module ActiveRecord
       return count if @limit.nil? && @offset.nil?
       prior_orders = @orders
       @orders = []
-      inner = select_sql_with("1 AS one")
+      # Same DISTINCT pitfall as exists_sql: `SELECT DISTINCT 1` collapses
+      # every matching row into one, so `distinct.limit(5).size` would
+      # answer 1. Project the primary key when distinct so the outer
+      # COUNT sees separate rows under LIMIT.
+      cols = @distinct ? "#{@table}.#{@model.primary_key}" : "1 AS one"
+      inner = select_sql_with(cols)
       @orders = prior_orders
       sql = "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_size"
       rows = ActiveRecord.adapter.select_rows(sql)
