@@ -544,11 +544,9 @@ def check_results(plan, needs, *, compact=False):
     if not plan["jobs"]:
         # Idle draft (no opt-in label): nothing selected, nothing required.
         required = []
-    elif plan["jobs"] == DRAFT_FLOOR:
-        required = DRAFT_FLOOR
-    elif plan["jobs"] == SPINEL_LANE:
-        required = [j for j in SPINEL_LANE if j not in ADVISORY]
     elif compact:
+        # Compact gate only observes the publication floor jobs in its needs
+        # graph. Spinel/full extras are enforced by ci-summary, not here.
         required = [job for job in PUBLICATION if job in plan["jobs"]]
     else:
         required = plan["required"]
@@ -566,6 +564,8 @@ def check_results(plan, needs, *, compact=False):
     ):
         failures.append("compact-required: no successful baseline gate")
     # Advisory work never blocks the gate, but incomplete work is not complete.
+    # Compact only claims completeness for the publication floor it can see.
+    tracked = required if compact else plan["jobs"]
     complete = not failures and all(
         needs.get(j, {}).get("result") == "success"
         and (
@@ -579,7 +579,7 @@ def check_results(plan, needs, *, compact=False):
                 )
             )
         )
-        for j in plan["jobs"]
+        for j in tracked
     )
     return failures, complete
 

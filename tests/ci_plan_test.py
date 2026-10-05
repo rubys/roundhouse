@@ -202,6 +202,46 @@ class Routing(unittest.TestCase):
         self.assertNotIn("writebook-inventory", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
 
+    def test_draft_plus_spinel_without_full_selects_spinel_lane(self):
+        plan = ci.select(
+            ["README.md"], draft=True, draft_ci=True, spinel_lane=True
+        )
+        self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+        self.assertEqual(plan["extra_compare"], [])
+
+    def test_spinel_compact_gate_only_requires_publication_floor(self):
+        plan = ci.select([], spinel_lane=True)
+        needs = {
+            "plan": {"result": "success"},
+            "generate-fixture": {"result": "success"},
+            "unit": {"result": "success"},
+            "build-roundhouse": {"result": "success"},
+            "store-check": {"result": "success"},
+            "compare-ruby": {"result": "success"},
+            "campfire-conformance": {"result": "success"},
+            "campfire-compare": {"result": "success"},
+            "compare": {"result": "skipped"},
+            "browser-smoke-typescript": {"result": "skipped"},
+        }
+        self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
+        # Non-compact still needs the Spinel required set + compact-required.
+        needs["compact-required"] = {"result": "success"}
+        for job in plan["required"]:
+            needs.setdefault(job, {"result": "success"})
+        for job in plan["jobs"]:
+            needs.setdefault(job, {"result": "success", "outputs": {"execution": "success"}})
+        # Advisory Spinel GC matrix needs per-mode outputs when present.
+        if "campfire-compare-spinel" in plan["jobs"]:
+            needs["campfire-compare-spinel"] = {
+                "result": "success",
+                "outputs": {
+                    "default": "success",
+                    "minor-gc": "success",
+                    "verify-gen": "success",
+                },
+            }
+        self.assertEqual(ci.check_results(plan, needs, compact=False)[0], [])
+
     def test_full_overrides_draft_and_spinel_without_enabling_publication(self):
         plan = ci.select(
             ["README.md"], draft=True, draft_ci=True, spinel_lane=True, full=True

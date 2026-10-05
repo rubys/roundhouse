@@ -51,6 +51,7 @@ See the run's **plan** job for its selected jobs and reasons.
 Drafts stay idle until `ci:draft`, `ci:spinel`, or `ci:full` is applied.
 Marking a PR ready-for-review leaves the draft idle path and runs the normal
 ready planner. `ci:full` / `ci:spinel` also work while the PR is still a draft.
+Stacked labels prefer the broader lane: `ci:full` > `ci:spinel` > `ci:draft`.
 Documentation-only ready PRs still receive checks; changes to the rendered user
 guide also select site/browser coverage.
 
