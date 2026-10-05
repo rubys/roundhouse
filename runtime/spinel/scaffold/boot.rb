@@ -20,9 +20,6 @@ require_relative "runtime/sqlite_adapter"
 # Required before active_record so Base.rb's default `_adapter_*`
 # helpers and per-model overrides find `Db` at constant-resolution
 # time. See project_arel_compile_time_first.md.
-# Program-defined Date is not the unavailable Spinel stdlib package.
-# Load it before Db requires the ActiveSupport temporal seam.
-require_relative "runtime/date"
 require_relative "runtime/db"
 # Base64 + JSON + Importmap shims. All required before any framework
 # Ruby file that references them so spinel-AOT's static resolver
@@ -100,9 +97,9 @@ ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(
   Rails.application.config_time_zone, Rails.application.config_time_zone
 )
 require_relative "runtime/active_record"
-# Date-aware default ActiveRecord JSON path — the CRuby/JRuby overlay
-# has its own reflection-aware serializer, while Spinel uses schema facts.
-require_relative "runtime/active_record_date_serialization"
+# Default as_json → _as_json_only. Date-column rewrite is injected only
+# when app_uses_date (see project::spinel_files); Campfire omits Date.
+require_relative "runtime/active_record_serialization"
 # Record equality (same class + same persisted id) — a reopen of
 # ActiveRecord::Base; the CRuby overlay's twin is active_record_bang.rb.
 require_relative "runtime/active_record_equality_spinel"

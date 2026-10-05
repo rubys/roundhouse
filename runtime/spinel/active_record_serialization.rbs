@@ -1,0 +1,5 @@
+module ActiveRecord
+  class Base
+    def as_json: (?Hash[Symbol, untyped] options) -> Hash[String, untyped]
+  end
+end

@@ -184,8 +184,20 @@ fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
         "date apps must load the program-defined Date"
     );
     assert!(
+        boot.1.contains("require_relative \"runtime/active_support_date_parsing\""),
+        "date apps must load Date parse/format intrinsics"
+    );
+    assert!(
         boot.1.contains("require_relative \"runtime/active_record_date_serialization\""),
         "date apps must load date-aware JSON serialization"
+    );
+    assert!(
+        files.iter().any(|(path, _)| path == "runtime/active_support_date_parsing.rb"),
+        "date parse/format must ship with the Date package"
+    );
+    assert!(
+        boot.1.contains("require_relative \"runtime/active_record_serialization\""),
+        "default as_json entrypoint is always-on"
     );
     let model = files
         .iter()
@@ -231,18 +243,34 @@ end
         "date.rb must not ship when unused"
     );
     assert!(
+        !files.iter().any(|(path, _)| path == "runtime/active_support_date_parsing.rb"),
+        "date parse/format must not ship when unused"
+    );
+    assert!(
         !files.iter().any(|(path, _)| path == "runtime/active_record_date_serialization.rb"),
         "date serialization reopen must not ship when unused"
     );
+    assert!(
+        files.iter().any(|(path, _)| path == "runtime/active_record_serialization.rb"),
+        "default as_json entrypoint still ships without dates"
+    );
     let boot = files.iter().find(|(path, _)| path == "boot.rb").unwrap();
     assert!(
-        !boot.1.contains("runtime/date"),
+        !boot.1.contains("runtime/date\""),
         "boot must not require Date when unused:\n{}",
         boot.1
     );
     assert!(
+        !boot.1.contains("active_support_date_parsing"),
+        "boot must not require date parse/format when unused"
+    );
+    assert!(
         !boot.1.contains("active_record_date_serialization"),
         "boot must not require date JSON reopen when unused"
+    );
+    assert!(
+        boot.1.contains("require_relative \"runtime/active_record_serialization\""),
+        "boot still loads always-on as_json without dates"
     );
 }
 

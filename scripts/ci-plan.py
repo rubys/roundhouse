@@ -140,9 +140,20 @@ def native_coverage(path):
             )
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
-        if name in {"date.rb", "date.rbs", "active_record_date_serialization.rb"}:
+        if name in {
+            "date.rb",
+            "date.rbs",
+            "active_support_date_parsing.rb",
+            "active_support_date_parsing.rbs",
+            "active_record_date_serialization.rb",
+            "active_record_date_serialization.rbs",
+            "sqlite_adapter.rb",
+        }:
             owned_tests.add("date_columns_spinel")
-        if name == "active_record_date_serialization.rb":
+        if name in {
+            "active_record_date_serialization.rb",
+            "active_record_serialization.rb",
+        }:
             owned_tests.add("framework_tests_spinel")
         if (
             path.startswith("runtime/spinel/")

@@ -1,22 +1,10 @@
-# Date-aware ActiveRecord JSON for the Spinel runtime.
-#
-# Kept beside the bounded Date (not in shared `runtime/ruby/`) because:
-# - the CRuby/JRuby overlay supplies its own reflection-aware reopen
-# - putting a `schema_date_columns` / `format_db_date` branch into the
-#   shared `_as_json_only` paid Bar B / AR RBS-probe residuals on every
-#   analyze of `connection.rb`, including apps that never load Date
-# - Campfire omits this file via `app_uses_date` (matz/spinel#7334)
-#
-# Mirrors the overlay's posture: call the shared time-aware seam, then
-# rewrite date-column values to ISO `YYYY-MM-DD` (or nil).
+# Date-column JSON rewrite for Spinel. Omit-when-unused with the Date
+# package (matz/spinel#7334). Default `as_json` lives in the always-on
+# `active_record_serialization.rb`; this reopen wraps `_as_json_only`
+# after the shared time-aware seam so date columns become ISO
+# `YYYY-MM-DD` (or nil) without taxing shared `connection.rb`.
 module ActiveRecord
   class Base
-    def as_json(options = {})
-      only = options && options[:only]
-      only ||= self.class.schema_columns
-      _as_json_only(only)
-    end
-
     alias_method :_as_json_only_without_dates, :_as_json_only
     private :_as_json_only_without_dates
 

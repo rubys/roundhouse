@@ -143,8 +143,6 @@ class Date
     index = @year * 12 + @month - 1 + amount
     year = index / 12
     month = index % 12 + 1
-    year -= 1 if month == 0
-    month = 12 if month == 0
     day = @day
     last = Date.month_length(year, month)
     day = last if day > last

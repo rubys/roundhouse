@@ -3816,35 +3816,65 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         ));
     }
 
-    // Program-defined Date for apps that actually use date-only values.
-    // Loading it unconditionally breaks Campfire under Spinel today:
-    // matz/spinel#7334 drops `Time#strftime` from poly `Time | Date`
-    // receivers once a user `Date#strftime` exists. Omit the class,
-    // its RBS, the JSON reopen, and the boot requires until needed.
+    // Program-defined Date package for apps that use date-only values.
+    // Loading Date#strftime into every Spinel tree breaks poly
+    // Time|Date receivers (matz/spinel#7334). Default boot has no Date
+    // requires; when needed we inject the package (class + date parse/
+    // format + date JSON rewrite) after always-on AR serialization.
+    const DATE_PACKAGE_FILES: &[&str] = &[
+        "runtime/date.rb",
+        "runtime/active_support_date_parsing.rb",
+        "runtime/active_record_date_serialization.rb",
+        "sig/runtime/date.rbs",
+        "sig/runtime/active_support_date_parsing.rbs",
+        "sig/runtime/active_record_date_serialization.rbs",
+    ];
     if needs_date {
-        let rbs = crate::runtime_files::read_to_string("runtime/spinel/date.rbs")
-            .map_err(|e| format!("read runtime/spinel/date.rbs: {e}"))?;
-        files.push(("sig/runtime/date.rbs".to_string(), rbs));
-    } else {
-        files.retain(|(p, _)| {
-            p != "runtime/date.rb"
-                && p != "runtime/active_record_date_serialization.rb"
-                && p != "sig/runtime/date.rbs"
-        });
+        for (src, dest) in [
+            ("runtime/spinel/date.rbs", "sig/runtime/date.rbs"),
+            (
+                "runtime/spinel/active_support_date_parsing.rbs",
+                "sig/runtime/active_support_date_parsing.rbs",
+            ),
+            (
+                "runtime/spinel/active_record_date_serialization.rbs",
+                "sig/runtime/active_record_date_serialization.rbs",
+            ),
+        ] {
+            let rbs = crate::runtime_files::read_to_string(src)
+                .map_err(|e| format!("read {src}: {e}"))?;
+            files.push((dest.to_string(), rbs));
+        }
         if let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") {
-            *boot = boot
-                .lines()
-                .filter(|line| {
-                    let t = line.trim();
-                    t != "require_relative \"runtime/date\""
-                        && t != "require_relative \"runtime/active_record_date_serialization\""
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !boot.ends_with('\n') {
-                boot.push('\n');
+            let anchor = "require_relative \"runtime/active_record_serialization\"\n";
+            let inject = "\
+# Date package — only when the app uses date-only values (matz/spinel#7334).\n\
+require_relative \"runtime/date\"\n\
+require_relative \"runtime/active_support_date_parsing\"\n\
+require_relative \"runtime/active_record_date_serialization\"\n";
+            if !boot.contains("require_relative \"runtime/date\"") {
+                if let Some(at) = boot.find(anchor) {
+                    boot.insert_str(at + anchor.len(), inject);
+                } else {
+                    return Err(
+                        "spinel boot.rb missing active_record_serialization require \
+                         (Date package inject anchor)"
+                            .into(),
+                    );
+                }
             }
         }
+    } else {
+        files.retain(|(p, _)| !DATE_PACKAGE_FILES.contains(&p.as_str()));
+    }
+
+    // Always-on AR JSON entrypoint signatures (date rewrite RBS is gated above).
+    {
+        let rbs = crate::runtime_files::read_to_string(
+            "runtime/spinel/active_record_serialization.rbs",
+        )
+        .map_err(|e| format!("read runtime/spinel/active_record_serialization.rbs: {e}"))?;
+        files.push(("sig/runtime/active_record_serialization.rbs".to_string(), rbs));
     }
 
     // Schema-less json/jsonb column seam. The flat walk emits the Ruby

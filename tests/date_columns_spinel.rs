@@ -56,16 +56,33 @@ entry.update!(due_on: nil)
 entry.reload
 raise entry.due_on.inspect unless entry.due_on.nil?
 raise entry.as_json(only: [:due_on]).inspect unless entry.as_json(only: [:due_on]) == {"due_on" => nil}
+entry.update!(due_on: "")
+entry.reload
+raise entry.due_on.inspect unless entry.due_on.nil?
+raise entry.as_json(only: [:due_on]).inspect unless entry.as_json(only: [:due_on]) == {"due_on" => nil}
+entry.update!(due_on: Date.new(2024, 6, 15))
+entry.reload
+raise entry.due_on.iso8601 unless entry.due_on.iso8601 == "2024-06-15"
+found = CalendarEntry.where(due_on: Date.new(2024, 6, 15)).to_a
+raise found.map { |e| e.id }.inspect unless found.length == 1 && found[0].id == entry.id
+miss = CalendarEntry.where(due_on: Date.new(2024, 6, 16)).to_a
+raise miss.inspect unless miss.empty?
 raise ActiveSupport.format_db_date(nil).inspect unless ActiveSupport.format_db_date(nil).nil?
 raise ActiveSupport.parse_db_date("").inspect unless ActiveSupport.parse_db_date("").nil?
 raise ActiveSupport.parse_db_date(nil).inspect unless ActiveSupport.parse_db_date(nil).nil?
 raise ActiveSupport.format_db_date(Date.new(2024, 2, 29)).inspect unless ActiveSupport.format_db_date(Date.new(2024, 2, 29)) == "2024-02-29"
+raise ActiveSupport.format_db_date("2024-02-29").inspect unless ActiveSupport.format_db_date("2024-02-29") == "2024-02-29"
 raise ActiveSupport.format_db_date(nil).inspect unless ActiveSupport.format_db_date(nil).nil?
 raise ActiveSupport.format_db_date("").inspect unless ActiveSupport.format_db_date("").nil?
 begin
   ActiveSupport.format_db_date(42)
   raise "invalid DB date value was accepted"
 rescue TypeError
+end
+begin
+  ActiveSupport.parse_db_date("2024-02-30")
+  raise "invalid parse_db_date was accepted"
+rescue Date::Error
 end
 raise SqliteAdapter.escape_value(Date.new(2024, 2, 29)).inspect unless SqliteAdapter.escape_value(Date.new(2024, 2, 29)) == "'2024-02-29'"
 raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "2024-01-31"

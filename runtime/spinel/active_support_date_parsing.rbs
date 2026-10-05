@@ -1,0 +1,5 @@
+# Date-only temporal intrinsics. Emitted with the Date package only.
+module ActiveSupport
+  def self.parse_db_date: (String? value) -> Date?
+  def self.format_db_date: (Date | String | nil value) -> String?
+end

@@ -20,20 +20,8 @@
 # corpus are second-granularity, and JSON serializes from the raw
 # string (`<col>_raw`), not the parsed Time.
 module ActiveSupport
-  # SQL DATE has no clock or zone. The empty string is the SQLite
-  # adapter's nil representation for a nullable column.
-  def self.parse_db_date(value)
-    return nil if value.nil? || value == ""
-    Date.iso8601(value)
-  end
-
-  def self.format_db_date(value)
-    return nil if value.nil?
-    return nil if value.is_a?(String) && value == ""
-    return value.iso8601 if value.is_a?(Date)
-    return Date.iso8601(value).iso8601 if value.is_a?(String)
-    raise TypeError, "expected Date, String, or nil"
-  end
+  # Date-only parse/format live in `active_support_date_parsing.rb`,
+  # loaded only when `app_uses_date` (matz/spinel#7334).
 
   # Rails zone name → IANA identifier. TWIN of the constant in the
   # CRuby/JRuby overlay's sibling file, which shadows this whole file on

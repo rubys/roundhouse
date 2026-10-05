@@ -2,8 +2,6 @@
 # raw TEXT column value the synthesized reader passes — nil/"" for
 # absent storage (the nil-guard narrows before the positional parse).
 module ActiveSupport
-  def self.parse_db_date: (String? value) -> Date?
-  def self.format_db_date: (untyped value) -> String?
   def self.parse_db_time: (String? str) -> Time?
   def self.json_time: (String? str) -> String?
   def self.db_now: () -> String
