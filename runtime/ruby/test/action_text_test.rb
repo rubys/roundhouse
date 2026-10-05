@@ -256,6 +256,7 @@ class ActionTextContentTest < Minitest::Test
 
   def test_blank_tracks_plain_text_not_markup
     assert ActionText::Content.new("").blank?
+    assert ActionText::Content.new("   \n\t").blank?
     assert ActionText::Content.new("<div></div>").blank?
     assert ActionText::Content.new("<div><br></div>").blank?
     refute ActionText::Content.new("<div>x</div>").blank?

@@ -1165,13 +1165,23 @@ module ActionText
       @html
     end
 
-    # Empty markup is blank without scanning. Non-empty shells
-    # (`<div></div>`, `<div><br></div>`) still need to_plain_text —
+    # Empty / whitespace-only markup is blank without scanning. Non-empty
+    # shells (`<div></div>`, `<div><br></div>`) still need to_plain_text —
     # empty blockquotes become curly quotes and are not blank.
     def blank?
       html = @html
-      return true if html.nil? || html == ""
-      to_plain_text == ""
+      return true if html.nil?
+      n = html.length
+      return true if n == 0
+      i = 0
+      while i < n
+        c = html[i, 1].to_s
+        unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f"
+          return to_plain_text == ""
+        end
+        i = i + 1
+      end
+      true
     end
 
     def empty?
