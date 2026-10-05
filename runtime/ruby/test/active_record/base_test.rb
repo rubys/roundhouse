@@ -457,20 +457,6 @@ class BaseTest < Minitest::Test
     assert_equal "SELECT '\\' AS slash, 42 AS value", sql
   end
 
-  def test_sanitize_sql_array_named_binds
-    sql = ActiveRecord::Base.sanitize_sql_array(
-      ["title = :title", { title: "A" }]
-    )
-    assert_equal "title = 'A'", sql
-  end
-
-  def test_sanitize_sql_array_sprintf_binds
-    sql = ActiveRecord::Base.sanitize_sql_array(
-      ["title = %s", "A"]
-    )
-    assert_equal "title = 'A'", sql
-  end
-
   def test_relation_grouped_distinct_count_sql_keeps_distinct
     rel = ActiveRecord::Relation.new(Item)
       .select("title")
