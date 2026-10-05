@@ -3847,11 +3847,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         }
         if let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") {
             let anchor = "require_relative \"runtime/active_record_serialization\"\n";
-            let inject = "\
-# Date package — only when the app uses date-only values (matz/spinel#7334).\n\
-require_relative \"runtime/date\"\n\
-require_relative \"runtime/active_support_date_parsing\"\n\
-require_relative \"runtime/active_record_date_serialization\"\n";
+            // Prefer concat! over one escaped multiline string: the CI
+            // planner's project.rs body-scope regex backtracks for minutes
+            // on `\"` + `\` continuations in a single literal this large.
+            let inject = concat!(
+                "# Date package — only when the app uses date-only values (matz/spinel#7334).\n",
+                "require_relative \"runtime/date\"\n",
+                "require_relative \"runtime/active_support_date_parsing\"\n",
+                "require_relative \"runtime/active_record_date_serialization\"\n",
+            );
             if !boot.contains("require_relative \"runtime/date\"") {
                 if let Some(at) = boot.find(anchor) {
                     boot.insert_str(at + anchor.len(), inject);

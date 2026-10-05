@@ -498,7 +498,7 @@ def project_change_scope(before, after):
     return None
 
 
-def changed_inputs(event, event_name, sha):
+def changed_inputs(event, event_name, sha, *, need_project_scope=True):
     if not SHA.fullmatch(sha) or git("rev-parse", "HEAD").decode().strip() != sha:
         raise ValueError("checkout is not the event SHA")
     if event_name == "pull_request":
@@ -532,7 +532,7 @@ def changed_inputs(event, event_name, sha):
         if p
     ]
     scope = None
-    if "src/project.rs" in paths:
+    if need_project_scope and "src/project.rs" in paths:
         entries = [
             git("ls-tree", ref, "--", "src/project.rs").split() for ref in (base, sha)
         ]
@@ -632,8 +632,13 @@ def main():
         full = True
     reason = None
     try:
+        # project_scope only narrows path selection; spinel/full short-circuit
+        # before that, so skip the expensive project.rs body scan there.
         paths, project_scope = changed_inputs(
-            event, event_name, os.environ["GITHUB_SHA"]
+            event,
+            event_name,
+            os.environ["GITHUB_SHA"],
+            need_project_scope=not full and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
         paths, project_scope, full, reason = (
