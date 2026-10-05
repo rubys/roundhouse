@@ -106,3 +106,26 @@ end
         "map.with_index must not become each_with_index:\n{src}"
     );
 }
+
+#[test]
+fn each_with_index_dynamic_offset_is_left_alone() {
+    let src = emit_lib(
+        r#"class Mover
+  def self.reposition(items, start)
+    items.each.with_index(start) do |item, index|
+      item.update!(score: index)
+    end
+  end
+end
+"#,
+        "mover",
+    );
+    assert!(
+        src.contains("each.with_index") || src.contains(".with_index"),
+        "non-literal offset must keep each.with_index (eval once):\n{src}"
+    );
+    assert!(
+        !src.contains("each_with_index"),
+        "dynamic offset must not materialize into each_with_index:\n{src}"
+    );
+}

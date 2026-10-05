@@ -252,12 +252,16 @@ fn seed_ivars_for_class(
         }
     }
     // Short-name RBS keys (rare) — only when exact ClassId missed.
-    if let Some(short) = class_id.0.as_str().rsplit("::").next() {
-        let short_id = ClassId(Symbol::new(short));
-        if short_id != *class_id {
-            if let Some(declared) = rbs_ivars.get(&short_id) {
-                for (name, ty) in declared {
-                    flow.entry(name.clone()).or_insert_with(|| ty.clone());
+    // Do not merge short-only ivars onto a class that already has its
+    // own declaration map (would widen unrelated siblings).
+    if !rbs_ivars.contains_key(class_id) {
+        if let Some(short) = class_id.0.as_str().rsplit("::").next() {
+            let short_id = ClassId(Symbol::new(short));
+            if short_id != *class_id {
+                if let Some(declared) = rbs_ivars.get(&short_id) {
+                    for (name, ty) in declared {
+                        flow.entry(name.clone()).or_insert_with(|| ty.clone());
+                    }
                 }
             }
         }
@@ -284,16 +288,32 @@ fn merge_ivar_maps(into: &mut HashMap<Symbol, Ty>, from: HashMap<Symbol, Ty>) {
             Some(prev) => {
                 into.insert(name, match (prev, ty) {
                     (a, b) if a == b => a,
-                    (Ty::Union { mut variants }, other)
-                    | (other, Ty::Union { mut variants }) => {
-                        if !variants.iter().any(|v| v == &other) {
-                            variants.push(other);
+                    (a, b) => {
+                        // Flatten nested unions so `Array[Int]|Nil` ⨝ `Nil`
+                        // stays a flat union (collection_elem still sees Int).
+                        let mut variants = Vec::new();
+                        let mut push = |t: Ty| match t {
+                            Ty::Union { variants: inner } => {
+                                for v in inner {
+                                    if !variants.iter().any(|e| e == &v) {
+                                        variants.push(v);
+                                    }
+                                }
+                            }
+                            other => {
+                                if !variants.iter().any(|e| e == &other) {
+                                    variants.push(other);
+                                }
+                            }
+                        };
+                        push(a);
+                        push(b);
+                        match variants.len() {
+                            0 => Ty::Nil,
+                            1 => variants.pop().unwrap(),
+                            _ => Ty::Union { variants },
                         }
-                        Ty::Union { variants }
                     }
-                    (a, b) => Ty::Union {
-                        variants: vec![a, b],
-                    },
                 });
             }
             None => {

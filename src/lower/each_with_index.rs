@@ -61,13 +61,20 @@ fn rewrite(expr: &mut Expr) {
             return;
         }
 
+        // Only literal Int offsets are safe to materialize into the
+        // loop (`index = __with_index_i + offset`). A dynamic offset
+        // must evaluate once before iteration — cloning it into the
+        // body would re-run side effects and see reassigned locals.
         let offset = match args.as_slice() {
             [] => None,
             [arg] => match &*arg.node {
                 ExprNode::Lit {
                     value: Literal::Int { value: 0 },
                 } => None,
-                _ => Some(arg.clone()),
+                ExprNode::Lit {
+                    value: Literal::Int { .. },
+                } => Some(arg.clone()),
+                _ => return,
             },
             _ => return,
         };

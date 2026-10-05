@@ -2350,11 +2350,9 @@ impl ModelBases {
     /// lexical spelling when no enclosing candidate is a known base.
     pub fn resolve_superclass(&self, scope: &[String], parent_path: &[String]) -> String {
         let joined = parent_path.join("::");
-        if self.contains(&joined) {
-            return joined;
-        }
-        // Only bare names participate in lexical search — a written
-        // `Foo::Bar` is already absolute enough for ModelBases.
+        // Bare names: search enclosing scopes first (Ruby constant
+        // lookup). A global `ApplicationRecord` base must not win over
+        // a closer `Foo::ApplicationRecord` when both are known.
         if parent_path.len() == 1 {
             let bare = &parent_path[0];
             let mut segs = scope.to_vec();
@@ -2365,6 +2363,9 @@ impl ModelBases {
                 }
                 segs.pop();
             }
+        }
+        if self.contains(&joined) {
+            return joined;
         }
         joined
     }
@@ -2392,7 +2393,11 @@ impl ModelBases {
             if !declares_abstract_class(&class) {
                 continue;
             }
-            pairs.push((full.join("::"), parent.join("::")));
+            // Resolve bare parents (`Record` under `module ActionText`)
+            // before close_over, which matches on the stored parent
+            // spelling against seeded qualified bases.
+            let parent = self.resolve_superclass(&scope, &parent);
+            pairs.push((full.join("::"), parent));
         }
     }
 

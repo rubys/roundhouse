@@ -288,6 +288,17 @@ fn collect_class_ivars<'a, I: Iterator<Item = Node<'a>>>(
                     .or_default()
                     .insert(Symbol::new(bare), ty);
             }
+            // `self.@foo` — class-instance variable on the module/class
+            // object (what `def self.` bodies read). Same ivar map key as
+            // `@foo`; the runtime typer seeds both from this harvest.
+            Node::ClassInstanceVariable(ivar) => {
+                let raw = ivar.name().as_str().to_string();
+                let bare = raw.strip_prefix('@').unwrap_or(raw.as_str());
+                let ty = ty_from_node(&ivar.type_(), ctx)?;
+                out.entry(class_id.clone())
+                    .or_default()
+                    .insert(Symbol::new(bare), ty);
+            }
             Node::Class(_) | Node::Module(_) | Node::Interface(_) => {
                 walk_ivars(&member, Some(class_name), aliases, out)?;
             }
@@ -1543,6 +1554,24 @@ end
             }
         );
         assert_eq!(base[&Symbol::from("persisted")], Ty::Bool);
+    }
+
+    #[test]
+    fn app_ivars_harvest_self_at_class_instance_variables() {
+        let src = "\
+module ActionView
+  module ViewHelpers
+    self.@sanitize_default_tags: Array[String]?
+    def self.sanitize_default_tags: () -> Array[String]
+  end
+end
+";
+        let out = parse_app_ivars(src).expect("parses");
+        let helpers = &out[&ClassId(Symbol::from("ActionView::ViewHelpers"))];
+        assert!(
+            helpers.contains_key(&Symbol::from("sanitize_default_tags")),
+            "self.@sanitize_* must seed the ivar map: {helpers:?}"
+        );
     }
 
     #[test]

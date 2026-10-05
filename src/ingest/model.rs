@@ -471,18 +471,26 @@ pub(super) fn ingest_model_body_items(
                 let is_class_attr =
                     name.starts_with("cattr_") || name.starts_with("mattr_");
                 let mut names: Vec<Symbol> = Vec::new();
+                let mut has_options = is_class_attr && call.block().is_some();
                 if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
                         if let Some(s) = symbol_value(&arg) {
                             names.push(Symbol::from(s));
+                        } else if is_class_attr {
+                            // `default:` / other kwargs are not modeled —
+                            // partial expansion would drop the initializer.
+                            has_options = true;
                         }
                     }
                 }
-                let recv = if is_class_attr {
-                    crate::dialect::MethodReceiver::Class
-                } else {
-                    crate::dialect::MethodReceiver::Instance
-                };
+                if has_options {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "{name} options (e.g. default:) are not modeled on model ingest"
+                        ),
+                    });
+                }
                 let want_reader =
                     name.ends_with("_reader") || name.ends_with("_accessor");
                 let want_writer =
@@ -494,27 +502,48 @@ pub(super) fn ingest_model_body_items(
                     } else {
                         Vec::new()
                     };
-                    if want_reader {
-                        out.push(ModelBodyItem::Method {
-                            method: super::library_class::synth_attr_reader(
-                                owner, attr, recv,
-                            ),
-                            leading_comments: lead.clone(),
-                            leading_blank_line: false,
-                        });
-                    }
-                    if want_writer {
-                        out.push(ModelBodyItem::Method {
-                            method: super::library_class::synth_attr_writer(
-                                owner, attr, recv,
-                            ),
-                            leading_comments: if want_reader {
-                                Vec::new()
-                            } else {
-                                lead
-                            },
-                            leading_blank_line: false,
-                        });
+                    // mattr/cattr: class accessors plus instance accessors
+                    // that share the same @ivar storage approximation used
+                    // by library ingest (Rails instance copies read the
+                    // class attribute; here both sides use the ivar).
+                    let receivers: &[crate::dialect::MethodReceiver] = if is_class_attr {
+                        &[
+                            crate::dialect::MethodReceiver::Class,
+                            crate::dialect::MethodReceiver::Instance,
+                        ]
+                    } else {
+                        &[crate::dialect::MethodReceiver::Instance]
+                    };
+                    let mut first_method = true;
+                    for &recv in receivers {
+                        if want_reader {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_reader(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
+                        if want_writer {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_writer(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
                     }
                 }
                 if !out.is_empty() {

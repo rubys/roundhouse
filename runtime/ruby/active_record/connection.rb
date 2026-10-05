@@ -161,18 +161,44 @@ module ActiveRecord
     # drops a trailing empty field, so `"… where rowid = ?"` splits to
     # one part, and appending a bind after each part while binds remain
     # reconstructs it exactly. A `?` with no bind left is dropped, which
-    # is the same shape `substitute_binds` leaves it in.
+    # is the same shape `substitute_binds` leaves it in. Question marks
+    # inside single- or double-quoted SQL literals are not placeholders.
     def self.sanitize_sql(statement)
-      parts = statement[0].to_s.split("?")
+      sql = statement[0].to_s
       out = ""
+      bind = 1
       i = 0
-      while i < parts.length
-        out = out + parts[i].to_s
-        bind = i + 1
-        if bind < statement.length
-          out = out + ActiveRecord.adapter.escape_value(statement[bind])
+      n = sql.length
+      quote = nil
+      while i < n
+        c = sql[i, 1].to_s
+        if !quote.nil?
+          out = out + c
+          if c == "\\" && i + 1 < n
+            out = out + sql[i + 1, 1].to_s
+            i = i + 2
+            next
+          end
+          quote = nil if c == quote
+          i = i + 1
+          next
         end
-        i += 1
+        if c == "'" || c == "\""
+          quote = c
+          out = out + c
+          i = i + 1
+          next
+        end
+        if c == "?"
+          if bind < statement.length
+            out = out + ActiveRecord.adapter.escape_value(statement[bind])
+            bind = bind + 1
+          end
+          i = i + 1
+          next
+        end
+        out = out + c
+        i = i + 1
       end
       out
     end

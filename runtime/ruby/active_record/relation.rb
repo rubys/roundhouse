@@ -1636,13 +1636,17 @@ module ActiveRecord
       # discipline; scalar `count` on a grouped relation counts groups
       # (Hash form is `group_count`). LIMIT/OFFSET stay off total_count.
       if !@groups.empty?
+        # Keep an explicit projection so HAVING can name selected
+        # aliases (`select("COUNT(*) AS n").having("n > 1")`).
+        cols = @select_sql.nil? ? "1 AS one" : @select_sql
         inner = append_group_having(
-          append_join_where("#{cte_prefix}SELECT 1 AS one FROM #{from_source}")
+          append_join_where("#{cte_prefix}SELECT #{cols} FROM #{from_source}")
         )
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
       if @distinct
-        cols = "#{@table}.#{@model.primary_key}"
+        # `select(:title).distinct.count` counts distinct titles, not pks.
+        cols = @select_sql.nil? ? "#{@table}.#{@model.primary_key}" : @select_sql
         inner = append_join_where(
           "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
         )

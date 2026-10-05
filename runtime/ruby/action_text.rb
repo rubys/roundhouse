@@ -1177,7 +1177,9 @@ module ActionText
       while i < n
         c = html[i, 1].to_s
         unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f"
-          return to_plain_text == ""
+          # Entity-decoded plain text (`&nbsp;` → " ") is blank when
+          # whitespace-only — match ActiveSupport, not only `""`.
+          return ActiveSupport.blank?(to_plain_text)
         end
         i = i + 1
       end

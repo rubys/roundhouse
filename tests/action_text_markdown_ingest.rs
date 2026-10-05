@@ -96,6 +96,15 @@ fn markdown_under_action_text_ingests_as_model() {
         )),
         "mattr_accessor :renderer must synthesize a class reader on the model"
     );
+    assert!(
+        md.body.iter().any(|item| matches!(
+            item,
+            roundhouse::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "renderer"
+                    && method.receiver == roundhouse::dialect::MethodReceiver::Instance
+        )),
+        "mattr_accessor :renderer must also synthesize an instance reader for to_html"
+    );
 }
 
 #[test]
