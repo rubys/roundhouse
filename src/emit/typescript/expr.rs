@@ -2068,12 +2068,30 @@ fn js_send_inner(
     if method == "iso8601" && args.is_empty() && recv.is_some() {
         return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
-    // `<regex>.match?(s)` → `<regex>.test(s)`. Ruby's `Regexp#match?`
-    // returns boolean; JS RegExp has `.test()` for the same purpose.
-    // Both `match?` (predicate) and `match` (returns MatchData) get
-    // mapped: predicate → `.test()`, value form → `.exec()`.
+    // Ruby has both `Regexp#match?(str)` and `String#match?(re)`.
+    // JS only has `RegExp#test(str)`, so the String-receiver form must
+    // swap: `s.match?(re)` → `re.test(s)`. Emitting `s.test(re)` is a
+    // TypeError (`String.prototype.test` does not exist) — which is
+    // exactly what six `html_escape`-family fast-paths hit under TS.
     if method == "match?" && args.len() == 1 && recv.is_some() {
-        return Js::method_call(span, js_expr(recv.unwrap()), "test", vec![js_expr(&args[0])]);
+        let r = recv.unwrap();
+        let arg = &args[0];
+        let recv_name = match r.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => id.0.as_str(),
+            _ => "",
+        };
+        let arg_name = match arg.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => id.0.as_str(),
+            _ => "",
+        };
+        let recv_is_string = recv_name == "String";
+        let arg_is_regexp = arg_name == "Regexp" || arg_name == "RegExp";
+        let recv_is_regexp = recv_name == "Regexp" || recv_name == "RegExp";
+        if recv_is_string || (arg_is_regexp && !recv_is_regexp) {
+            return Js::method_call(span, js_expr(arg), "test", vec![js_expr(r)]);
+        }
+        // Regexp receiver (or unknown): `<regex>.test(s)`.
+        return Js::method_call(span, js_expr(r), "test", vec![js_expr(arg)]);
     }
     if method == "match" && args.len() == 1 && recv.is_some() {
         if let Some(Ty::Class { id, .. }) = recv.unwrap().ty.as_ref() {
