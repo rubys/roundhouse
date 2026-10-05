@@ -271,6 +271,58 @@ class BaseTest < Minitest::Test
     assert_equal 1, Item.hydrate_count
   end
 
+  def test_relation_exists_does_not_hydrate
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    rel = ActiveRecord::Relation.new(Item)
+    assert rel.exists?
+    assert_equal 0, Item.hydrate_count
+    refute ActiveRecord::Relation.new(Item).where(title: "Nope").exists?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_empty_any_use_exists_not_hydrate
+    it = Item.new; it.title = "A"; it.save()
+    Item.hydrate_count = 0
+    rel = ActiveRecord::Relation.new(Item)
+    refute rel.empty?
+    assert rel.any?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_many_and_one_probe_without_hydrate
+    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    assert ActiveRecord::Relation.new(Item).many?
+    assert_equal 0, Item.hydrate_count
+    refute ActiveRecord::Relation.new(Item).where(title: "T0").many?
+    assert ActiveRecord::Relation.new(Item).where(title: "T0").one?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_exists_sql_selects_one_with_limit
+    sql = ActiveRecord::Relation.new(Item).where(title: "A").exists_sql(1)
+    assert_match(/SELECT 1 AS one FROM items/, sql)
+    assert_match(/LIMIT 1/, sql)
+    refute_match(/COUNT\(\*\)/, sql)
+    refute_match(/ORDER BY/, sql)
+  end
+
+  def test_relation_size_counts_without_hydrate_when_unloaded
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    assert_equal 3, ActiveRecord::Relation.new(Item).size
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_last_page_short_loaded_page_skips_count_path
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).order("id").limit(10)
+    rel.to_a
+    # Loaded page has 3 < 10, so last_page? is true without total_count.
+    assert rel.last_page?
+  end
+
   def test_relation_each_reuses_the_loaded_array
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

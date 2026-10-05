@@ -1177,15 +1177,14 @@ module ActiveRecord
 
     # ActiveSupport's blank family on a relation. Rails answers `blank?`
     # through `records.blank?`, which LOADS; spelled against `empty?`
-    # here so an unloaded relation pays the COUNT round-trip `empty?`
+    # here so an unloaded relation pays the existence probe `empty?`
     # already pays rather than materialising every row.
     #
     # `lower::blank` folds these away where the receiver's static type
     # is known (a typed relation grounds to `!empty?`). These are the
-    # runtime answers for the sites it declines: campfire's has_many
-    # extension `revise(granted: [], revoked: [])` takes a relation
-    # through an untyped kwarg, and `granted.present?` reaches the
-    # object by dispatch.
+    # runtime answers for the sites it declines: a has_many extension
+    # that takes a relation through an untyped kwarg reaches
+    # `granted.present?` by dispatch.
     def blank?
       empty?
     end
@@ -1201,7 +1200,7 @@ module ActiveRecord
     # Rails reaches Enumerable#none? through the relation, and without a
     # block it is `any?` inverted. Spelled against `empty?` rather than
     # `!any?` so the loaded case answers from the cache the way `empty?`
-    # does instead of paying a COUNT round-trip.
+    # does instead of paying an existence probe.
     def none?
       empty?
     end
@@ -1209,25 +1208,26 @@ module ActiveRecord
     # `one?` — EXACTLY one row, the third of the Enumerable predicates
     # Rails reaches through a relation. Its siblings have been here
     # since `any?`; this one had no caller until a `has_many :through`
-    # reader started answering a real Relation, at which point
-    # campfire's `user.rooms.one?` stopped being an Array question.
+    # reader started answering a real Relation.
     #
-    # Block form is absent for the same reason `any?`'s is: it would
-    # have to materialize and iterate, and no call site asks.
+    # Unloaded: `SELECT 1 LIMIT 2` and check the row count — cheaper
+    # than COUNT(*) on a large match set. Block form is absent for the
+    # same reason `any?`'s is: it would have to materialize and
+    # iterate, and no call site asks.
     def one?
-      count == 1
+      r = @records
+      return r.length == 1 unless r.nil?
+      probe_existence(2) == 1
     end
 
     # `many?` — MORE than one row, ActiveSupport's Enumerable addition
     # Rails answers on a relation with `limit_value ? records.many? :
     # size > 1`. Loaded answers from the cache like `any?`; unloaded
-    # pays the COUNT. campfire's sidebar asks it of a direct room's
-    # `users.without(user)` to pick the avatar-group layout — a site
-    # that was never reached until the helper's block-form `link_to`
-    # rendered its block.
+    # probes with `SELECT 1 LIMIT 2`.
     def many?
       r = @records
-      r.nil? ? count > 1 : r.length > 1
+      return r.length > 1 unless r.nil?
+      probe_existence(2) > 1
     end
 
     # Block form of Enumerable#all? over the materialized rows (the
@@ -1245,36 +1245,49 @@ module ActiveRecord
     # would be the untyped-Hash-surface problem `has_json` mapped out.
     # An `Integer?` param narrows by early return, not by a guard —
     # rust2 does not narrow an `Option` across `unless x.nil?`.
+    #
+    # Unloaded SQL is `SELECT 1 AS one … LIMIT 1` (see `exists_sql`),
+    # not COUNT(*). Loaded relations answer from the cache.
     def exists?(id = nil)
-      return offset_row_exists? if id.nil? && !@offset.nil?
-      return count > 0 if id.nil?
+      if id.nil?
+        r = @records
+        return r.length > 0 unless r.nil?
+        return probe_existence(1) > 0
+      end
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
       # asked on.
       @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      found = count > 0
+      found = probe_existence(1) > 0
       @wheres.pop
       found
     end
 
-    # `offset(n).exists?` — whether a row lies past the first n, which
-    # is campfire's `paged?` (basecamp/once-campfire#297). A COUNT ignores
-    # the offset and answered whether the room had any messages at all;
-    # Rails asks for one row past it, `SELECT 1 … LIMIT 1 OFFSET n`.
+    # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
+    # `one?`, and `many?` so cardinality questions never hydrate.
+    def probe_existence(n)
+      ActiveRecord.adapter.select_rows(exists_sql(n)).length
+    end
+
+    # `offset(n).exists?` — whether a row lies past the first n. A COUNT
+    # ignores OFFSET and answers whether ANY row matches; Rails asks for
+    # one row past the offset (`SELECT 1 … LIMIT 1 OFFSET n`). Kept as
+    # a named entry point for call sites that probe "is there a next
+    # page?" without loading it.
     def offset_row_exists?
-      prior = @limit
-      @limit = 1
-      sql = select_sql_with("1 AS one")
-      @limit = prior
-      ActiveRecord.adapter.select_rows(sql).length > 0
+      probe_existence(1) > 0
     end
 
     def length
       to_a.length
     end
 
+    # Rails' `Relation#size`: COUNT when unloaded, `length` when loaded.
+    # `length` always materializes; size must not hydrate a whole table
+    # just to answer how many rows match.
     def size
-      to_a.length
+      r = @records
+      r.nil? ? count : r.length
     end
 
     # `delete_all` — bulk DELETE scoped by the accumulated WHEREs.

@@ -164,6 +164,7 @@ module ActiveRecord
     def many?: () -> bool
     def all?: () { (untyped) -> bool } -> bool
     def exists?: (?Integer? id) -> bool
+    def probe_existence: (Integer n) -> Integer
     def length: () -> Integer
     def size: () -> Integer
     def delete_all: () -> Integer
@@ -205,6 +206,7 @@ module ActiveRecord
     def to_subquery_sql: () -> String
     def select_sql_with: (String default_cols) -> String
     def count_sql: () -> String
+    def exists_sql: (Integer n) -> String
     def hash_conditions: (untyped hash) -> String
     def column_predicate: (String col, untyped val) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
