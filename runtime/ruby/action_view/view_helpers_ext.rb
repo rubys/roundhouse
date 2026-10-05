@@ -354,8 +354,14 @@ module ActionView
             i = i + len
           end
         else
-          out = out + c
+          start = i
           i = i + 1
+          while i < n
+            nc = s[i, 1].to_s
+            break if nc == "<" || nc == ">" || nc == "&"
+            i = i + 1
+          end
+          out = out + s[start, i - start].to_s
         end
       end
       out
@@ -448,44 +454,71 @@ module ActionView
     # literal (`ActionText::SafeListSanitizer.allowed_attributes`).
 
     # Rails::HTML5::SafeListSanitizer.allowed_tags, 1.7.1.
+    # Frozen memo: sanitize/auto_link call these every pass; rebuilding
+    # ~40-element Arrays per call was pure alloc on Writebook TOC /
+    # Campfire message sanitize. Callers must not mutate the result.
     def self.sanitize_default_tags
-      ["a", "abbr", "acronym", "address", "b", "big", "blockquote",
+      cached = @sanitize_default_tags
+      return cached unless cached.nil?
+      cached = ["a", "abbr", "acronym", "address", "b", "big", "blockquote",
        "br", "cite", "code", "dd", "del", "dfn", "div", "dl", "dt",
        "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img",
        "ins", "kbd", "li", "mark", "ol", "p", "pre", "samp", "small",
-       "span", "strong", "sub", "sup", "time", "tt", "ul", "var"]
+       "span", "strong", "sub", "sup", "time", "tt", "ul", "var"].freeze
+      @sanitize_default_tags = cached
+      cached
     end
 
     # Rails::HTML5::SafeListSanitizer.allowed_attributes, 1.7.1.
     def self.sanitize_default_attributes
-      ["abbr", "alt", "cite", "class", "datetime", "height", "href",
-       "lang", "name", "src", "title", "width", "xml:lang"]
+      cached = @sanitize_default_attributes
+      return cached unless cached.nil?
+      cached = ["abbr", "alt", "cite", "class", "datetime", "height", "href",
+       "lang", "name", "src", "title", "width", "xml:lang"].freeze
+      @sanitize_default_attributes = cached
+      cached
     end
 
     # Loofah::HTML5::SafeList::ATTR_VAL_IS_URI — the attributes whose
     # value gets the protocol check.
     def self.sanitize_uri_attributes
-      ["action", "cite", "href", "longdesc", "poster", "preload",
-       "src", "xlink:href", "xml:base"]
+      cached = @sanitize_uri_attributes
+      return cached unless cached.nil?
+      cached = ["action", "cite", "href", "longdesc", "poster", "preload",
+       "src", "xlink:href", "xml:base"].freeze
+      @sanitize_uri_attributes = cached
+      cached
     end
 
     # Loofah::HTML5::SafeList::ALLOWED_PROTOCOLS.
     def self.sanitize_allowed_protocols
-      ["afs", "aim", "callto", "data", "ed2k", "fax", "ftp", "gopher",
+      cached = @sanitize_allowed_protocols
+      return cached unless cached.nil?
+      cached = ["afs", "aim", "callto", "data", "ed2k", "fax", "ftp", "gopher",
        "http", "https", "irc", "line", "mailto", "modem", "news",
        "nntp", "rsync", "rtsp", "sftp", "sms", "ssh", "tag", "tel",
-       "telnet", "urn", "webcal", "xmpp"]
+       "telnet", "urn", "webcal", "xmpp"].freeze
+      @sanitize_allowed_protocols = cached
+      cached
     end
 
     # Loofah::HTML5::SafeList::ALLOWED_URI_DATA_MEDIATYPES.
     def self.sanitize_data_mediatypes
-      ["image/gif", "image/jpeg", "image/png", "text/css", "text/plain"]
+      cached = @sanitize_data_mediatypes
+      return cached unless cached.nil?
+      cached = ["image/gif", "image/jpeg", "image/png", "text/css", "text/plain"].freeze
+      @sanitize_data_mediatypes = cached
+      cached
     end
 
     # Loofah::HTML5::SafeList::VOID_ELEMENTS — serialized with no close
     # tag, never pushed on the open stack.
     def self.sanitize_void_elements
-      ["area", "br", "hr", "img", "input"]
+      cached = @sanitize_void_elements
+      return cached unless cached.nil?
+      cached = ["area", "br", "hr", "img", "input"].freeze
+      @sanitize_void_elements = cached
+      cached
     end
 
     # HTML5 RAWTEXT / escapable-rawtext containers: their content is
@@ -495,13 +528,21 @@ module ActionView
     # `noscript` is deliberately absent — with scripting off, which is
     # how the gem's parser runs, its children parse as markup.
     def self.sanitize_rawtext_elements
-      ["iframe", "noembed", "noframes", "plaintext", "script", "style",
-       "textarea", "title", "xmp"]
+      cached = @sanitize_rawtext_elements
+      return cached unless cached.nil?
+      cached = ["iframe", "noembed", "noframes", "plaintext", "script", "style",
+       "textarea", "title", "xmp"].freeze
+      @sanitize_rawtext_elements = cached
+      cached
     end
 
     # Allow-list entries this port refuses to serve (see the header).
     def self.sanitize_unservable_tags
-      sanitize_rawtext_elements + ["svg", "math", "template"]
+      cached = @sanitize_unservable_tags
+      return cached unless cached.nil?
+      cached = (sanitize_rawtext_elements + ["svg", "math", "template"]).freeze
+      @sanitize_unservable_tags = cached
+      cached
     end
 
     def self.sanitize_space?(c)
@@ -635,8 +676,15 @@ module ActionView
             i = i + len
           end
         else
-          out = out + c
+          # Batch ordinary text until the next markup-sensitive char.
+          start = i
           i = i + 1
+          while i < n
+            nc = s[i, 1].to_s
+            break if nc == "<" || nc == ">" || nc == "&"
+            i = i + 1
+          end
+          out = out + s[start, i - start].to_s
         end
       end
       # Close anything the input left open, innermost first — measured:
@@ -805,8 +853,14 @@ module ActionView
             i = i + len
           end
         else
-          out = out + c
+          start = i
           i = i + 1
+          while i < n
+            nc = t[i, 1].to_s
+            break if nc == "<" || nc == ">" || nc == "&"
+            i = i + 1
+          end
+          out = out + t[start, i - start].to_s
         end
       end
       out

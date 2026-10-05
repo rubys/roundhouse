@@ -1372,8 +1372,22 @@ module ActionText
             i = i + 1
           end
         else
-          out = out + c if skipping == ""
-          i = i + 1
+          # One slice for a run of ordinary text — avoids O(n) 1-char
+          # Strings + concatenations on Writebook Page#plain_text /
+          # Campfire ActionText bodies. Keep [i,1] only to find the
+          # next markup boundary (portable; one-arg index is not).
+          if skipping == ""
+            start = i
+            i = i + 1
+            while i < n
+              nc = @html[i, 1].to_s
+              break if nc == "<" || nc == "&"
+              i = i + 1
+            end
+            out = out + @html[start, i - start].to_s
+          else
+            i = i + 1
+          end
         end
       end
       Content.chomp_newlines(out)

@@ -34,6 +34,14 @@ module ActionView
     def self.sanitize_void_elements: () -> Array[String]
     def self.sanitize_rawtext_elements: () -> Array[String]
     def self.sanitize_unservable_tags: () -> Array[String]
+    @sanitize_default_tags: Array[String]?
+    @sanitize_default_attributes: Array[String]?
+    @sanitize_uri_attributes: Array[String]?
+    @sanitize_allowed_protocols: Array[String]?
+    @sanitize_data_mediatypes: Array[String]?
+    @sanitize_void_elements: Array[String]?
+    @sanitize_rawtext_elements: Array[String]?
+    @sanitize_unservable_tags: Array[String]?
     def self.sanitize_space?: (String c) -> bool
     def self.sanitize_tag_name: (String raw) -> String
     def self.sanitize_foreign_end: (String s, Integer from, String name) -> Integer
