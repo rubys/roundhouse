@@ -987,7 +987,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to COUNT for strict targets; Relation.exists? forms moved to
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
-    const CEILING: usize = 1400;
+    // 2026-10-05 1400 -> 1404, +4, MEASURED (relation.rb count_sql):
+    // DISTINCT / GROUP BY scalar count via subquery (#343 slice). Same
+    // unresolved self-send / `@groups` / `@havings` residual every SQL
+    // composer pays.
+    const CEILING: usize = 1404;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

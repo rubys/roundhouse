@@ -403,6 +403,26 @@ class BaseTest < Minitest::Test
     assert ActiveRecord::Relation.new(Item).where(title: "T0").distinct.one?
   end
 
+  def test_relation_distinct_count_counts_distinct_pks
+    5.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    # Five rows, two title values. Distinct on primary key is still 5 —
+    # count_sql must not answer the underlying non-distinct row total
+    # via a bare COUNT(*) that ignores DISTINCT (#343).
+    assert_equal 5, ActiveRecord::Relation.new(Item).distinct.count
+    sql = ActiveRecord::Relation.new(Item).distinct.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/__rh_count/, sql)
+  end
+
+  def test_relation_grouped_count_sql_counts_groups
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title")
+    sql = rel.count_sql
+    assert_match(/GROUP BY/, sql)
+    assert_match(/__rh_count/, sql)
+    assert_equal 2, rel.count
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)
