@@ -5,8 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Drafts default to fixture + unit; ci:full also expands drafts.
-    # Label/draft/head transitions cancel superseded PR runs via concurrency.
+    # Drafts stay dark until ci:draft / ci:spinel / ci:full. Ready PRs use the
+    # normal path planner; label and draft transitions cancel superseded runs.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   workflow_call:
     inputs:
@@ -165,6 +165,7 @@ jobs:
   # -------------------------------------------------------------------
   generate-fixture:
     needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -536,7 +537,8 @@ jobs:
   # ingest / analyze / IR round-trip / per-target emit snapshot tests.
   # -------------------------------------------------------------------
   unit:
-    needs: generate-fixture
+    needs: [generate-fixture, plan]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

@@ -9,7 +9,10 @@ fn fixture_job() -> serde_yaml_ng::Value {
 #[test]
 fn installed_gems_are_isolated_and_only_reused_within_observed_compatibility() {
     let job = fixture_job();
-    assert!(job.get("if").is_none());
+    assert_eq!(
+        job["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}")
+    );
     assert!(job["env"].get("GEM_HOME").is_none());
     assert!(job["env"].get("GEM_PATH").is_none());
     assert_eq!(job["env"]["BUNDLE_JOBS"], "4");

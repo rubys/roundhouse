@@ -5,7 +5,10 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let unit = &ci["jobs"]["unit"];
-    assert!(unit.get("if").is_none());
+    assert_eq!(
+        unit["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
+    );
     assert!(unit.get("continue-on-error").is_none());
     assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
     assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
@@ -100,7 +103,18 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
-    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(
+        jobs["unit"]["needs"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap()
+    );
+    assert_eq!(
+        jobs["generate-fixture"]["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}")
+    );
+    assert_eq!(
+        jobs["unit"]["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
+    );
     for name in [
         "build-roundhouse",
         "build-wasm",

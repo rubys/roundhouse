@@ -58,6 +58,10 @@ SPINEL11 = [
     "smoke-campfire",
     "smoke-campfire-docker",
 ]
+# Opt-in Spinel lane (`ci:spinel`): Ruby floor plus the full Spinel suite,
+# without other-language emitters, WASM, or Writebook. smoke-spinel needs
+# build-site; archive-results closes packaging evidence.
+SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 PROJECT_BUILDERS = {
@@ -178,8 +182,30 @@ def archive_and_campfire_jobs(path, interpreter_only):
     return jobs
 
 
-def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
-    if draft and not full:
+def select(
+    paths,
+    *,
+    draft=False,
+    full=False,
+    spinel_lane=False,
+    draft_ci=False,
+    publish=False,
+    project_scope=None,
+):
+    # Draft PRs stay dark until an opt-in label. Precedence:
+    # ci:full > ci:spinel > ci:draft > (ready path selection) > draft idle.
+    if draft and not full and not spinel_lane and not draft_ci:
+        return finish(
+            [],
+            [],
+            [],
+            False,
+            False,
+            False,
+            ["draft: no CI until ci:draft, ci:spinel, or ci:full"],
+            spinel_tests=[],
+        )
+    if draft and draft_ci and not full and not spinel_lane:
         return finish(
             DRAFT_FLOOR,
             [],
@@ -187,8 +213,19 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
             False,
             False,
             False,
-            ["draft: fixture and unit only"],
+            ["ci:draft: fixture and unit only"],
             spinel_tests=[],
+        )
+    if spinel_lane and not full:
+        return finish(
+            SPINEL_LANE,
+            [],
+            [],
+            False,
+            False,
+            True,
+            ["ci:spinel: Ruby floor plus Spinel suite"],
+            spinel_tests=list(SPINEL_TESTS),
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
@@ -504,8 +541,13 @@ def changed_inputs(event, event_name, sha):
 
 
 def check_results(plan, needs, *, compact=False):
-    if plan["jobs"] == DRAFT_FLOOR:
+    if not plan["jobs"]:
+        # Idle draft (no opt-in label): nothing selected, nothing required.
+        required = []
+    elif plan["jobs"] == DRAFT_FLOOR:
         required = DRAFT_FLOOR
+    elif plan["jobs"] == SPINEL_LANE:
+        required = [j for j in SPINEL_LANE if j not in ADVISORY]
     elif compact:
         required = [job for job in PUBLICATION if job in plan["jobs"]]
     else:
@@ -517,7 +559,11 @@ def check_results(plan, needs, *, compact=False):
     ]
     if needs.get("plan", {}).get("result") != "success":
         failures.append("plan: no successful routing decision")
-    if not compact and needs.get("compact-required", {}).get("result") != "success":
+    if (
+        plan["jobs"]
+        and not compact
+        and needs.get("compact-required", {}).get("result") != "success"
+    ):
         failures.append("compact-required: no successful baseline gate")
     # Advisory work never blocks the gate, but incomplete work is not complete.
     complete = not failures and all(
@@ -568,9 +614,10 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     event_name = os.environ["GITHUB_EVENT_NAME"]
     pr = event.get("pull_request", {})
-    full = os.environ.get("CI_FULL") == "true" or any(
-        label["name"] == "ci:full" for label in pr.get("labels", [])
-    )
+    labels = {label["name"] for label in pr.get("labels", [])}
+    full = os.environ.get("CI_FULL") == "true" or "ci:full" in labels
+    spinel_lane = "ci:spinel" in labels
+    draft_ci = "ci:draft" in labels
     if (
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
@@ -600,6 +647,8 @@ def main():
         paths,
         draft=pr.get("draft", False),
         full=full,
+        spinel_lane=spinel_lane,
+        draft_ci=draft_ci,
         publish=publish,
         project_scope=project_scope,
     )
