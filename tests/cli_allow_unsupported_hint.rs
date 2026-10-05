@@ -1,8 +1,7 @@
 //! The transpile gate's "rerun with --allow-unsupported" hint at the
 //! process boundary (#303). The flag downgrades diagnostics, but a
-//! project-boundary refusal (`target_files` returning `Err`, as the
-//! Date gate does for spinel) fails with or without it, so the hint
-//! must only be printed when the flag would actually write the output.
+//! project-boundary refusals fail with or without it, so the hint must
+//! only be printed when the flag would actually write the output.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,19 +61,14 @@ fn transpile(target: &str, input: &Path, allow_unsupported: bool) -> (i32, Strin
 }
 
 #[test]
-fn a_date_boundary_refusal_does_not_suggest_allow_unsupported() {
+fn spinel_date_columns_pass_the_old_boundary_refusal() {
     let root = app("date", "", "    t.date \"published_on\"\n");
 
     let (code, err) = transpile("spinel", &root, false);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("Date not supported (spinel)"), "{err}");
-    assert!(err.contains("Date-only values are not supported"), "{err}");
-    assert!(!err.contains(HINT), "the flag cannot override this refusal: {err}");
-
-    // The reason the hint is wrong: the flag still fails the run.
-    let (code, err) = transpile("spinel", &root, true);
-    assert_eq!(code, 1, "{err}");
-    assert!(!root.join("out").exists(), "{err}");
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("Date not supported (spinel)"), "{err}");
+    assert!(!err.contains(HINT), "{err}");
+    assert!(root.join("out").is_dir(), "{err}");
 
     std::fs::remove_dir_all(root).expect("remove temporary app");
 }

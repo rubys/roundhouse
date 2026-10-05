@@ -1585,8 +1585,8 @@ fn every_runtime_method_body_concretely_typed() {
     // requires a non-empty short page. Earlier claim of 521 was a
     // mis-measure — the reopen still pays Relation.new typing sites
     // this probe counts, so the residual landed at 562.
-    const CEILING: usize = 562;
-    assert!(
+    // 562 -> 563: Date JSON via ActiveSupport.format_db_date in `_as_json_only`.
+    const CEILING: usize = 563;    assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
     );

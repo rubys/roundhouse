@@ -720,15 +720,11 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
-/// The executed Date-only runtime is native Ruby, not the timestamp seam
-/// shared by the other targets (including the unverified JRuby adapter).
-/// Reject before entering their emitters:
-/// dynamic backends may never render a type, so a type-position check
-/// alone would silently emit a String/Time or call an absent intrinsic.
-fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
-        return Ok(());
-    }
+/// True when the app schema or emitted roots mention a date-only value.
+/// Shared by the unsupported-target gate and Spinel's conditional Date
+/// runtime load (matz/spinel#7334: defining `Date#strftime` currently
+/// breaks poly `Time | Date` dispatch for `Time#strftime`).
+fn app_uses_date(app: &App) -> bool {
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
         if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
             || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
@@ -803,7 +799,19 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     }
     has_date |= app.rbs_signatures.values().flat_map(|methods| methods.values())
         .any(crate::ty::Ty::contains_date);
-    if has_date {
+    has_date
+}
+
+/// The executed Date-only runtime is native Ruby (and now Spinel), not
+/// the timestamp seam shared by the other targets (including the
+/// unverified JRuby adapter). Reject before entering their emitters:
+/// dynamic backends may never render a type, so a type-position check
+/// alone would silently emit a String/Time or call an absent intrinsic.
+fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    if app_uses_date(app) {
         emit::diagnostics::unsupported_date_ty(target.as_str());
         return Err(format!("{}: Date-only values are not supported; use the native Ruby target", target.as_str()));
     }
@@ -3794,6 +3802,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
 
+    let needs_date = app_uses_date(app);
+
     // Temporal-intrinsics sidecar — the flat walk above picks only .rb,
     // and spinel's strict unresolved-call gate needs `parse_db_time`'s
     // `String?` param typed to compile the nil-guard narrow.
@@ -3804,6 +3814,37 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
         ));
+    }
+
+    // Program-defined Date for apps that actually use date-only values.
+    // Loading it unconditionally breaks Campfire under Spinel today:
+    // matz/spinel#7334 drops `Time#strftime` from poly `Time | Date`
+    // receivers once a user `Date#strftime` exists. Omit the class,
+    // its RBS, the JSON reopen, and the boot requires until needed.
+    if needs_date {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/date.rbs")
+            .map_err(|e| format!("read runtime/spinel/date.rbs: {e}"))?;
+        files.push(("sig/runtime/date.rbs".to_string(), rbs));
+    } else {
+        files.retain(|(p, _)| {
+            p != "runtime/date.rb"
+                && p != "runtime/active_record_date_serialization.rb"
+                && p != "sig/runtime/date.rbs"
+        });
+        if let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") {
+            *boot = boot
+                .lines()
+                .filter(|line| {
+                    let t = line.trim();
+                    t != "require_relative \"runtime/date\""
+                        && t != "require_relative \"runtime/active_record_date_serialization\""
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !boot.ends_with('\n') {
+                boot.push('\n');
+            }
+        }
     }
 
     // Schema-less json/jsonb column seam. The flat walk emits the Ruby

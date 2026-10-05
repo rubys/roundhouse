@@ -987,8 +987,9 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to COUNT for strict targets; Relation.exists? forms moved to
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
-    const CEILING: usize = 1400;
-
+    // 1400 -> 1412: date-column branch in `_as_json_only`
+    // (schema_date_columns / format_db_date). Measure after Date fold.
+    const CEILING: usize = 1412;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
