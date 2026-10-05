@@ -347,17 +347,25 @@ class Routing(unittest.TestCase):
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
-        for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
-            with self.subTest(path=path):
-                self.assertEqual(
-                    ci.select([path])["spinel_tests"],
-                    [
-                        "spinel_db_lease",
-                        "param_binds",
-                        "spinel_stmt_cache_lru",
-                        "db_sqlite_concurrency",
-                    ],
-                )
+        self.assertEqual(
+            ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
+            [
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
+            ],
+        )
+        self.assertEqual(
+            ci.select(["runtime/spinel/sqlite_adapter.rb"])["spinel_tests"],
+            [
+                "date_columns_spinel",
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
+            ],
+        )
         for path in [
             "README.md",
             "src/analyze/call.rs",
@@ -374,6 +382,8 @@ class Routing(unittest.TestCase):
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
+            "runtime/spinel/date.rb": "date_columns_spinel",
+            "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
         }
         for path, binary in cases.items():
             with self.subTest(path=path):
@@ -416,12 +426,26 @@ class Routing(unittest.TestCase):
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "date_columns_spinel",
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
                 "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
+            ],
+            "runtime/spinel/date.rb": ["date_columns_spinel"],
+            "runtime/spinel/date.rbs": ["date_columns_spinel"],
+            "runtime/spinel/active_support_date_parsing.rb": ["date_columns_spinel"],
+            "runtime/spinel/active_support_date_parsing.rbs": ["date_columns_spinel"],
+            "runtime/spinel/active_record_date_serialization.rb": [
+                "date_columns_spinel",
+                "framework_tests_spinel",
+            ],
+            "runtime/spinel/active_record_date_serialization.rbs": [
+                "date_columns_spinel"
             ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
@@ -453,6 +477,7 @@ class Routing(unittest.TestCase):
         self.assertEqual(
             plan["spinel_tests"],
             [
+                "date_columns_spinel",
                 "spinel_web_push_crypto",
                 "spinel_db_lease",
                 "param_binds",
