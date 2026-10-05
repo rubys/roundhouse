@@ -45,8 +45,15 @@ class BaseTest < Minitest::Test
 
     def self.table_name = "items"
     def self.schema_columns = [:id, :title]
+    def self.hydrate_count
+      @hydrate_count || 0
+    end
+    def self.hydrate_count=(n)
+      @hydrate_count = n
+    end
 
     def self.instantiate(row)
+      self.hydrate_count = hydrate_count + 1
       it = new
       # Two cross-target patterns at play here:
       #   1. String-keyed row access (`row["id"]`, not `row[:id]`).
@@ -119,6 +126,7 @@ class BaseTest < Minitest::Test
     Db.configure(":memory:")
     Db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)")
     ActiveRecord.adapter = SqliteAdapter
+    Item.hydrate_count = 0
   end
 
   def teardown
@@ -237,6 +245,30 @@ class BaseTest < Minitest::Test
     last = Item.last
     raise "expected last to return non-nil after save" if last.nil?
     assert_equal b.id, last.id
+  end
+
+  def test_relation_last_n_keeps_order_and_takes_the_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    tail = ActiveRecord::Relation.new(Item).order("id").last_n(2)
+    assert_equal 2, tail.length
+    assert_equal "T3", tail[0].title
+    assert_equal "T4", tail[1].title
+  end
+
+  def test_relation_last_n_limits_in_sql
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    ActiveRecord::Relation.new(Item).order("id").last_n(2)
+    assert_equal 2, Item.hydrate_count
+  end
+
+  def test_relation_last_is_one_sql_row
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    last = ActiveRecord::Relation.new(Item).order("id").last
+    raise "expected last to return a row" if last.nil?
+    assert_equal "T4", last.title
+    assert_equal 1, Item.hydrate_count
   end
 
   # ── update + destroy ────────────────────────────────────────
