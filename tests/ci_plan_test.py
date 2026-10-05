@@ -130,45 +130,7 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
-    def test_draft_without_opt_in_selects_nothing(self):
-        plan = ci.select(
-            ["src/emit/go/expressions.rs", ".github/workflows/ci.yml"],
-            draft=True,
-        )
-        self.assertEqual(plan["jobs"], [])
-        self.assertEqual(plan["required"], [])
-        self.assertIn("draft: no CI until", plan["reasons"][0])
-
-    def test_draft_with_ci_draft_retains_the_small_floor(self):
-        plan = ci.select(
-            ["src/emit/go/expressions.rs", ".github/workflows/ci.yml"],
-            draft=True,
-            draft_ci=True,
-        )
-        self.assertEqual(plan["required"], ["generate-fixture", "unit"])
-        self.assertNotIn("build-roundhouse", plan["jobs"])
-
-    def test_draft_floor_and_gates_do_not_depend_on_base_order(self):
-        with patch.object(ci, "BASE", list(reversed(ci.BASE))):
-            plan = ci.select([], draft=True, draft_ci=True)
-            self.assertEqual(plan["jobs"], ["generate-fixture", "unit"])
-            needs = {
-                job: {"result": "success"}
-                for job in ["plan", "compact-required", "generate-fixture", "unit"]
-            }
-            for compact in (False, True):
-                self.assertEqual(ci.check_results(plan, needs, compact=compact), ([], True))
-                needs["unit"]["result"] = "failure"
-                self.assertTrue(ci.check_results(plan, needs, compact=compact)[0])
-                needs["unit"]["result"] = "success"
-
-    def test_idle_draft_gate_passes_with_only_plan(self):
-        plan = ci.select(["README.md"], draft=True)
-        needs = {"plan": {"result": "success"}}
-        self.assertEqual(ci.check_results(plan, needs), ([], True))
-        self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
-
-    def test_empty_plan_output_does_not_crash_always_gates(self):
+    def test_missing_plan_output_fails_gates_without_crashing(self):
         with (
             patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
             patch("sys.argv", ["ci-plan.py", "compact-gate"]),
@@ -201,13 +163,6 @@ class Routing(unittest.TestCase):
         self.assertNotIn("compare-jruby", plan["jobs"])
         self.assertNotIn("writebook-inventory", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
-
-    def test_draft_plus_spinel_without_full_selects_spinel_lane(self):
-        plan = ci.select(
-            ["README.md"], draft=True, draft_ci=True, spinel_lane=True
-        )
-        self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
-        self.assertEqual(plan["extra_compare"], [])
 
     def test_spinel_compact_gate_only_requires_publication_floor(self):
         plan = ci.select([], spinel_lane=True)
@@ -242,10 +197,8 @@ class Routing(unittest.TestCase):
             }
         self.assertEqual(ci.check_results(plan, needs, compact=False)[0], [])
 
-    def test_full_overrides_draft_and_spinel_without_enabling_publication(self):
-        plan = ci.select(
-            ["README.md"], draft=True, draft_ci=True, spinel_lane=True, full=True
-        )
+    def test_full_overrides_spinel_without_enabling_publication(self):
+        plan = ci.select(["README.md"], spinel_lane=True, full=True)
         self.assertEqual(plan["smoke"], ci.TARGETS)
         self.assertTrue(plan["site"])
         self.assertTrue(plan["wasm"])
@@ -277,7 +230,7 @@ class Routing(unittest.TestCase):
             self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
             self.assertNotIn("assemble-site", plan["jobs"])
 
-    def test_draft_label_events_select_lanes_and_unlabel_returns_to_idle(self):
+    def test_draft_and_ready_events_use_the_same_paths_and_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
             env = {
@@ -287,33 +240,39 @@ class Routing(unittest.TestCase):
                 "CI_SPINEL_REVISION": "2" * 40,
             }
             cases = [
-                ([], [], False),
-                ([{"name": "ci:draft"}], [], False),
-                ([{"name": "ci:spinel"}], [], True),
-                ([{"name": "ci:full"}], ci.TARGETS, True),
+                (["README.md"], [], [], False),
+                (["README.md"], ["ci:draft"], [], False),
+                (["src/emit/go.rs"], [], ["go"], False),
+                (["README.md"], ["ci:spinel"], [], True),
+                (["README.md"], ["ci:full", "ci:spinel"], ci.TARGETS, True),
+                ([".github/workflows/ci.yml"], [], ci.TARGETS, True),
             ]
-            for labels, expected_smoke, expect_spinel in cases:
-                with self.subTest(labels=labels):
-                    event.write_text(json.dumps({
-                        "pull_request": {"draft": True, "labels": labels}
-                    }))
-                    with (
-                        patch.dict(os.environ, env, clear=True),
-                        patch("sys.argv", ["ci-plan.py", "plan"]),
-                        patch.object(ci, "changed_inputs", return_value=(["README.md"], None)),
-                        patch.object(ci, "write_outputs") as output,
-                    ):
-                        self.assertEqual(ci.main(), 0)
-                    plan = output.call_args.args[0]["plan"]
-                    self.assertEqual(plan["smoke"], expected_smoke)
-                    self.assertEqual(plan["spinel"], expect_spinel)
-                    self.assertNotIn("assemble-site", plan["jobs"])
-                    if not labels:
-                        self.assertEqual(plan["jobs"], [])
-                    elif labels == [{"name": "ci:draft"}]:
-                        self.assertEqual(plan["jobs"], ci.DRAFT_FLOOR)
-                    elif labels == [{"name": "ci:spinel"}]:
-                        self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+            for paths, labels, expected_smoke, expect_spinel in cases:
+                for draft in (False, True):
+                    with self.subTest(paths=paths, labels=labels, draft=draft):
+                        event.write_text(json.dumps({
+                            "pull_request": {
+                                "draft": draft,
+                                "labels": [{"name": label} for label in labels],
+                            }
+                        }))
+                        with (
+                            patch.dict(os.environ, env, clear=True),
+                            patch("sys.argv", ["ci-plan.py", "plan"]),
+                            patch.object(ci, "changed_inputs", return_value=(paths, None)),
+                            patch.object(ci, "write_outputs") as output,
+                        ):
+                            self.assertEqual(ci.main(), 0)
+                        plan = output.call_args.args[0]["plan"]
+                        self.assertEqual(plan["smoke"], expected_smoke)
+                        self.assertEqual(plan["spinel"], expect_spinel)
+                        self.assertTrue(set(ci.BASE).issubset(plan["required"]))
+                        self.assertNotIn("assemble-site", plan["jobs"])
+                        if paths == ["README.md"] and labels in ([], ["ci:draft"]):
+                            self.assertEqual(plan["jobs"], ci.BASE)
+                        elif labels == ["ci:spinel"]:
+                            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+
     def test_contract_tests_do_not_expand_the_exercised_workflows(self):
         paths = [
             "tests/ci_plan_test.py",
@@ -701,15 +660,17 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_unselected_jobs_may_skip_but_planner_must_succeed(self):
-        plan = ci.select([])
-        needs = self.needs(plan)
-        needs["build-wasm"] = {"result": "skipped"}
-        needs["compare"] = {"result": "skipped"}
-        needs["browser-smoke-typescript"] = {"result": "skipped"}
-        self.assertEqual(ci.check_results(plan, needs), ([], True))
-        self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
-        needs["plan"]["result"] = "failure"
-        self.assertTrue(ci.check_results(plan, needs)[0])
+        for lane in ({}, {"spinel_lane": True}, {"full": True}):
+            with self.subTest(lane=lane):
+                plan = ci.select([], **lane)
+                needs = self.needs(plan)
+                for job in ["build-wasm", "compare", "browser-smoke-typescript", "assemble-site"]:
+                    if job not in plan["jobs"]:
+                        needs[job] = {"result": "skipped"}
+                self.assertEqual(ci.check_results(plan, needs), ([], True))
+                self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
+                needs["plan"]["result"] = "failure"
+                self.assertTrue(ci.check_results(plan, needs)[0])
 
     def test_compact_gate_ignores_unselected_publication_lanes(self):
         plan = ci.select(["src/analyze/call.rs"])

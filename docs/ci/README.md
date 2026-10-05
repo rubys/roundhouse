@@ -7,17 +7,15 @@ The workflows and their tests own implementation details, not this handbook.
 ## What runs
 
 Coverage is a ladder. The planner (`scripts/ci-plan.py`) chooses jobs from
-the PR draft state, labels, and changed paths:
+labels and changed paths; draft and ready PRs use the same policy:
 
 | State | What runs |
 |---|---|
-| **Draft**, no CI label | Nothing selected — build and review without runners |
-| **Draft** + `ci:draft` | Fixture preparation and unit shards only |
+| **Draft or ready**, no special label | Path-selected coverage on the Ruby floor |
 | **Draft or ready** + `ci:spinel` | Ruby floor plus the full Spinel suite; no other language SDKs |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Writebook, Spinel) |
-| **Ready** (non-draft), no special label | Path-selected coverage on the Ruby floor |
 
-Ready PRs without a special label run a Ruby floor: fixture preparation, unit
+PRs without a special label run a Ruby floor: fixture preparation, unit
 tests, Store analysis, the CRuby comparison against Rails, and Campfire
 conformance/comparison. Four unit shards cover all package test targets in
 bounded batches; ignored integrations need selected toolchain lanes. Framework
@@ -48,12 +46,10 @@ includes both sides of a rename, and expands only when the trees cannot be
 identified. A newer main than the event's `base.sha` is not unknown input.
 See the run's **plan** job for its selected jobs and reasons.
 
-Drafts stay idle until `ci:draft`, `ci:spinel`, or `ci:full` is applied.
-Marking a PR ready-for-review leaves the draft idle path and runs the normal
-ready planner. `ci:full` / `ci:spinel` also work while the PR is still a draft.
-Stacked labels prefer the broader lane: `ci:full` > `ci:spinel` > `ci:draft`.
-Documentation-only ready PRs still receive checks; changes to the rendered user
-guide also select site/browser coverage.
+Changing draft status does not restart checks or change coverage. `ci:draft`
+has no effect. Stacked labels prefer the broader lane: `ci:full` > `ci:spinel`.
+Documentation-only PRs still receive checks; changes to the rendered user guide
+also select site/browser coverage.
 
 Pushes to canonical `main` run full validation and cancel a superseded SHA
 on the same ref. Extra-target red on that run is follow-up work on main,
@@ -62,7 +58,6 @@ the publication and floating-pin catch-up.
 
 ## Request full, Spinel, or fresh validation
 
-- **Slim draft CI:** apply `ci:draft` on a draft PR (fixture + unit only).
 - **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
   Ruby floor plus every Spinel job; skips Crystal/Go/Swift/… SDKs, WASM, and
   Writebook. Prefer this over `ci:full` when only the native/Ruby-family lane
@@ -84,17 +79,11 @@ Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
 SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
 explicitly reused execution evidence. The compact and summary gates run only
-when `plan` succeeded and no needed job was cancelled. That skips them on
-cancel-in-progress instead of leaving `always()` gates QUEUED (which holds
-the concurrency lock ahead of the replacement run).
-
-A draft with no CI label looks almost empty on purpose (`plan` + gates only;
-everything else skipped). Marking the same PR ready does **not** keep that
-idle selection: path policy applies, and changes under `.github/` or
-`scripts/ci-plan.py` expand to full validation. If the Checks tab still shows
-only cancelled jobs after `ready_for_review`, look for a stuck superseded run
-on the `validation-pull_request-<n>` concurrency group rather than assuming
-the ready planner selected nothing.
+when `plan` succeeded and the workflow has not been cancelled. Their explicit
+`!cancelled()` status check overrides GitHub's implicit `success()`, so skipped
+or failed dependencies still reach the result evaluator. Cancelling the workflow
+stops the gates instead of scheduling `always()` work in a superseded run.
+A missing plan output is not a valid successful selection.
 
 ## Read results honestly
 

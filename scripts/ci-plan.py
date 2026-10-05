@@ -21,11 +21,11 @@ TARGETS = [
     "ruby",
     "jruby",
 ]
-DRAFT_FLOOR = ["generate-fixture", "unit"]
-# Ready-PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
+# PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
 # compare, WASM, and Spinel are not in this list.
 BASE = [
-    *DRAFT_FLOOR,
+    "generate-fixture",
+    "unit",
     "build-roundhouse",
     "store-check",
     "compare-ruby",
@@ -187,37 +187,11 @@ def archive_and_campfire_jobs(path, interpreter_only):
 def select(
     paths,
     *,
-    draft=False,
     full=False,
     spinel_lane=False,
-    draft_ci=False,
     publish=False,
     project_scope=None,
 ):
-    # Draft PRs stay dark until an opt-in label. Precedence:
-    # ci:full > ci:spinel > ci:draft > (ready path selection) > draft idle.
-    if draft and not full and not spinel_lane and not draft_ci:
-        return finish(
-            [],
-            [],
-            [],
-            False,
-            False,
-            False,
-            ["draft: no CI until ci:draft, ci:spinel, or ci:full"],
-            spinel_tests=[],
-        )
-    if draft and draft_ci and not full and not spinel_lane:
-        return finish(
-            DRAFT_FLOOR,
-            [],
-            [],
-            False,
-            False,
-            False,
-            ["ci:draft: fixture and unit only"],
-            spinel_tests=[],
-        )
     if spinel_lane and not full:
         return finish(
             SPINEL_LANE,
@@ -543,10 +517,7 @@ def changed_inputs(event, event_name, sha):
 
 
 def check_results(plan, needs, *, compact=False):
-    if not plan["jobs"]:
-        # Idle draft (no opt-in label): nothing selected, nothing required.
-        required = []
-    elif compact:
+    if compact:
         # Compact gate only observes the publication floor jobs in its needs
         # graph. Spinel/full extras are enforced by ci-summary, not here.
         required = [job for job in PUBLICATION if job in plan["jobs"]]
@@ -560,8 +531,7 @@ def check_results(plan, needs, *, compact=False):
     if needs.get("plan", {}).get("result") != "success":
         failures.append("plan: no successful routing decision")
     if (
-        plan["jobs"]
-        and not compact
+        not compact
         and needs.get("compact-required", {}).get("result") != "success"
     ):
         failures.append("compact-required: no successful baseline gate")
@@ -606,7 +576,7 @@ def main():
         raw_plan = os.environ.get("CI_PLAN", "")
         if not raw_plan.strip():
             # Plan cancelled/skipped leaves an empty output; do not crash the
-            # always() gates or claim a green floor.
+            # gates or claim a green floor.
             write_outputs({"complete": False})
             print("::notice::No plan output (cancelled or skipped); incomplete")
             return True
@@ -626,7 +596,6 @@ def main():
     labels = {label["name"] for label in pr.get("labels", [])}
     full = os.environ.get("CI_FULL") == "true" or "ci:full" in labels
     spinel_lane = "ci:spinel" in labels
-    draft_ci = "ci:draft" in labels
     if (
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
@@ -654,10 +623,8 @@ def main():
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(
         paths,
-        draft=pr.get("draft", False),
         full=full,
         spinel_lane=spinel_lane,
-        draft_ci=draft_ci,
         publish=publish,
         project_scope=project_scope,
     )

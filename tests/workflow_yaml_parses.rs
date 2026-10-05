@@ -475,18 +475,19 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
 }
 
 #[test]
-fn draft_transitions_replace_the_previous_pr_run() {
+fn head_and_label_changes_replace_the_previous_pr_run_without_draft_churn() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let events = ci["on"]["pull_request"]["types"].as_sequence().unwrap();
-    for event in [
-        "ready_for_review",
-        "converted_to_draft",
-        "labeled",
-        "unlabeled",
-    ] {
-        assert!(events.iter().any(|value| value.as_str() == Some(event)));
-    }
+    assert_eq!(
+        events,
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(
+            "[opened, synchronize, reopened, labeled, unlabeled]"
+        )
+        .unwrap()
+        .as_sequence()
+        .unwrap()
+    );
     assert_eq!(
         ci["concurrency"]["group"].as_str(),
         Some(

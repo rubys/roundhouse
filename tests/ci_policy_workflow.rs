@@ -5,10 +5,7 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let unit = &ci["jobs"]["unit"];
-    assert_eq!(
-        unit["if"].as_str(),
-        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
-    );
+    assert!(unit.get("if").is_none());
     assert!(unit.get("continue-on-error").is_none());
     assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
     assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
@@ -115,18 +112,10 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
-    assert_eq!(
-        jobs["unit"]["needs"],
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap()
-    );
-    assert_eq!(
-        jobs["generate-fixture"]["if"].as_str(),
-        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}")
-    );
-    assert_eq!(
-        jobs["unit"]["if"].as_str(),
-        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
-    );
+    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(jobs["generate-fixture"]["needs"].as_str(), Some("plan"));
+    assert!(jobs["generate-fixture"].get("if").is_none());
+    assert!(jobs["unit"].get("if").is_none());
     for name in [
         "build-roundhouse",
         "build-wasm",
@@ -183,14 +172,12 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
                 "{name}: {required}"
             );
         }
-        // always() && !cancelled() still queued these after plan cancelled
-        // (holding the concurrency group). Require plan success and no
-        // cancelled need so superseded runs skip instead of queuing.
+        // cancelled() overrides GitHub's implicit success(): expected skips
+        // and failed/cancelled jobs must reach the gate, while cancellation
+        // of the entire workflow must not schedule more work.
         assert_eq!(
             jobs[name]["if"].as_str(),
-            Some(
-                "${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}"
-            )
+            Some("${{ !cancelled() && needs.plan.result == 'success' }}")
         );
     }
 }
@@ -479,14 +466,6 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         ci["on"]["workflow_call"]["outputs"]["complete"]["value"].as_str(),
         Some("${{ jobs.ci-summary.outputs.complete }}")
     );
-    for name in ["compact-required", "ci-summary"] {
-        assert_eq!(
-            jobs[name]["if"].as_str(),
-            Some(
-                "${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}"
-            )
-        );
-    }
     let gate = jobs["ci-summary"]["needs"].as_sequence().unwrap();
     for name in jobs.as_mapping().unwrap().keys().filter_map(|v| v.as_str()) {
         if name != "ci-summary" {

@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Drafts stay dark until ci:draft / ci:spinel / ci:full. Ready PRs use the
-    # normal path planner; label and draft transitions cancel superseded runs.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    # Draft and ready PRs share path/label selection. Draft transitions do
+    # not change coverage and must not replace an otherwise useful run.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
     inputs:
       full:
@@ -165,7 +165,6 @@ jobs:
   # -------------------------------------------------------------------
   generate-fixture:
     needs: plan
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -537,8 +536,7 @@ jobs:
   # ingest / analyze / IR round-trip / per-target emit snapshot tests.
   # -------------------------------------------------------------------
   unit:
-    needs: [generate-fixture, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}
+    needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -3465,13 +3463,10 @@ jobs:
   compact-required:
     # compare and browser-smoke-typescript stay in needs so a full/main run
     # can still require them. Unselected PR skips must not fail this gate.
-    # Do not use always()/cancelled() here: always() still schedules the job
-    # on cancel-in-progress (run 37366559376: plan cancelled, this gate sat
-    # QUEUED and held validation-push-refs/heads/main). Require a successful
-    # plan and no cancelled need so superseded runs skip immediately instead
-    # of queuing. Custom if still runs when other needs fail or skip.
+    # cancelled() overrides GitHub's implicit success(): evaluate skipped
+    # or failed needs, but do not schedule gates after workflow cancellation.
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
-    if: ${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -3491,9 +3486,8 @@ jobs:
   ci-summary:
     name: CI summary
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
-    # Same cancel/concurrency rule as compact-required: skip when plan did not
-    # succeed or any need was cancelled, so the job is never left QUEUED.
-    if: ${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}
+    # Report selected failures and expected skips; stop on workflow cancellation.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
