@@ -1345,35 +1345,38 @@ puts "ok"
         .assert_passes();
 }
 
-/// `rel.count > n` is `more_than?(n)`: `SELECT 1 LIMIT 1 OFFSET n` with
-/// the same FROM/JOIN/WHERE as COUNT, and the relation is not mutated.
-/// Campfire's `Message.paged?` is `count > PAGE_SIZE`.
+/// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
+/// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
+/// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.
 #[test]
 fn relation_more_than_probes_offset_without_count() {
     emit_and_run::real_blog()
-        .run_ruby(
-            r##"
-seen = []
-orig = Db.method(:prepare)
-Db.define_singleton_method(:prepare) do |sql|
-  seen << sql
-  orig.call(sql)
-end
+        .write(
+            "test/models/article_more_than_test.rb",
+            r#"require "test_helper"
 
-3.times { |i| Article.create!(title: "more-#{i}", body: "long enough body") }
-rel = ActiveRecord::Relation.new(Article).where("title LIKE 'more-%'")
-prior = rel.to_sql
-seen.clear
-raise "more_than? 2" unless rel.more_than?(2)
-raise "more_than? 3" if rel.more_than?(3)
-raise "more_than? poisoned: #{rel.to_sql}" unless rel.to_sql == prior
-sql = seen.find { |s| s.include?("FROM articles") && s.include?("OFFSET 2") }
-raise "more_than? did not OFFSET: #{seen.inspect}" if sql.nil?
-raise "COUNT leaked: #{sql}" if sql.upcase.include?("COUNT")
-raise "LIMIT 1 missing: #{sql}" unless sql.include?("LIMIT 1")
-puts "ok"
-"##,
+class ArticleMoreThanTest < ActiveSupport::TestCase
+  test "more_than? offsets without COUNT or mutating the relation" do
+    Article.delete_all
+    3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
+    rel = Article.where("title LIKE 'more-%'")
+    prior = rel.to_sql
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      assert rel.more_than?(2)
+      assert_not rel.more_than?(3)
+    end
+    assert_equal prior, rel.to_sql
+    sql = statements.find { |s| s.include?("OFFSET 2") }
+    assert sql, statements.inspect
+    assert_no_match(/COUNT/i, sql)
+    assert_match(/LIMIT 1/, sql)
+  end
+end
+"#,
         )
+        .run_test("test/models/article_more_than_test.rb")
         .assert_passes();
 }
 

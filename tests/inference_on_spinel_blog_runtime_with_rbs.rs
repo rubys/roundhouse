@@ -978,7 +978,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `distinct.many?`/`one?` see separate rows. The find_by(id: nil)
     // short-circuit that this ceiling once paid for is gone; the net
     // still rises by six unresolved self-send / `@orders` sites.
-    const CEILING: usize = 1386;
+    // 2026-10-05 1386 -> 1395, +9, MEASURED (relation.rb / base.rb):
+    // Relation#more_than? (COUNT>n as LIMIT 1 OFFSET n), loaded_records
+    // shared by each/find_each, Base.any?/none? via exists?. Dropped
+    // offset_row_exists?. Residual is the same unresolved self-send /
+    // `@joins` / `@wheres` every SQL composer pays.
+    const CEILING: usize = 1395;
 
     assert!(
         all_untyped.len() <= CEILING,

@@ -1574,7 +1574,11 @@ fn every_runtime_method_body_concretely_typed() {
     // as `each`). What it bought: room-page cardinality without
     // COUNT(*) scans, and find_messages' nil message_id probe without
     // `WHERE id IS NULL LIMIT 1`.
-    const CEILING: usize = 571;
+    //
+    // 571 -> 560, -11 MEASURED (relation.rb / base.rb): more_than?,
+    // loaded_records, Base.any? via exists?; offset_row_exists? gone.
+    // Net drop because each/find_each share one load helper.
+    const CEILING: usize = 560;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

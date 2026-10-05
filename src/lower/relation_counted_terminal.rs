@@ -56,10 +56,7 @@ pub(crate) fn rewrite_count_gt_when(e: &mut Expr, rel_ok: impl Fn(&Expr) -> bool
     if !is_count_gt_shape(e, &rel_ok) {
         return false;
     }
-    let parenthesized = match &*e.node {
-        ExprNode::Send { parenthesized, .. } => *parenthesized,
-        _ => return false,
-    };
+    let parenthesized = true;
     let ExprNode::Send { recv: Some(count_e), args, .. } = &mut *e.node else {
         return false;
     };
