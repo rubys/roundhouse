@@ -194,9 +194,9 @@ module ActiveRecord
     #
     # `untyped` is the honest type at this level: the column's type is
     # not knowable from `Relation`. Typing it precisely means the
-    # lowerer monomorphizing per call site from the schema, the way
-    # `ids` below can be Array[Integer] because it only ever reads a
-    # primary key.
+    # lowerer monomorphizing per call site from the schema.
+    # `ids` is Array[Integer] for integer-key apps; string/uuid apps
+    # widen it via `project::widen_key_contract` (#310).
     def pluck: (untyped col) -> Array[untyped]
     def pick: (untyped col) -> untyped
     def ids: () -> Array[Integer]

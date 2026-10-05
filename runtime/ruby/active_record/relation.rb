@@ -1410,13 +1410,16 @@ module ActiveRecord
       rows.length == 0 ? nil : rows[0]
     end
 
-    # `ids` — primary keys, as integers.
+    # `ids` — primary keys, cast through the model's key type. Reads
+    # `@model.primary_key` (not a hard-coded `id` column) and casts the
+    # way `find` does, so uuid / string keys survive (#310).
     def ids
       prior = @select_sql
-      @select_sql = "#{@table}.id AS v"
+      key = @model.primary_key
+      @select_sql = "#{@table}.#{key} AS v"
       rows = ActiveRecord.adapter.select_rows(to_sql)
       @select_sql = prior
-      rows.map { |row| row["v"].to_i }
+      rows.map { |row| @model._cast_primary_key(row["v"]) }
     end
 
     # `find(id)` — the row with that primary key, RAISING

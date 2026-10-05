@@ -560,6 +560,60 @@ puts "sanitize_sql_array passed"
         .assert_passes();
 }
 
+/// Relation#ids must preserve uuid / named string keys (#310).
+fn relation_ids_uuid_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", id: :uuid, force: :cascade do |t|
+    t.string "name"
+    t.boolean "active", default: true
+  end
+end
+"#,
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widget_ids\", to: \"widgets#ids\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def ids
+    render plain: Widget.where(active: true).ids.join(",")
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn relation_ids_preserves_uuid_keys() {
+    relation_ids_uuid_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+uid = "44444444-4444-4444-8444-444444444441"
+Widget.create!(id: uid, name: "a", active: true)
+controller = WidgetsController.new
+controller.process_action(:ids)
+raise "uuid ids: #{controller.body.inspect}" unless controller.body == uid
+puts "relation ids uuid passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Rails 7.2's query assertions and the notification they are built on,
 /// over the runtime's statement capture, with `connection.select_rows`
 /// answering Arrays: campfire's tests count queries, assert none match a

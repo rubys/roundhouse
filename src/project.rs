@@ -674,6 +674,23 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
         }
         *text = text.replace(narrow, wide);
     }
+    // Relation#ids reads the primary key; string/uuid apps need the
+    // same widened element type Spinel sees on Base#id (#310).
+    let Some((_, relation)) =
+        files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/relation.rbs")
+    else {
+        return Err(
+            "widen_key_contract: sig/runtime/active_record/relation.rbs not in the tree".into(),
+        );
+    };
+    let ids_narrow = "    def ids: () -> Array[Integer]\n";
+    let ids_wide = "    def ids: () -> Array[Integer | String]\n";
+    if !relation.contains(ids_narrow) {
+        return Err(format!(
+            "widen_key_contract: relation.rbs no longer declares {ids_narrow:?}"
+        ));
+    }
+    *relation = relation.replace(ids_narrow, ids_wide);
     Ok(())
 }
 
