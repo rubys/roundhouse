@@ -113,6 +113,220 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
 
 /// The harness itself: the unedited blog emits and its controller
 /// suite, which renders every page, passes.
+/// `reorder`, `skip_preloading!` and `preload_associations`, the three
+/// Relation methods campfire's message paging (basecamp/once-campfire#292)
+/// leans on. Preloading is observed by deleting the parts after loading:
+/// only a widget whose parts were preloaded still sees them.
+fn relation_paging_hooks_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  has_many :parts\nend\n")
+        .write("app/models/part.rb", "class Part < ApplicationRecord\n  belongs_to :widget\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    reordered = Widget.order(:name).reorder(name: :desc).map { |w| w.name }.join(",")
+
+    relation = Widget.includes(:parts).order(:name)
+    widgets = relation.skip_preloading!.to_a
+    relation.preload_associations(widgets.first(1))
+    Part.delete_all
+    counts = widgets.map { |w| w.parts.size }.join(",")
+
+    render plain: "#{reordered}|#{counts}"
+  end
+end
+"##)
+}
+
+fn relation_paging_hooks_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/widgets_controller"
+alpha = Widget.create!(name: "alpha")
+beta = Widget.create!(name: "beta")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: beta, label: "b1")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "paging hooks: #{controller.body}" unless controller.body == "beta,alpha|1,0"
+puts "relation paging hooks passed"
+"##
+}
+
+#[test]
+fn relation_reorder_and_deferred_preloading_run() {
+    relation_paging_hooks_app()
+        .run_ruby(relation_paging_hooks_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn relation_reorder_and_deferred_preloading_run_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        relation_paging_hooks_assertions()
+    );
+    relation_paging_hooks_app().run_spinel(&script).assert_passes();
+}
+
+/// A class method runs against the relation it is reached from: called at
+/// implicit self inside a scope body (basecamp/once-campfire#292's
+/// `scope :last_page, -> { last_page_of(PAGE_SIZE) }`), and called on a
+/// relation no syntactic channel recognizes, here a through-association
+/// (campfire's `Current.user.reachable_messages.search(q)
+/// .last_page_of_matches(n)`). `a0` sorts first in the whole table but
+/// belongs to the other widget and the other shop, so an unscoped page
+/// answers it.
+fn class_method_relation_scope_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "shops", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "widgets", force: :cascade do |t|
+    t.integer "shop_id"
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/shop.rb", "class Shop < ApplicationRecord\n  has_many :widgets\n  has_many :shop_parts, through: :widgets, source: :parts\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  belongs_to :shop\n  has_many :parts\nend\n")
+        .write("app/models/part.rb", r#"class Part < ApplicationRecord
+  belongs_to :widget
+
+  scope :by_label, -> { order(:label) }
+  scope :first_label, -> { labels_page(1) }
+
+  def self.labels_page(size)
+    by_label.limit(size).pluck(:label)
+  end
+end
+"#)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/parts\", to: \"parts#index\"\nend\n")
+        .write("app/controllers/parts_controller.rb", r##"class PartsController < ApplicationController
+  def index
+    widget = Widget.find_by(name: "alpha")
+    shop = Shop.find_by(name: "north")
+    render plain: "#{widget.parts.first_label.join(",")}|#{shop.shop_parts.where.not(label: nil).labels_page(1).join(",")}"
+  end
+end
+"##)
+}
+
+fn class_method_relation_scope_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/parts_controller"
+north = Shop.create!(name: "north")
+south = Shop.create!(name: "south")
+alpha = Widget.create!(name: "alpha", shop: north)
+beta = Widget.create!(name: "beta", shop: south)
+Part.create!(widget: alpha, label: "a2")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: beta, label: "a0")
+controller = PartsController.new
+controller.process_action(:index)
+raise "class method lost its relation: #{controller.body}" unless controller.body == "a1|a1"
+puts "class method relation scope passed"
+"##
+}
+
+#[test]
+fn class_methods_run_against_the_relation_they_are_reached_from() {
+    class_method_relation_scope_app()
+        .run_ruby(class_method_relation_scope_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn class_methods_run_against_the_relation_they_are_reached_from_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        class_method_relation_scope_assertions()
+    );
+    class_method_relation_scope_app().run_spinel(&script).assert_passes();
+}
+
+/// `relation.public_send(direction, size)` where `direction` is a
+/// parameter every caller passes as a Symbol literal — campfire's
+/// `Page.load(relation, :first | :last, size)` after
+/// basecamp/once-campfire#292. The literals are the name set, so the
+/// send grounds into a static dispatch, and the counted `last(n)` lands
+/// on the runtime's `last_n` because the receiver is a typed Relation.
+fn param_selector_dispatch_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("app/models/pager.rb", r#"class Pager
+  def self.load(relation, direction, size)
+    relation.public_send(direction, size).map { |widget| widget.name }
+  end
+end
+"#)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    oldest = Pager.load(Widget.order(:name), :first, 2).join(",")
+    newest = Pager.load(Widget.order(:name), :last, 1).join(",")
+    render plain: "#{oldest}|#{newest}"
+  end
+end
+"##)
+}
+
+fn param_selector_dispatch_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/widgets_controller"
+%w[ beta alpha gamma ].each { |name| Widget.create!(name: name) }
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "selector dispatch: #{controller.body}" unless controller.body == "alpha,beta|gamma"
+puts "param selector dispatch passed"
+"##
+}
+
+#[test]
+fn a_send_whose_selector_every_caller_names_dispatches_statically() {
+    param_selector_dispatch_app()
+        .run_ruby(param_selector_dispatch_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        param_selector_dispatch_assertions()
+    );
+    param_selector_dispatch_app().run_spinel(&script).assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()

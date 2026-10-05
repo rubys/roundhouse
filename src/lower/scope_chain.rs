@@ -675,6 +675,30 @@ pub fn collect_relation_class_method_demand(
         if let Some(m) = model_relation_root(r, models, scope_names) {
             out.insert((m, method.clone()));
         }
+        // ...and any receiver the analyzer typed as one of the model's
+        // relations, however it was built: a through-association
+        // (campfire's `Current.user.reachable_messages.search(q)
+        // .last_page_of_matches(100)`) has no foreign key to seed from
+        // and no model constant at its root, so neither syntactic
+        // channel sees it. The relation delegate answers it instead.
+        // The analyzer types a scope's result as `Array[Model]` as often
+        // as `Relation[Model]` (the catalog does not yet tell them
+        // apart), so both count. Demand only registers a class method
+        // the model really has; an Array receiver still has no such
+        // method at runtime, as in Rails.
+        let typed_model = match &r.ty {
+            Some(crate::ty::Ty::Relation { of }) => Some(of),
+            Some(crate::ty::Ty::Array { elem }) => match &**elem {
+                crate::ty::Ty::Class { id, .. } => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(of) = typed_model {
+            if models.contains(of) {
+                out.insert((of.clone(), method.clone()));
+            }
+        }
     }
     expr.node.for_each_child(&mut |c| {
         collect_relation_class_method_demand(c, models, scope_names, out)
@@ -717,7 +741,65 @@ pub fn survey_assoc_class_methods(
             &mut model_demand,
         );
     }
-    build_assoc_class_methods(&app.models, assocs, scopes, &demand, &model_demand)
+    // A scope body runs with its relation as the current scope, so a
+    // class method it calls at implicit self runs there too: campfire's
+    // `scope :last_page, -> { last_page_of(PAGE_SIZE) }`
+    // (basecamp/once-campfire#292). Without the demand, `last_page_of`
+    // never took the relation and paged the whole table. The same holds
+    // one call further for a class method that itself takes the
+    // relation, so the demand closes over the registered bodies.
+    let explicit_demand = model_demand.clone();
+    for model in &app.models {
+        for item in &model.body {
+            if let ModelBodyItem::Scope { scope, .. } = item {
+                collect_implicit_self_sends(&scope.body, &model.name, &mut model_demand);
+            }
+        }
+    }
+    loop {
+        let (mut reg, declined) =
+            build_assoc_class_methods(&app.models, assocs, scopes, &demand, &model_demand);
+        // A callee found only at implicit self needs the relation only
+        // when its body uses it. A helper that neither queries nor
+        // creates (campfire's `match_terms`, which quotes search words)
+        // keeps its own signature: no call site reaches it through a
+        // relation, so there is nothing to answer.
+        for (model, per_model) in reg.iter_mut() {
+            per_model.retain(|name, entry| {
+                entry.creates
+                    || entry.queries
+                    || explicit_demand.contains(&(model.clone(), name.clone()))
+            });
+        }
+        reg.retain(|_, per_model| !per_model.is_empty());
+        let before = model_demand.len();
+        for model in &app.models {
+            let Some(per_model) = reg.get(&model.name) else { continue };
+            for item in &model.body {
+                if let ModelBodyItem::Method { method, .. } = item {
+                    if method.receiver == crate::dialect::MethodReceiver::Class
+                        && per_model.contains_key(&method.name)
+                    {
+                        collect_implicit_self_sends(&method.body, &model.name, &mut model_demand);
+                    }
+                }
+            }
+        }
+        if model_demand.len() == before {
+            return (reg, declined);
+        }
+    }
+}
+
+/// `(model, method)` for every receiver-less call in a body that runs
+/// at the model's class level. Most name a scope or a Relation builtin,
+/// which `build_assoc_class_methods` passes over; what it keeps are the
+/// model's own class methods.
+fn collect_implicit_self_sends(expr: &Expr, model: &ClassId, out: &mut HashSet<(ClassId, Symbol)>) {
+    if let ExprNode::Send { recv: None, method, .. } = &*expr.node {
+        out.insert((model.clone(), method.clone()));
+    }
+    expr.node.for_each_child(&mut |c| collect_implicit_self_sends(c, model, out));
 }
 
 /// `(model, method)` for the QUERY-shaped half of that survey — the
@@ -1929,6 +2011,13 @@ fn is_relation_chain_method(name: &str) -> bool {
             // core_ext) and answers an Array, so the NEXT hop
             // (`with_creator`, a scope) was the one that failed.
             | "without"
+            // `reorder` replaces the ordering gathered so far — a chain
+            // hop like `order`. campfire's `last_page_of_matches`
+            // (basecamp/once-campfire#304) writes it at implicit self
+            // inside a class method that runs against a relation, and
+            // without it here that body never rooted on `__rel` and the
+            // search paged every message in the table.
+            | "reorder"
     )
 }
 
@@ -3045,6 +3134,16 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
                     return Some(self_model.clone());
                 }
+                // One of the model's own class methods that takes the
+                // relation (`last_page_of(PAGE_SIZE)` in campfire's
+                // `last_page` scope): it runs against this scope, so it
+                // gets this scope's relation, as a scope call does. What
+                // it answers is the method's own business, not a relation.
+                if let Some(leading) = ctx.assoc_class_method_params(self_model, &method) {
+                    let new_args = thread_rel(args, var_expr(span, rel), Some(leading), span);
+                    *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
+                    return None;
+                }
                 if is_relation_chain_method(method.as_str()) {
                     // Receiver is the bare `__rel` param — any `joins`
                     // sits in a separate chain link handled below.
@@ -3703,6 +3802,37 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             None
         }
     }
+}
+
+/// Hand `rel_param` to every receiver-less call of one of `self_model`'s
+/// class methods that takes the relation — the step the scope-body
+/// rewrite cannot take, because it runs before the call-site demand
+/// that registers those methods is known. Applied at the emit seam to
+/// scope bodies and to the bodies of class methods that take the
+/// relation themselves: in Rails both run with that relation as the
+/// current scope, so a class method they call does too
+/// (basecamp/once-campfire#292's `last_page` -> `last_page_of`).
+pub fn thread_rel_into_class_method_calls(
+    body: &mut Expr,
+    self_model: &ClassId,
+    rel_param: &Symbol,
+    assoc_class_methods: &AssocClassMethods,
+) {
+    let Some(per_model) = assoc_class_methods.get(self_model) else { return };
+    fn walk(e: &mut Expr, rel: &Symbol, per_model: &HashMap<Symbol, AssocScopedMethod>) {
+        e.node.for_each_child_mut(&mut |c| walk(c, rel, per_model));
+        let span = e.span;
+        if let ExprNode::Send { recv: None, method, args, .. } = &mut *e.node {
+            if let Some(entry) = per_model.get(method) {
+                let already = args.iter().any(|a| matches!(&*a.node, ExprNode::Var { name, .. } if name == rel));
+                if !already {
+                    let taken = std::mem::take(args);
+                    *args = thread_rel(taken, var_expr(span, rel), Some(&entry.params), span);
+                }
+            }
+        }
+    }
+    walk(body, rel_param, per_model);
 }
 
 /// Rewrite a scope body: implicit-self query roots thread `rel_param`.

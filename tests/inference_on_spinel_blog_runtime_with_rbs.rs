@@ -942,7 +942,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // 802). This probe does not resolve self-sends or `@orders`
     // indexing; the full-context gate counts 16. What it buys: campfire
     // room pages LIMIT the last 40 in SQL, including `order(a:, b:)`.
-    const CEILING: usize = 1273;
+    // 2026-10-05 1273 -> 1280, +7, MEASURED against the previous
+    // runtime with the same probe: Relation#reorder (+4: its result,
+    // the order self-send, splat and parts read) and
+    // #preload_associations (+3: its result and two records reads).
+    // Clean main c8646ce4 and PR #197 have identical diagnostic paths,
+    // kinds, types and multiplicities; no existing site changed. This
+    // limited probe leaves the rest/record bindings as TyVar, while the
+    // full-context zero-unresolved gate passes and its gradual ledger
+    // records only reorder's one declared-untyped parts read. The runtime
+    // change preserves ordering and permits deferred association preload.
+    const CEILING: usize = 1280;
 
     assert!(
         all_untyped.len() <= CEILING,

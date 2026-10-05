@@ -670,11 +670,51 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
             preloads.insert(n, assoc.as_str().to_string());
         }
     }
-    if by_name.is_empty() && preloads.is_empty() {
+    // Class methods some call site reaches THROUGH a relation, which
+    // take that relation as a trailing `__rel` (see
+    // `scope_chain::survey_assoc_class_methods`). The call-site rewrite
+    // re-roots the chains it can recognize; a delegate here answers the
+    // rest, whatever built the relation: campfire's
+    // `Current.user.reachable_messages.search(q).last_page_of_matches(n)`
+    // is a through-association, with no foreign key to seed from.
+    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let (assoc_class_methods, _) =
+        crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
+    let mut class_methods: std::collections::BTreeMap<
+        String,
+        Vec<(&crate::ident::ClassId, Vec<crate::dialect::Param>)>,
+    > = Default::default();
+    for model in &app.models {
+        let Some(per) = assoc_class_methods.get(&model.name) else { continue };
+        let mut names: Vec<&Symbol> = per.keys().collect();
+        names.sort_by_key(|n| n.as_str());
+        for n in names {
+            let key = n.as_str().to_string();
+            if RELATION_BUILTINS.contains(&key.as_str())
+                || by_name.contains_key(&key)
+                || preloads.contains_key(&key)
+            {
+                continue;
+            }
+            class_methods.entry(key).or_default().push((&model.name, per[n].params.clone()));
+        }
+    }
+    if by_name.is_empty() && preloads.is_empty() && class_methods.is_empty() {
         return None;
     }
     let mut skipped: Vec<String> = Vec::new();
     let mut body = String::new();
+    for (name, decls) in &class_methods {
+        match render_class_method_delegate(name, decls) {
+            Ok(text) => body.push_str(&text),
+            Err(reason) => {
+                let borrowed: Vec<(&crate::ident::ClassId, &[crate::dialect::Param])> =
+                    decls.iter().map(|(m, p)| (*m, p.as_slice())).collect();
+                push_delegate_skip_diagnostic(name, &reason, &borrowed);
+                skipped.push(name.clone());
+            }
+        }
+    }
     for (name, decls) in &by_name {
         match render_scope_delegate(name, decls) {
             Ok(text) => body.push_str(&text),
@@ -734,6 +774,54 @@ struct DelegateCtx<'a> {
 
 /// One delegate def for `name` across every model declaring it, or the
 /// reason it can't render (fed to the skip diagnostic).
+/// One Relation delegate for a relation-taking class method: the
+/// caller's positional arguments, then the relation itself as `__rel`.
+/// Dispatched on `klass.name` with a constant receiver per model, so a
+/// relation of a model without the method raises NoMethodError as Rails
+/// would. Required positionals only; anything else is skipped and
+/// reported.
+fn render_class_method_delegate(
+    name: &str,
+    decls: &[(&crate::ident::ClassId, Vec<crate::dialect::Param>)],
+) -> Result<String, String> {
+    let arity = decls[0].1.len();
+    for (model, params) in decls {
+        if params.len() != arity {
+            return Err(format!("arity differs across models ({})", model.0.as_str()));
+        }
+        if params.iter().any(|p| p.default.is_some() || p.keyword || p.rest || p.forwarding || p.name.as_str().is_empty()) {
+            return Err(format!(
+                "shape on {} is not required positionals only",
+                model.0.as_str()
+            ));
+        }
+    }
+    let names: Vec<String> = decls[0].1.iter().map(|p| p.name.as_str().to_string()).collect();
+    let sig = names.join(", ");
+    let mut call_args = names.clone();
+    call_args.push("self".to_string());
+    let call = call_args.join(", ");
+    let mut out = String::new();
+    out.push_str("\n    # Class method run against this relation: the relation is its `__rel`.\n");
+    if sig.is_empty() {
+        writeln!(out, "    def {name}").unwrap();
+    } else {
+        writeln!(out, "    def {name}({sig})").unwrap();
+    }
+    out.push_str("      case klass.name\n");
+    for (model, _) in decls {
+        let m = model.0.as_str();
+        writeln!(out, "      when \"{m}\" then {m}.{name}({call})").unwrap();
+    }
+    writeln!(
+        out,
+        "      else raise NoMethodError, \"undefined method '{name}' for a relation of #{{klass.name}}\""
+    )
+    .unwrap();
+    out.push_str("      end\n    end\n");
+    Ok(out)
+}
+
 fn render_scope_delegate(
     name: &str,
     decls: &[(&crate::ident::ClassId, &[crate::dialect::Param])],
@@ -1268,6 +1356,23 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                    );
+                }
+            }
+        }
+        // Scope bodies and relation-taking class method bodies hand their
+        // relation on to the class methods they call at implicit self.
+        if is_model {
+            let rel_param = Symbol::from("__rel");
+            for m in &mut lc.methods {
+                if m.receiver == MethodReceiver::Class
+                    && m.params.iter().any(|p| p.as_str() == "__rel")
+                {
+                    crate::lower::scope_chain::thread_rel_into_class_method_calls(
+                        &mut m.body,
+                        &lc.name,
+                        &rel_param,
+                        &assoc_class_methods,
                     );
                 }
             }

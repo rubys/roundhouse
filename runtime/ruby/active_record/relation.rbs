@@ -44,6 +44,7 @@ module ActiveRecord
     def order_key_of: (untyped record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
     def order!: (*untyped parts) -> Relation
+    def reorder: (*untyped parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
     # Kaminari's pagination surface (see the .rb): `page` / `per` take
@@ -80,6 +81,8 @@ module ActiveRecord
     def includes: (*untyped names) -> Relation
     def preload: (*untyped names) -> Relation
     def eager_load: (*untyped names) -> Relation
+    def skip_preloading!: () -> Relation
+    def preload_associations: (Array[untyped] records) -> Array[untyped]
     def references: (*untyped names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]

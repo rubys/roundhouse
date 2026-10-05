@@ -146,6 +146,7 @@ pub mod params_permit;
 pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
+pub mod relation_counted_terminal;
 pub(crate) mod secure_password;
 pub mod attached;
 pub mod attached_url;
@@ -624,6 +625,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
+    // `first(n)`/`last(n)` on an analyzer-typed Relation -> `first_n` /
+    // `last_n`, including the arms send_static_dispatch synthesizes from
+    // a `public_send(selector, n)`, so it observes that pass's output.
+    ("relation_counted_terminal", &["send_static_dispatch"]),
     // Grounds `attach(io:, filename:, content_type:)` to positional
     // Strings by reading the io at the call site — the runtime's RBS
     // has no File type, and an `untyped` parameter there is five new
@@ -975,6 +980,8 @@ pub fn apply_post_analyze_lowerings(
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");
+    relation_counted_terminal::apply_relation_counted_terminals(app);
+    ran!("relation_counted_terminal");
     attached::apply_attach_lowering(app);
     ran!("attach");
     attached_url::apply_attached_url_lowering(app);

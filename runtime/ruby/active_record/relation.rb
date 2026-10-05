@@ -40,6 +40,7 @@ module ActiveRecord
       @limit = nil
       @offset = nil
       @includes = []
+      @skip_preloading = false
       @records = nil
       @scope_attributes = {}
       @from = nil
@@ -201,6 +202,14 @@ module ActiveRecord
         @records = nil
       end
       self
+    end
+
+    # `reorder(*parts)` — Rails' "replace the ordering": drop every term
+    # gathered so far, then order by these. Same in-memory resort as
+    # `order` when the records are already loaded.
+    def reorder(*parts)
+      @orders = []
+      order(*parts)
     end
 
     # Rails' mutating spellings. This Relation's chain methods already
@@ -593,6 +602,25 @@ module ActiveRecord
       self
     end
 
+    # `skip_preloading!` — load the rows without running the recorded
+    # `includes`/`preload` specs. The specs stay on the relation, so a
+    # caller can apply them later, to just the records it needs, with
+    # `preload_associations`. campfire's message pages load this way and
+    # preload only the messages its fragment cache missed.
+    def skip_preloading!
+      @records = nil
+      @skip_preloading = true
+      self
+    end
+
+    # `preload_associations(records)` — run this relation's recorded
+    # preload specs against `records`, loaded here or anywhere else, the
+    # batched `IN` loads `load_records` would have run on its own rows.
+    def preload_associations(records)
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
+    end
+
     def eager_load(*names)
       @records = nil
       names.each { |n| @includes << n }
@@ -716,7 +744,7 @@ module ActiveRecord
         rows = ActiveRecord.adapter.select_rows(to_sql)
         rows.map { |row| @model.instantiate(row) }
       end
-      @model.preload_associations(records, @includes) if @includes.length > 0
+      @model.preload_associations(records, @includes) if @includes.length > 0 && !@skip_preloading
       records
     end
 

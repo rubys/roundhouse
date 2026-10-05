@@ -1550,7 +1550,14 @@ fn every_runtime_method_body_concretely_typed() {
     // @orders / @records / to_a seam every other terminal already
     // pays. What it bought: campfire's ordered.last(PAGE_SIZE) is
     // ORDER BY … DESC LIMIT n, not the whole room history.
-    const CEILING: usize = 537;
+    //
+    // 537 -> 538, ONE MEASURED (relation.rb 256 -> 257): `Relation#reorder`
+    // hands its untyped `*parts` to `order`, the read `order` and `order!`
+    // already pay. `skip_preloading!` and `preload_associations` beside it
+    // cost nothing once `records` is typed `Array[untyped]`. What it bought:
+    // campfire's message paging after basecamp/once-campfire#292 (and #304,
+    // #312, which `reorder` a page's relation).
+    const CEILING: usize = 538;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
