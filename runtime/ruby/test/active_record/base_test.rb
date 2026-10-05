@@ -449,6 +449,46 @@ class BaseTest < Minitest::Test
     assert_equal "SELECT '?' AS marker, 42 AS value", sql
   end
 
+  def test_sanitize_sql_backslash_is_literal_in_sqlite_quotes
+    # SQLite: backslash does not escape; the second `'` closes the string.
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["SELECT '\\' AS slash, ? AS value", 42]
+    )
+    assert_equal "SELECT '\\' AS slash, 42 AS value", sql
+  end
+
+  def test_sanitize_sql_array_named_binds
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["title = :title", { title: "A" }]
+    )
+    assert_equal "title = 'A'", sql
+  end
+
+  def test_sanitize_sql_array_sprintf_binds
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["title = %s", "A"]
+    )
+    assert_equal "title = 'A'", sql
+  end
+
+  def test_relation_grouped_distinct_count_sql_keeps_distinct
+    rel = ActiveRecord::Relation.new(Item)
+      .select("title")
+      .group("title")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/GROUP BY/, sql)
+  end
+
+  def test_relation_from_distinct_count_sql_uses_bare_primary_key
+    rel = ActiveRecord::Relation.new(Item).from("parents").distinct
+    sql = rel.count_sql
+    assert_match(/FROM parents/, sql)
+    refute_match(/items\.id/, sql)
+    assert_match(/DISTINCT id/, sql)
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

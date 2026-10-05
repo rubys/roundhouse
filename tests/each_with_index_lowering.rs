@@ -129,3 +129,28 @@ end
         "dynamic offset must not materialize into each_with_index:\n{src}"
     );
 }
+
+#[test]
+fn each_with_index_method_ref_offset_is_left_alone() {
+    let src = emit_lib(
+        r#"class Mover
+  def self.touch(item, index)
+    item.update!(score: index)
+  end
+
+  def self.reposition(items)
+    items.each.with_index(1, &method(:touch))
+  end
+end
+"#,
+        "mover",
+    );
+    assert!(
+        src.contains("with_index"),
+        "method-ref block must keep each.with_index so offset is not dropped:\n{src}"
+    );
+    assert!(
+        !src.contains("each_with_index"),
+        "method-ref + nonzero offset must not rewrite (would drop offset):\n{src}"
+    );
+}

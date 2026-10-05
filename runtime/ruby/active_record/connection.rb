@@ -163,6 +163,8 @@ module ActiveRecord
     # reconstructs it exactly. A `?` with no bind left is dropped, which
     # is the same shape `substitute_binds` leaves it in. Question marks
     # inside single- or double-quoted SQL literals are not placeholders.
+    # SQLite does not treat `\` as a string escape — a backslash is
+    # literal, so `'\''` ends the quote at the second apostrophe.
     def self.sanitize_sql(statement)
       sql = statement[0].to_s
       out = ""
@@ -174,11 +176,6 @@ module ActiveRecord
         c = sql[i, 1].to_s
         if !quote.nil?
           out = out + c
-          if c == "\\" && i + 1 < n
-            out = out + sql[i + 1, 1].to_s
-            i = i + 2
-            next
-          end
           quote = nil if c == quote
           i = i + 1
           next
@@ -203,11 +200,104 @@ module ActiveRecord
       out
     end
 
-    # Rails' array-form entry point (`sanitize_sql_array([...])`). Same
-    # bind interleave as `sanitize_sql` — apps that name the `_array`
-    # form (raw upserts, hand-built fragments) must resolve here (#400).
+    # Rails' array-form entry point (`sanitize_sql_array([...])`).
+    # Dispatches named Hash binds (`:title`) and `%s` sprintf-style
+    # binds before the positional `?` scanner (#400).
     def self.sanitize_sql_array(statement)
+      sql = statement[0].to_s
+      if statement.length >= 2 && statement[1].is_a?(Hash)
+        return sanitize_sql_named(sql, statement[1])
+      end
+      if sql.include?("%s")
+        return sanitize_sql_sprintf(sql, statement)
+      end
       sanitize_sql(statement)
+    end
+
+    # `:name` binds from a trailing Hash. Names inside quotes stay literal.
+    def self.sanitize_sql_named(sql, binds)
+      out = ""
+      i = 0
+      n = sql.length
+      quote = nil
+      while i < n
+        c = sql[i, 1].to_s
+        if !quote.nil?
+          out = out + c
+          quote = nil if c == quote
+          i = i + 1
+          next
+        end
+        if c == "'" || c == "\""
+          quote = c
+          out = out + c
+          i = i + 1
+          next
+        end
+        if c == ":" && i + 1 < n
+          j = i + 1
+          while j < n
+            ch = sql[j, 1].to_s
+            break unless (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch == "_"
+            j = j + 1
+          end
+          if j > i + 1
+            key = sql[i + 1, j - i - 1]
+            matched = false
+            val = nil
+            binds.each do |k, v|
+              if k.to_s == key
+                matched = true
+                val = v
+              end
+            end
+            if matched
+              out = out + ActiveRecord.adapter.escape_value(val)
+              i = j
+              next
+            end
+          end
+        end
+        out = out + c
+        i = i + 1
+      end
+      out
+    end
+
+    # `%s` placeholders (Rails sprintf-style array form). Quoted `%s`
+    # stays literal; each unquoted `%s` consumes the next bind.
+    def self.sanitize_sql_sprintf(sql, statement)
+      out = ""
+      bind = 1
+      i = 0
+      n = sql.length
+      quote = nil
+      while i < n
+        c = sql[i, 1].to_s
+        if !quote.nil?
+          out = out + c
+          quote = nil if c == quote
+          i = i + 1
+          next
+        end
+        if c == "'" || c == "\""
+          quote = c
+          out = out + c
+          i = i + 1
+          next
+        end
+        if c == "%" && i + 1 < n && sql[i + 1, 1].to_s == "s"
+          if bind < statement.length
+            out = out + ActiveRecord.adapter.escape_value(statement[bind])
+            bind = bind + 1
+          end
+          i = i + 2
+          next
+        end
+        out = out + c
+        i = i + 1
+      end
+      out
     end
 
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with

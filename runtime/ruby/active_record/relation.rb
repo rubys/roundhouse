@@ -1639,14 +1639,23 @@ module ActiveRecord
         # Keep an explicit projection so HAVING can name selected
         # aliases (`select("COUNT(*) AS n").having("n > 1")`).
         cols = @select_sql.nil? ? "1 AS one" : @select_sql
+        dist = @distinct ? "DISTINCT " : ""
         inner = append_group_having(
-          append_join_where("#{cte_prefix}SELECT #{cols} FROM #{from_source}")
+          append_join_where("#{cte_prefix}SELECT #{dist}#{cols} FROM #{from_source}")
         )
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
       if @distinct
         # `select(:title).distinct.count` counts distinct titles, not pks.
-        cols = @select_sql.nil? ? "#{@table}.#{@model.primary_key}" : @select_sql
+        # When `from(...)` replaces the model table, drop the model-table
+        # qualifier so the key projects from the active FROM source.
+        cols = if !@select_sql.nil?
+          @select_sql
+        elsif @from.nil?
+          "#{@table}.#{@model.primary_key}"
+        else
+          @model.primary_key.to_s
+        end
         inner = append_join_where(
           "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
         )

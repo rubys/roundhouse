@@ -61,6 +61,19 @@ fn rewrite(expr: &mut Expr) {
             return;
         }
 
+        // Only a two-param Lambda can receive the offset binding. Method
+        // refs (`&method(:f)`) and rest-param blocks would lose a nonzero
+        // offset if rewritten — keep the dynamic each.with_index path.
+        let block_expr = block.as_ref().expect("checked above");
+        let offset_ok = match &*block_expr.node {
+            ExprNode::Lambda {
+                params,
+                rest_param: None,
+                ..
+            } if params.len() >= 2 => true,
+            _ => false,
+        };
+
         // Only literal Int offsets are safe to materialize into the
         // loop (`index = __with_index_i + offset`). A dynamic offset
         // must evaluate once before iteration — cloning it into the
@@ -73,7 +86,12 @@ fn rewrite(expr: &mut Expr) {
                 } => None,
                 ExprNode::Lit {
                     value: Literal::Int { .. },
-                } => Some(arg.clone()),
+                } => {
+                    if !offset_ok {
+                        return;
+                    }
+                    Some(arg.clone())
+                }
                 _ => return,
             },
             _ => return,
@@ -262,6 +280,50 @@ mod tests {
             vec![lit_int(1)],
             Some(lambda(&["item", "index"], lit_int(0))),
         );
+        rewrite(&mut expr);
+        let ExprNode::Send { method, .. } = &*expr.node else {
+            panic!("expected Send");
+        };
+        assert_eq!(method.as_str(), "with_index");
+    }
+
+    #[test]
+    fn leaves_method_ref_block_with_offset_alone() {
+        let each = send(Some(var("items")), "each", vec![], None);
+        let method_ref = Expr::new(
+            Span::synthetic(),
+            ExprNode::MethodRef {
+                recv: None,
+                name: Symbol::from("touch"),
+            },
+        );
+        let mut expr = send(
+            Some(each),
+            "with_index",
+            vec![lit_int(1)],
+            Some(method_ref),
+        );
+        rewrite(&mut expr);
+        let ExprNode::Send { method, .. } = &*expr.node else {
+            panic!("expected Send");
+        };
+        assert_eq!(method.as_str(), "with_index");
+    }
+
+    #[test]
+    fn leaves_rest_param_block_with_offset_alone() {
+        let each = send(Some(var("items")), "each", vec![], None);
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![Symbol::from("item")],
+                rest_param: Some(Symbol::from("rest")),
+                block_param: None,
+                body: lit_int(0),
+                block_style: Default::default(),
+            },
+        );
+        let mut expr = send(Some(each), "with_index", vec![lit_int(1)], Some(block));
         rewrite(&mut expr);
         let ExprNode::Send { method, .. } = &*expr.node else {
             panic!("expected Send");
