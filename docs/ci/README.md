@@ -83,7 +83,17 @@ the publication and floating-pin catch-up.
 Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
 SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
-explicitly reused execution evidence.
+explicitly reused execution evidence. The compact and summary gates skip when
+the workflow itself was cancelled so a superseded run cannot leave those jobs
+QUEUED and hold the PR concurrency lock ahead of the replacement run.
+
+A draft with no CI label looks almost empty on purpose (`plan` + gates only;
+everything else skipped). Marking the same PR ready does **not** keep that
+idle selection: path policy applies, and changes under `.github/` or
+`scripts/ci-plan.py` expand to full validation. If the Checks tab still shows
+only cancelled jobs after `ready_for_review`, look for a stuck superseded run
+on the `validation-pull_request-<n>` concurrency group rather than assuming
+the ready planner selected nothing.
 
 ## Read results honestly
 

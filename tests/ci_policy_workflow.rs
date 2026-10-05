@@ -171,7 +171,12 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
                 "{name}: {required}"
             );
         }
-        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+        // Do not use bare always(): cancel-in-progress would still schedule
+        // these gates, leaving them QUEUED and blocking the PR concurrency group.
+        assert_eq!(
+            jobs[name]["if"].as_str(),
+            Some("${{ always() && !cancelled() }}")
+        );
     }
 }
 
@@ -460,7 +465,10 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         Some("${{ jobs.ci-summary.outputs.complete }}")
     );
     for name in ["compact-required", "ci-summary"] {
-        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+        assert_eq!(
+            jobs[name]["if"].as_str(),
+            Some("${{ always() && !cancelled() }}")
+        );
     }
     let gate = jobs["ci-summary"]["needs"].as_sequence().unwrap();
     for name in jobs.as_mapping().unwrap().keys().filter_map(|v| v.as_str()) {

@@ -3456,8 +3456,11 @@ jobs:
   compact-required:
     # compare and browser-smoke-typescript stay in needs so a full/main run
     # can still require them. Unselected PR skips must not fail this gate.
+    # Skip when the workflow itself was cancelled: always()-only gates still
+    # schedule on cancel-in-progress, then sit QUEUED and hold the PR
+    # concurrency group so the superseding ready/full run never starts.
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
-    if: always()
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -3477,7 +3480,7 @@ jobs:
   ci-summary:
     name: CI summary
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
-    if: always()
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
