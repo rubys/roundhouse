@@ -145,17 +145,17 @@ pub fn synthesize_record_model(app: &mut App) {
     // nothing else complained.
     let attributes = crate::ingest::model::row_from_table(table);
     // `belongs_to :record, polymorphic: true` is declared (rather than
-    // written out) because the has_one side is what needed the scope;
-    // this side is an ordinary polymorphic belongs_to and the existing
-    // synthesizer produces exactly Rails' reader.
+    // written out) because the has_one side is what needed the scope.
     //
     // `polymorphic_targets` stays empty on purpose: it is filled by
     // `resolve_polymorphic_targets` from the inverse `as:` declarations,
     // and no model declares `has_one … as: :record` in source — the
-    // owner side is this file's own expansion. The consequence is that
-    // `rich_text.record` reads as gradual rather than as a union of the
-    // models that use it, which is the honest type for a column that
-    // can name any of them.
+    // owner side is this file's own expansion. With an empty implementor
+    // set, association lowering skips both the type-switched reader and
+    // the monomorphic `Record.find_by` fallback (which would NameError),
+    // so `rich_text.record` stays un-synthesized and typed gradual —
+    // honest for a column that can name any owner. Storage uses the raw
+    // `record_id` / `record_type` columns.
     let body = vec![ModelBodyItem::Association {
         assoc: Association::BelongsTo {
             name: Symbol::from("record"),

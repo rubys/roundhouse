@@ -279,7 +279,27 @@ pub(super) fn push_association_methods(
                     ));
                 }
             }
-            Association::BelongsTo { name, target, foreign_key, .. } => {
+            // Unresolved polymorphic (`polymorphic: true` but no inverse
+            // `as:` filled `polymorphic_targets`): do **not** fall through
+            // to the monomorphic synthesizer. The phantom target is often
+            // `Record` (ActionText::RichText / Markdown), and emitting
+            // `Record.find_by` is a boot-time `NameError` if the accessor
+            // is ever called; the monomorphic writer also drops the
+            // `_type` half. Storage via the raw `*_id` / `*_type` columns
+            // still works. Same contract as schema.rs: no writer when
+            // implementors are unresolved.
+            Association::BelongsTo {
+                polymorphic: true,
+                polymorphic_targets,
+                ..
+            } if polymorphic_targets.is_empty() => {}
+            Association::BelongsTo {
+                name,
+                target,
+                foreign_key,
+                polymorphic: false,
+                ..
+            } => {
                 let sentinel = fk_sentinel(model, foreign_key);
                 methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, sentinel.clone()));
                 // Rails provides the writer alongside the reader

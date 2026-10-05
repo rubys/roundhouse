@@ -244,3 +244,69 @@ end
         "targets from SQL fragment + where-hash literals"
     );
 }
+
+/// Unresolved polymorphic belongs_to (no inverse `as:`, no body
+/// literals) must not fall through to the monomorphic synthesizer.
+/// ActionText::Markdown / RichText declare `belongs_to :record,
+/// polymorphic: true` with phantom target `Record`; emitting
+/// `Record.find_by` is a NameError if the accessor is called, and the
+/// monomorphic writer drops `record_type`.
+#[test]
+fn unresolved_polymorphic_skips_monomorphic_synth() {
+    let app = app_from(vec![
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :action_text_markdowns do |t|\n    t.text :content\n    t.string :name, null: false\n    t.bigint :record_id, null: false\n    t.string :record_type, null: false\n  end\nend\n",
+        ),
+        (
+            "app/models/action_text/markdown.rb",
+            "module ActionText\n  class Markdown < ApplicationRecord\n    self.table_name = \"action_text_markdowns\"\n    belongs_to :record, polymorphic: true\n  end\nend\n",
+        ),
+    ]);
+    let md = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "ActionText::Markdown")
+        .expect("Markdown model");
+    let Association::BelongsTo {
+        polymorphic,
+        polymorphic_targets,
+        target,
+        ..
+    } = md.associations().next().expect("belongs_to")
+    else {
+        panic!("expected BelongsTo");
+    };
+    assert!(polymorphic);
+    assert!(
+        polymorphic_targets.is_empty(),
+        "no inverse as: → unresolved; got {polymorphic_targets:?}"
+    );
+    assert_eq!(target.0.as_str(), "Record", "Rails phantom target");
+
+    let (lcs, _registry) = lower_models_with_registry_and_params(
+        &app.models,
+        &app.schema,
+        vec![],
+        &Default::default(),
+    );
+    let lowered = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "ActionText::Markdown")
+        .expect("lowered Markdown");
+    assert!(
+        !lowered.methods.iter().any(|m| {
+            m.name.as_str() == "record" && m.receiver == roundhouse::dialect::MethodReceiver::Instance
+        }),
+        "must not synth monomorphic `record` → Record.find_by; methods: {:?}",
+        lowered
+            .methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !lowered.methods.iter().any(|m| m.name.as_str() == "record="),
+        "must not synth monomorphic writer that drops record_type"
+    );
+}
