@@ -262,13 +262,10 @@ fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     }
 }
 
-/// Build a `ClassInfo` for each class declared in any of the
-/// `.rbs` files, keyed by the class's last name segment. Mirrors
-/// the existing `runtime_src_integration` registry-building
-/// pattern (lines 300–348 of that file): RBS uses fully-qualified
-/// names (`ActiveRecord::Base`) but the body-typer dispatches via
-/// `Ty::Class { id }` whose id comes from `Const { path }.last()`.
-/// Stripping to the last segment keeps lookups consistent.
+/// Preserve canonical RBS class identities for method parameters and
+/// dispatch. This probe has no ConstantResolver, so unique short-name
+/// aliases also serve bare constants. Ambiguous suffixes must never
+/// merge unrelated classes.
 fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
     let dir = Path::new(RUNTIME_DIR);
     let mut entries: Vec<_> = fs::read_dir(dir)
@@ -279,12 +276,7 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
         .collect();
     entries.sort();
 
-    let mut registry: HashMap<ClassId, ClassInfo> = HashMap::new();
-    // Keep the full Ty::Fn signatures alongside (the registry stores
-    // return types after unwrap_fn_ret; the body Ctx needs the full
-    // params Vec).
     let mut sigs: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-
     for path in entries {
         let source = fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!("read {}: {e}", path.display())
@@ -293,28 +285,44 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
             panic!("parse {}: {e}", path.display())
         });
         for (class_id, methods) in by_class {
-            // Strip fully-qualified to last segment.
-            let short = class_id
-                .0
-                .as_str()
-                .rsplit("::")
-                .next()
-                .unwrap_or(class_id.0.as_str())
-                .to_string();
-            let short_id = ClassId(Symbol::new(&short));
-            let entry = registry.entry(short_id.clone()).or_default();
-            let sig_entry = sigs.entry(short_id).or_default();
-            for (name, ty) in methods {
-                // Registry stores the Ty::Fn directly so dispatch's
-                // `unwrap_fn_ret` returns the declared result. Both
-                // class and instance methods land in instance_methods
-                // (matches the existing app-RBS overlay convention).
-                entry.instance_methods.insert(name.clone(), ty.clone());
-                sig_entry.insert(name, ty);
-            }
+            // Sorted sidecars retain the existing reopen/override order.
+            sigs.entry(class_id).or_default().extend(methods);
         }
     }
-    (registry, sigs)
+    (registry_with_unique_aliases(&sigs), sigs)
+}
+
+/// Build exact entries first, then alias only unambiguous short references.
+/// Keep full Fn signatures so dispatch and body contexts see the same RBS.
+fn registry_with_unique_aliases(
+    sigs: &HashMap<ClassId, HashMap<Symbol, Ty>>,
+) -> HashMap<ClassId, ClassInfo> {
+    let mut registry: HashMap<ClassId, ClassInfo> = HashMap::new();
+    let mut aliases: HashMap<ClassId, Option<ClassId>> = HashMap::new();
+    for (class_id, methods) in sigs {
+        registry.entry(class_id.clone()).or_default().instance_methods = methods.clone();
+        let short = ClassId(Symbol::new(
+            class_id.0.as_str().rsplit("::").next().unwrap_or(class_id.0.as_str()),
+        ));
+        aliases
+            .entry(short)
+            .and_modify(|owner| {
+                if owner.as_ref() != Some(class_id) {
+                    *owner = None;
+                }
+            })
+            .or_insert_with(|| Some(class_id.clone()));
+    }
+    for (short, owner) in aliases {
+        if let Some(owner) = owner {
+            registry.entry(short).or_insert_with(|| {
+                let mut info = ClassInfo::default();
+                info.instance_methods = sigs[&owner].clone();
+                info
+            });
+        }
+    }
+    registry
 }
 
 /// Build a method-body Ctx by seeding `self_ty` from the enclosing
@@ -366,6 +374,71 @@ fn ingest_runtime_classes() -> Vec<(String, LibraryClass)> {
         }
     }
     out
+}
+
+/// Existing nested runtime classes must receive their declared parameter
+/// types, and fully-qualified receiver types must resolve their readers.
+#[test]
+fn qualified_runtime_signatures_seed_contexts_and_results() {
+    let (registry, sigs) = build_class_registry();
+    let classes = ingest_runtime_classes();
+    let row = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Untyped),
+    };
+    let rows = Ty::Array { elem: Box::new(row) };
+    for (class, method, name, expected) in [
+        ("ActiveRecord::Result", "initialize", "rows", rows.clone()),
+        ("ActiveRecord::Connection", "quote_string", "str", Ty::Str),
+    ] {
+        let (_, lc) = classes
+            .iter()
+            .find(|(_, lc)| lc.name.0.as_str() == class)
+            .expect("runtime class");
+        let method = lc.methods.iter().find(|m| m.name.as_str() == method).unwrap();
+        let ctx = build_method_ctx(&lc.name, method, &sigs, &HashMap::new());
+        assert_eq!(
+            ctx.local_bindings.get(&Symbol::new(name)),
+            Some(&expected),
+            "{class}.{name}"
+        );
+    }
+    let source = b"class Probe; def rows(result); result.rows; end; end";
+    let typer = BodyTyper::new(&registry);
+    for class in ["ActiveRecord::Result", "Result"] {
+        // Each spelling starts untyped so prior annotations cannot mask a miss.
+        let mut probes = ingest_library_classes(source, "probe.rb").unwrap();
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::new("result"),
+            Ty::Class {
+                id: ClassId(Symbol::new(class)),
+                args: vec![],
+            },
+        );
+        typer.analyze_expr(&mut probes[0].methods[0].body, &ctx);
+        assert_eq!(
+            probes[0].methods[0].body.ty,
+            Some(rows.clone()),
+            "{class}"
+        );
+    }
+}
+
+/// A short alias may not combine identically named classes in distinct modules.
+#[test]
+fn ambiguous_short_aliases_do_not_merge_signatures() {
+    let signatures = parse_app_signatures(
+        "module One\n class Shared\n def first: () -> Integer\n end\nend\n\
+         module Two\n class Shared\n def second: () -> String\n end\nend\n",
+    )
+    .unwrap();
+    let registry = registry_with_unique_aliases(&signatures);
+    assert!(!registry.contains_key(&ClassId(Symbol::new("Shared"))));
+    let one = &registry[&ClassId(Symbol::new("One::Shared"))].instance_methods;
+    let two = &registry[&ClassId(Symbol::new("Two::Shared"))].instance_methods;
+    assert!(one.contains_key(&Symbol::new("first")) && !one.contains_key(&Symbol::new("second")));
+    assert!(two.contains_key(&Symbol::new("second")) && !two.contains_key(&Symbol::new("first")));
 }
 
 #[test]
@@ -444,12 +517,10 @@ fn untyped_subexpressions_with_rbs_baseline() {
         }
     }
 
-    // Soft ratchet: untyped / unresolved sub-expressions in
-    // `active_record/` under hand-authored RBS. Fails only when the
-    // residual rises. Tighten after a measured drop. Growth here is
-    // mostly Relation SQL composers (self-sends and query ivars), not
-    // a substitute for Bar B's Untyped count.
-    const CEILING: usize = 1405;
+    // Soft ratchet under canonical class-ID lookup (Fixes #435). Fails
+    // only when the residual rises. Growth here is mostly Relation SQL
+    // composers (self-sends and query ivars), not a substitute for Bar B.
+    const CEILING: usize = 57;
 
     assert!(
         all_untyped.len() <= CEILING,
