@@ -1585,7 +1585,12 @@ fn every_runtime_method_body_concretely_typed() {
     // requires a non-empty short page. Earlier claim of 521 was a
     // mis-measure — the reopen still pays Relation.new typing sites
     // this probe counts, so the residual landed at 562.
-    const CEILING: usize = 562;
+    //
+    // 562 -> 458, -104 MEASURED (relation.rbs): initialize(Base),
+    // sort_in_place!/loaded_tail as Array[untyped], order_key_of /
+    // include?(Base). Not Class (breaks Bar A); preloaded stays bare
+    // for Spinel integer seeds.
+    const CEILING: usize = 458;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

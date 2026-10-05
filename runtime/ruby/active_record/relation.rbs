@@ -4,7 +4,10 @@ module ActiveRecord
   # type is `untyped` in v1 — the lowered model methods carry the model
   # identity; per-element typing is a later (generic-Relation) refinement.
   class Relation
-    def initialize: (untyped model) -> void
+    # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
+    # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
+    # and breaks Bar A.
+    def initialize: (Base model) -> void
 
     def where: (?untyped condition, *untyped args) -> Relation
 
@@ -30,18 +33,19 @@ module ActiveRecord
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
     def order: (*untyped parts) -> Relation
     # The in-memory sort `order` applies to a LOADED relation (see the
-    # .rb). `sorted` is `untyped` for the same reason `preloaded`'s
-    # `records` is: the body only indexes and assigns into it.
-    def sort_in_place!: (untyped sorted, Array[String] terms) -> bool
+    # .rb). Element type stays untyped until Relation[T]; the array
+    # representation is honest — only index/length/map appear here
+    # (unlike `preloaded`, which must stay bare for Spinel integer seeds).
+    def sort_in_place!: (Array[untyped] sorted, Array[String] terms) -> bool
     def order_column: (String term) -> String?
     def order_descending?: (String term) -> bool
     def reverse_order_term: (String term) -> String
     def reverse_one_order_term: (String term) -> String
-    def loaded_tail: (untyped loaded, Integer n) -> Array[untyped]
+    def loaded_tail: (Array[untyped] loaded, Integer n) -> Array[untyped]
     # The keys are whatever the ordered column holds, and `<=>` on two
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
-    def order_key_of: (untyped record, String col) -> untyped
+    def order_key_of: (Base record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
     def order!: (*untyped parts) -> Relation
     def reorder: (*untyped parts) -> Relation
@@ -127,7 +131,7 @@ module ActiveRecord
     def operand_ids: (untyped other) -> Array[untyped]
     def ids_of: (Array[untyped] records) -> Array[untyped]
     def id_filter: (Array[untyped] records, Array[untyped] ids, bool keep) -> Array[untyped]
-    def include?: (untyped record) -> bool
+    def include?: (Base record) -> bool
     def each: () { (untyped) -> void } -> Relation
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Relation
