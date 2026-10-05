@@ -982,6 +982,7 @@ module ActionText
     def initialize(html = "", canonicalize: true)
       @html = html.to_s
       @canonicalize = canonicalize
+      @plain_text = nil
     end
 
     # `ActionText::Content#fragment` — the element view a
@@ -1276,6 +1277,17 @@ module ActionText
     # parser. Well-formed markup — everything the editors produce — is
     # unaffected.
     def to_plain_text
+      cached = @plain_text
+      return cached unless cached.nil?
+      text = convert_html_to_plain_text
+      @plain_text = text
+      text
+    end
+
+    # The scan `to_plain_text` memoizes. `blank?` / `empty?` / `present?`
+    # all call it, and campfire's message presentation asks more than
+    # once per body on a cache miss.
+    def convert_html_to_plain_text
       out = +""
       names = []
       starts = []

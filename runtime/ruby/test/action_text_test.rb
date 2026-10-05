@@ -262,6 +262,14 @@ class ActionTextContentTest < Minitest::Test
     assert ActionText::Content.new("<div>x</div>").present?
   end
 
+  def test_to_plain_text_is_memoized
+    content = ActionText::Content.new("<div>Hello world</div>")
+    first = content.to_plain_text
+    second = content.to_plain_text
+    assert_equal "Hello world", first
+    assert_same first, second
+  end
+
   def test_tag_name_is_the_canonical_attachment_element
     assert_equal "action-text-attachment", ActionText::Attachment.tag_name
   end
