@@ -876,3 +876,32 @@ fn render_constant_value(e: &Expr) -> String {
         _ => format!("/* TODO rust2 const value: {:?} */", e.node),
     }
 }
+
+#[cfg(test)]
+mod op_assign_tests {
+    use super::emit_library_class;
+
+    fn emit(ruby: &str, rbs: &str) -> String {
+        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "op_assign.rb")
+            .expect("snippet parses and types");
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            classes.iter().map(|c| emit_library_class(c).expect("emits")).collect()
+        })
+    }
+
+    /// `+=` used to fall through the expression catch-all, which dropped
+    /// the statement: a `while i < n; …; i += 1; end` counter never
+    /// advanced, and the transpiled loop spun forever.
+    #[test]
+    fn op_assign_emits_the_assignment() {
+        let out = emit(
+            "module OpAssign\n  def self.count(n)\n    i = 0\n    s = \"\"\n    while i < n\n      s += \"x\"\n      i += 1\n    end\n    s\n  end\nend\n",
+            "module OpAssign\n  def self.count: (Integer n) -> String\nend\n",
+        );
+        assert!(!out.contains("TODO rust2"), "OpAssign fell through:\n{out}");
+        assert!(out.contains("i = i + 1_i64"), "int counter not advanced:\n{out}");
+        // A `+=` is a reassignment, so its local needs `let mut` as the
+        // spelled-out `s = s + "x"` gets.
+        assert!(out.contains("let mut s"), "`+=` local not declared mut:\n{out}");
+    }
+}

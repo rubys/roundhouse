@@ -196,6 +196,11 @@ class TestBase
   # so unlike `assert_difference` it is not numeric — `from:`/`to:` are
   # whatever the expression answers.
   def assert_changes: (untyped expression, ?String? message, ?from: untyped, ?to: untyped) { () -> void } -> void
+  def assert_no_changes: (untyped expression, ?String? message) { () -> void } -> void
+  # The mail log counts; see the .rb for what is not checked. `args:` is
+  # declared and deliberately unread, like `assert_enqueued_with`'s.
+  def assert_enqueued_emails: (Integer count) ?{ () -> void } -> void
+  def assert_enqueued_email_with: (String mailer, Symbol method, ?args: untyped) ?{ () -> void } -> void
   def skip: (?String message) -> void
 
   # Turbo::Broadcastable::TestHelper. `capture_` answers the LOG

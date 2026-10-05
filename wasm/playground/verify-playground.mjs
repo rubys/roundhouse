@@ -347,7 +347,10 @@ if (appNames.length >= 2 && appNames.includes("lobsters")) {
     console.log(`mastodon: ${mast.files} files, ${mast.notes} gap-notes, worst UI round-trip ${worst}ms during transpile`);
     if (mast.error) fail(`mastodon transpile errored: ${mast.error}`);
     if (!(mast.files > 100)) fail(`mastodon emitted too little: ${mast.files} files`);
-    if (!(mast.notes > 100)) fail(`mastodon gap-note ledger unexpectedly sparse: ${mast.notes}`);
+    // Measured 59 on 2026-10-03 after ordinary Rails calls stopped being
+    // recorded as ingest gaps. The floor only proves the ledger still
+    // lands; it is not a target to grow.
+    if (!(mast.notes >= 59)) fail(`mastodon gap-note ledger unexpectedly sparse: ${mast.notes}`);
   }
 
   // Deep-link: switching via the picker syncs ?app= into the address bar, and

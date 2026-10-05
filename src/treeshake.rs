@@ -297,6 +297,38 @@ where
         // Existence queries still need the queried methods to survive
         // treeshaking, even though they are not ordinary evaluated children.
         ExprNode::Defined { operand } => walk_sends(operand, visit),
+        // Pattern-embedded exprs (a `Value`'s test, an
+        // `Array`/`Find`/`Hash` pattern's narrowing `constant`) can
+        // hide a `Send` — `in KnownClass(...)` reaches the constant's
+        // class the same way a bare `Const` read would — so this must
+        // walk them for real, not skip them the way some other
+        // structural passes do; a method treeshaking misses here is a
+        // method silently stripped from the emitted app.
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            walk_sends(scrutinee, visit);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| walk_sends(e, visit));
+                if let Some((_, g)) = &arm.guard {
+                    walk_sends(g, visit);
+                }
+                walk_sends(&arm.body, visit);
+            }
+            if let Some(e) = else_body {
+                walk_sends(e, visit);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            walk_sends(value, visit);
+            pattern.for_each_expr(&mut |e| walk_sends(e, visit));
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin {
+                walk_sends(b, visit);
+            }
+            if let Some(e) = end {
+                walk_sends(e, visit);
+            }
+        }
         _ => e.node.for_each_child(&mut |child| walk_sends(child, visit)),
     }
 }

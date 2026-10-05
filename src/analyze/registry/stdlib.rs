@@ -409,7 +409,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Both CRuby's bundled libraries and Spinel's uri/net packages
         // define these exception classes; emitted requires load them.
         "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
-        "OpenSSL::OpenSSLError",
+        "OpenSSL::OpenSSLError", "JSON::ParserError",
     ] {
         register_stdlib_class(classes, exc, &[], &[
             ("message", Ty::Str),
@@ -521,6 +521,21 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);
+    // Ruby and Spinel provide both core classes. The existing constructor
+    // rule carries Struct.new's value into an assigned constant, so reads
+    // of that constant and Mutex.new retain their source expressions.
+    // Do not invent member or synchronization return types here.
+    register_stdlib_class(classes, "Struct", &[], &[]);
+    register_stdlib_class(classes, "Mutex", &[], &[]);
+    // `Array.wrap` is folded by `lower::enumerable_ext` before emit.
+    // Registered so the analyzer does not report it as unknown. The
+    // element type is not known from a scalar argument.
+    register_stdlib_class(
+        classes,
+        "Array",
+        &[("wrap", Ty::Array { elem: Box::new(Ty::Untyped) })],
+        &[],
+    );
     // CRuby supplies Sets here, the Spinel port supplies Arrays. Both
     // implement the collection operations the app uses; don't invent
     // one concrete representation for the two runtimes.

@@ -304,7 +304,7 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // machinery + belongs_to reader cache guards, so `includes(...)`
     // on a runtime Relation executes as batched IN-loads instead of
     // N+1 lazy reads. Runs last so nothing reprocesses the synthesized
-    // bodies (no-op unless the app has scopes AND surviving includes).
+    // bodies (no-op unless the app mentions includes).
     library::apply_preload_lowering(&mut lcs, app);
     // A belongs_to reader memoizes, and writing the foreign key
     // invalidates it (no-op for models with no belongs_to). AFTER the

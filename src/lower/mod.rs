@@ -19,6 +19,7 @@
 
 pub mod arel;
 pub mod associations;
+pub mod association_new;
 pub mod blank;
 pub mod broadcast_calls;
 pub mod module_mixins;
@@ -101,6 +102,7 @@ pub mod defined_ivar_memo;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
+pub mod test_cookie_jar;
 pub mod sti_scope;
 mod sti_subclass_callbacks;
 pub mod sum_symbol;
@@ -113,6 +115,7 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod object_extend;
+pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
@@ -140,6 +143,7 @@ pub mod to_param_residue;
 pub mod relation_residue;
 pub mod params_residue;
 pub mod params_permit;
+pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -282,6 +286,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Deletes provably-dead `false && …` tails before any pass can
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
+    ("association_new", &["bool_fold"]),
     // Preserve native full destinations; ordinary keyword producers
     // rejoin the legacy projection before any argument-rewriting pass.
     ("forwarding_keywords", &["bool_fold"]),
@@ -292,6 +297,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
+    // `super` in a model's own `password=` → the `has_secure_password`
+    // writer under its own name. Before `create_block`, which inlines
+    // blocks: the pass leaves a `super` inside a block alone.
+    ("secure_password_super", &[]),
     ("parameterize", &[]),
     // `Pathname(p)` → `Pathname.new(p)`. Rewrites a receiverless call
     // no other pass produces or consumes into a Const-receiver send of
@@ -387,6 +396,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const literal nothing else produces and writes a String array
     // nothing else reads, so no ordering constraints.
     ("job_test_only", &[]),
+    ("test_cookie_jar", &[]),
     // `x_previously_changed?(to: V)` → the predicate AND a comparison.
     // Reads a kwargs hash on a synthesized predicate name and writes
     // reads of the same synthesis; no pass produces or consumes either
@@ -535,6 +545,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // consumes. Before `relation_residue`, which then sees the grounded
     // `find_by` chain rather than an unresolved send.
     ("authenticate_by", &[]),
+    // Wraps finder keywords in a model's `normalizes`; authenticate_by
+    // expands into one such `find_by`.
+    ("normalizes", &["authenticate_by"]),
     ("group_count", &[]),
     ("dead_default", &[]),
     ("errors_add", &[]),
@@ -547,7 +560,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
-    ("create_block", &[]),
+    ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
     // the enclosing statement. AFTER `create_block`, whose inlining
@@ -582,6 +595,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A parameter written after its binder (`user = users(user) unless
+    // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
+    // not pin the caller's type onto the later write. Reads an Assign
+    // no other pass produces; writes a name no other pass reads.
+    ("param_rebind", &[]),
     // `record.to_sgid(for: LOCATOR_NAME).to_s` -> the runtime's attachable
     // sgid mint, model name baked in. Consumes a shape no pass produces
     // or reads; no constraints.
@@ -698,6 +716,18 @@ pub fn apply_post_analyze_lowerings(
     // leave here: the type checker and the IDE have seen them; no
     // lowering or emitter should.
     app.views.retain(|v| !v.analysis_only);
+    // Likewise the methods `ingest::graphql_ruby` gave graphql-ruby
+    // classes so inference could type their fields.
+    for gql in &app.graphql_types {
+        if let Some(class) = app.library_classes.iter_mut().find(|c| c.name == gql.class) {
+            class.methods.retain(|m| !gql.synthesized.contains(&m.name));
+        }
+    }
+    for (class, name) in &app.graphql_signatures {
+        if let Some(table) = app.rbs_signatures.get_mut(class) {
+            table.remove(name);
+        }
+    }
     debug_assert!(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
@@ -725,6 +755,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
+    association_new::apply_association_new_lowering(app);
+    ran!("association_new");
     diags.extend(forwarding::apply(app));
     ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));
@@ -737,6 +769,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("time_current");
     as_json_super::apply_as_json_super_grounding(app);
     ran!("as_json_super");
+    secure_password::apply_secure_password_super(app);
+    ran!("secure_password_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
     pathname_ctor::apply_pathname_ctor_lowering(app);
@@ -791,6 +825,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("sti_subclass_callbacks");
     job_test_only::apply_job_test_only_lowering(app);
     ran!("job_test_only");
+    test_cookie_jar::apply_test_cookie_jar_lowering(app);
+    ran!("test_cookie_jar");
     dirty_predicate_kwargs::apply_dirty_predicate_kwargs(app);
     ran!("dirty_predicate_kwargs");
     controller_class_render::apply_controller_class_render(app);
@@ -799,7 +835,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("sum_symbol");
     values_at_splat::apply_values_at_splat_lowering(app);
     ran!("values_at_splat");
-    diags.extend(tag_builder::apply_tag_builder_lowering(app));
+    diags.extend(tag_builder::apply_tag_builder_lowering(app, registry));
     ran!("tag_builder");
     request_index::apply_request_index_lowering(app);
     ran!("request_index");
@@ -887,6 +923,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("perform_all_later");
     diags.extend(authenticate_by::apply_authenticate_by_lowering(app));
     ran!("authenticate_by");
+    // After authenticate_by: its expansion is a `find_by` whose keyword
+    // a `normalizes` declaration applies to.
+    normalizes::apply_normalizes_finder_lowering(app);
+    ran!("normalizes");
     group_count::apply_group_count_lowering(app);
     ran!("group_count");
     dead_default::apply_dead_default_lowering(app, registry);
@@ -913,6 +953,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("attachables_grep");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    param_rebind::apply_param_rebind_lowering(app);
+    ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
     ran!("to_sgid");
     diags.extend(cable_test_case::apply_cable_test_case_lowering(app));
@@ -1086,76 +1128,148 @@ pub(crate) fn for_each_test_body(
     }
 }
 
-// Like emit_roots below, keep surveys and rewrites on one root inventory.
-macro_rules! hook_roots {
-    ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
-        for model in & $($mutable)? $app.models {
-            for item in & $($mutable)? model.body {
-                match item {
-                    crate::dialect::ModelBodyItem::Method { method, .. } => {
-                        for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                        $f(& $($mutable)? method.body);
-                    }
-                    crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                        for default in scope.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                        $f(& $($mutable)? scope.body);
-                    }
-                    crate::dialect::ModelBodyItem::Callback { callback, .. } => {
-                        if let Some(cond) = callback.condition.$option() { $f(cond); }
-                    }
-                    // Unknown class-body expressions emit verbatim.
-                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => $f(expr),
-                    // Association extension methods become ordinary methods
-                    // during model lowering, so passes must reach them first.
-                    crate::dialect::ModelBodyItem::Association {
-                        assoc: crate::dialect::Association::HasMany { extension, .. },
-                        ..
-                    } => {
-                        for method in extension.$iter() {
-                            for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                            $f(& $($mutable)? method.body);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // config/application.rb emits too, but is not in library_classes.
-        for lc in $app.library_classes.$iter().chain($app.rails_application.$iter()) {
-            for method in & $($mutable)? lc.methods {
-                for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                $f(& $($mutable)? method.body);
-            }
-            for (_, value) in & $($mutable)? lc.constants { $f(value); }
-            for call in & $($mutable)? lc.unknown_calls { $f(call); }
-            for initializer in & $($mutable)? lc.class_ivar_initializers { $f(initializer); }
-        }
-        for controller in & $($mutable)? $app.controllers {
-            for item in & $($mutable)? controller.body {
-                match item {
-                    crate::dialect::ControllerBodyItem::Action { action, .. } => {
-                        for (_, default) in & $($mutable)? action.opt_params { $f(default); }
-                        $f(& $($mutable)? action.body);
-                    }
-                    crate::dialect::ControllerBodyItem::Unknown { expr, .. } => $f(expr),
-                    // Filter conditions are spliced into process_action.
-                    crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
-                        if let Some(cond) = filter.if_cond_expr.$option() { $f(cond); }
-                        if let Some(cond) = filter.unless_cond_expr.$option() { $f(cond); }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(seeds) = $app.seeds.$option() { $f(seeds); }
-    }
-}
-
 pub(crate) fn for_each_hook_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),
 ) {
-    hook_roots!(app, f, iter_mut, as_mut, mut);
+    for_each_owned_hook_body(app, &mut |_, body| f(body))
+}
+
+/// [`for_each_hook_body`] with each body's OWNER: the class (model,
+/// library class, `config/application.rb`, controller) whose method it
+/// is, so a receiver-less send can be read against what that class
+/// defines. `None` for the seeds, which belong to no class. One walk
+/// with the owner threaded through, so the two cannot disagree about
+/// the set of bodies.
+pub(crate) fn for_each_owned_hook_body(
+    app: &mut crate::app::App,
+    f: &mut impl FnMut(Option<&crate::ident::ClassId>, &mut crate::expr::Expr),
+) {
+    fn visit_param_defaults(
+        params: &mut [crate::dialect::Param],
+        f: &mut impl FnMut(&mut crate::expr::Expr),
+    ) {
+        for p in params {
+            if let Some(default) = &mut p.default {
+                f(default);
+            }
+        }
+    }
+    for model in &mut app.models {
+        let crate::dialect::Model { name, body, .. } = model;
+        let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
+        for item in body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    visit_param_defaults(&mut method.params, f);
+                    f(&mut method.body)
+                }
+                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
+                    visit_param_defaults(&mut scope.params, f);
+                    f(&mut scope.body)
+                }
+                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
+                    if let Some(cond) = &mut callback.condition {
+                        f(cond);
+                    }
+                }
+                // Unrecognized class-body exprs (constant procs and
+                // friends) round-trip verbatim into the emit — their
+                // sites are just as reachable.
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                // A has_many extension's methods (`has_many :memberships
+                // do def revise(…) … end end`) are app-authored bodies
+                // that the model lowering turns into ordinary methods;
+                // every pass driven from here has to see them first.
+                // campfire's `revise` reads `granted.present?` and the
+                // blank grounding never reached it.
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension.iter_mut() {
+                        visit_param_defaults(&mut m.params, f);
+                        f(&mut m.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for lc in &mut app.library_classes {
+        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, class_ivar_initializers, .. } = lc;
+        let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
+        for method in methods.iter_mut() {
+            visit_param_defaults(&mut method.params, f);
+            f(&mut method.body);
+        }
+        for (_name, value) in constants.iter_mut() {
+            f(value);
+        }
+        for call in unknown_calls.iter_mut() {
+            f(call);
+        }
+        for initializer in class_ivar_initializers.iter_mut() {
+            f(initializer);
+        }
+    }
+    // `config/application.rb`. `App::rails_application` is a
+    // `LibraryClass` that EMITS but is not in `library_classes`, so
+    // every pass driven from here skipped it — and the bodies there are
+    // app-authored Ruby like any other. campfire's
+    // `ENV["APP_VERSION"].presence || …` reached spinel un-grounded and
+    // compiled to `undefined method 'presence' for an instance of
+    // String`: a body that ships has to be walked.
+    if let Some(lc) = &mut app.rails_application {
+        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, class_ivar_initializers, .. } = lc;
+        let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
+        for method in methods.iter_mut() {
+            visit_param_defaults(&mut method.params, f);
+            f(&mut method.body);
+        }
+        for (_name, value) in constants.iter_mut() {
+            f(value);
+        }
+        for call in unknown_calls.iter_mut() {
+            f(call);
+        }
+        for initializer in class_ivar_initializers.iter_mut() {
+            f(initializer);
+        }
+    }
+    for controller in &mut app.controllers {
+        let crate::dialect::Controller { name, body, .. } = controller;
+        let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
+        for item in body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &mut action.opt_params {
+                        f(default);
+                    }
+                    f(&mut action.body)
+                }
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                // A filter's `if:` / `unless:` lambda body is spliced into
+                // the dispatcher as written (`process_action`), so it is
+                // an app body like the model callbacks' conditions above.
+                // lobsters' `around_action :track_story_reads, if: -> {
+                // @user.present? }` reached spinel un-grounded and every
+                // story page 500'd on `present?`.
+                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                    if let Some(c) = &mut filter.if_cond_expr {
+                        f(c);
+                    }
+                    if let Some(c) = &mut filter.unless_cond_expr {
+                        f(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(seeds) = &mut app.seeds {
+        f(None, seeds);
+    }
 }
 
 /// Read-only twin of [`for_each_hook_body`], for a pass that needs to
@@ -1167,17 +1281,114 @@ pub(crate) fn for_each_hook_body(
 /// agree; disagreeing would thread a relation at the call site into a
 /// method that never grew the parameter.
 ///
-/// Both projections use the same inventory so their root sets cannot drift.
+/// Kept adjacent to the mutable version deliberately: the two must walk
+/// the same set, and the only defence against that drifting is that
+/// they are read together.
 pub(crate) fn for_each_hook_body_ref(
     app: &crate::app::App,
     f: &mut impl FnMut(&crate::expr::Expr),
 ) {
-    hook_roots!(app, f, iter, as_ref);
+    fn visit_param_defaults(
+        params: &[crate::dialect::Param],
+        f: &mut impl FnMut(&crate::expr::Expr),
+    ) {
+        for p in params {
+            if let Some(default) = &p.default {
+                f(default);
+            }
+        }
+    }
+    for model in &app.models {
+        for item in &model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    visit_param_defaults(&method.params, f);
+                    f(&method.body)
+                }
+                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
+                    visit_param_defaults(&scope.params, f);
+                    f(&scope.body)
+                }
+                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
+                    if let Some(cond) = &callback.condition {
+                        f(cond);
+                    }
+                }
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension {
+                        visit_param_defaults(&m.params, f);
+                        f(&m.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit_param_defaults(&method.params, f);
+            f(&method.body);
+        }
+        for (_name, value) in &lc.constants {
+            f(value);
+        }
+        for call in &lc.unknown_calls {
+            f(call);
+        }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
+        }
+    }
+    // Same set as the mutable twin — see the note there.
+    if let Some(lc) = &app.rails_application {
+        for method in &lc.methods {
+            visit_param_defaults(&method.params, f);
+            f(&method.body);
+        }
+        for (_name, value) in &lc.constants {
+            f(value);
+        }
+        for call in &lc.unknown_calls {
+            f(call);
+        }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
+        }
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &action.opt_params {
+                        f(default);
+                    }
+                    f(&action.body)
+                }
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                    if let Some(c) = &filter.if_cond_expr {
+                        f(c);
+                    }
+                    if let Some(c) = &filter.unless_cond_expr {
+                        f(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(seeds) = &app.seeds {
+        f(seeds);
+    }
 }
 
 // One inventory for the extra emit-bound roots the hook walker intentionally
 // excludes. Keep the mutable projection and immutable survey in lockstep.
-macro_rules! emit_roots {
+macro_rules! forwarding_roots {
     ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
         for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
         for tm in & $($mutable)? $app.test_modules {
@@ -1201,14 +1412,54 @@ macro_rules! emit_roots {
     }
 }
 
-pub(crate) fn for_each_emit_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
     for_each_hook_body(app, f);
-    emit_roots!(app, f, iter_mut, as_mut, mut);
+    forwarding_roots!(app, f, iter_mut, as_mut, mut);
 }
 
-pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
     for_each_hook_body_ref(app, f);
-    emit_roots!(app, f, iter, as_ref);
+    forwarding_roots!(app, f, iter, as_ref);
+}
+
+/// Survey every emit-bound expression root, including defaults and fixture
+/// expressions outside the forwarding pass's narrower inventory. Callers walk
+/// children themselves, so each root is visited exactly once.
+pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate::expr::Expr)) {
+    for_each_forwarding_body_ref(app, f);
+    for association in app.models.iter().flat_map(|model| model.associations()) {
+        match association {
+            crate::dialect::Association::BelongsTo { default: Some(e), .. }
+            | crate::dialect::Association::HasMany { scope: Some(e), .. } => f(e),
+            _ => {}
+        }
+    }
+    for action in app.controllers.iter().flat_map(|c| c.actions()) {
+        for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) { f(default); }
+    }
+    for view in &app.views {
+        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) { f(default); }
+    }
+    for fixture in &app.fixtures {
+        for e in &fixture.preamble { f(e); }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &app.routes.direct_helpers { f(&helper.body); }
+    for function in &app.sql_functions {
+        let mut visit_method = |method: &crate::dialect::MethodDef| {
+            f(&method.body);
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) { f(default); }
+        };
+        match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step);
+                visit_method(finalize);
+            }
+        }
+    }
 }
 
 pub use associations::{
@@ -1399,18 +1650,24 @@ mod body_root_tests {
         for_each_hook_body_ref(&app, &mut |root| trace(root, &mut seen));
         assert_eq!(seen, hooks);
         seen.clear();
-        for_each_hook_body(&mut app, &mut |root| trace(root, &mut seen));
+        for_each_owned_hook_body(&mut app, &mut |owner, root| {
+            if matches!(&*root.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str() == "@@counter") {
+                assert_eq!(owner.unwrap().0.as_str(), "Counter");
+            }
+            trace(root, &mut seen);
+        });
         assert_eq!(seen, hooks);
         let expected: Vec<_> = hooks.into_iter().chain(extras).collect();
         seen.clear();
         for_each_emit_body_ref(&app, &mut |root| trace(root, &mut seen));
         assert_eq!(seen, expected);
         seen.clear();
-        for_each_emit_body(&mut app, &mut |root| {
+        for_each_forwarding_body(&mut app, &mut |root| {
             trace(root, &mut seen);
             root.span.start = 99;
         });
         assert_eq!(seen, expected);
-        for_each_emit_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
+        for_each_forwarding_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
     }
 }

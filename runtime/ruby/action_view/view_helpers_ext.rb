@@ -214,6 +214,40 @@ module ActionView
       # below concretely Float/Integer, which is what the framework
       # runtime's fully-typed invariant requires.
       elapsed = later.to_f - earlier.to_f
+      # Leap days matter only past a year, and only between two Times —
+      # Rails skips the offset for anything that does not act like one.
+      leap_minutes = 0
+      if (elapsed / 60.0).round >= MINUTES_IN_YEAR
+        from_year = earlier.year
+        from_year += 1 if earlier.month >= 3
+        to_year = later.year
+        to_year -= 1 if later.month < 3
+        if from_year <= to_year
+          fyear = from_year - 1
+          leap_years = (to_year / 4 - to_year / 100 + to_year / 400) -
+                       (fyear / 4 - fyear / 100 + fyear / 400)
+          leap_minutes = leap_years * 1440
+        end
+      end
+      distance_in_words(elapsed, leap_minutes, include_seconds)
+    end
+
+    # The same words for two NUMBERS of seconds, which Rails accepts in
+    # either slot: the authentication generator's reset mailer writes
+    # `distance_of_time_in_words(0, @user.password_reset_token_expires_in)`
+    # and means "15 minutes". A separate entry rather than a widened
+    # `from_time`: a Time-or-Integer parameter is a poly slot on spinel.
+    # The view lowering (`view_helpers_call`) routes a call here when both
+    # arguments are typed Integer.
+    def self.distance_of_seconds_in_words(from_seconds, to_seconds, include_seconds: false)
+      elapsed = (to_seconds - from_seconds).abs.to_f
+      distance_in_words(elapsed, 0, include_seconds)
+    end
+
+    # Rails' wording table over an elapsed number of seconds.
+    # `leap_minutes` discounts leap-year days so e.g. 80 years of minutes
+    # still reads "about 80 years" (Rails' comment, same arithmetic).
+    def self.distance_in_words(elapsed, leap_minutes, include_seconds)
       distance_in_minutes = (elapsed / 60.0).round
       distance_in_seconds = elapsed.round
 
@@ -240,24 +274,7 @@ module ActionView
         months == 1 ? "about 1 month" : "about #{months} months"
       when 86400...525600 then "#{(distance_in_minutes.to_f / 43200.0).round} months"
       else
-        from_year = earlier.year
-        from_year += 1 if earlier.month >= 3
-        to_year = later.year
-        to_year -= 1 if later.month < 3
-
-        leap_years =
-          if from_year > to_year
-            0
-          else
-            fyear = from_year - 1
-            (to_year / 4 - to_year / 100 + to_year / 400) -
-              (fyear / 4 - fyear / 100 + fyear / 400)
-          end
-        minute_offset_for_leap_year = leap_years * 1440
-
-        # Discount leap-year days so e.g. 80 years of minutes still reads
-        # "about 80 years" (Rails' comment, same arithmetic).
-        minutes_with_offset = distance_in_minutes - minute_offset_for_leap_year
+        minutes_with_offset = distance_in_minutes - leap_minutes
         remainder = minutes_with_offset % MINUTES_IN_YEAR
         # Rails spells this `.div(...)`, which the Integer method table
         # doesn't carry; `/` on two Integers is the same floor division.

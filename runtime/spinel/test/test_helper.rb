@@ -70,7 +70,9 @@ require_relative "../app/models"
 # that did not exist. campfire's `vips_loader_policy_test` asks
 # `Vips.vips_foreign_find_load` for a BMP and expects nil; without this
 # line it got "VipsForeignLoadMagickFile" and nine tests read as a
-# missing feature rather than a missing require.
+# missing feature rather than a missing require. The processor also
+# wraps find_load itself: applying the policy is not enough on libvips
+# 8.14, which still names a blocked Magick/Svg loader.
 #
 # After app/models.rb, so `Rails.application`'s reopen (the lifted
 # policy) is defined before the file reads it — boot.rb's own order,
@@ -740,6 +742,10 @@ class TestBase
     # `assert_turbo_stream_broadcasts` does (see its note) would carry
     # one test's broadcasts into the next.
     Broadcasts.reset_log! if defined?(Broadcasts)
+    # Rails' integration test clears the :test delivery log around every
+    # test (`ActionMailer::TestCase::ClearTestDeliveries`); the mailer
+    # assertions below count from it.
+    ActionMailer::Base.deliveries.clear if defined?(ActionMailer)
     # WebMock's stub registry is a GLOBAL, and its Minitest integration
     # empties it in an `after_teardown` hook this TestBase never runs —
     # the helper is deliberately Minitest-free, which is the same reason
@@ -975,6 +981,48 @@ class TestBase
     end
     return if to.nil? || after == to
     raise(message || "assert_changes failed: expected #{to.inspect}, got #{after.inspect}")
+  end
+
+  # `assert_no_changes -> { @user.reload.password_digest } do … end` —
+  # the Rails 8 authentication generator's mismatched-password test.
+  def assert_no_changes(expression, message = nil, &block)
+    before = expression.call
+    block.call
+    after = expression.call
+    return if after == before
+    raise(message || "assert_no_changes failed: #{before.inspect} changed to #{after.inspect}")
+  end
+
+  # ---- ActionMailer::TestHelper -----------------------------------
+  #
+  # `deliver_later` collects into `ActionMailer::Base.deliveries` as it
+  # is called (runtime/action_mailer.rb: no queue in one process), so the
+  # deliveries ARE the enqueued mail, and `setup` clears them the way
+  # Rails' integration test does (`ClearTestDeliveries`).
+  #
+  # DIVERGENCE, stated rather than hidden: a `deliver_now` lands in the
+  # same list, so it counts as enqueued here; and only the COUNT is
+  # checked — a Message does not carry the mailer class, action, or
+  # arguments that built it, the same narrowing `assert_enqueued_with`
+  # documents for jobs.
+  #
+  # `assert_enqueued_emails 0` (no block) counts everything this test
+  # has sent so far; with a block, what the block sent.
+  def assert_enqueued_emails(count)
+    before = block_given? ? ActionMailer::Base.deliveries.length : 0
+    yield if block_given?
+    actual = ActionMailer::Base.deliveries.length - before
+    return if actual == count
+    raise("assert_enqueued_emails failed: expected #{count} email(s), got #{actual}")
+  end
+
+  # `assert_enqueued_email_with PasswordsMailer, :reset, args: [ @user ]`.
+  # `mailer` arrives as the class NAME (`lower::job_test_only`).
+  def assert_enqueued_email_with(mailer, method, args: nil)
+    before = block_given? ? ActionMailer::Base.deliveries.length : 0
+    yield if block_given?
+    return if ActionMailer::Base.deliveries.length > before
+    raise("assert_enqueued_email_with failed: no #{mailer}##{method} email was enqueued")
   end
 end
 

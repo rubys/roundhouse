@@ -194,7 +194,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 case_sensitive: *case_sensitive,
             });
         }
-        ValidationRule::Custom { method } => {
+        ValidationRule::Custom { method, .. } => {
             out.push(Check::Custom { method: method.clone() });
         }
     }

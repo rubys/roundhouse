@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
 
 /// Emit an `.rbs` sidecar for a single `LibraryClass`. The output
@@ -66,6 +67,10 @@ fn render_class(lc: &LibraryClass) -> String {
         writeln!(s).unwrap();
     }
 
+    for (name, value) in &lc.constants {
+        render_data_factory(&mut s, lc, name.as_str(), value, &body_pad);
+    }
+
     for m in &lc.methods {
         let line = render_method(m, &segments);
         writeln!(s, "{body_pad}{line}").unwrap();
@@ -76,6 +81,27 @@ fn render_class(lc: &LibraryClass) -> String {
     }
 
     s
+}
+
+fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str) {
+    if value.decisions & RESOLVED_DATA_FACTORY == 0 {
+        return;
+    }
+    let Some(Ty::Class { id, args: type_args }) = &value.ty else { return };
+    if !type_args.is_empty() || id.0.as_str() != format!("{}::{name}", owner.name.0.as_str()) {
+        return;
+    }
+    let ExprNode::Send { args, .. } = &*value.node else { return };
+    let Some(members) = args.iter().map(|arg| match &*arg.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+        _ => None,
+    }).collect::<Option<Vec<_>>>() else { return };
+    writeln!(s, "{pad}class {name} < ::Data").unwrap();
+    writeln!(s, "{pad}  def self.new: (*untyped, **untyped) -> instance").unwrap();
+    for member in members {
+        writeln!(s, "{pad}  def `{member}`: () -> untyped").unwrap();
+    }
+    writeln!(s, "{pad}end").unwrap();
 }
 
 fn render_method(m: &MethodDef, enclosing: &[&str]) -> String {

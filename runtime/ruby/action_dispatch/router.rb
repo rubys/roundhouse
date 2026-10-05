@@ -167,13 +167,35 @@ module ActionDispatch
     # extension the REQUEST carried ("" when it carried none); it
     # reaches the action as `params["format"]`, which is where Rails
     # puts the `(.:format)` segment.
+    #
+    # A HEAD request is Rails' two-pass rule (Journey's
+    # `match_head_routes`): a route declared for HEAD itself wins;
+    # failing that, the request is routed as the GET it shadows. Without
+    # the second pass `HEAD /` — what an uptime monitor or a deploy
+    # proxy sends — 404'd on every app, since no `rails new` app
+    # declares a HEAD route. The verb the ACTION sees stays HEAD;
+    # dropping the body is the server's job, as it is Rack's.
     def self.match_path(method, path, table, format)
       method_upcase = method.to_s.upcase
       path_parts = path.split("/")
+      hit = scan_routes(method_upcase, path_parts, table, format)
+      if hit.nil? && method_upcase == "HEAD"
+        return scan_routes("GET", path_parts, table, format)
+      end
+      hit
+    end
+
+    # One pass of the table for one verb, over the already-split path.
+    def self.scan_routes(method_upcase, path_parts, table, format)
       i = 0
       while i < table.length
         route = table[i]
-        if route.verb.to_s == method_upcase
+        # "ANY" is `match …, via: :all`: Rails routes it for every verb.
+        # Not on the HEAD pass, though: Rails' first HEAD pass takes only
+        # routes that name a verb, so a `via: :all` route is reached on
+        # the GET pass, in declaration order with the GET routes.
+        verb = route.verb.to_s
+        if verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")
           params = match_parts(route.pattern_parts, path_parts, route.int_params, format)
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)

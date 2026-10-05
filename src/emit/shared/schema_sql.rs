@@ -456,6 +456,29 @@ end
         );
     }
 
+    /// An integer's `limit:` is a byte size: solid_cache's `key_hash`
+    /// (`limit: 8`) is a `bigint` on Postgres, as Rails creates it. A
+    /// 64-bit hash does not fit the `integer` it used to render.
+    #[test]
+    fn postgres_renders_an_eight_byte_integer_as_bigint() {
+        let out = statements(
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "solid_cache_entries", force: :cascade do |t|
+    t.binary "key", limit: 1024, null: false
+    t.integer "key_hash", limit: 8, null: false
+    t.integer "byte_size", limit: 4, null: false
+  end
+end
+"#,
+            Dialect::Postgres,
+        );
+        assert_eq!(
+            out[0],
+            "CREATE TABLE IF NOT EXISTS \"solid_cache_entries\" (\n  \"id\" bigserial PRIMARY KEY,\n  \
+             \"key\" bytea NOT NULL,\n  \"key_hash\" bigint NOT NULL,\n  \"byte_size\" integer NOT NULL\n)"
+        );
+    }
+
     /// A partial index keeps its `where:` wherever it decides which rows
     /// the index accepts: on a unique index in both dialects. A
     /// non-unique one keeps it on Postgres only; on SQLite it covers

@@ -51,8 +51,8 @@ Unsupported constructs return `IngestError::Unsupported { file,
 message }` rather than silently dropping them. "Loud by design" — a
 missing arm is a signal that either the IR needs a new variant or the
 recognizer needs to widen. See [Adding a new IR
-variant](../../DEVELOPMENT.md#adding-a-new-ir-variant) for the
-six-step pattern.
+variant](../development/compiler-changes.md#adding-an-ir-variant) for the
+development checklist.
 
 That's the strict path, and it's the default. Survey mode —
 `roundhouse-check --continue`, or `ROUNDHOUSE_INGEST_SURVEY=1` —

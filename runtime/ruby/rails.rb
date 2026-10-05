@@ -486,8 +486,9 @@ module Rails
     # user uploads sets before any image is decoded. Lifted at ingest
     # onto the reopen, the same way as the trim above; applied by the
     # image processor (runtime/spinel/facades/active_storage_processor
-    # _vips.rb) when it loads. Nothing blocked when the app says
-    # nothing, which is libvips' own default.
+    # _vips.rb) when it loads, which also wraps find_load so a blocked
+    # loader is not selected on libvips 8.14. Nothing blocked when the
+    # app says nothing, which is libvips' own default.
     def vips_block_untrusted
       false
     end

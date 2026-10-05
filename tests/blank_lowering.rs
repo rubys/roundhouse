@@ -6,15 +6,14 @@
 //! normal dispatch, and ungroundable receivers survive verbatim with a
 //! `blank_unlowered` residue diagnostic.
 
+use roundhouse::App;
 use roundhouse::analyze::{Analyzer, Diagnostic};
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::lower::apply_blank_lowering;
-use roundhouse::App;
 
 fn lower_and_emit(source: &str) -> (String, Vec<Diagnostic>) {
-    let classes =
-        ingest_library_classes(source.as_bytes(), "test.rb").expect("ingest test source");
+    let classes = ingest_library_classes(source.as_bytes(), "test.rb").expect("ingest test source");
     let mut app = App::new();
     for lc in classes {
         app.library_classes.push(lc);
@@ -45,7 +44,10 @@ end
     );
     assert!(!out.contains("present?"), "site should be grounded:\n{out}");
     assert!(out.contains("empty?"), "expected empty?-based form:\n{out}");
-    assert!(diags.is_empty(), "typed receiver should not produce residue: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "typed receiver should not produce residue: {diags:?}"
+    );
 }
 
 #[test]
@@ -64,7 +66,10 @@ end
     assert!(!out.contains("blank?"), "site should be grounded:\n{out}");
     // The ruby-family emitter's nil-safety pass may wrap the receiver
     // (`(a || "").empty?`); either surface is the grounded form.
-    assert!(out.contains(".empty?"), "expected empty?-based form:\n{out}");
+    assert!(
+        out.contains(".empty?"),
+        "expected empty?-based form:\n{out}"
+    );
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -82,7 +87,10 @@ end
 "#,
     );
     assert!(!out.contains("present?"), "site should be grounded:\n{out}");
-    assert!(out.contains("nil?"), "nilable receiver needs the nil guard:\n{out}");
+    assert!(
+        out.contains("nil?"),
+        "nilable receiver needs the nil guard:\n{out}"
+    );
     assert!(out.contains("empty?"), "{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
@@ -100,7 +108,10 @@ class Util
 end
 "#,
     );
-    assert!(!out.contains("present?"), "never-blank scalar should fold:\n{out}");
+    assert!(
+        !out.contains("present?"),
+        "never-blank scalar should fold:\n{out}"
+    );
     assert!(!out.contains("empty?"), "no empty? for scalars:\n{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
@@ -117,7 +128,10 @@ class Util
 end
 "#,
     );
-    assert!(!out.contains("presence"), "presence should be grounded:\n{out}");
+    assert!(
+        !out.contains("presence"),
+        "presence should be grounded:\n{out}"
+    );
     assert!(out.contains("empty?"), "{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
@@ -218,7 +232,10 @@ end
         out.contains("w.blank?"),
         "class with its own predicate keeps normal dispatch:\n{out}"
     );
-    assert!(diags.is_empty(), "own-predicate dispatch is not residue: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "own-predicate dispatch is not residue: {diags:?}"
+    );
 }
 
 #[test]
@@ -234,7 +251,10 @@ class Util
 end
 "#,
     );
-    assert!(!out.contains("present?"), "hash-value read should ground:\n{out}");
+    assert!(
+        !out.contains("present?"),
+        "hash-value read should ground:\n{out}"
+    );
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -262,6 +282,93 @@ end
         2,
         "both params reads should reach the runtime predicate:\n{out}"
     );
-    assert!(!out.contains("strip"), "no String-shaped grounding on a params read:\n{out}");
+    assert!(
+        !out.contains("strip"),
+        "no String-shaped grounding on a params read:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// `{ host:, protocol: }.compact_blank` — ActiveSupport rejects on the
+/// VALUE. campfire's `SetCurrentRequest#default_url_options` is this
+/// Hash of nilable Strings; leaving it as a send is an AOT refusal.
+#[test]
+fn hash_compact_blank_rejects_on_the_value() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Url
+  def options(host, protocol)
+    { host: host, protocol: protocol }.compact_blank
+  end
+end
+"#,
+    );
+    assert!(
+        !out.contains("compact_blank"),
+        "Hash compact_blank must ground:\n{out}"
+    );
+    assert!(
+        out.contains("reject"),
+        "expected a reject over the values:\n{out}"
+    );
+    assert!(
+        out.contains("_k") && out.contains("__cb"),
+        "Hash reject binds the key and tests the value:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// `[ String | Content ].compact_blank` must not reject through
+/// `ActiveSupport.blank?` — that helper never calls `Content#blank?`.
+#[test]
+fn union_with_own_predicate_compact_blank_stays_dynamic() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Content
+  def blank?
+    false
+  end
+end
+
+class Titles
+  def of(flag)
+    item = flag ? "x" : Content.new
+    [ item ].compact_blank
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains("compact_blank"),
+        "own-predicate union must keep the send:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "blank_unlowered");
+}
+
+/// An Array whose element is still an inference var used to file
+/// residue and keep the send. The reject body now calls
+/// `ActiveSupport.blank?`, the same runtime predicate an untyped
+/// `blank?` already takes — campfire's helper
+/// `[ author.name, author.bio ].compact_blank` is this shape.
+#[test]
+fn untyped_array_compact_blank_uses_the_runtime_predicate() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Titles
+  def of(author)
+    [ author.name, author.bio ].compact_blank.join(" – ")
+  end
+end
+"#,
+    );
+    assert!(
+        !out.contains("compact_blank"),
+        "must not keep the send:\n{out}"
+    );
+    assert!(
+        out.contains("reject") && out.contains("ActiveSupport.blank?"),
+        "expected a reject through the runtime predicate:\n{out}"
+    );
     assert!(diags.is_empty(), "{diags:?}");
 }

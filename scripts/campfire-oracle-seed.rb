@@ -77,6 +77,7 @@ end
 # the HTML Action Text keeps in the column.
 BODIES = [
   "Morning, all.",
+  "Coffee later? The machine in the kitchen is on.",
   "Deploy is green — <b>3.4.10</b> on all boxes.",
   "Anyone seen the flaky test on <code>messages_controller_test</code>? " \
     "It only fails when the suite runs in parallel, which makes me think " \
@@ -125,6 +126,42 @@ if Message.none? && messages > 0
     })
   end
 end
+
+# insert_all skips Message::Searchable's after_create_commit, so the FTS
+# index that `/searches?q=` reads would otherwise be empty and a search
+# workload would time an empty page. Index the same plain text Rails
+# would (`Message#plain_text_body`), not the Action Text HTML — markup
+# tokens (`b`, `code`) would otherwise match searches they shouldn't.
+if Message.any?
+  indexed = ActiveRecord::Base.connection.select_value("SELECT count(*) FROM message_search_index").to_i
+  if indexed.zero?
+    conn = ActiveRecord::Base.connection
+    rows = conn.select_all(<<~SQL)
+      SELECT messages.id AS id, coalesce(action_text_rich_texts.body, '') AS html
+      FROM messages
+      LEFT JOIN action_text_rich_texts
+        ON action_text_rich_texts.record_type = 'Message'
+       AND action_text_rich_texts.record_id = messages.id
+       AND action_text_rich_texts.name = 'body'
+    SQL
+    rows.each_slice(200) do |slice|
+      values = slice.map { |r|
+        text = ActionText::Content.new(r["html"]).to_plain_text
+        "(#{r["id"].to_i}, #{conn.quote(text)})"
+      }
+      conn.execute("INSERT INTO message_search_index(rowid, body) VALUES #{values.join(',')}")
+    end
+  end
+end
+
+# Campfire pages a room through `order(:created_at)` on `index_messages_on_room_id`
+# alone, which sorts the room's whole history. The rust port adds this composite
+# index on boot; we add it here so Rails, the emit, and the ports all read the
+# same schema. Additive: the original index stays.
+ActiveRecord::Base.connection.execute(<<~SQL)
+  CREATE INDEX IF NOT EXISTS index_messages_on_room_id_and_created_at
+    ON messages (room_id, created_at)
+SQL
 
 puts "seeded: accounts=#{Account.count} users=#{User.count} rooms=#{Room.count} " \
      "memberships=#{Membership.count} sessions=#{Session.count} " \

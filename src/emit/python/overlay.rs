@@ -271,6 +271,9 @@ fn emit_models(models: &[LibraryClass]) -> Result<String, String> {
     out.push_str("\nfrom app.active_record_base import Base\n");
     for (needle, import) in [
         ("Db.", "from app.db import Db\n"),
+        // `ActiveRecord.lower_bound` — the `includes(:assoc)` distribute
+        // a lowered query body calls (lower::arel::visitor).
+        ("ActiveRecord.", "from app.active_record_base import ActiveRecord\n"),
         ("RecordNotFound", "from app.errors import RecordNotFound\n"),
         ("RecordInvalid", "from app.errors import RecordInvalid\n"),
         // The temporal intrinsics (`ActiveSupport.db_now` et al)
@@ -387,6 +390,9 @@ fn emit_controllers(
     }
     if body.contains("Db.") {
         out.push_str("from app.db import Db\n");
+    }
+    if body.contains("ActiveRecord.") {
+        out.push_str("from app.active_record_base import ActiveRecord\n");
     }
     out.push_str(&missing_parent_aliases(controllers));
     out.push_str(&body);

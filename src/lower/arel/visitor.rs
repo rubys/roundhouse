@@ -15,7 +15,7 @@ use crate::dialect::AccessorKind;
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, Literal, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::schema::{Column, Schema, Table};
+use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -315,6 +315,22 @@ fn push_preload_stmts(
     out.push(assign_var(&ids, send_block(var_ref(parent_results), "map", map_block)));
 
     // pstmt = Db.prepare("SELECT <cols> FROM <tbl> WHERE <fk> IN (" + Db.escape_int_list(ids) + ")")
+    // A non-null fk distributes by binary search over the children's
+    // fks (`ActiveRecord.lower_bound`), which needs them sorted: `ORDER BY fk`,
+    // then the primary key so a parent's children keep the order the
+    // fk index would have returned them in (what Rails' unordered
+    // preload query sees on SQLite).
+    let fk_col = target_table.columns.iter().find(|c| c.name == directive.foreign_key);
+    let planned = fk_col.is_some_and(|c| !c.nullable && matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt));
+    let mut close = ")".to_string();
+    if planned {
+        close.push_str(" ORDER BY ");
+        close.push_str(&crate::naming::sql_ident(directive.foreign_key.as_str()));
+        if let Some(pk) = target_table.columns.iter().find(|c| c.primary_key) {
+            close.push_str(", ");
+            close.push_str(&crate::naming::sql_ident(pk.name.as_str()));
+        }
+    }
     let sql = concat_chain(vec![
         lit_str(format!(
             "SELECT {} FROM {} WHERE {} IN (",
@@ -323,7 +339,7 @@ fn push_preload_stmts(
             crate::naming::sql_ident(directive.foreign_key.as_str()),
         )),
         db_call(&db, "escape_int_list", vec![var_ref(&ids)]),
-        lit_str(")".to_string()),
+        lit_str(close),
     ]);
     out.push(assign_var(&pstmt, db_call(&db, "prepare", vec![sql])));
 
@@ -360,6 +376,16 @@ fn push_preload_stmts(
     // Db.finalize(pstmt)
     out.push(db_call(&db, "finalize", vec![var_ref(&pstmt)]));
 
+    if planned {
+        push_planned_distribute(out, directive, parent_results, &loaded);
+        return;
+    }
+
+    // A nullable fk keeps the nested scan: its reads are `Integer?`, and
+    // `lower_bound` takes `Array[Integer]` — the IN filter means no
+    // loaded row is nil, but no target-neutral cast says so yet. This is
+    // the O(N * M) shape `push_planned_distribute` replaced.
+    //
     // Distribute, grouping by FK with a portable nested loop rather than
     // `loaded.select { … }` — Ruby's `Array#select` has no universal
     // emitter mapping (Go has no `.Select`):
@@ -405,6 +431,117 @@ fn push_preload_stmts(
         seq(vec![
             assign_var(&group, group_init),
             send_block(var_ref(&loaded), "each", block1("r", push_if)),
+            send_to(var_ref(&Symbol::from("a")), &setter, vec![var_ref(&group)], true),
+        ]),
+    );
+    out.push(send_block(var_ref(parent_results), "each", each_block));
+}
+
+/// The O(N log M + M) distribute for a non-null fk. The preload query
+/// returned the children `ORDER BY fk`, so each parent's children are
+/// one contiguous run, found by two binary searches in the runtime's
+/// integer-only `ActiveRecord.lower_bound`:
+///
+///   fks = loaded.map { |r| r.<fk> }
+///   parent_results.each do |a|
+///     group = []                          # Array<Target>
+///     j = ActiveRecord.lower_bound(fks, a.id)
+///     stop = ActiveRecord.lower_bound(fks, a.id + 1)
+///     while j < stop
+///       group << loaded[j]
+///       j = j + 1
+///     end
+///     a._preload_<assoc>(group)
+///   end
+///
+/// The parents are still walked with `each`, as the nested scan walked
+/// them: on a target whose models are values (Rust) that is the
+/// in-place iteration, where indexing `parent_results[i]` would hand
+/// the setter a copy. Each iteration owns its locals -- a counter
+/// carried across iterations is a captured variable the block mutates,
+/// which TypeScript re-declares inside the closure. Nodes are typed
+/// here so the strict targets render the index by type
+/// (`loaded[j as usize]`); the re-typer keeps them, given the
+/// `lower_bound` signature in `insert_framework_stubs`.
+fn push_planned_distribute(
+    out: &mut Vec<Expr>,
+    directive: &PreloadDirective,
+    parent_results: &Symbol,
+    loaded: &Symbol,
+) {
+    use crate::lower::typing::with_ty;
+    let assoc = directive.name.as_str();
+    let fks = Symbol::from(format!("__{}_fks", assoc));
+    let j = Symbol::from(format!("__{}_j", assoc));
+    let stop = Symbol::from(format!("__{}_stop", assoc));
+    let group = Symbol::from(format!("__{}_group", assoc));
+
+    let int_array = || Ty::Array { elem: Box::new(Ty::Int) };
+    let target_ty = || Ty::Class { id: directive.target_class.clone(), args: vec![] };
+    let target_array = || Ty::Array { elem: Box::new(target_ty()) };
+    let int_var = |name: &Symbol| with_ty(var_ref(name), Ty::Int);
+    let typed_send = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
+        with_ty(send_to(recv, method, args, false), ty)
+    };
+
+    // fks = loaded.map { |r| r.<fk> }
+    let r = with_ty(var_ref(&Symbol::from("r")), target_ty());
+    let fk_block = block1("r", typed_send(r, directive.foreign_key.as_str(), vec![], Ty::Int));
+    out.push(assign_var(
+        &fks,
+        with_ty(send_block(with_ty(var_ref(loaded), target_array()), "map", fk_block), int_array()),
+    ));
+
+    let parent_id = || typed_send(var_ref(&Symbol::from("a")), "id", vec![], Ty::Int);
+    let lower_bound = |value: Expr| {
+        with_ty(
+            db_call(
+                &ClassId(Symbol::from("ActiveRecord")),
+                "lower_bound",
+                vec![with_ty(var_ref(&fks), int_array()), value],
+            ),
+            Ty::Int,
+        )
+    };
+    let group_init = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+        ),
+        target_array(),
+    );
+    let walk = Expr::new(
+        Span::synthetic(),
+        ExprNode::While {
+            cond: typed_send(int_var(&j), "<", vec![int_var(&stop)], Ty::Bool),
+            body: seq(vec![
+                send_to(
+                    with_ty(var_ref(&group), target_array()),
+                    "<<",
+                    vec![typed_send(
+                        with_ty(var_ref(loaded), target_array()),
+                        "[]",
+                        vec![int_var(&j)],
+                        target_ty(),
+                    )],
+                    false,
+                ),
+                assign_var(&j, typed_send(int_var(&j), "+", vec![lit_int(1)], Ty::Int)),
+            ]),
+            until_form: false,
+        },
+    );
+    let setter = format!("_preload_{}", assoc);
+    let each_block = block1(
+        "a",
+        seq(vec![
+            assign_var(&group, group_init),
+            assign_var(&j, lower_bound(parent_id())),
+            assign_var(
+                &stop,
+                lower_bound(typed_send(parent_id(), "+", vec![lit_int(1)], Ty::Int)),
+            ),
+            walk,
             send_to(var_ref(&Symbol::from("a")), &setter, vec![var_ref(&group)], true),
         ]),
     );

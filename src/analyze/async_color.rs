@@ -634,6 +634,18 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
                         || walk_expr(&a.body, pred)
                 })
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            walk_expr(scrutinee, pred)
+                || arms.iter().any(|a| {
+                    walk_match_pattern(&a.pattern, pred)
+                        || a.guard.as_ref().map_or(false, |(_, g)| walk_expr(g, pred))
+                        || walk_expr(&a.body, pred)
+                })
+                || else_body.as_ref().map_or(false, |e| walk_expr(e, pred))
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            walk_expr(value, pred) || walk_match_pattern(pattern, pred)
+        }
         ExprNode::Seq { exprs } => exprs.iter().any(|e| walk_expr(e, pred)),
         ExprNode::Assign { target, value } => walk_lvalue(target, pred) || walk_expr(value, pred),
         ExprNode::OpAssign { target, value, .. } => {
@@ -685,6 +697,18 @@ fn walk_lvalue<F: FnMut(&Expr) -> bool>(lv: &LValue, pred: &mut F) -> bool {
 // need a walker. Guards and arm bodies are Exprs, walked above.
 #[allow(dead_code)]
 fn _pattern_marker(_p: &Pattern) {}
+
+/// `MatchPattern`'s Expr children: a `Value`'s test expression, or an
+/// `Array`/`Find`/`Hash` pattern's narrowing `constant`. Unlike
+/// `case/when`'s `Pattern`, `MatchPattern` genuinely can hide a call
+/// worth async-coloring (`in ^(fetch_expected)`, `in KnownClass(id:)`),
+/// so this walker recurses for real rather than short-circuiting on
+/// "bound-name only" like `_pattern_marker` does above.
+fn walk_match_pattern<F: FnMut(&Expr) -> bool>(p: &crate::expr::MatchPattern, pred: &mut F) -> bool {
+    let mut found = false;
+    p.for_each_expr(&mut |expr| { found = found || walk_expr(expr, pred); });
+    found
+}
 
 #[cfg(test)]
 mod tests {

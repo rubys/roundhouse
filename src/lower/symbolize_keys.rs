@@ -109,6 +109,33 @@ fn rewrite(expr: &mut Expr) {
                 _ => None,
             }
         }
+        // A scalar `Hash#to_query` is `ViewHelpers.to_query`. Nested
+        // values stay on the ruby-family reopen, which sorts and
+        // brackets them.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "to_query" && args.is_empty() && scalar_hash(r.ty.as_ref()) =>
+        {
+            let mut call = Expr::new(
+                expr.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        expr.span,
+                        ExprNode::Const {
+                            path: vec![
+                                crate::ident::Symbol::from("ActionView"),
+                                crate::ident::Symbol::from("ViewHelpers"),
+                            ],
+                        },
+                    )),
+                    method: crate::ident::Symbol::from("to_query"),
+                    args: vec![r.clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = Some(Ty::Str);
+            Some(call)
+        }
         _ => None,
     };
     if let Some(r) = replacement {
@@ -116,9 +143,28 @@ fn rewrite(expr: &mut Expr) {
     }
 }
 
+fn scalar_hash(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Hash { value, .. }) => is_scalar(value),
+        Some(Ty::Union { variants }) => {
+            let hashes: Vec<&Ty> = variants.iter().filter(|v| matches!(v, Ty::Hash { .. })).collect();
+            hashes.len() == 1
+                && scalar_hash(hashes.first().copied())
+                && variants.iter().all(|v| matches!(v, Ty::Hash { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
+}
+
 fn is_scalar(ty: &Ty) -> bool {
     match ty {
         Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Time => true,
+        // An empty literal is an open variable, not a nested hash. The
+        // ruby emit has no `Hash#to_query` of its own, so leaving that
+        // call ungrounded is a missing method. A value typed `Untyped`
+        // can still be a Hash or an Array, and that stays on the
+        // dynamic path.
+        Ty::Var { .. } => true,
         Ty::Union { variants } => variants.iter().all(is_scalar),
         _ => false,
     }

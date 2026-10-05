@@ -139,8 +139,85 @@ pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = super::forwarding::apply(app);
     let sigs = collect_signatures(app);
     super::for_each_hook_body(app, &mut |body| rewrite(body, &sigs, &mut diags));
+    apply_to_self_sends(app, &sigs, &mut diags);
     apply_to_test_modules(app, &mut diags);
     diags
+}
+
+/// Re-apply the `**h` → `KeywordSplat` restore after a later pass has
+/// projected splats to positional hashes. `helper_kwargs` calls
+/// `forwarding::apply`, which strips `**` so explicit-keyword expansion
+/// can fire; a callee that IS `**rest` then needs the marker back.
+pub(crate) fn restore_kwrest_in_test_helpers(app: &mut App) {
+    let sigs = collect_signatures(app);
+    apply_to_self_sends(app, &sigs, &mut Vec::new());
+    apply_to_test_modules(app, &mut Vec::new());
+}
+
+/// The receiverless half for models and library classes: `render_code(
+/// size: 2, **opts)` inside the class that defines `render_code`, or
+/// inside a concern it includes. The body typer leaves these sends
+/// `recv: None`, so the receiver-typed walk above never sees them.
+/// Each class's view is its own instance methods, its ancestors', and
+/// every module it includes, transitively. Only instance method bodies
+/// are rewritten: a receiverless call in a `def self.` reaches the
+/// class side, which the view does not hold.
+fn apply_to_self_sends(app: &mut App, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
+    let mut includes: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+    for lc in &app.library_classes {
+        includes.insert(lc.name.clone(), lc.includes.clone());
+    }
+    for model in &app.models {
+        includes.insert(model.name.clone(), crate::analyze::model_includes(model));
+    }
+    let view_of = |id: &ClassId| -> HashMap<Symbol, Vec<Param>> {
+        let mut out: HashMap<Symbol, Vec<Param>> = HashMap::new();
+        let mut queue: Vec<ClassId> = vec![id.clone()];
+        let mut seen: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
+        while let Some(cid) = queue.pop() {
+            if !seen.insert(cid.clone()) {
+                continue;
+            }
+            for ((owner, name), params) in &sigs.methods {
+                if *owner == cid {
+                    // Nearest definition wins: the class itself is
+                    // visited first, then what it reaches.
+                    out.entry(name.clone()).or_insert_with(|| params.clone());
+                }
+            }
+            if let Some(parent) = sigs.parents.get(&cid) {
+                queue.push(parent.clone());
+            }
+            if let Some(incs) = includes.get(&cid) {
+                queue.extend(incs.iter().cloned());
+            }
+        }
+        out
+    };
+    for lc in &mut app.library_classes {
+        let view = view_of(&lc.name);
+        if view.is_empty() {
+            continue;
+        }
+        for m in &mut lc.methods {
+            if matches!(m.receiver, MethodReceiver::Instance) {
+                rewrite_self_sends(&mut m.body, &view, diags);
+            }
+        }
+    }
+    for model in &mut app.models {
+        let view = view_of(&model.name);
+        if view.is_empty() {
+            continue;
+        }
+        for item in &mut model.body {
+            if let ModelBodyItem::Method { method, .. } = item {
+                if matches!(method.receiver, MethodReceiver::Instance) {
+                    rewrite_self_sends(&mut method.body, &view, diags);
+                }
+            }
+        }
+    }
 }
 
 /// The test-class half: a receiverless call in a test body, `setup` or
@@ -178,17 +255,24 @@ fn rewrite_self_sends(expr: &mut Expr, helpers: &HashMap<Symbol, Vec<Param>>, di
     expr.node
         .for_each_child_mut(&mut |child| rewrite_self_sends(child, helpers, diags));
     let splat = {
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
             return;
         };
+        if !is_self_send(recv.as_ref()) {
+            return;
+        }
         let Some(params) = helpers.get(method) else { return };
-        let Some(splat) = erased_splat_against(args, params) else { return };
-        splat
+        erased_splat_against(args, params)
     };
-    let ExprNode::Send { args, .. } = &mut *expr.node else {
+    let ExprNode::Send { method, args, .. } = &mut *expr.node else {
         unreachable!("matched a Send above")
     };
-    expand(args, splat, diags);
+    if let Some(splat) = splat {
+        expand(args, splat, diags);
+        return;
+    }
+    let Some(params) = helpers.get(method) else { return };
+    restore_kwrest_splat(args, params);
 }
 
 /// Every instance method an app class declares. Class-side methods are
@@ -237,13 +321,82 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
     expr.node
         .for_each_child_mut(&mut |child| rewrite(child, sigs, diags));
 
-    let Some(splat) = erased_splat(expr, sigs) else {
+    if let Some(splat) = erased_splat(expr, sigs) {
+        let ExprNode::Send { args, .. } = &mut *expr.node else {
+            unreachable!("erased_splat matched a Send")
+        };
+        expand(args, splat, diags);
+        return;
+    }
+    restore_kwrest_on_typed_send(expr, sigs);
+}
+
+fn is_self_send(recv: Option<&Expr>) -> bool {
+    match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    }
+}
+
+fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
         return;
     };
-    let ExprNode::Send { args, .. } = &mut *expr.node else {
-        unreachable!("erased_splat matched a Send")
+    let Some(params) = recv.ty.as_ref().and_then(|ty| callee_params(ty, method, sigs)) else {
+        return;
     };
-    expand(args, splat, diags);
+    let params = params.clone();
+    let ExprNode::Send { args, .. } = &mut *expr.node else { return };
+    restore_kwrest_splat(args, &params);
+}
+
+/// `f(**h)` into `def f(**rest)` survived ingest as a positional `h`.
+/// Ruby 3 will not auto-convert that Hash, so the call is
+/// `wrong number of arguments (given 1, expected 0)` — campfire's
+/// `embeds_from(**details)` → `attachments_for(details)` against
+/// `def attachments_for(**details)`. Restore the splat; the ruby
+/// emitter already prints `**h` for `KeywordSplat`.
+fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
+    if args
+        .iter()
+        .any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. }))
+        || params.iter().any(|p| p.forwarding)
+    {
+        return;
+    }
+    // `def f(*items, **opts); f(payload)` is a valid positional call:
+    // `*items` absorbs the Hash. The same count as `f(**payload)` into
+    // a bare `**opts`, so a rewrite here would move the argument from
+    // `items` onto `opts`. Leave the call when that distinction is
+    // unavailable.
+    if params.iter().any(|p| p.rest && !p.keyword && !p.from_kwrest) {
+        return;
+    }
+    let positional = params
+        .iter()
+        .filter(|p| !p.keyword && !p.rest && !p.from_kwrest)
+        .count();
+    let Some(last) = params.last() else { return };
+    // Ingest keeps `**rest` as a keyword-rest when the def already has
+    // a rest/required-keyword or the body forwards `**name`. Otherwise
+    // it flattens to a trailing positional marked `from_kwrest`, and
+    // emit prints `name = {}`. Restoring `**h` against that def is
+    // unexpected keywords. Only the kept `**name` slot needs the splat.
+    if !(last.keyword && last.rest) {
+        return;
+    }
+    if args.len() != positional + 1 {
+        return;
+    }
+    let Some(hash) = args.last() else { return };
+    if !is_pure_read(hash) {
+        return;
+    }
+    let hash = args.pop().expect("checked above");
+    args.push(Expr::new(
+        hash.span,
+        ExprNode::KeywordSplat { value: hash },
+    ));
 }
 
 /// Replace the trailing positional bundle in `args` with the keyword
@@ -258,7 +411,7 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
         ));
         return;
     }
-    let Some((read, literal)) = splat_shape(hash) else {
+    let Some((read, literal, bundle_wins)) = splat_shape(hash) else {
         diags.push(residue(
             hash,
             "the splatted expression is not a local, ivar or constant read",
@@ -266,6 +419,17 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
         return;
     };
     let (read, literal): (Expr, Vec<(Expr, Expr)>) = (read.clone(), literal.to_vec());
+    // `f(k: compute(), **h)` evaluates `compute()` even when `h` has
+    // `:k`. `h.fetch(:k, compute())` does not. Leave that call as the
+    // positional merge; a literal value is the only default fetch can
+    // hold without changing evaluation.
+    if bundle_wins && literal.iter().any(|(_, v)| !is_literal(v) && !is_pure_read(v)) {
+        diags.push(residue(
+            hash,
+            "a keyword value beside a later splat is not a literal, so fetch would skip it",
+        ));
+        return;
+    }
 
     let hash = args.pop().expect("checked above");
     let value_ty = match &read.ty {
@@ -274,7 +438,10 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
     };
     // A keyword the literal names takes the literal's value — evaluated
     // once, as Ruby's `**` would; the rest are read off the bundle, an
-    // optional one with its declared default in hand.
+    // optional one with its declared default in hand. When the bundle
+    // was splatted AFTER the literal (`f(size: 2, **opts)`), Ruby lets
+    // the bundle's key win, so the literal is the default the bundle is
+    // read against.
     let entries = splat
         .keywords
         .iter()
@@ -282,7 +449,13 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
             let value = literal
                 .iter()
                 .find(|(k, _)| sym_of(k).is_some_and(|k| k == kw))
-                .map(|(_, v)| v.clone())
+                .map(|(_, v)| {
+                    if bundle_wins {
+                        fetch(&read, kw, v, value_ty.clone())
+                    } else {
+                        v.clone()
+                    }
+                })
                 .unwrap_or_else(|| match default {
                     Some(default) => fetch(&read, kw, default, value_ty.clone()),
                     None => index(&read, kw, value_ty.clone()),
@@ -303,24 +476,33 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
 /// merge chain the ingest desugar made of it, `h.merge({ k: v })`, and
 /// is just as expandable: every key of the literal is a Symbol the
 /// caller wrote, so the keyword it names takes that value and only the
-/// keywords it does NOT name are indexed off `h`. A key that is not a
-/// Symbol literal, or a merge whose argument is not a literal, is a
-/// bundle this pass cannot read, and declines.
-fn splat_shape(expr: &Expr) -> Option<(&Expr, &[(Expr, Expr)])> {
+/// keywords it does NOT name are indexed off `h`. `f(k: v, **h)` is
+/// the mirror, `{ k: v }.merge(h)`, where the bundle's key wins over
+/// the literal's; the third value says which order it was. A key that
+/// is not a Symbol literal, or a merge whose other side is not a
+/// literal, is a bundle this pass cannot read, and declines.
+fn splat_shape(expr: &Expr) -> Option<(&Expr, &[(Expr, Expr)], bool)> {
     if is_pure_read(expr) {
-        return Some((expr, &[]));
+        return Some((expr, &[], false));
     }
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return None;
     };
-    if method.as_str() != "merge" || args.len() != 1 || !is_pure_read(recv) {
+    if method.as_str() != "merge" || args.len() != 1 {
         return None;
     }
-    let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+    let (read, literal, bundle_wins) = if is_pure_read(recv) {
+        (recv, &args[0], false)
+    } else if is_pure_read(&args[0]) {
+        (&args[0], recv, true)
+    } else {
+        return None;
+    };
+    let ExprNode::Hash { entries, .. } = &*literal.node else { return None };
     if !entries.iter().all(|(k, _)| sym_of(k).is_some()) {
         return None;
     }
-    Some((recv, entries.as_slice()))
+    Some((read, entries.as_slice(), bundle_wins))
 }
 
 fn sym_of(key: &Expr) -> Option<&Symbol> {
@@ -462,6 +644,20 @@ fn index(hash: &Expr, key: &Symbol, value_ty: Ty) -> Expr {
 /// the read of an OPTIONAL keyword, with the callee's default standing
 /// in for an absent key as Ruby's `**` would have it.
 fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
+    // `diagnose` treats an untyped send on a known receiver as
+    // "no known method". The hash value is often untyped; the
+    // default is the shape this read answers, the same rule
+    // `hash_method` uses for a closed default.
+    let ty = match default.ty.as_ref() {
+        Some(default_ty) if !default_ty.is_open() && matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+            default_ty.clone()
+        }
+        Some(default_ty) if !default_ty.is_open() => crate::analyze::union_of(value_ty, default_ty.clone()),
+        _ if matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+            default.ty.clone().unwrap_or(value_ty)
+        }
+        _ => value_ty,
+    };
     let mut e = Expr::new(
         hash.span,
         ExprNode::Send {
@@ -474,7 +670,7 @@ fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
             parenthesized: true,
         },
     );
-    e.ty = Some(value_ty);
+    e.ty = Some(ty);
     e
 }
 

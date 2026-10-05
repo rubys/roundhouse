@@ -21,7 +21,7 @@ fn lower(source: &str) -> (String, usize) {
     for lc in classes {
         app.library_classes.push(lc);
     }
-    let diags = apply_tag_builder_lowering(&mut app);
+    let diags = apply_tag_builder_lowering(&mut app, &Default::default());
     let out = roundhouse::emit::ruby::emit_library(&app)
         .into_iter()
         .filter(|f| f.path.extension().is_some_and(|e| e == "rb"))

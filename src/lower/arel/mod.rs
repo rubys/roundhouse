@@ -101,6 +101,13 @@ const RELATION_REFINERS: &[&str] = &[
     "select", "where!", "order!", "reorder", "rewhere",
 ];
 
+/// A finder terminates a relation but still needs that relation as its
+/// receiver. If the whole call cannot lift, hydrating only its receiver
+/// would strand `find_by`/`find_by!` on an Array, just as for a refiner.
+fn requires_relation_receiver(method: &str) -> bool {
+    RELATION_REFINERS.contains(&method) || matches!(method, "find_by" | "find_by!")
+}
+
 /// Method names whose RESULT this class then refines with a relation
 /// method — `users_scope.active`, where `users_scope` is a method on
 /// the same class.
@@ -129,7 +136,7 @@ pub fn relation_refined_method_names(
     out: &mut std::collections::HashSet<crate::ident::Symbol>,
 ) {
     if let ExprNode::Send { recv: Some(r), method, .. } = body.node.as_ref() {
-        if RELATION_REFINERS.contains(&method.as_str()) || scopes.contains(method) {
+        if requires_relation_receiver(method.as_str()) || scopes.contains(method) {
             if let Some(name) = self_call_name(r) {
                 out.insert(name);
             }
@@ -160,7 +167,7 @@ fn collect_relation_refined_names(
     out: &mut std::collections::HashSet<crate::ident::Symbol>,
 ) {
     if let ExprNode::Send { recv: Some(r), method, .. } = expr.node.as_ref() {
-        if RELATION_REFINERS.contains(&method.as_str()) {
+        if requires_relation_receiver(method.as_str()) {
             match r.node.as_ref() {
                 ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
                     out.insert(name.clone());
@@ -204,12 +211,13 @@ fn rewrite_arel_inner(
         }
     }
     // Inline sibling of the refined-names guard above: this Send is a
-    // relation refiner whose chain did NOT lift (a lifted chain was
+    // relation consumer whose chain did NOT lift (a lifted chain was
     // replaced wholesale and returned before reaching here — string
     // `order("tag asc")`, a chained `.where`, `references(...)`, …).
     // Recursing into its receiver would materialize the liftable base
     // underneath (`Category.all`, the has_many FK query) and strand the
-    // refiner on a hydrated Array — `results.order("tag asc")`,
+    // consumer on a hydrated Array — `results.order("tag asc")` or
+    // `results.find_by(id: value)`,
     // NoMethodError on every lane and a hard compile stop under AOT.
     // Leave the whole chain to the runtime Relation (the scope-chain
     // normalizer re-roots surviving `Const`-headed chains onto
@@ -217,12 +225,12 @@ fn rewrite_arel_inner(
     // and blocks are ordinary value positions and still rewrite. A
     // refiner WITH a block (`.select { … }`) is an Enumerable call on
     // materialized rows, not a chain link — the claim stays.
-    let unlifted_refiner = matches!(
+    let unlifted_relation_consumer = matches!(
         expr.node.as_ref(),
         ExprNode::Send { recv: Some(_), block: None, method, .. }
-            if RELATION_REFINERS.contains(&method.as_str())
+            if requires_relation_receiver(method.as_str())
     );
-    if unlifted_refiner {
+    if unlifted_relation_consumer {
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else {
             unreachable!("matched Send with recv above");
         };
@@ -459,6 +467,23 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
                 }
                 f(&mut arm.body);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            f(scrutinee);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(f);
+                if let Some((_, g)) = &mut arm.guard {
+                    f(g);
+                }
+                f(&mut arm.body);
+            }
+            if let Some(e) = else_body {
+                f(e);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            f(value);
+            pattern.for_each_expr_mut(f);
         }
         ExprNode::Seq { exprs } => {
             for e in exprs {

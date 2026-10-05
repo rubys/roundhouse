@@ -3,7 +3,7 @@
 # Surface:
 #   - Frame.new(fin, opcode, payload)             build for emit
 #   - frame.encode_unmasked -> String             server-side emit bytes
-#   - Frame.parse_from_buf(bytes_at, bytes_len)   parse a recv'd frame
+#   - Frame.parse_from_buf(s, start, avail, max_payload)  parse a recv'd frame
 #       returns a ParseResult (frame + bytes_consumed, OR an error code).
 #
 # Server-side emit: never masks (RFC 6455 §5.3 -- server MUST NOT
@@ -18,6 +18,9 @@
 #   - client frame not masked
 #   - control frame payload > 125
 #   - control frame fragmented
+#
+# and a 1009 close for a frame whose advertised payload exceeds
+# `max_payload` (the caller's `Driver#max_frame_size`).
 module Tep
   module WebSocket
     class Frame
@@ -81,11 +84,14 @@ module Tep
       # value at an index regardless of embedded NULs) — so the 16-bit
       # length high byte (0x00 for payloads 126..255) parses correctly.
       #
+      # `max_payload` is the largest payload this connection will accept —
+      # `Driver#max_frame_size`, which the recv loop passes in.
+      #
       # Returns a ParseResult with one of three shapes:
       #   .outcome == "ok"     -> .frame populated + .consumed bytes used
       #   .outcome == "need"   -> need more bytes (consumed == 0)
       #   .outcome == "close"  -> protocol violation; close with .close_code
-      def self.parse_from_buf(s, start, avail)
+      def self.parse_from_buf(s, start, avail, max_payload)
         out = Tep::WebSocket::ParseResult.new
         if avail - start < 2
           out.outcome = "need"
@@ -149,6 +155,17 @@ module Tep
             out.outcome = "need"
             return out
           end
+          # RFC 6455 §5.2: the most significant bit MUST be 0. Checked
+          # before accumulating, because spinel's Integer is a fixed int64:
+          # a set top bit overflows the loop's final `<<` — a raise inside
+          # the recv loop, or on a wrapping build a negative length that
+          # slips under the size guard below. Clear, the 8 bytes stay
+          # under 2^63 and the loop cannot overflow.
+          if s.getbyte(pos) >= 0x80
+            out.outcome = "close"
+            out.close_code = Tep::WebSocket::CLOSE_PROTOCOL_ERROR
+            return out
+          end
           plen = 0
           i = 0
           while i < 8
@@ -156,6 +173,26 @@ module Tep
             i += 1
           end
           pos += 8
+        end
+
+        # Oversize guard — 1009. This MUST come before the "need more
+        # bytes" return below, and that ordering is the whole point of
+        # it: `Connection#run` answers "need" by appending the next recv
+        # to its accumulator and parsing again, so a frame we intend to
+        # refuse must be refused from the LENGTH FIELD ALONE. Answering
+        # "need" until the payload arrived would buffer every byte of
+        # the payload the cap exists to reject — a 14-byte header
+        # claiming a 64-bit length grew that accumulator until the
+        # worker died, which is the OOM `DEFAULT_MAX_FRAME`'s comment
+        # says it prevents. The cap was defined and settable but never
+        # read; pinned by tests/spinel_websocket_frame_cap.rb.
+        #
+        # Control frames are already bounded at 125 above, and that
+        # check runs first, so an oversized ping stays the 1002 it was.
+        if plen > max_payload
+          out.outcome = "close"
+          out.close_code = Tep::WebSocket::CLOSE_MESSAGE_TOO_BIG
+          return out
         end
 
         # 4-byte mask key.

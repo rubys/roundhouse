@@ -89,6 +89,23 @@ fn formatted_count_labels() {
 "#,
     )
     .unwrap();
+    // `i += 1` loop counters in transpiled runtime bodies: the rust
+    // emitter used to drop the `+=` statement, so `enum_label` spun
+    // forever on any value past the first label. A hang here is the
+    // regression.
+    std::fs::write(
+        scratch.join("tests/op_assign_counter.rs"),
+        r#"
+use app::active_record_base::ActiveRecord;
+#[test]
+fn enum_label_walks_past_the_first_label() {
+    let labels = vec!["draft".to_string(), "published".to_string(), "archived".to_string()];
+    assert_eq!(ActiveRecord::enum_label(2, labels.clone(), vec![0, 1, 2]), Some("archived".to_string()));
+    assert_eq!(ActiveRecord::enum_label(7, labels, vec![0, 1, 2]), None);
+}
+"#,
+    )
+    .unwrap();
 
     let output = Command::new("cargo")
         .arg("test")

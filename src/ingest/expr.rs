@@ -1936,6 +1936,62 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             ExprNode::Case { scrutinee, arms }
         }
+        n if n.as_case_match_node().is_some() => {
+            // `case scrutinee; in pat [guard]; body; ... [else …] end`
+            // — Ruby 3's structural pattern matching. Each `InNode`
+            // contributes one `MatchArm`; `else` becomes `else_body`
+            // (not a synthetic wildcard arm — `CaseMatch` has real
+            // NoMatchingPatternError semantics when it's absent, so it
+            // needs to stay absent through the IR, not get folded into
+            // an arm the way `case/when`'s `else` does).
+            let case = n.as_case_match_node().unwrap();
+            let scrutinee = match case.predicate() {
+                Some(p) => ingest_expr(&p, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "case/in with no scrutinee (predicate-less case)".to_string(),
+                    });
+                }
+            };
+            let mut arms: Vec<crate::expr::MatchArm> = Vec::new();
+            for cond in case.conditions().iter() {
+                let in_node = cond.as_in_node().ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("unsupported case/in condition (expected in): {cond:?}"),
+                })?;
+                let body = match in_node.statements() {
+                    Some(s) => ingest_expr(&s.as_node(), file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                };
+                let (pattern, guard) = ingest_pattern_with_guard(&in_node.pattern(), file)?;
+                arms.push(crate::expr::MatchArm { pattern, guard, body });
+            }
+            let else_body = match case.else_clause() {
+                Some(else_clause) => Some(match else_clause.statements() {
+                    Some(s) => ingest_expr(&s.as_node(), file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                }),
+                None => None,
+            };
+            ExprNode::CaseMatch { scrutinee, arms, else_body }
+        }
+        // `value in pattern` — one-line pattern predicate, `true`/
+        // `false`, never raises.
+        n if n.as_match_predicate_node().is_some() => {
+            let m = n.as_match_predicate_node().unwrap();
+            let value = ingest_expr(&m.value(), file)?;
+            let pattern = ingest_pattern(&m.pattern(), file)?;
+            ExprNode::MatchPredicate { value, pattern }
+        }
+        // `value => pattern` — one-line pattern assertion: binds on
+        // match, raises `NoMatchingPatternError` otherwise.
+        n if n.as_match_required_node().is_some() => {
+            let m = n.as_match_required_node().unwrap();
+            let value = ingest_expr(&m.value(), file)?;
+            let pattern = ingest_pattern(&m.pattern(), file)?;
+            ExprNode::MatchRequired { value, pattern }
+        }
         // Ruby 3.1 hash/keyword value omission (`{short_id:}`,
         // `find_by!(short_id:)`) — prism wraps the implied value
         // (a local read or same-named method call, resolved at parse
@@ -2007,6 +2063,270 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
     };
     Ok(Expr::new(span, expr_node))
+}
+
+/// Ingest a `case/in` arm's pattern, unwrapping a guard first when the
+/// source wrote one. Prism has no dedicated guard field on `InNode` —
+/// `in pat if cond` / `in pat unless cond` are represented by wrapping
+/// the REAL pattern node inside an `IfNode`/`UnlessNode` whose
+/// `predicate` is the guard condition and whose single-statement
+/// `statements` holds the pattern. `MatchPredicateNode`/
+/// `MatchRequiredNode` never carry a guard, so they call
+/// [`ingest_pattern`] directly instead of this wrapper.
+fn ingest_pattern_with_guard(
+    node: &Node<'_>,
+    file: &str,
+) -> IngestResult<(crate::expr::MatchPattern, Option<(crate::expr::MatchGuardKind, Expr)>)> {
+    use crate::expr::MatchGuardKind;
+    fn unwrap_guarded_pattern<'pr>(
+        stmts: Option<ruby_prism::StatementsNode<'pr>>,
+        file: &str,
+    ) -> IngestResult<Node<'pr>> {
+        stmts
+            .and_then(|s| s.body().iter().next())
+            .ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "case/in guard wraps no pattern statement".to_string(),
+            })
+    }
+    if let Some(if_node) = node.as_if_node() {
+        let guard_expr = ingest_expr(&if_node.predicate(), file)?;
+        let inner = unwrap_guarded_pattern(if_node.statements(), file)?;
+        let pattern = ingest_pattern(&inner, file)?;
+        return Ok((pattern, Some((MatchGuardKind::If, guard_expr))));
+    }
+    if let Some(unless_node) = node.as_unless_node() {
+        let guard_expr = ingest_expr(&unless_node.predicate(), file)?;
+        let inner = unwrap_guarded_pattern(unless_node.statements(), file)?;
+        let pattern = ingest_pattern(&inner, file)?;
+        return Ok((pattern, Some((MatchGuardKind::Unless, guard_expr))));
+    }
+    Ok((ingest_pattern(node, file)?, None))
+}
+
+/// Ingest one `case/in` pattern node — the guard-unwrapped `InNode`
+/// pattern, a nested sub-pattern inside `Array`/`Find`/`Hash`, or
+/// `MatchPredicateNode`/`MatchRequiredNode`'s bare `pattern`. Every
+/// Prism pattern node kind Ruby 3's grammar can produce is handled
+/// explicitly; anything left over falls through to plain
+/// [`ingest_expr`] and becomes a `Value` — safe because Ruby's pattern
+/// grammar already rejects an arbitrary expression here unless pinned
+/// (handled below), so whatever reaches the fallback is a literal,
+/// range, regex, or bare constant/class reference, exactly what
+/// `case/when`'s own `Pattern::Expr` escape hatch ingests the same way.
+/// A node `ingest_expr` itself doesn't know either surfaces as ITS OWN
+/// specifically-named `IngestError::Unsupported`, never a generic
+/// pattern-shaped one from here.
+fn ingest_pattern(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::MatchPattern> {
+    use crate::expr::MatchPattern;
+
+    if let Some(p) = node.as_parentheses_node() {
+        let inner = p.body().ok_or_else(|| IngestError::Unsupported {
+            file: file.into(), message: "empty parenthesized pattern".into(),
+        })?;
+        return ingest_pattern(&inner, file);
+    }
+    if node.as_nil_node().is_some() {
+        return Ok(MatchPattern::Nil);
+    }
+    // Bare bind: `in name`. Ruby's pattern grammar never treats a
+    // plain identifier as a value test — that's what `^` is for — so
+    // this is unconditionally a Bind, never a Value.
+    if let Some(lvt) = node.as_local_variable_target_node() {
+        return Ok(MatchPattern::Bind { name: Symbol::from(constant_id_str(&lvt.name())) });
+    }
+    // `in ^name` (also covers `^@name`/`^$name`/`^@@name` — whichever
+    // of those `ingest_expr` resolves; only local/instance reads are
+    // modeled today, so a pinned global/class-var surfaces as ITS OWN
+    // unsupported-expression error from that call, not a pattern one).
+    if let Some(p) = node.as_pinned_variable_node() {
+        let expr = ingest_expr(&p.variable(), file)?;
+        return Ok(MatchPattern::Value { expr });
+    }
+    // `in ^(expr)`.
+    if let Some(p) = node.as_pinned_expression_node() {
+        let expr = ingest_expr(&p.expression(), file)?;
+        return Ok(MatchPattern::Value { expr });
+    }
+    // `in p1 | p2 | ... | pn` — Prism's left-associative binary tree
+    // flattens into one `Vec`; only `_`-prefixed bindings are legal.
+    if node.as_alternation_pattern_node().is_some() {
+        let mut alternatives = Vec::new();
+        flatten_alternation(node, file, &mut alternatives)?;
+        return Ok(MatchPattern::Alt { alternatives });
+    }
+    // `in pattern => name`.
+    if let Some(cap) = node.as_capture_pattern_node() {
+        let pattern = Box::new(ingest_pattern(&cap.value(), file)?);
+        let name = Symbol::from(constant_id_str(&cap.target().name()));
+        return Ok(MatchPattern::Capture { pattern, name });
+    }
+    // `in [a, b, *rest, c]` / `in Success(page)` / `in Success[a, b]`.
+    if let Some(arr) = node.as_array_pattern_node() {
+        return ingest_array_pattern(&arr, file);
+    }
+    // `in [*, x, y, *post]`.
+    if let Some(find) = node.as_find_pattern_node() {
+        return ingest_find_pattern(&find, file);
+    }
+    // `in {status: "ok", data:, **rest}` / `in Success(value:)`.
+    if let Some(h) = node.as_hash_pattern_node() {
+        return ingest_hash_pattern(&h, file);
+    }
+    let expr = ingest_expr(node, file)?;
+    Ok(MatchPattern::Value { expr })
+}
+
+/// Flatten Prism's left-associative `AlternationPatternNode` binary
+/// tree (`(a | b) | c` for source `a | b | c`) into one flat `Vec` in
+/// source order.
+fn flatten_alternation(
+    node: &Node<'_>,
+    file: &str,
+    out: &mut Vec<crate::expr::MatchPattern>,
+) -> IngestResult<()> {
+    if let Some(alt) = node.as_alternation_pattern_node() {
+        flatten_alternation(&alt.left(), file, out)?;
+        flatten_alternation(&alt.right(), file, out)?;
+    } else {
+        out.push(ingest_pattern(node, file)?);
+    }
+    Ok(())
+}
+
+/// Ingest an array pattern's `*`/`*name` rest marker — a `SplatNode`
+/// (name-optional: `Some` for `*rest`, `None` for a bare `*`) or an
+/// `ImplicitRestNode` (always bare, no name — the trailing-comma
+/// shape, `in [a, b,]`). Anything else is a defect in the caller: only
+/// these two node kinds ever appear in a pattern's rest position.
+fn splat_name(node: &Node<'_>, file: &str) -> IngestResult<Option<Symbol>> {
+    if let Some(s) = node.as_splat_node() {
+        return match s.expression() {
+            None => Ok(None),
+            Some(e) => {
+                let lvt = e.as_local_variable_target_node().ok_or_else(|| {
+                    IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("unsupported splat target in pattern: {e:?}"),
+                    }
+                })?;
+                Ok(Some(Symbol::from(constant_id_str(&lvt.name()))))
+            }
+        };
+    }
+    if node.as_implicit_rest_node().is_some() {
+        return Ok(None);
+    }
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported pattern rest node: {node:?}"),
+    })
+}
+
+fn ingest_array_pattern(
+    arr: &ruby_prism::ArrayPatternNode<'_>,
+    file: &str,
+) -> IngestResult<crate::expr::MatchPattern> {
+    use crate::expr::MatchPattern;
+    let constant = match arr.constant() {
+        Some(c) => Some(ingest_expr(&c, file)?),
+        None => None,
+    };
+    let pre = arr
+        .requireds()
+        .iter()
+        .map(|n| ingest_pattern(&n, file))
+        .collect::<IngestResult<Vec<_>>>()?;
+    let post = arr
+        .posts()
+        .iter()
+        .map(|n| ingest_pattern(&n, file))
+        .collect::<IngestResult<Vec<_>>>()?;
+    let rest = match arr.rest() {
+        None => None,
+        Some(r) => Some(splat_name(&r, file)?),
+    };
+    Ok(MatchPattern::Array { constant, pre, rest, post })
+}
+
+fn ingest_find_pattern(
+    find: &ruby_prism::FindPatternNode<'_>,
+    file: &str,
+) -> IngestResult<crate::expr::MatchPattern> {
+    use crate::expr::MatchPattern;
+    let constant = match find.constant() {
+        Some(c) => Some(ingest_expr(&c, file)?),
+        None => None,
+    };
+    let pre_rest = splat_name(&find.left().as_node(), file)?;
+    let middle = find
+        .requireds()
+        .iter()
+        .map(|n| ingest_pattern(&n, file))
+        .collect::<IngestResult<Vec<_>>>()?;
+    let post_rest = splat_name(&find.right(), file)?;
+    Ok(MatchPattern::Find { constant, pre_rest, middle, post_rest })
+}
+
+fn ingest_hash_pattern(
+    h: &ruby_prism::HashPatternNode<'_>,
+    file: &str,
+) -> IngestResult<crate::expr::MatchPattern> {
+    use crate::expr::MatchPattern;
+    let constant = match h.constant() {
+        Some(c) => Some(ingest_expr(&c, file)?),
+        None => None,
+    };
+    let mut pairs = Vec::new();
+    for el in h.elements().iter() {
+        let assoc = el.as_assoc_node().ok_or_else(|| IngestError::Unsupported {
+            file: file.into(),
+            message: format!("unsupported hash pattern element: {el:?}"),
+        })?;
+        let key = symbol_value(&assoc.key()).ok_or_else(|| IngestError::Unsupported {
+            file: file.into(),
+            message: format!("unsupported hash pattern key: {:?}", assoc.key()),
+        })?;
+        let value_node = assoc.value();
+        // Ruby 3.1 keyword-value-omission shorthand (`data:`): Prism
+        // wraps the implied `LocalVariableTargetNode` in an
+        // `ImplicitNode`. That IS what `MatchPattern::Hash`'s `None`
+        // pair value means, so unwrap and discard rather than
+        // ingesting the wrapped bind as an explicit sub-pattern (which
+        // would double-bind under a redundant `Bind` node).
+        let sub = if value_node.as_implicit_node().is_some() {
+            None
+        } else {
+            Some(ingest_pattern(&value_node, file)?)
+        };
+        pairs.push((Symbol::from(key.as_str()), sub));
+    }
+    let rest = match h.rest() {
+        None => None,
+        Some(r) => Some(ingest_hash_rest(&r, file)?),
+    };
+    Ok(MatchPattern::Hash { constant, pairs, rest })
+}
+
+fn ingest_hash_rest(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::HashRest> {
+    use crate::expr::HashRest;
+    if node.as_no_keywords_parameter_node().is_some() {
+        return Ok(HashRest::Nil);
+    }
+    if let Some(splat) = node.as_assoc_splat_node() {
+        let Some(value) = splat.value() else { return Ok(HashRest::Ignore); };
+        let lvt = value.as_local_variable_target_node().ok_or_else(|| {
+            IngestError::Unsupported {
+                file: file.into(),
+                message: format!("unsupported hash pattern **rest target: {value:?}"),
+            }
+        })?;
+        return Ok(HashRest::Collect { name: Symbol::from(constant_id_str(&lvt.name())) });
+    }
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported hash pattern rest node: {node:?}"),
+    })
 }
 
 /// Map a Prism `binary_operator` symbol (`+`, `-`, `<<`, …) to the IR

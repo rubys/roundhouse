@@ -1,0 +1,4 @@
+module ActionController
+  class API < Base
+  end
+end

@@ -180,6 +180,10 @@ use crate::session::Session;
 use crate::param_value::ParamValue;
 #[allow(unused_imports)]
 use crate::db::Db;
+// `ActiveRecord::lower_bound` — the run lookup in the `includes(:assoc)` distribute the
+// Arel visitor emits into a lowered query body.
+#[allow(unused_imports)]
+use crate::active_record_base::ActiveRecord;
 #[allow(unused_imports)]
 use crate::route_helpers::{self, RouteHelpers};
 #[allow(unused_imports)]
@@ -203,6 +207,10 @@ use crate::param_value::ParamValue;
 use crate::params::{self, Params};
 #[allow(unused_imports)]
 use crate::db::Db;
+// `ActiveRecord::lower_bound` — the run lookup in the `includes(:assoc)` distribute the
+// Arel visitor emits into a lowered query body.
+#[allow(unused_imports)]
+use crate::active_record_base::ActiveRecord;
 #[allow(unused_imports)]
 use crate::broadcasts::Broadcasts;
 // The broadcast-render bracket pair around synthesized broadcast

@@ -14,19 +14,16 @@
 //! (`send_dispatch_failed: no known method `destroy_by` on
 //! Class { Push::Subscription }`).
 //!
-//! The KWARGS form is now split earlier, by `lower::destroy_by`, into
-//! the `where` + `destroy_all` / `delete_all` pair Rails defines it as —
-//! which is what makes the analyzer see it resolve, and puts the `where`
-//! where the arel pass can fold it. The Relation seed here still serves
-//! every other shape `where` accepts, so both spellings are asserted:
-//! the class root reaches a Relation either way, and never reaches
-//! nothing.
+//! The KWARGS form is split earlier, by `lower::destroy_by`, into the
+//! `where` + `destroy_all` / `delete_all` pair Rails defines it as. The
+//! whole-app gate now recognizes that class-root `where`, so scope-free
+//! apps explicitly seed it with `ActiveRecord::Relation.new(...)`. Other
+//! argument shapes retain the original terminal and receive the same
+//! explicit Relation seed.
 //!
-//! The GATE matters as much as the rewrite. `mentions_model_chain_start`
-//! decides whether a body reaches the rewriter at all, and it asked only
-//! about chain methods and `all` — so a body whose ONLY relation surface
-//! is one of these terminals was never offered to the pass that exists
-//! to fix it.
+//! Both the whole-app gate and the per-body gate use
+//! `mentions_model_chain_start`: a class-root query or write terminal
+//! must reach the rewriter even when no named scope is declared.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,21 +64,24 @@ fn emitted(action_body: &str) -> String {
         .expect("subscriptions_controller emitted")
 }
 
+/// The kwargs split retains its destroy operation on a seeded Relation.
 #[test]
 fn destroy_by_on_a_model_constant_seeds_a_relation() {
     let src = emitted("Subscription.destroy_by(endpoint: params[:endpoint])");
     assert!(
-        src.contains("Subscription.where({ endpoint:")
+        src.contains("ActiveRecord::Relation.new(Subscription).where({ endpoint:")
             && src.contains(".destroy_all"),
         "the terminal rides a seeded Relation:\n{src}"
     );
 }
 
+/// The delete variant uses the same explicit seed and its own terminal.
 #[test]
 fn delete_by_takes_the_same_seed() {
     let src = emitted("Subscription.delete_by(endpoint: params[:endpoint])");
     assert!(
-        src.contains("Subscription.where({ endpoint:") && src.contains(".delete_all"),
+        src.contains("ActiveRecord::Relation.new(Subscription).where({ endpoint:")
+            && src.contains(".delete_all"),
         "the terminal rides a seeded Relation:\n{src}"
     );
 }

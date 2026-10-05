@@ -95,6 +95,10 @@ fn rewrite(expr: &mut Expr) {
     // call is the form Rails' counter-and-`any?` body reduces to a
     // length test, and the block form counts MATCHES instead, which is
     // a different question no corpus app asks.
+    if method.as_str() == "wrap" {
+        ground_array_wrap(expr);
+        return;
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" | "to_sentence" | "sole" | "squish" => false,
@@ -190,6 +194,149 @@ fn rewrite(expr: &mut Expr) {
         }));
     }
     *parenthesized = true;
+}
+
+/// `Array.wrap(value)` → `ActiveSupport.wrap(value)`. A receiverless
+/// `wrap`, or a wrap on something other than the Array class, stays.
+fn ground_array_wrap(expr: &mut Expr) {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, block, parenthesized: _ } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "wrap" || block.is_some() || args.len() != 1 {
+        return;
+    }
+    let Some(receiver) = recv.as_ref() else { return };
+    let ExprNode::Const { path } = &*receiver.node else { return };
+    // `Reports::Array.wrap` is not ActiveSupport's method. Only the
+    // top-level constant, written `Array` or `::Array`, is.
+    let names: Vec<&str> = path.iter().map(|name| name.as_str()).collect();
+    if names != ["Array"] && names != ["::Array"] {
+        return;
+    }
+    // Folded here, not hosted as `ActiveSupport.wrap`. That method
+    // reads an untyped parameter, and each read counts against the
+    // runtime concrete-type ceiling. Nil is `[]`. An Array is itself,
+    // which is what Rails' `to_ary` answers for a real Array. A single
+    // other closed type is a one-element array. A union of those
+    // shapes is a branch, so neither arm wraps the other. Anything
+    // else stays the call. A custom `to_ary` is not called: an unknown
+    // `to_ary` is dropped, which would wrap the object instead of its
+    // records.
+    let arg = args[0].clone();
+    let Some(folded) = fold_array_wrap(span, &arg) else { return };
+    expr.ty = folded.ty.clone();
+    *expr.node = *folded.node;
+}
+
+fn empty_array(span: crate::span::Span) -> Expr {
+    let mut empty = Expr::new(span, ExprNode::Array { elements: vec![], style: Default::default() });
+    // A later pass reads assignment types. An untyped `[]` is invisible
+    // to it, so a controller ivar assigned both this and a Relation
+    // would keep the Relation.
+    empty.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    empty
+}
+
+fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
+    let empty = empty_array(span);
+    let one = |value: Expr| {
+        let mut wrapped = Expr::new(
+            span,
+            ExprNode::Array { elements: vec![value], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped
+    };
+    match arg.ty.as_ref() {
+        Some(Ty::Nil) => Some(empty),
+        Some(Ty::Array { .. }) => Some(arg.clone()),
+        Some(Ty::Union { variants }) => fold_union_wrap(span, arg, variants),
+        None => None,
+        Some(_) => Some(one(arg.clone())),
+    }
+}
+
+/// `Array | Nil` is `[]` or the array. `String | Nil` is `[]` or
+/// `[value]`. A union that also holds an open or nested type is not
+/// one of those answers, so the call stays.
+fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Option<Expr> {
+    let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+    let arrays: Vec<&Ty> = variants.iter().filter(|v| matches!(v, Ty::Array { .. })).collect();
+    let others: Vec<&Ty> = variants
+        .iter()
+        .filter(|v| !matches!(v, Ty::Nil | Ty::Array { .. }))
+        .collect();
+    if arrays.len() > 1 || (!others.is_empty() && !arrays.is_empty()) {
+        return None;
+    }
+    if !has_nil && arrays.is_empty() {
+        return Some(Expr::new(
+            span,
+            ExprNode::Array { elements: vec![arg.clone()], style: Default::default() },
+        ));
+    }
+    let bound = bind_once(span, arg);
+    let read = bound.read.clone();
+    let when_nil = empty_array(span);
+    let when_present = if arrays.len() == 1 {
+        read.clone()
+    } else {
+        let mut wrapped = Expr::new(
+            span,
+            ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped
+    };
+    let mut cond = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(read),
+            method: crate::ident::Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    cond.ty = Some(Ty::Bool);
+    let mut branch = Expr::new(
+        span,
+        ExprNode::If {
+            cond,
+            then_branch: when_nil,
+            else_branch: when_present,
+        },
+    );
+    branch.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    Some(Expr::new(
+        span,
+        ExprNode::Seq { exprs: vec![bound.assign, branch] },
+    ))
+}
+
+struct Bound {
+    assign: Expr,
+    read: Expr,
+}
+
+fn bind_once(span: crate::span::Span, arg: &Expr) -> Bound {
+    if matches!(&*arg.node, ExprNode::Var { .. } | ExprNode::Lit { .. }) {
+        return Bound { assign: Expr::new(span, ExprNode::Seq { exprs: vec![] }), read: arg.clone() };
+    }
+    let name = crate::ident::Symbol::from("__array_wrap");
+    let read = Expr::new(
+        span,
+        ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
+    );
+    let assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+            value: arg.clone(),
+        },
+    );
+    Bound { assign, read }
 }
 
 /// words_connector, two_words_connector, last_word_connector — Rails'

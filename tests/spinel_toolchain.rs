@@ -62,6 +62,37 @@ fn rails_root_join_takes_any_number_of_parts_natively() {
     assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
 
+/// The native half of `rails_health_check::the_rails_health_check_answers_up`:
+/// `/up` routes to the synthesized `Rails::HealthController`, which
+/// compiles and answers the green page. `main.rb` boots the server
+/// under AOT, so its `instantiate_controller` arm is checked as text.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn the_rails_health_check_answers_up_natively() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"up\" => \"rails/health#show\", as: :rails_health_check\n",
+        )
+        .run_spinel(r#"
+routed = false
+RouteTable.table.each do |route|
+  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails_health && route.action == :show
+end
+raise "no GET /up route to rails_health#show" unless routed
+c = Rails::HealthController.new
+c.process_action(:show)
+raise "status #{c.status}" unless c.status == 200
+raise "body #{c.body}" unless c.body == "<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>"
+puts "rails health contract passed"
+"#);
+    run.assert_passes();
+    assert!(run.stdout.contains("rails health contract passed"));
+    let main = std::fs::read_to_string(run.emitted.join("main.rb")).expect("main.rb");
+    assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+}
+
 fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
 }

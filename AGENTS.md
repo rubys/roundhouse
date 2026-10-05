@@ -5,31 +5,31 @@ languages, plus an inference engine (LSP/MCP/in-browser IDE) that types Rails
 without annotations. This file is the orientation an AI agent or new contributor
 needs *before* touching the code: where to look, and the invariants not to break.
 
-**Source of truth for current state is [`RELEASES.md`](RELEASES.md) and CI** —
-which targets are live, what each snapshot proves, the known gaps; the
-[user guide](docs/guide/README.md) says what each door does today, and the
-[bench page](https://rubys.github.io/roundhouse/bench/) carries the numbers.
-[`README.md`](README.md) is the landing page. The older docs below are
-accurate on *architecture* but may narrate migrations that have since
-landed. **When a status claim anywhere disagrees with RELEASES.md or CI,
-RELEASES.md and CI win.**
+Current implementation and executed CI are authoritative for behavior.
+[`RELEASES.md`](RELEASES.md) records dated snapshot claims, not a live main
+status page. The [user guide](docs/guide/README.md) describes product usage;
+the [bench page](https://rubys.github.io/roundhouse/bench/) carries measurements.
 
 ## Start here
 
 | You want… | Read |
 |---|---|
 | What the project is | [`README.md`](README.md) — the landing page |
-| Current state, per snapshot, and the known gaps | [`RELEASES.md`](RELEASES.md) — authoritative with CI |
+| Release snapshots and their known gaps | [`RELEASES.md`](RELEASES.md) |
 | Using it (check / editor / MCP / transpile / Spinel) | [`docs/guide/`](docs/guide/README.md) |
-| The dev loop, `roundhouse-ast`, adding an IR variant | [`DEVELOPMENT.md`](DEVELOPMENT.md) |
+| Set up a checkout | [`docs/development/README.md`](docs/development/README.md) |
+| Choose tests or use `bin/rh verify` | [`docs/development/testing.md`](docs/development/testing.md) |
+| Inspect AST, IR, or emitted output | [`docs/development/debugging.md`](docs/development/debugging.md) |
+| Change IR, lowering, runtime, or an emitter | [`docs/development/compiler-changes.md`](docs/development/compiler-changes.md) |
+| Read/request hosted checks | [`docs/ci/README.md`](docs/ci/README.md) |
 | Pipeline internals (analyze / lower / emit / runtime / verification) | [`docs/pipeline/`](docs/pipeline/) — architecture, not status |
 | Compiler inputs (Ruby+ERB, schema/routes/seeds, method catalog, DB adapter) | [`docs/data/`](docs/data/) |
 | Why do this at all (the argument, option value) | [`WHY.md`](WHY.md) |
 | Why this attempt is different (lineage, the three bets, risks) | [`BETS.md`](BETS.md) |
 
 Pipeline shape: `Ruby AST → analyze (typed IR) → lower (target-neutral IR) →
-emit (per-target project + runtime/<target>/ glue)`. Key files are mapped in
-DEVELOPMENT.md § "Pipeline at a glance."
+emit (per-target project + runtime/<target>/ glue)`. The
+[ownership map](docs/development/compiler-changes.md#ownership-map) locates each stage.
 
 ## Invariants — do not break these
 
@@ -87,57 +87,18 @@ defect even if the build is green.
   you changed. End commit messages with the standard `Co-Authored-By`
   trailer.
 - **Outside contributors: fork, and open a pull request against `main`.**
-  CI runs a compact floor plus targeted lanes. For broad/risky changes,
-  ask a maintainer to apply `ci:full` for the complete PR matrix.
-  This expands validation only; PR runs never publish. Drafts retain
-  fixture + unit coverage even with the label. Full main validation and
-  publication are scheduled every four hours and execute freshly every cycle.
-  `CI summary` reports selected checks, not a mandatory merge gate;
-  maintainers decide when to merge. See [CI coverage](docs/ci-reuse.md).
-  You do not need every toolchain locally; CI covers the missing lanes.
-  Before opening one: `bin/rh fixture` (the test fixtures are generated,
-  not checked in — see below), `cargo test --lib` plus the targeted
-  integration test for what you touched, and a test that pins the fix.
-  When the fix removes an error diagnostic, that test goes through
-  `tests/emit_and_run.rs` (invariant 6): CI's toolchain lanes emit only
-  the fixtures, so a construct the fixtures do not use is exercised by
-  nothing else, and every lane stays green while it is broken.
-  A reported repro with a patch in the issue is welcome; the same patch
-  as a PR is better, because the lanes you cannot run will run.
-- **Fixtures are generated.** `fixtures/real-blog` and `fixtures/store`
-  are `.gitignore`d; a fresh clone has neither, and the tests that read
-  them fail until `bin/rh fixture` (~60s, needs Ruby and
-  `gem install rails`) and `scripts/create-store` have run. Tests reach
-  them through `roundhouse::fixtures::real_blog()` / `store()`, which
-  say so — with the command — when one is absent.
-- **Test cycle:** `cargo build --tests` + the targeted test for what you
-  touched + a round-trip check (`roundhouse-ast --round-trip`). Use
-  `cargo test --all-targets` at milestones. Real-toolchain tests are
-  `#[ignore]`-gated (`cargo test --test <target>_toolchain -- --ignored`); CI
-  runs each in its own job.
-- **Focused local loop:** `bin/rh verify --plan --test <suite>` previews;
-  `bin/rh verify --test <suite>` builds and runs only library tests and the
-  selected suites sequentially, not all test programs. Repeat `--test`; opt
-  into native checks with `--toolchain <target>`. Default `--test` skips
-  ignored tests; use `--test <suite> --ignored` for ignored integration checks.
-  Prepare both fixtures and dependencies first.
-  The JSON report (`--json`) separates executed local checks from unexecuted
-  hosted coverage; neither a preview nor a passing subset proves full CI.
-  Before/after filesystem-space snapshots and low-space warnings are advisory;
-  an unavailable probe does not block tests. The runner never cleans caches.
-  Do not run another build/test in that checkout concurrently. See
-  DEVELOPMENT.md § "Focused local verification" for scope and prerequisites.
-- **CI is deliberately not uniformly gating.** The core `cargo test` job is
-  non-advisory. Jobs marked `continue-on-error: true` track current Spinel
-  master and other moving toolchains on purpose — **red is a signal, not a
-  regression to shim away.** A Spinel red can come from Roundhouse runtime, RBS
-  or packaging, or from upstream; it is not by itself proof of an upstream
-  fault. Don't add workarounds just to make an advisory job green.
+  Include the repro, a regression test, and actual verification results.
+- Prepare the [fixtures and dependencies](docs/development/README.md#setup)
+  before testing. Iterate with focused suites; follow the
+  [test cycle](docs/development/testing.md) before committing.
+- A local preview/subset is not full CI or merge approval. Report missing SDK
+  coverage and request [broader checks](docs/ci/README.md) for broad/risky changes.
+- Do not suppress diagnostics, comparison differences, or advisory failures
+  merely to make a check green. Establish the failing input and cause first.
 
 ## The actual goal
 
 The endpoint is not "does the fixture compile." It is a **per-target ledger of
 how much of Rails transpiles** — the honest unsupported list, driven down over
-time. Don't trade that real goal for a locally reachable one. The proving lanes
-today are the real-blog fixture (every target, DOM-equivalent to Rails in full
-validation) and lobsters/Mastodon on the inference + Spinel path (see README).
+time. Don't trade that real goal for a locally reachable one. Inspect the
+relevant input, target, and executed gate before making a support claim.

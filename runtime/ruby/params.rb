@@ -94,6 +94,19 @@ module Params
     value
   end
 
+  # One key of a top-level `params.permit(:a, :b)` — the Rails 8
+  # authentication generator's `@user.update(params.permit(:password,
+  # :password_confirmation))`. The permit lowers to a chain of these from
+  # `{}`, one per permitted key: `name` (the Symbol the model's
+  # `update`/`create` read the field under) is added when the request
+  # carried a scalar for `key`, and left out otherwise — Rails' `permit`
+  # omits an absent key and drops a non-scalar, and a model write then
+  # leaves that attribute alone.
+  def self.permitted(acc, params, key, name)
+    acc[name] = Params.str(params, key, "") if Params.provided(params, key)
+    acc
+  end
+
   def self.provided(sub, key)
     return false unless sub.key?(key)
     value = sub.fetch(key, "")

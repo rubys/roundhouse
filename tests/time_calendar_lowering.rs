@@ -65,25 +65,27 @@ fn a_form_the_runtime_does_not_take_is_left_alone() {
     assert_eq!(emit("starts_at.last_month(2)"), "starts_at.last_month(2)");
 }
 
+/// An explicitly seeded Relation retains both inclusive month bounds.
 #[test]
 fn all_month_is_a_literal_range_for_where_to_render() {
     assert_eq!(
         emit("Event.where(starts_at: starts_at.all_month).count"),
-        "Event.where({ starts_at: ActiveSupport.beginning_of_month(starts_at)..ActiveSupport.end_of_month(starts_at) }).count"
+        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_month(starts_at), ActiveSupport.end_of_month(starts_at)).count"
     );
 }
 
+/// Range bounds, sibling predicates, and find_by survive explicit seeding.
 #[test]
 fn a_range_beside_other_keys_splits_into_its_own_where() {
     assert_eq!(
         emit("Event.where(name: name, starts_at: starts_at.all_day).count"),
-        "Event.where({ starts_at: ActiveSupport.beginning_of_day(starts_at)..ActiveSupport.end_of_day(starts_at) }).where(name: name).count"
+        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_day(starts_at), ActiveSupport.end_of_day(starts_at)).where(name: name).count"
     );
     assert_eq!(
         emit("Event.find_by(name: name, starts_at: starts_at.all_week)"),
-        "Event.where({ starts_at: ActiveSupport.beginning_of_week(starts_at)..ActiveSupport.end_of_week(starts_at) }).find_by(name: name)"
+        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_week(starts_at), ActiveSupport.end_of_week(starts_at)).find_by(name: name)"
     );
-    assert_eq!(emit("Event.where(name: name).count"), "Event.where({ name: name }).count");
+    assert_eq!(emit("Event.where(name: name).count"), "ActiveRecord::Relation.new(Event).where({ name: name }).count");
 }
 
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {

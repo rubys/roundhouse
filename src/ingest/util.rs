@@ -132,16 +132,38 @@ pub(super) fn find_first_class<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Clas
 pub(super) fn find_all_classes_with_scope<'pr>(
     node: &Node<'pr>,
 ) -> Vec<(Vec<String>, ruby_prism::ClassNode<'pr>)> {
+    find_all_classes_with_nesting(node)
+        .into_iter()
+        .map(|(scope, _, c)| (scope, c))
+        .collect()
+}
+
+/// `find_all_classes_with_scope`, plus each class's lexical nesting at
+/// its `class` keyword — what `Module.nesting` reports there: the
+/// qualified names of the enclosing `module`/`class` bodies, innermost
+/// first. It differs from the scope wherever a compact path is
+/// written. `module A::B; class X` has nesting `["A::B"]` (not `A`),
+/// and a top-level `class A::X` has none at all: the `A::` prefix
+/// names the class but puts nothing in Ruby's lexical search path.
+pub(super) fn find_all_classes_with_nesting<'pr>(
+    node: &Node<'pr>,
+) -> Vec<(Vec<String>, Vec<String>, ruby_prism::ClassNode<'pr>)> {
     let mut out = Vec::new();
-    collect_classes(node, &[], &mut |scope, c| {
-        out.push((scope.to_vec(), c));
+    collect_classes(node, &[], &[], &mut |scope, nesting, c| {
+        out.push((scope.to_vec(), nesting.to_vec(), c));
     });
     out
 }
 
-fn collect_classes<'pr, F: FnMut(&[String], ruby_prism::ClassNode<'pr>)>(
+/// The nesting inside a body whose qualified path is `inner`.
+fn push_nesting(inner: &[String], nesting: &[String]) -> Vec<String> {
+    std::iter::once(inner.join("::")).chain(nesting.iter().cloned()).collect()
+}
+
+fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr>)>(
     node: &Node<'pr>,
     scope: &[String],
+    nesting: &[String],
     out: &mut F,
 ) {
     if let Some(c) = node.as_class_node() {
@@ -156,19 +178,19 @@ fn collect_classes<'pr, F: FnMut(&[String], ruby_prism::ClassNode<'pr>)>(
         if let Some(name_path) = class_name_path(&c) {
             inner.extend(name_path);
         }
-        out(scope, c);
+        out(scope, nesting, c);
         if let Some(b) = body {
-            collect_classes(&b, &inner, out);
+            collect_classes(&b, &inner, &push_nesting(&inner, nesting), out);
         }
         return;
     }
     if let Some(p) = node.as_program_node() {
-        collect_classes(&p.statements().as_node(), scope, out);
+        collect_classes(&p.statements().as_node(), scope, nesting, out);
         return;
     }
     if let Some(s) = node.as_statements_node() {
         for stmt in s.body().iter() {
-            collect_classes(&stmt, scope, out);
+            collect_classes(&stmt, scope, nesting, out);
         }
         return;
     }
@@ -181,7 +203,7 @@ fn collect_classes<'pr, F: FnMut(&[String], ruby_prism::ClassNode<'pr>)>(
             inner.extend(name_path);
         }
         if let Some(body) = m.body() {
-            collect_classes(&body, &inner, out);
+            collect_classes(&body, &inner, &push_nesting(&inner, nesting), out);
         }
     }
 }
@@ -313,6 +335,14 @@ fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
     let Some(body) = body else { return false };
     for stmt in flatten_statements(body) {
         if super::visibility::definition(&stmt).is_some() {
+            return true;
+        }
+        // `if ready; def hidden; end; end` is a declaration this walk
+        // cannot keep. Surface the module so the refusal is reported
+        // instead of the file vanishing.
+        if (stmt.as_if_node().is_some() || stmt.as_unless_node().is_some())
+            && super::visibility::Visibility::hides_declaration(&stmt)
+        {
             return true;
         }
         if let Some(call) = stmt.as_call_node() {
@@ -631,7 +661,8 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 }
 
 /// `ActionView::Helpers::*` (SanitizeHelper, NumberHelper) in an
-/// include list. No target ships the namespace, so the `include` is an
+/// include list, or `ActiveSupport::NumberHelper`, which gives the same
+/// number helpers. No target ships the namespace, so the `include` is an
 /// `uninitialized constant` at class-definition time — before any
 /// request, which means it takes the whole tree's boot with it, not one
 /// route. It contributes nothing either way: every member the app calls
@@ -643,7 +674,7 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 /// walk for everything else — because the same source line means the
 /// same thing in either.
 pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
-    matches!(path, ["ActionView", "Helpers", ..])
+    matches!(path, ["ActionView", "Helpers", ..] | ["ActiveSupport", "NumberHelper"])
 }
 
 /// `ActiveModel::*` (Validations / Conversion / AttributeMethods /

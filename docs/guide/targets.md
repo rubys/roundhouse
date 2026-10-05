@@ -11,20 +11,20 @@ is tested — which is the honest measure of how much to trust it.
 |---|---|---|
 | `rust` | Cargo crate (axum, rusqlite) | Rust 1.85+, SQLite library |
 | `go` | Go module | Go 1.24+ |
-| `typescript` | Node package | Node.js 18+ |
+| `typescript` | Node package | Node.js 24+ |
 | `crystal` | shard | Crystal 1.10+, SQLite library |
 | `elixir` | Mix project | Elixir 1.15+ |
 | `kotlin` | Gradle build (JVM) | JDK 17+, Gradle 8+ |
 | `swift` | Swift package | Swift 6+; on Linux `libsqlite3-dev` |
 | `python` | Python project (`uv`) | Python 3.11+, `uv` |
 | `csharp` | .NET solution | .NET SDK 10+ |
-| `ruby` | Ruby tree — the framework runtime in Ruby, no Rails | Ruby 3.4+, bundler, SQLite; Node for the asset build |
+| `ruby` | Ruby tree — the framework runtime in Ruby, no Rails | Ruby [3.4+](../../.ruby-version), bundler, SQLite; Node for the asset build |
 
 All ten serve on `:3000`, speak Action Cable at `/cable`, use SQLite at
 `storage/development.sqlite3`, and are seeded by
 `sqlite3 storage/development.sqlite3 < db/seed.sql`. Each ships the
 app's model and controller tests and a Playwright `e2e/` suite; the
-`sqlite3` CLI and Node.js 18+ are needed for the latter.
+`sqlite3` CLI and Node.js 24+ are needed for the latter.
 
 ## The variations
 
@@ -32,14 +32,15 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 |---|---|
 | `jruby` | The `ruby` emit with prebuilt assets and JRuby run/test commands. JRuby 10+ (JDK 21+). |
 | `spinel` | The `ruby` shape packaged as a `spin` project for ahead-of-time compilation to a native binary. Needs the Spinel compiler; [`spinel.md`](spinel.md). |
-| `typescript-worker` | The `typescript` emit bundled to run in a browser `SharedWorker`, with SQLite compiled to WebAssembly, for the in-browser demos. Node.js 18+ to bundle; no server. |
+| `typescript-worker` | The `typescript` emit bundled to run in a browser `SharedWorker`, with SQLite compiled to WebAssembly, for the in-browser demos. Node.js 24+ to bundle; no server. |
 
 ## How far each is tested
 
-The lanes below run across targets in full validation, scheduled every four
-hours or requested manually. Ordinary PRs/main pushes use a compact floor plus
-targeted additions; maintainers can request full PR coverage with `ci:full`.
-See [CI coverage](../ci-reuse.md). The lanes use the blog fixture
+The lanes below run across targets in full validation: after merge to
+canonical `main`, on the four-hour schedule, or when requested with `ci:full`.
+Ordinary PRs use a Ruby floor plus targeted additions for the files they
+change; maintainers can request full PR coverage with `ci:full`.
+See [CI coverage](../ci/README.md). The lanes use the blog fixture
 (`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
 unless another app is named. A target's row in

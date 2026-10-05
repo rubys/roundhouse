@@ -69,6 +69,8 @@ impl Diagnostic {
             DiagnosticKind::Parse { .. } => "parse",
             DiagnosticKind::BlankUnlowered { .. } => "blank_unlowered",
             DiagnosticKind::LowerResidue { .. } => "lower_residue",
+            DiagnosticKind::UndefinedFilterTarget { .. } => "undefined_filter_target",
+            DiagnosticKind::GraphqlNullableField { .. } => "graphql_nullable_field",
         }
     }
 
@@ -81,6 +83,7 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
             DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
             DiagnosticKind::MissingPreload { .. } => Severity::Warning,
+            DiagnosticKind::GraphqlNullableField { .. } => Severity::Warning,
             DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
             DiagnosticKind::LowerResidue { .. } => Severity::Warning,
             _ => Severity::Error,
@@ -200,6 +203,15 @@ impl Diagnostic {
                     reason.as_str()
                 )
             }
+            DiagnosticKind::UndefinedFilterTarget { target, macro_name } => format!(
+                "`{} :{}` names a method nothing defines; Rails raises NoMethodError on every action it guards",
+                macro_name.as_str(),
+                target.as_str()
+            ),
+            DiagnosticKind::GraphqlNullableField { field, .. } => format!(
+                "`field :{}` is declared `null: false` but can resolve to nil; when it does, the response carries an error and nulls its parent",
+                field.as_str()
+            ),
         }
     }
 
@@ -476,4 +488,18 @@ pub enum DiagnosticKind {
     /// `BlankUnlowered`; produced as returned lists, never as
     /// `Expr.diagnostic` annotations.
     LowerResidue { pass: Symbol, construct: Symbol, reason: Symbol },
+    /// `before_action :x` (or around/after) where no method `x` is
+    /// reachable from the controller — its own methods, its ancestors',
+    /// spliced concerns', or the registered framework surface
+    /// (`analyze::filter_targets`). The source is wrong: Rails answers
+    /// every guarded action with a 500. Default severity `Error`, since
+    /// the emitted program cannot reproduce a guard that names nothing.
+    UndefinedFilterTarget { target: Symbol, macro_name: Symbol },
+    /// A graphql-ruby field declared `null: false` whose resolved value
+    /// (`analyze::graphql`) can be nil. graphql-ruby checks this only
+    /// while serving a request that reaches a nil, and answers with an
+    /// error, the null spreading to the nearest nullable parent. Anchored
+    /// at the `field` call; `value_ty` is what it resolves to. Warning:
+    /// the analyzer can see a nil that the data never holds.
+    GraphqlNullableField { field: Symbol, value_ty: Ty },
 }

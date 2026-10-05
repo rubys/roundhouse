@@ -14,12 +14,26 @@ use crate::{ClassId, Symbol};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
-    find_all_classes_with_scope, find_first_class, flatten_statements, source_has_blank_line,
+    find_all_classes_with_nesting, find_first_class, flatten_statements, source_has_blank_line,
     symbol_list_style, symbol_list_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
 pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Controller>> {
+    Ok(ingest_controller_with_nesting(source, file)?.map(|(controller, _)| controller))
+}
+
+/// `ingest_controller`, plus the lexical nesting the superclass is
+/// looked up in (`Module.nesting` at the `class` keyword, innermost
+/// first). `Controller` doesn't carry it, and the name can't stand in
+/// for it: `class Admin::XController < BaseController` at top level
+/// looks up `::BaseController`, while the same class written inside
+/// `module Admin` looks up `Admin::BaseController` first. Empty when
+/// the superclass is rooted (`< ::BaseController`).
+pub(super) fn ingest_controller_with_nesting(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Option<(Controller, Vec<String>)>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -31,8 +45,8 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     // class as the controller and drops every real action (so its
     // view ivars never resolve). Fall back to the first class when no
     // name matches the convention.
-    let all_classes = find_all_classes_with_scope(&root);
-    let chosen_idx = all_classes.iter().position(|(_, c)| {
+    let all_classes = find_all_classes_with_nesting(&root);
+    let chosen_idx = all_classes.iter().position(|(_, _, c)| {
         class_name_path(c)
             .and_then(|p| p.last().cloned())
             .is_some_and(|last| last.ends_with("Controller"))
@@ -47,7 +61,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     // stays dropped as before.
     let mut sibling_classes: Vec<(Symbol, Symbol)> = Vec::new();
     if chosen_idx.is_some() {
-        for (i, (scope, c)) in all_classes.iter().enumerate() {
+        for (i, (scope, _, c)) in all_classes.iter().enumerate() {
             if Some(i) == chosen_idx || !scope.is_empty() {
                 continue;
             }
@@ -74,14 +88,14 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     // `Admin::StatusesController`, not collide with the top-level
     // `StatusesController` (which merges two controllers' actions and
     // poisons both metas' ivar seeding).
-    let (scope, class) = match chosen_idx {
+    let (scope, nesting, class) = match chosen_idx {
         Some(i) => {
-            let (s, c) = all_classes.into_iter().nth(i).expect("chosen index in range");
-            (s, Some(c))
+            let (s, n, c) = all_classes.into_iter().nth(i).expect("chosen index in range");
+            (s, n, Some(c))
         }
         None => match all_classes.into_iter().next() {
-            Some((s, c)) => (s, Some(c)),
-            None => (Vec::new(), find_first_class(&root)),
+            Some((s, n, c)) => (s, n, Some(c)),
+            None => (Vec::new(), Vec::new(), find_first_class(&root)),
         },
     };
     let Some(class) = class else {
@@ -97,6 +111,13 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
+    // `< ::BaseController` names the top level whatever the nesting;
+    // the path above has already dropped the leading `::`.
+    let rooted = class
+        .superclass()
+        .and_then(|n| n.as_constant_path_node().map(|p| p.parent().is_none()))
+        .unwrap_or(false);
+    let nesting = if rooted { Vec::new() } else { nesting };
 
     let mut comments = collect_comments(&result);
     drain_comments_before(&mut comments, class.location().start_offset());
@@ -183,13 +204,16 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
         }
     }
 
-    Ok(Some(Controller {
-        name: ClassId(Symbol::from(name_path.join("::"))),
-        parent,
-        body: body_items,
-        layout,
-        sibling_classes,
-    }))
+    Ok(Some((
+        Controller {
+            name: ClassId(Symbol::from(name_path.join("::"))),
+            parent,
+            body: body_items,
+            layout,
+            sibling_classes,
+        },
+        nesting,
+    )))
 }
 
 /// Recognize a `layout` class-body call. Returns `Some(decl)` if this

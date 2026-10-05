@@ -276,6 +276,11 @@ fn ingest_route_stmts<'pr>(
         // zero the whole table. Survey mode records the gap and keeps
         // walking; strict mode still fails loud.
         match ingest_route_call(&call, &method, file, parent, draws) {
+            Ok(Some(spec)) if method == "match" => match expand_match_via(&call, spec, file) {
+                Ok(expanded) => entries.extend(expanded),
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
+            },
             Ok(Some(spec)) => entries.push(spec),
             Ok(None) => {}
             Err(err) if super::survey::is_active() => super::survey::record(&err),
@@ -306,6 +311,20 @@ mod redirect_sink {
     /// it: the path, made into an identifier, with a counter appended
     /// if an earlier route already took that name.
     pub(super) fn push(path: &str, location: String, status: u16) -> Symbol {
+        push_with(path, location, status, false, false)
+    }
+
+    pub(super) fn push_keeping_query(path: &str, location: String, status: u16) -> Symbol {
+        push_with(path, location, status, false, true)
+    }
+
+    fn push_with(
+        path: &str,
+        location: String,
+        status: u16,
+        location_is_expression: bool,
+        keep_query: bool,
+    ) -> Symbol {
         SINK.with(|sink| {
             let mut sink = sink.borrow_mut();
             let base = action_name(path);
@@ -316,7 +335,13 @@ mod redirect_sink {
                 name = format!("{base}_{n}");
             }
             let action = Symbol::from(name.as_str());
-            sink.push(RedirectRoute { action: action.clone(), location, status });
+            sink.push(RedirectRoute {
+                action: action.clone(),
+                location,
+                status,
+                location_is_expression,
+                keep_query,
+            });
             action
         })
     }
@@ -353,10 +378,16 @@ mod redirect_sink {
 /// generator produces.
 pub const REDIRECT_CONTROLLER: &str = "RoundhouseRedirectsController";
 
+/// Rails' own health-check controller (`get "up" => "rails/health#show"`
+/// in every `rails new` app). Ingest synthesizes it when a route
+/// targets it and the app defines none; see
+/// `project::emits_namespaced_controllers` for the targets that receive it.
+pub const RAILS_HEALTH_CONTROLLER: &str = "Rails::HealthController";
+
 /// `redirect("/path")` / `redirect("/path", status: 302)` — the literal
 /// form, which is all that can be served without running Rails'
 /// redirect block. Answers the location and the status Rails would use.
-fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
+fn redirect_literal(node: &Node<'_>) -> Option<(String, u16, bool)> {
     let call = node.as_call_node()?;
     if call.receiver().is_some() {
         return None;
@@ -365,14 +396,14 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
     if constant_id_str(&name) != "redirect" {
         return None;
     }
-    // A block form (`redirect { |params, req| … }`) has no literal to
-    // carry and stays dropped.
-    if call.block().is_some() {
-        return None;
+    if let Some(block) = call.block().and_then(|block| block.as_block_node()) {
+        let (location, status) = redirect_block(block, redirect_status_from_call(&call))?;
+        return Some((location, status, false));
     }
-    let arguments = call.arguments()?;
+    let Some(arguments) = call.arguments() else { return None };
     let mut location = None;
     let mut status = 301;
+    let mut path_option = false;
     for argument in arguments.arguments().iter() {
         if let Some(s) = string_value(&argument) {
             location.get_or_insert(s);
@@ -382,18 +413,116 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
         for element in hash.elements().iter() {
             let Some(assoc) = element.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if key.as_str() != "status" {
-                return None;
+            match key.as_str() {
+                "status" => {
+                    let value = assoc.value();
+                    let code = value
+                        .as_integer_node()
+                        .and_then(|i| super::util::integer_i64(&i.value()))
+                        .and_then(|i| u16::try_from(i).ok())?;
+                    status = code;
+                }
+                // `redirect(path: "/login")` is Rails' options form of a
+                // path-only redirect: the same location a positional
+                // string carries, without host, protocol, or query.
+                // Other options (`subdomain:`, `host:`) rebuild the
+                // request URL and stay unmodeled.
+                "path" => {
+                    // Distinct from a positional string: the caller marks
+                    // this route so the synthesized action keeps the
+                    // request query string. Rails' options hash wins
+                    // over a positional string, so `redirect("/old",
+                    // path: "/new")` goes to `/new`, not `/old`.
+                    path_option = true;
+                    location = Some(string_value(&assoc.value())?);
+                }
+                _ => return None,
             }
-            let value = assoc.value();
-            let code = value
-                .as_integer_node()
-                .and_then(|i| super::util::integer_i64(&i.value()))
-                .and_then(|i| u16::try_from(i).ok())?;
-            status = code;
         }
     }
-    Some((location?, status))
+    Some((location?, status, path_option))
+}
+
+/// `redirect { |params, request| "/path" }` when the block returns a
+/// string. One or two block parameters are accepted. A block that does
+/// not return a string stays unsupported.
+fn redirect_block(block: ruby_prism::BlockNode<'_>, status: u16) -> Option<(String, u16)> {
+    let params = block.parameters().and_then(|params| params.as_block_parameters_node());
+    let names = params
+        .and_then(|params| params.parameters())
+        .map(|list| {
+            list.requireds()
+                .iter()
+                .filter_map(|param| param.as_required_parameter_node())
+                .map(|param| constant_id_str(&param.name()).to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if names.len() > 2 || names.iter().any(|name| name != "_" && name != "params" && name != "request" && name != "req") {
+        return None;
+    }
+    let body = block.body()?;
+    let source = super::expr::ingest_expr(&body, "<redirect>").ok()?;
+    if !redirect_expression_is_string(&source) {
+        return None;
+    }
+    let mut rendered = crate::emit::ruby::emit_expr(&source);
+    // The synthesized action reads the request as `request`. A block
+    // parameter named `req` is the same object.
+    rendered = rendered.replace("req.", "request.");
+    Some((format!("\u{0}{rendered}"), status))
+}
+
+fn redirect_status_from_call(call: &ruby_prism::CallNode<'_>) -> u16 {
+    let Some(arguments) = call.arguments() else { return 301 };
+    for argument in arguments.arguments().iter() {
+        let Some(hash) = argument.as_keyword_hash_node() else { continue };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else { continue };
+            let Some(key) = symbol_value(&assoc.key()) else { continue };
+            if key.as_str() != "status" {
+                continue;
+            }
+            if let Some(code) = assoc
+                .value()
+                .as_integer_node()
+                .and_then(|i| super::util::integer_i64(&i.value()))
+                .and_then(|i| u16::try_from(i).ok())
+            {
+                return code;
+            }
+        }
+    }
+    301
+}
+
+fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
+    match &*expr.node {
+        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => true,
+        crate::expr::ExprNode::StringInterp { .. } => true,
+        crate::expr::ExprNode::If { then_branch, else_branch, .. } => {
+            redirect_expression_is_string(then_branch) && redirect_expression_is_string(else_branch)
+        }
+        crate::expr::ExprNode::Send { method, recv, args, .. } => {
+            // `present?` is rewritten to `!(...).strip.empty?` before this
+            // check. The result is a string when that call's argument is.
+            if method.as_str() == "!" {
+                return args.iter().any(redirect_expression_is_string);
+            }
+            if matches!(method.as_str(), "strip" | "empty?") {
+                return recv.as_ref().is_some_and(redirect_expression_is_string)
+                    || args.iter().any(redirect_expression_is_string);
+            }
+            matches!(
+                method.as_str(),
+                "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]" | "present?"
+            )
+        }
+        crate::expr::ExprNode::Seq { exprs } => exprs
+            .last()
+            .is_some_and(redirect_expression_is_string),
+        _ => false,
+    }
 }
 
 fn ingest_route_call(
@@ -408,7 +537,40 @@ fn ingest_route_call(
     // for shapes it intentionally drops (today: `to: redirect(...)`
     // helpers — not bench-critical, not modeled in `RouteSpec`).
     if let Some(http) = http_method_from(method) {
-        return ingest_explicit_route(call, http, file, parent);
+        // A `match` takes its verbs from `via:` in `expand_match_via`,
+        // once the entry is built; expanding it here too would copy
+        // each of these routes again per verb.
+        let via = if method == "match" { Vec::new() } else { via_methods(call) };
+        if via.is_empty() {
+            return ingest_explicit_route(call, http, file, parent);
+        }
+        let mut entries = Vec::new();
+        let mut dropped = false;
+        for method in via {
+            // A dropped target is the same for every verb. Do not ingest
+            // it again: that repeated the survey line and, before the
+            // empty check, panicked.
+            if dropped {
+                continue;
+            }
+            if let Some(route) = ingest_explicit_route(call, method, file, parent)? {
+                entries.push(route);
+            } else {
+                dropped = true;
+            }
+        }
+        let Some(first) = entries.pop() else { return Ok(None) };
+        if entries.is_empty() {
+            return Ok(Some(first));
+        }
+        entries.insert(0, first);
+        return Ok(Some(entries.into_iter().reduce(|left, right| match (left, right) {
+            (RouteSpec::Scope { mut entries, .. }, route) => {
+                entries.push(route);
+                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, entries }
+            }
+            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, entries: vec![left, right] },
+        }).expect("via produced a route")));
     }
     match method {
         "root" => ingest_root_route(call, file),
@@ -471,6 +633,118 @@ fn ingest_route_call(
             message: format!("unsupported routes DSL: `{method}`"),
         }),
     }
+}
+
+fn via_methods(call: &ruby_prism::CallNode<'_>) -> Vec<HttpMethod> {
+    let Some(args) = call.arguments() else { return Vec::new() };
+    for arg in args.arguments().iter() {
+        let Some(hash) = arg.as_keyword_hash_node() else { continue };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else { continue };
+            if symbol_value(&assoc.key()).as_deref() != Some("via") {
+                continue;
+            }
+            let values = assoc.value().as_array_node().map(|array| array.elements().iter().collect()).unwrap_or_else(|| vec![assoc.value()]);
+            return values.iter().filter_map(|value| symbol_value(value).as_deref().and_then(http_method_from)).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// `match "x", to: "c#a", via: %i[get post]` is one route per verb in
+/// Rails (`GET|POST /x`); the entry ingests once with the `Any`
+/// placeholder and is copied here with each listed verb. Only
+/// `via: :all` keeps `Any`, the verb the runtime router matches
+/// against every request method. A verb the table cannot represent
+/// (`via: :trace`), a `via:` that is not a literal, or no `via:` at all
+/// (which Rails refuses) is unsupported rather than widened to `Any`.
+fn expand_match_via(
+    call: &ruby_prism::CallNode<'_>,
+    spec: RouteSpec,
+    file: &str,
+) -> Result<Vec<RouteSpec>, IngestError> {
+    let unsupported = |message: String| IngestError::Unsupported { file: file.into(), message };
+    let names = match_via_names(call).map_err(unsupported)?;
+    let mut verbs = Vec::with_capacity(names.len());
+    for name in &names {
+        let verb = match name.as_str() {
+            "all" => HttpMethod::Any,
+            other => http_method_from(other)
+                .filter(|m| *m != HttpMethod::Any)
+                .ok_or_else(|| unsupported(format!("unsupported `match` verb: `via: :{other}`")))?,
+        };
+        verbs.push(verb);
+    }
+    if verbs.contains(&HttpMethod::Any) {
+        return Ok(vec![spec]);
+    }
+    Ok(verbs
+        .into_iter()
+        .map(|verb| {
+            let mut entry = spec.clone();
+            if let RouteSpec::Explicit { method, .. } = &mut entry {
+                *method = verb;
+            }
+            entry
+        })
+        .collect())
+}
+
+/// The `via:` value of a call as written: `:get`, `"post"`, or a
+/// literal list of either, lowercased. An error when `via:` is absent,
+/// empty, or anything but symbol/string literals.
+fn match_via_names(call: &ruby_prism::CallNode<'_>) -> Result<Vec<String>, String> {
+    // Ruby keeps the last of duplicate keys, so `via: :get, via: :post`
+    // is `via: :post`.
+    let via = call.arguments().and_then(|args| {
+        args.arguments()
+            .iter()
+            .filter_map(|arg| arg.as_keyword_hash_node())
+            .flat_map(|kh| kh.elements().iter().collect::<Vec<_>>())
+            .filter_map(|el| el.as_assoc_node())
+            .filter(|assoc| symbol_value(&assoc.key()).as_deref() == Some("via"))
+            .map(|assoc| assoc.value())
+            .last()
+    });
+    let Some(via) = via else {
+        return Err("`match` without `via:` (Rails requires the verbs)".into());
+    };
+    let names: Vec<String> = match via.as_array_node() {
+        Some(arr) => arr
+            .elements()
+            .iter()
+            .map(|n| via_name(&n))
+            .collect::<Result<_, _>>()?,
+        None => vec![via_name(&via)?],
+    };
+    if names.is_empty() {
+        return Err("unsupported `match` option: non-literal `via:`".into());
+    }
+    Ok(names)
+}
+
+/// One `via:` element, lowercased. Rails upcases any other spelling of
+/// a verb (`:GET`, `"post"` both work), but only the exact symbol
+/// `:all` means every verb: `"all"` and `:ALL` become a literal `ALL`
+/// request method that no request carries, so those are unsupported
+/// rather than widened to `Any`.
+fn via_name(node: &Node<'_>) -> Result<String, String> {
+    if symbol_value(node).as_deref() == Some("all") {
+        return Ok("all".into());
+    }
+    let name = symbol_or_string_value(node)
+        .ok_or_else(|| "unsupported `match` option: non-literal `via:`".to_string())?;
+    if name.eq_ignore_ascii_case("all") {
+        let spelled = if symbol_value(node).is_some() {
+            format!(":{name}")
+        } else {
+            format!("{name:?}")
+        };
+        return Err(format!(
+            "unsupported `match` verb: `via: {spelled}` (only the symbol `:all` means every verb)"
+        ));
+    }
+    Ok(name.to_lowercase())
 }
 
 fn http_method_from(name: &str) -> Option<HttpMethod> {
@@ -861,7 +1135,7 @@ fn ingest_explicit_route(
     let mut path: Option<String> = None;
     let mut to: Option<String> = None;
     let mut to_is_unsupported = false;
-    let mut redirect_target: Option<(String, u16)> = None;
+    let mut redirect_target: Option<(String, u16, bool)> = None;
     let mut as_name: Option<Symbol> = None;
     let mut action_kwarg: Option<String> = None;
     // The INLINE spelling of `member do … end` / `collection do … end`.
@@ -962,9 +1236,8 @@ fn ingest_explicit_route(
                         action_kwarg =
                             string_value(value).or_else(|| symbol_value(value));
                     }
-                    // `via: :all` (HTTP-method override) and similar
-                    // method-shaping options aren't modeled today; the
-                    // route still resolves to the outer verb. Other
+                    // `via:` picks the verbs of a `match`; read by
+                    // `expand_match_via` once the entry is built. Other
                     // string-value options become routing constraints.
                     "via" => {}
                     // `constraints: { id: /\d+/, tag: /[^,.\/]+/ }` —
@@ -996,12 +1269,16 @@ fn ingest_explicit_route(
         }
     }
 
-    if let Some((location, status)) = redirect_target {
+    if let Some((location, status, keep_query)) = redirect_target {
         // Served by a synthesized action rather than dropped: the app
         // gets the 301 it asked for, and no emitter learns a new route
         // kind for it.
         let path = path.clone().unwrap_or_else(|| "/".to_string());
-        let action = redirect_sink::push(&path, location, status);
+        let action = if keep_query {
+            redirect_sink::push_keeping_query(&path, location, status)
+        } else {
+            redirect_sink::push(&path, location, status)
+        };
         return Ok(Some(RouteSpec::Explicit {
             method,
             path,
@@ -1085,7 +1362,7 @@ fn ingest_root_route(
     // one file in the tree that failed `ruby -c`, and the entry point
     // (#82).
     let mut target: Option<String> = None;
-    let mut redirect_target: Option<(String, u16)> = None;
+    let mut redirect_target: Option<(String, u16, bool)> = None;
     if let Some(args_node) = call.arguments() {
         for arg in args_node.arguments().iter() {
             if let Some(s) = string_value(&arg) {
@@ -1111,8 +1388,12 @@ fn ingest_root_route(
         // `root to: redirect("/scan")` — served by a synthesized action
         // rather than dropped, so the emitted app answers `/` the way
         // Rails does (#82 recorded the drop; this lowers it).
-        let (location, status) = redirect;
-        let action = redirect_sink::push("/", location, status);
+        let (location, status, keep_query) = redirect;
+        let action = if keep_query {
+            redirect_sink::push_keeping_query("/", location, status)
+        } else {
+            redirect_sink::push("/", location, status)
+        };
         return Ok(Some(RouteSpec::Explicit {
             method: HttpMethod::Get,
             path: "/".to_string(),
@@ -1170,6 +1451,7 @@ fn ingest_resources_route(
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
     let mut param: Option<Symbol> = None;
+    let mut path: Option<String> = None;
     let mut only_none = false;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -1236,7 +1518,48 @@ fn ingest_resources_route(
                 // `params[:task_id]`. Dropped, the path bound `:id`
                 // and the lowered action read nil (#84).
                 "param" => param = symbol_or_string_value(&value).map(|s| Symbol::from(s.as_str())),
-                // `path:` and `shallow:` land when a fixture demands them.
+                // `path: "components"` renames the URL SEGMENT and nothing
+                // else (`/components`, still `parts_path` and
+                // `PartsController`). Rails strips the slashes, so
+                // `path: "/components"` is the same segment.
+                "path" => {
+                    let Some(raw) = symbol_or_string_value(&value) else {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path:` is not a literal string or symbol"
+                            ),
+                        });
+                    };
+                    // A dynamic segment (`"categories/:category_id/parts"`),
+                    // a glob or an optional group adds route params the
+                    // flattener does not carry yet; refuse rather than
+                    // serve a path whose `:category_id` never reaches
+                    // `params`.
+                    if raw.contains([':', '*', '(']) {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` has a dynamic segment"
+                            ),
+                        });
+                    }
+                    // `path: ""` / `path: "/"` mounts the resource at the
+                    // root (`GET /` is `index`, `/:id` is `show`). That
+                    // is not the resource name, so refuse it rather
+                    // than fall back to `/parts`.
+                    let segment = raw.trim_matches('/');
+                    if segment.is_empty() {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
+                            ),
+                        });
+                    }
+                    path = Some(segment.to_string());
+                }
+                // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
         }
@@ -1261,6 +1584,7 @@ fn ingest_resources_route(
         as_name,
         controller,
         param,
+        path,
     })
 }
 

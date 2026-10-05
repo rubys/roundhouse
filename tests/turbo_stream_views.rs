@@ -23,7 +23,10 @@ fn app_with_template(body: &str) -> App {
             "db/schema.rb",
             "ActiveRecord::Schema.define(version: 1) do\n  create_table :things do |t|\n    t.string :name\n  end\nend\n",
         ),
-        ("app/models/thing.rb", "class Thing < ApplicationRecord\nend\n"),
+        (
+            "app/models/thing.rb",
+            "class Thing < ApplicationRecord\nend\n",
+        ),
         (
             "app/controllers/things_controller.rb",
             "class ThingsController < ApplicationController\n  def create\n    @thing = Thing.new\n  end\nend\n",
@@ -33,7 +36,10 @@ fn app_with_template(body: &str) -> App {
             "<div id=\"<%= dom_id(thing) %>\"><%= thing.name %></div>\n",
         ),
         ("app/views/things/index.html.erb", "<h1>Things</h1>\n"),
-        ("app/views/things/create.turbo_stream.erb", Box::leak(body.to_string().into_boxed_str())),
+        (
+            "app/views/things/create.turbo_stream.erb",
+            Box::leak(body.to_string().into_boxed_str()),
+        ),
     ];
     let tree = files
         .into_iter()
@@ -67,7 +73,10 @@ fn a_turbo_stream_template_is_ingested_and_named_for_its_format() {
         .iter()
         .flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str().to_string()))
         .collect();
-    assert!(names.contains(&"create_turbo_stream".to_string()), "got {names:?}");
+    assert!(
+        names.contains(&"create_turbo_stream".to_string()),
+        "got {names:?}"
+    );
     assert!(names.contains(&"index".to_string()), "got {names:?}");
 }
 
@@ -80,7 +89,10 @@ fn append_with_a_record_renders_that_records_partial() {
     // Rails renders the record's own partial for the `<template>`.
     assert!(body.contains("Things"), "the partial module: {body}");
     // Markup must NOT be escaped on its way to the buffer.
-    assert!(!body.contains("html_escape"), "fragment was escaped: {body}");
+    assert!(
+        !body.contains("html_escape"),
+        "fragment was escaped: {body}"
+    );
 }
 
 #[test]
@@ -88,7 +100,10 @@ fn remove_targets_the_records_dom_id_and_carries_no_template() {
     let app = app_with_template("<%= turbo_stream.remove @thing %>\n");
     let body = method_body(&app, "create_turbo_stream");
     assert!(body.contains("turbo_stream_fragment"), "got {body}");
-    assert!(body.contains("dom_id"), "a bare record target is its dom_id: {body}");
+    assert!(
+        body.contains("dom_id"),
+        "a bare record target is its dom_id: {body}"
+    );
     // `remove` has no content, and the runtime composer omits the
     // `<template>` entirely for it.
     assert!(body.contains("remove"), "got {body}");
@@ -113,7 +128,11 @@ fn create_action_body(app: &App) -> String {
         .iter()
         .find(|lc| lc.name.0.as_str() == "ThingsController")
         .expect("ThingsController");
-    let m = lc.methods.iter().find(|m| m.name.as_str() == "create").expect("create");
+    let m = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "create")
+        .expect("create");
     format!("{:?}", m.body)
 }
 
@@ -121,7 +140,10 @@ fn create_action_body(app: &App) -> String {
 fn the_action_dispatches_on_the_request_format() {
     let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
     let body = create_action_body(&app);
-    assert!(body.contains("turbo_stream"), "expected a format branch: {body}");
+    assert!(
+        body.contains("turbo_stream"),
+        "expected a format branch: {body}"
+    );
     assert!(
         body.contains("create_turbo_stream"),
         "the turbo_stream branch renders the format-qualified view: {body}"
@@ -154,9 +176,16 @@ fn a_bare_accept_any_renders_the_template_the_action_has() {
     // The html fallback asks `accepts_any_format` before it raises.
     let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
     let body = create_action_body(&app);
-    let any = body.find("accepts_any_format").unwrap_or_else(|| panic!("no any-format arm: {body}"));
-    let raise = body.find("MissingTemplate").unwrap_or_else(|| panic!("no raise: {body}"));
-    assert!(any < raise, "the any-format arm is asked before the raise: {body}");
+    let any = body
+        .find("accepts_any_format")
+        .unwrap_or_else(|| panic!("no any-format arm: {body}"));
+    let raise = body
+        .find("MissingTemplate")
+        .unwrap_or_else(|| panic!("no raise: {body}"));
+    assert!(
+        any < raise,
+        "the any-format arm is asked before the raise: {body}"
+    );
     assert!(
         body[any..raise].contains("create_turbo_stream"),
         "the any-format arm renders the turbo_stream view: {body}"
@@ -164,19 +193,70 @@ fn a_bare_accept_any_renders_the_template_the_action_has() {
 }
 
 #[test]
-fn the_option_form_is_left_alone_rather_than_half_lowered() {
-    // `partial:`/`collection:`/`locals:` needs the partial machinery a
-    // `render` call site gets. Declining keeps the source shape (and
-    // files a residue line at emit); half-lowering would look like it
-    // worked.
+fn the_option_form_with_an_unknown_key_is_left_alone() {
+    // A key this pass does not read (`layout:`) stays source-shaped.
+    // Half-lowering would look like it worked and drop the unread option.
     let app = app_with_template(
-        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things %>\n",
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", layout: \"box\" %>\n",
     );
     let body = method_body(&app, "create_turbo_stream");
     assert!(
         !body.contains("turbo_stream_fragment"),
         "unsupported spelling must not be lowered: {body}"
     );
+}
+
+/// `collection:` is Rails' once-per-element render. campfire's
+/// `accounts/users/index.turbo_stream.erb` writes
+/// `turbo_stream.replace :next_page_container, partial: "…/user",
+/// collection: @page.records, as: :user`. Treating that as a single
+/// render would keep only the first element.
+#[test]
+fn the_collection_option_form_renders_each_element() {
+    let app = app_with_template(
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things, as: :thing %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(body.contains("turbo_stream_fragment"), "got {body}");
+    assert!(body.contains("each"), "the collection must iterate: {body}");
+    assert!(
+        body.contains("_ts_cap"),
+        "concatenated into the fragment: {body}"
+    );
+    assert!(
+        body.contains("Views::Things") && body.contains("thing"),
+        "the named partial supplies each element: {body}"
+    );
+    assert!(
+        body.contains("BoolOp") || body.contains("Array {"),
+        "a nil collection must iterate as empty, not as nil.each: {body}"
+    );
+}
+
+/// A supplied `as:` that is not a name literal cannot be lowered —
+/// dropping it would bind the element to the partial's default name.
+#[test]
+fn an_invalid_as_option_stays_source_shaped() {
+    let app = app_with_template(
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things, as: @name %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(
+        !body.contains("turbo_stream_fragment"),
+        "invalid as: must not lower: {body}"
+    );
+}
+
+/// `locals:` evaluate once at the call site, even for an empty
+/// collection. Binding them inside `each` would skip or repeat them.
+#[test]
+fn collection_locals_are_bound_before_each() {
+    let app = app_with_template(
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things, as: :thing, locals: { heading: next_heading } %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(body.contains("_ts_local_"), "locals bound once: {body}");
+    assert!(body.contains("each"), "still iterates: {body}");
 }
 
 /// BLOCK form: `turbo_stream.append target do … end`. The block body is
@@ -197,7 +277,10 @@ fn the_block_form_captures_its_body_as_the_template() {
         body.contains("turbo_stream_fragment"),
         "the block form must reach the composer: {body}"
     );
-    assert!(body.contains("_ts_cap"), "with its own capture accumulator: {body}");
+    assert!(
+        body.contains("_ts_cap"),
+        "with its own capture accumulator: {body}"
+    );
     assert!(
         !body.contains("html_escape"),
         "a turbo-stream fragment is markup, not escaped text: {body}"

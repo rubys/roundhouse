@@ -457,6 +457,15 @@ fn run_transpile(
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     let type_errors = analyze_diags.iter().filter(|d| d.severity == Severity::Error).count();
     if errors + type_errors > 0 {
+        // A project-boundary refusal (`target_files` returned `Err`, e.g.
+        // a Date column on a target without a date-only runtime) fails
+        // with or without the flag, so suggesting it would be false.
+        // Name the refusal instead (issue #303).
+        if let Err(e) = &files_result {
+            return Err(format!(
+                "{errors} unsupported/syntax error(s), {type_errors} type error(s) — {e}"
+            ));
+        }
         return Err(format!(
             "{errors} unsupported/syntax error(s), {type_errors} type error(s) — rerun \
              with --allow-unsupported to write the output anyway"

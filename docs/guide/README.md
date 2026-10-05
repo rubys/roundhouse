@@ -42,6 +42,9 @@ interpreter, a SQLite file beside it by default.
 
 - [`spinel.md`](spinel.md) — building, running, tuning and deploying
   the binary.
+- [One command: OCRAN](spinel.md#one-command-ocran) — `ocran
+  --roundhouse path/to/app` runs those steps for you and hands back a
+  directory to ship.
 
 ## Before any of them
 

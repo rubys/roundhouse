@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use rubydex::model::identity_maps::IdentityHashMap;
 use rubydex::model::ids::{DeclarationId, declaration_id_from_lookup_name};
 
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, HashRest, LValue, Literal, MatchPattern};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::{Row, Ty};
 
@@ -201,6 +201,7 @@ pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
+    data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
@@ -215,7 +216,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -230,6 +231,11 @@ impl<'a> BodyTyper<'a> {
         values: &'a IdentityHashMap<DeclarationId, Ty>,
     ) -> Self {
         self.typed_constants = Some(values);
+        self
+    }
+
+    pub(super) fn with_data_factories(mut self, factories: &'a HashMap<crate::span::Span, Ty>) -> Self {
+        self.data_factories = Some(factories);
         self
     }
 
@@ -257,6 +263,134 @@ impl<'a> BodyTyper<'a> {
         ty
     }
 
+    /// Pattern-side expressions use ordinary expression/constant resolution;
+    /// recognizing pattern syntax does not grant unknown classes new support.
+    fn analyze_match_pattern_constants(&self, pattern: &mut MatchPattern, ctx: &Ctx) {
+        pattern.for_each_expr_mut(&mut |expr| { self.analyze_expr(expr, ctx); });
+    }
+
+    /// The locals a `MatchPattern` binds when it matches, typed against
+    /// `subject_ty` — the static type of the value being tested AT
+    /// THIS POSITION (the `CaseMatch` scrutinee at the top level, `None`
+    /// for anything nested inside an `Array`/`Find` pattern, whose
+    /// `deconstruct` return isn't modeled positionally).
+    ///
+    /// Only a *plain* `Hash` pattern (no `constant` narrowing) against a
+    /// statically `Hash[Symbol, V]`-typed subject gets typed key
+    /// bindings, and every key gets the SAME `V` — `Ty::Hash` has no
+    /// per-key shape, so `{status:, data:}` against `Hash[Sym, String]`
+    /// types both `status` and `data` as `String`, which is exactly
+    /// right for a value-omission bind (`data:`) and merely
+    /// conservative for one with an explicit sub-pattern. A
+    /// `constant`-narrowed `Hash`/`Array` pattern (`Success(value:)`,
+    /// `Success(page)`) always types its bindings `Untyped`: reading a
+    /// narrowing class's own attribute types back out (real
+    /// `deconstruct_keys` fidelity) is future work, and every one of
+    /// those constants in the Procore survey is a gem class the
+    /// registry doesn't know regardless, so today the two cases collapse
+    /// to the same answer.
+    fn match_pattern_bindings(
+        &self,
+        pattern: &MatchPattern,
+        subject_ty: Option<&Ty>,
+    ) -> Vec<(Symbol, Ty)> {
+        match pattern {
+            MatchPattern::Value { .. } | MatchPattern::Nil => Vec::new(),
+            MatchPattern::Bind { name } => {
+                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped))]
+            }
+            MatchPattern::Capture { pattern, name } => {
+                let mut out = self.match_pattern_bindings(pattern, subject_ty);
+                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped)));
+                out
+            }
+            // Ruby permits `_`-prefixed bindings in alternatives. A
+            // different alternative can succeed without that binding.
+            MatchPattern::Alt { alternatives } => alternatives.iter()
+                .flat_map(|p| self.match_pattern_bindings(p, subject_ty))
+                .map(|(name, ty)| (name, union_of(ty, Ty::Nil))).collect(),
+            MatchPattern::Array { pre, rest, post, .. } => {
+                let mut out = Vec::new();
+                for p in pre.iter().chain(post.iter()) {
+                    out.extend(self.match_pattern_bindings(p, None));
+                }
+                if let Some(Some(name)) = rest {
+                    out.push((name.clone(), Ty::Untyped));
+                }
+                out
+            }
+            MatchPattern::Find { middle, pre_rest, post_rest, .. } => {
+                let mut out = Vec::new();
+                for p in middle {
+                    out.extend(self.match_pattern_bindings(p, None));
+                }
+                if let Some(name) = pre_rest {
+                    out.push((name.clone(), Ty::Untyped));
+                }
+                if let Some(name) = post_rest {
+                    out.push((name.clone(), Ty::Untyped));
+                }
+                out
+            }
+            MatchPattern::Hash { constant, pairs, rest } => {
+                let value_ty = if constant.is_none() {
+                    match subject_ty {
+                        Some(Ty::Hash { key, value }) if matches!(**key, Ty::Sym) => {
+                            Some((**value).clone())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let mut out = Vec::new();
+                for (key, sub) in pairs {
+                    match sub {
+                        Some(p) => out.extend(self.match_pattern_bindings(p, value_ty.as_ref())),
+                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::Untyped))),
+                    }
+                }
+                if let Some(HashRest::Collect { name }) = rest {
+                    // The rest is a Hash returned by deconstruct_keys,
+                    // never the deconstructed object. Unmatched keys
+                    // need not be symbols, even though pattern keys are.
+                    let rest_ty = match subject_ty {
+                        Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
+                        _ => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+                    };
+                    out.push((name.clone(), rest_ty));
+                }
+                out
+            }
+        }
+    }
+
+    /// Matches nested in expressions can bind locals too. Conditional
+    /// matches may keep a prior/nil value; a required-match statement
+    /// definitely binds on the continuing path.
+    fn propagate_match_bindings(&self, expr: &Expr, ctx: &mut Ctx, definite: bool) {
+        if matches!(&*expr.node, ExprNode::Lambda { .. } | ExprNode::Let { .. }) { return; }
+        let mut bind = |pattern: &MatchPattern, subject_ty: Option<&Ty>| {
+            for (name, ty) in self.match_pattern_bindings(pattern, subject_ty) {
+                let ty = if definite && matches!(&*expr.node, ExprNode::MatchRequired { .. }) {
+                    ty
+                } else {
+                    union_of(ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil), ty)
+                };
+                ctx.local_bindings.insert(name, ty);
+            }
+        };
+        match &*expr.node {
+            ExprNode::CaseMatch { scrutinee, arms, .. } => {
+                for arm in arms { bind(&arm.pattern, scrutinee.ty.as_ref()); }
+            }
+            ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+                bind(pattern, value.ty.as_ref());
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| self.propagate_match_bindings(child, ctx, false));
+    }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let expr_span = expr.span;
@@ -545,6 +679,7 @@ impl<'a> BodyTyper<'a> {
                 // `||`).
                 let mut seeded = ctx.clone();
                 collect_var_assignments_into(left, &mut seeded.local_bindings);
+                self.propagate_match_bindings(left, &mut seeded, true);
                 let pred = narrowing::extract_narrowing(left);
                 let right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
@@ -681,6 +816,15 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
+                if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
+                    // Only admitted declarations establish a Data class identity.
+                    expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
+                    expr.diagnostic = None;
+                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
+                    return ty.clone();
+                }
                 // Bare-name implicit-self Send (no receiver, no args, no
                 // block) resolves to a local binding when one exists. Ruby
                 // parses `x` as `self.x()` when `x` wasn't assigned earlier
@@ -759,7 +903,9 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                for a in args.iter_mut() {
+                    self.analyze_expr(a, ctx);
+                }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
                         r.ty = Some(send::param_value_ty());
@@ -783,6 +929,17 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                if method.as_str() == "new"
+                    && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Data")
+                    && self.const_resolver.as_ref().is_some_and(|resolver| !resolver.has_source_namespace("Data"))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("Data.new"),
+                        detail: "Data is abstract; construct a class returned by Data.define".into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
@@ -943,6 +1100,7 @@ impl<'a> BodyTyper<'a> {
                 for (k, v) in &cond_assigns {
                     base.local_bindings.insert(k.clone(), v.clone());
                 }
+                self.propagate_match_bindings(cond, &mut base, true);
                 let then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
@@ -964,6 +1122,56 @@ impl<'a> BodyTyper<'a> {
                     branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
                 }
                 union_many(branch_tys)
+            }
+
+            // Pattern bindings are lexical locals. Failed guards do not
+            // roll them back, and failed patterns can bind a prefix.
+            // Sibling arms see possible earlier bindings joined with
+            // their old value (nil for a newly introduced local).
+            ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+                let scrutinee_ty = self.analyze_expr(scrutinee, ctx);
+                let mut branch_tys = Vec::new();
+                let mut fallthrough = ctx.clone();
+                for arm in arms.iter_mut() {
+                    let bindings =
+                        self.match_pattern_bindings(&arm.pattern, Some(&scrutinee_ty));
+                    let mut inner = fallthrough.clone();
+                    for (name, ty) in &bindings {
+                        inner.local_bindings.insert(name.clone(), ty.clone());
+                    }
+                    self.analyze_match_pattern_constants(&mut arm.pattern, &inner);
+                    if let Some((_, g)) = &mut arm.guard {
+                        self.analyze_expr(g, &inner);
+                    }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &inner));
+                    for (name, ty) in bindings {
+                        let old = fallthrough.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil);
+                        fallthrough.local_bindings.insert(name, union_of(old, ty));
+                    }
+                }
+                if let Some(eb) = else_body {
+                    branch_tys.push(self.analyze_expr(eb, &fallthrough));
+                }
+                union_many(branch_tys)
+            }
+
+            // The predicate returns Bool; user deconstruction/pin methods
+            // can still raise. Bindings escape, including partial matches.
+            ExprNode::MatchPredicate { value, pattern } => {
+                self.analyze_expr(value, ctx);
+                self.analyze_match_pattern_constants(pattern, ctx);
+                Ty::Bool
+            }
+
+            // `value => pattern` — binds on match, raises
+            // `NoMatchingPatternError` otherwise; evaluates to `nil`.
+            // Statement-position bindings ARE propagated forward — see
+            // the `Seq` walk below, which special-cases this the same
+            // way it special-cases `Assign`.
+            ExprNode::MatchRequired { value, pattern } => {
+                self.analyze_expr(value, ctx);
+                self.analyze_match_pattern_constants(pattern, ctx);
+                Ty::Nil
             }
 
             ExprNode::Seq { exprs } => {
@@ -1167,6 +1375,7 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    self.propagate_match_bindings(e, &mut local_ctx, true);
                     // Container element write — `hash[k] ||= []` /
                     // `hash[k] = v`. Widen the container's value type so
                     // a following `hash[k].push x` / `.join` in the same
@@ -3128,6 +3337,97 @@ mod tests {
             assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
             assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
         }
+    }
+
+    #[test]
+    fn case_match_hash_pattern_binds_value_omission_key_from_hash_value_ty() {
+        use crate::expr::{MatchArm, MatchPattern};
+
+        // case h
+        // in {status: "ok", data:}
+        //   data
+        // end
+        //
+        // `h` is statically `Hash[Sym, Str]`; the value-omission bind
+        // `data:` should type as the hash's uniform value type (`Str`),
+        // and so should the arm body that reads it back.
+        let h_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let pattern = MatchPattern::Hash {
+            constant: None,
+            pairs: vec![
+                (
+                    Symbol::from("status"),
+                    Some(MatchPattern::Value {
+                        expr: synth(ExprNode::Lit {
+                            value: Literal::Str { value: "ok".to_string() },
+                        }),
+                    }),
+                ),
+                (Symbol::from("data"), None),
+            ],
+            rest: None,
+        };
+        let arm = MatchArm { pattern, guard: None, body: var("data") };
+        let mut expr = synth(ExprNode::CaseMatch {
+            scrutinee: var("h"),
+            arms: vec![arm],
+            else_body: None,
+        });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("h", h_ty);
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+        assert_eq!(ty, Ty::Str, "case/in result should be the arm body's type");
+
+        let ExprNode::CaseMatch { arms, .. } = &*expr.node else {
+            panic!("expected CaseMatch, got {:?}", expr.node);
+        };
+        assert_eq!(
+            arms[0].body.ty,
+            Some(Ty::Str),
+            "`data` should read as the hash's value type, not Untyped"
+        );
+    }
+
+    #[test]
+    fn case_match_array_pattern_with_constant_binds_untyped() {
+        use crate::expr::{MatchArm, MatchPattern};
+
+        // case r
+        // in Success(page)
+        //   page
+        // else
+        //   nil
+        // end
+        //
+        // `Success` is an unregistered (gem) class — a constant-
+        // narrowed pattern's bindings type `Untyped`, a deliberate
+        // gradual opt-out rather than an error (mirrors how a bare
+        // `Const` read of an unknown class always resolves rather than
+        // failing to type at all).
+        let pattern = MatchPattern::Array {
+            constant: Some(synth(ExprNode::Const { path: vec![Symbol::from("Success")] })),
+            pre: vec![MatchPattern::Bind { name: Symbol::from("page") }],
+            rest: None,
+            post: vec![],
+        };
+        let arm = MatchArm { pattern, guard: None, body: var("page") };
+        let mut expr = synth(ExprNode::CaseMatch {
+            scrutinee: var("r"),
+            arms: vec![arm],
+            else_body: Some(nil_lit()),
+        });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("r", Ty::Untyped);
+        typer.analyze_expr(&mut expr, &ctx);
+
+        let ExprNode::CaseMatch { arms, .. } = &*expr.node else {
+            panic!("expected CaseMatch, got {:?}", expr.node);
+        };
+        assert_eq!(arms[0].body.ty, Some(Ty::Untyped));
     }
 }
 

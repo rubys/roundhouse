@@ -4,7 +4,8 @@
 //! `find_or_create_for(users)` is typed `Relation[User]` from its one
 //! app caller; campfire's tests pass `[ users(:david), users(:kevin) ]`.
 //! Ruby plucks either, a typed emit picks the app's shape, and the
-//! test's literal becomes `User.where(id: [david.id, kevin.id])`.
+//! test's literal becomes an explicit `ActiveRecord::Relation.new(User)`
+//! filtered by exactly `[david.id, kevin.id]`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,6 +53,7 @@ fn emitted(test_body: &str, model_call: &str) -> String {
         .clone()
 }
 
+/// Seed a Relation while preserving both selected fixture IDs exactly.
 #[test]
 fn a_record_array_at_a_relation_param_becomes_the_relation_over_its_ids() {
     let src = emitted(
@@ -60,7 +62,7 @@ fn a_record_array_at_a_relation_param_becomes_the_relation_over_its_ids() {
     );
     assert!(
         src.contains(
-            "Room.find_or_create_for(User.where(id: [UsersFixtures.david.id, UsersFixtures.kevin.id]))"
+            "Room.find_or_create_for(ActiveRecord::Relation.new(User).where(id: [UsersFixtures.david.id, UsersFixtures.kevin.id]))"
         ),
         "the literal should be restated as the Relation over its ids:\n{src}"
     );

@@ -14,12 +14,12 @@
 //! positional argument than the callee has positional parameters, into a
 //! callee with keywords, can only have been written `**`.
 
+use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::diagnostic::Diagnostic;
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::lower::kwsplat::apply_kwsplat_expansion;
-use roundhouse::App;
 
 /// Ingest → analyze → the splat expansion → ruby render. Returns the
 /// emitted source plus the pass's residue ledger.
@@ -64,7 +64,10 @@ end
         out.contains("Image.new(name: image[:name], width: image[:width], height: image[:height])"),
         "expected the splat expanded to keywords:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -91,7 +94,64 @@ end
         out.contains("notification(payload)"),
         "**rest callee must keep the positional hash:\n{out}"
     );
-    assert!(diags.is_empty(), "a correct call must not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "a correct call must not ledger: {diags:?}"
+    );
+}
+
+/// `def f(*items, **opts); f(payload)` is a valid positional call.
+/// Restoring `**payload` would move the Hash from `items` onto `opts`.
+#[test]
+fn a_positional_rest_beside_keyword_rest_is_not_an_erased_splat() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    consume(payload)
+  end
+
+  private
+    def consume(*items, **opts)
+      items
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("consume(payload)") || src.contains("consume(payload,"),
+        "a *items,**opts callee must keep the positional Hash:\n{src}"
+    );
+    assert!(
+        !src.contains("consume(**payload)"),
+        "must not restore a splat that *items already accepted:\n{src}"
+    );
 }
 
 #[test]
@@ -118,7 +178,10 @@ end
         out.contains("Tag.new(name: opts[:name], size: opts.fetch(:size, 48))"),
         "expected the optional keyword read with its default:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -201,7 +264,10 @@ end
         out.contains(r#"Image.new(name: "a", width: 1)"#),
         "literal kwargs must survive verbatim:\n{out}"
     );
-    assert!(diags.is_empty(), "a correct call must not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "a correct call must not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -252,7 +318,10 @@ end
         out.contains("Logger.new(opts)"),
         "a *rest callee must be left alone:\n{out}"
     );
-    assert!(diags.is_empty(), "no evidence means no ledger line either: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "no evidence means no ledger line either: {diags:?}"
+    );
 }
 
 #[test]
@@ -281,7 +350,98 @@ end
         out.contains("Notification.new(title: params[:title], body: params[:body], badge: unread, endpoint: endpoint)"),
         "expected the literal's keywords kept and the rest indexed off the bundle:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
+}
+
+#[test]
+fn a_receiverless_call_in_a_library_class_expands_with_the_bundle_winning() {
+    // `f(k: v, **h)` is `{ k: v }.merge(h)`: the later `**` wins, so the
+    // literal is the default the bundle is read against. The call has no
+    // receiver, so the callee is the class's own instance method.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg(**opts)
+    render_code(size: 2, **opts)
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains(
+            r#"render_code(size: opts.fetch(:size, 2), color: opts.fetch(:color, "black"))"#
+        ),
+        "expected the literal read as the bundle's default:\n{out}"
+    );
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
+}
+
+#[test]
+fn a_literal_merged_with_an_impure_bundle_is_ledgered_not_expanded() {
+    // `**defaults()` after a literal keyword: the bundle is a call, and
+    // expanding would evaluate it once per keyword. The positional Hash
+    // stays and the site is ledgered.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg
+    render_code(size: 2, **defaults())
+  end
+
+  def defaults
+    { color: "red" }
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains("render_code({ size: 2 }.merge(defaults"),
+        "expected the positional bundle left intact:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
+}
+
+#[test]
+fn a_computed_value_beside_a_later_splat_is_ledgered_not_expanded() {
+    // `f(size: compute(), **opts)` evaluates `compute()` even when
+    // `opts` has `:size`. Expanding to `opts.fetch(:size, compute())`
+    // would skip it. The positional merge stays.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg(**opts)
+    render_code(size: compute(), **opts)
+  end
+
+  def compute
+    7
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains("render_code({ size: compute }.merge(opts)"),
+        "expected the positional bundle left intact:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
 }
 
 /// A TEST CLASS forwarding `**attributes` from one of its own helpers
@@ -342,5 +502,145 @@ end
             r#"attachment_for(href: attributes[:href], url: attributes[:url], filename: attributes.fetch(:filename, "Title"), caption: attributes.fetch(:caption, "Description"))"#
         ),
         "expected the forwarded splat expanded against the class's own helper:\n{src}"
+    );
+}
+
+/// `f(**h)` into `def f(**rest)` must keep the splat. Ingest erases
+/// `**h` to a positional Hash; Ruby 3 will not auto-convert it, so the
+/// call is `wrong number of arguments (given 1, expected 0)` —
+/// campfire's `embeds_from(**details)` → `attachments_for(details)`.
+#[test]
+fn a_splat_into_keyword_rest_is_restored() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    assert_equal({ href: "a", url: "b" }, embeds_from(href: "a", url: "b"))
+  end
+
+  private
+    def attachments_for(**details)
+      details
+    end
+
+    def embeds_from(**details)
+      attachments_for(**details)
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `attachments_for` only *consumes* `**details`, so ingest flattens
+    // the def to `details = {}`. Restoring `**details` against that is
+    // unexpected keywords. The caller `embeds_from` forwards, so its
+    // def stays `**details`.
+    assert!(
+        src.contains("def attachments_for(details = {})")
+            || src.contains("def attachments_for(details={})"),
+        "a consuming **rest must emit as a positional Hash:\n{src}"
+    );
+    assert!(
+        src.contains("attachments_for(details)") || src.contains("attachments_for(details,"),
+        "the call into the flattened def stays positional:\n{src}"
+    );
+    assert!(
+        !src.contains("attachments_for(**details)"),
+        "must not restore ** against a flattened details = {{}}:\n{src}"
+    );
+    assert!(
+        src.contains("def embeds_from(**details)") || src.contains("def embeds_from(**details,"),
+        "a forwarding **rest keeps the keyword-rest def:\n{src}"
+    );
+}
+
+/// `def f(**rest)` whose body itself forwards `**rest` keeps the
+/// keyword-rest on the wire. A positional Hash into THAT def must
+/// become `**h`; a consuming `**rest` still flattens to `name = {}`.
+#[test]
+fn a_splat_into_a_forwarding_keyword_rest_is_restored() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    wrap(payload)
+  end
+
+  private
+    def other(**details)
+      details
+    end
+
+    def consume(**details)
+      other(**details)
+    end
+
+    def wrap(**details)
+      consume(**details)
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("def consume(**details)") || src.contains("def consume(**details,"),
+        "a forwarding **rest keeps the keyword-rest def:\n{src}"
+    );
+    assert!(
+        src.contains("consume(**details)"),
+        "the call into that def restores the splat:\n{src}"
+    );
+    assert!(
+        src.contains("def other(details = {})") || src.contains("def other(details={})"),
+        "a consuming **rest still flattens:\n{src}"
     );
 }

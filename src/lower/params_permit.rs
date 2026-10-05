@@ -22,6 +22,20 @@ fn is_request_params(e: &Expr) -> bool {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    // A top-level `params.permit(:a, :b)` CONSUMED IN PLACE, as a call's
+    // argument — the Rails 8 authentication generator's
+    // `@user.update(params.permit(:password, :password_confirmation))`
+    // and `User.authenticate_by(params.permit(:email_address,
+    // :password))`. One RETURNED from a params helper (`def note_params
+    // = params.permit(:body)`) is the controller lowering's: it becomes
+    // that controller's typed params class.
+    if let ExprNode::Send { args, .. } = &mut *expr.node {
+        for arg in args.iter_mut() {
+            if let Some(permitted) = permitted_chain(arg) {
+                *arg = permitted;
+            }
+        }
+    }
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else { return };
     let nested = is_param_value(r.ty.as_ref());
     let replacement = match (method.as_str(), args.as_slice()) {
@@ -41,6 +55,33 @@ fn rewrite(expr: &mut Expr) {
         new.ty = expr.ty.clone();
         *expr = new;
     }
+}
+
+/// `params.permit(:a, :b)` on the request's params →
+/// `Params.permitted(Params.permitted({}, params, "a", :a), params, "b", :b)`.
+/// A model write reads Symbol keys, so this builds a Symbol-keyed hash
+/// of the scalars the request provided, where `slice` would have handed
+/// it String keys it never reads.
+fn permitted_chain(e: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else { return None };
+    if method.as_str() != "permit" || args.is_empty() || !is_request_params(r) || is_param_value(r.ty.as_ref()) {
+        return None;
+    }
+    let names = args.iter().map(sym_name).collect::<Option<Vec<_>>>()?;
+    let params_const = || Expr::new(e.span, ExprNode::Const { path: vec![Symbol::from("Params")] });
+    let mut acc = Expr::new(e.span, ExprNode::Hash { entries: vec![], kwargs: false });
+    acc.ty = Some(permitted_ty());
+    for name in names {
+        let sym = Expr::new(e.span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name.as_str()) } });
+        acc = send(e.span, Some(params_const()), "permitted", vec![acc, r.clone(), str_lit(e.span, name), sym]);
+        acc.ty = Some(permitted_ty());
+    }
+    Some(acc)
+}
+
+/// What `Params.permitted` answers: the Symbol-keyed scalars.
+fn permitted_ty() -> Ty {
+    Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }
 }
 
 fn sym_name(e: &Expr) -> Option<String> {

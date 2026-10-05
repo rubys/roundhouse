@@ -170,10 +170,10 @@ fn claims(e: &Expr, secure: &HashMap<ClassId, Vec<Symbol>>) -> Option<Plan> {
         _ => return None,
     };
     let attrs = secure.get(&class)?;
-    let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+    let entries = argument_entries(&args[0])?;
     let mut identifiers = Vec::new();
     let mut passwords = Vec::new();
-    for (k, v) in entries {
+    for (k, v) in &entries {
         let ExprNode::Lit { value: Literal::Sym { value: name } } = &*k.node else {
             return None;
         };
@@ -191,6 +191,55 @@ fn claims(e: &Expr, secure: &HashMap<ClassId, Vec<Symbol>>) -> Option<Plan> {
         identifiers,
         passwords,
     })
+}
+
+/// The argument as `(key, value)` pairs: a literal hash as written, or
+/// the Rails 8 authentication generator's
+/// `params.permit(:email_address, :password)` — by this pass the
+/// `Params.permitted` chain `params_permit` lowers it to — whose keys are
+/// the permitted names and whose values are the same scalar reads the
+/// chain makes (`Params.str(params, "email_address", "")`: a non-scalar
+/// is dropped exactly as `permit` drops it). A key absent from the
+/// request reads "", where Rails' `authenticate_by` would raise
+/// ArgumentError for the missing half; both deny the sign-in.
+fn argument_entries(arg: &Expr) -> Option<Vec<(Expr, Expr)>> {
+    if let ExprNode::Hash { entries, .. } = &*arg.node {
+        return Some(entries.clone());
+    }
+    let mut out = Vec::new();
+    let mut cur = arg;
+    loop {
+        match &*cur.node {
+            ExprNode::Hash { entries, .. } if entries.is_empty() && !out.is_empty() => break,
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "permitted"
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Params") =>
+            {
+                let [acc, params, key, name] = &args[..] else { return None };
+                let ExprNode::Lit { value: Literal::Sym { .. } } = &*name.node else { return None };
+                let mut read = Expr::new(
+                    arg.span,
+                    ExprNode::Send {
+                        recv: Some(r.clone()),
+                        method: Symbol::from("str"),
+                        args: vec![
+                            params.clone(),
+                            key.clone(),
+                            Expr::new(arg.span, ExprNode::Lit { value: Literal::Str { value: String::new() } }),
+                        ],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                read.ty = Some(Ty::Str);
+                out.push((name.clone(), read));
+                cur = acc;
+            }
+            _ => return None,
+        }
+    }
+    out.reverse();
+    Some(out)
 }
 
 fn optional(class: &ClassId) -> Ty {
@@ -343,13 +392,13 @@ fn residue_reason(e: &Expr, secure: &HashMap<ClassId, Vec<Symbol>>) -> &'static 
     let Some(attrs) = secure.get(&class) else {
         return "receiver's model does not declare has_secure_password";
     };
-    let entries = match args.first().map(|a| &*a.node) {
-        Some(ExprNode::Hash { entries, .. }) if args.len() == 1 => entries,
-        _ => return "arguments are not a single hash literal",
+    let entries = match args.first().and_then(argument_entries) {
+        Some(entries) if args.len() == 1 => entries,
+        _ => return "arguments are not a single hash literal or symbol-key params.permit",
     };
     let mut identifiers = 0;
     let mut passwords = 0;
-    for (k, _) in entries {
+    for (k, _) in &entries {
         let ExprNode::Lit { value: Literal::Sym { value: name } } = &*k.node else {
             return "hash has a non-literal key";
         };

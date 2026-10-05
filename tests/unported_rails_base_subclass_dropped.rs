@@ -116,6 +116,40 @@ fn a_mailbox_and_its_subclass_are_dropped_at_lowering_and_ledgered() {
     assert!(!out.contains("Mailbox"), "{out}");
 }
 
+/// An Active Job argument serializer registers a custom argument type with
+/// `ActiveJob::Serializers`. The runtime's Active Job has no such registry,
+/// so the class is dropped like a mailbox.
+#[test]
+fn an_active_job_object_serializer_is_dropped_at_lowering_and_ledgered() {
+    let mut app = ingest(&[(
+        "app/serializers/comment_serializer.rb",
+        r#"class CommentSerializer < ActiveJob::Serializers::ObjectSerializer
+  def klass
+    Comment
+  end
+
+  def serialize(comment)
+    super("body" => comment.body)
+  end
+
+  def deserialize(hash)
+    Comment.new(body: hash["body"])
+  end
+end
+"#,
+    )]);
+    assert_eq!(library_class_names(&app), vec!["CommentSerializer"]);
+
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(library_class_names(&app).is_empty());
+    let gaps = dropped(&app, &diags);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(
+        gaps[0].contains("`CommentSerializer` extends `ActiveJob::Serializers::ObjectSerializer`"),
+        "{gaps:?}"
+    );
+}
+
 #[test]
 fn a_ported_rails_base_is_kept() {
     let mut app = ingest(&[("app/models/current.rb", CURRENT)]);

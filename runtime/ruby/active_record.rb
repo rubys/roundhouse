@@ -12,5 +12,7 @@ require_relative "active_record/connection"
 # calls into ActionController::MessageVerifier, whose PBKDF2/HMAC
 # primitives ship only with the ruby-family trees.
 require_relative "active_record/signed_id"
+# has_secure_password's reset token — same tier as signed_id.
+require_relative "active_record/token_for"
 require_relative "active_record/arel"
 require_relative "active_record/relation"

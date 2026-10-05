@@ -494,6 +494,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("cancancan", "CanCan"),
         ("combine_pdf", "CombinePDF"),
         ("fast_excel", "FastExcel"),
+        ("graphql", "GraphQL"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),
@@ -587,6 +588,12 @@ pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphql_owns_the_graphql_namespace() {
+        // Name-derived, it would be `Graphql`; graphql-ruby's is `GraphQL`.
+        assert_eq!(namespace_of("graphql"), "GraphQL");
+    }
 
     const LOCK: &str = "\
 GEM

@@ -59,7 +59,7 @@ behave differently from the one this archive was generated against.
 - libvips (\`libvips-dev\` to build, \`libvips42\` to run; \`brew install vips\`)
   — \`spin.toml\` names \`ruby-vips\`, the image processor behind attachment
   thumbnails, avatars and the account logo.
-- Node.js 18+ — for the End-to-end suite
+- Node.js 24+ — for the End-to-end suite
 
 ## Build
 

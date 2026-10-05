@@ -165,11 +165,11 @@ pub(super) fn push_association_methods(
                 }
                 // `has_many :through` collection writer (`story.tags =
                 // [tag]` — the factory/edit shape). Stages the target
-                // collection and marks it stale; `_sync_<name>` folds
-                // into after_save (before any user callbacks — they
-                // run against synced join rows) and replaces the join
-                // rows there. Deferred-sync is an honest subset of
-                // Rails, which syncs immediately for persisted owners.
+                // collection and marks it stale. A persisted owner
+                // syncs at once, as Rails does; a new owner defers:
+                // `_sync_<name>` folds into after_save (before any user
+                // callbacks — they run against synced join rows) and
+                // replaces the join rows there.
                 // The sibling through association names the join class
                 // and the owner-side fk; the join model's `belongs_to`
                 // matching the target supplies the target-side fk (see
@@ -1326,7 +1326,14 @@ fn synth_belongs_to_writer(
 ///     @tags_cache = values.to_a
 ///     @tags_loaded = true
 ///     @tags_stale = true
+///     if self.persisted? then self._sync_tags end
+///     nil
 ///   end
+///
+/// A persisted owner writes its join rows at once, as Rails does; a new
+/// one keeps them staged until `after_save`. Staged-only, code that saves
+/// a record and THEN assigns (`entry.save!; entry.tags = tags`) never
+/// wrote a join row.
 ///
 /// `.to_a` because the argument is as often a Relation as an Array
 /// (lobsters: `self.tags = Tag.where(tag: final_tags)` in Story, and
@@ -1368,6 +1375,36 @@ fn synth_through_collection_writer(owner: &ClassId, name: &Symbol, target: &Clas
         ),
         ivar_assign(format!("{}_loaded", name.as_str()), bool_lit(true)),
         ivar_assign(format!("{}_stale", name.as_str()), bool_lit(true)),
+        // Persisted owner → write the join rows NOW (Rails' collection
+        // writer does; only a new record defers to its save). Same
+        // `self.persisted?` spelling markers.rs uses, for the same reason.
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                        method: Symbol::from("persisted?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                then_branch: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                        method: Symbol::from(format!("_sync_{}", name.as_str())),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                else_branch: nil_lit(),
+            },
+        ),
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
     ]);
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,

@@ -1247,9 +1247,9 @@ pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model)
 /// `on:` restrictions lower structurally: `after_commit ..., on:
 /// :create` targets the runtime's `after_create_commit` hook, and
 /// validation hooks get a `new_record?` guard (accurate at validation
-/// time — the insert hasn't happened yet). Ingest already rejected
-/// every (hook, on) pair this match doesn't cover, plus `if:`/
-/// `unless:` conditions.
+/// time — the insert hasn't happened yet). `if:`/`unless:` conditions
+/// wrap the body in the guard they name. Ingest already rejected every
+/// (hook, on) pair this match doesn't cover.
 fn push_symbol_callback(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -1258,9 +1258,6 @@ fn push_symbol_callback(
 ) {
     use crate::dialect::{CallbackHook as Hook, CallbackOn as On};
 
-    if cb.condition.is_some() {
-        return;
-    }
     let hook_name = match (cb.hook, cb.on) {
         (Hook::AfterCommit, Some(On::Create)) => "after_create_commit",
         (Hook::AfterCommit, Some(On::Update)) => "after_update_commit",
@@ -1280,17 +1277,30 @@ fn push_symbol_callback(
         )
     };
 
+    let mut body = seq(cb.targets.iter().map(self_call).collect());
     if matches!(cb.hook, Hook::BeforeValidation | Hook::AfterValidation) && cb.on.is_some() {
         // Validations never run on destroy; ingest rejects this.
         let Some(on) = cb.on else { return };
-        let body = seq(cb.targets.iter().map(self_call).collect());
-        let Some(body) = guard_validation_on(body, on, span) else { return };
-        fold_into_or_push(methods, model, hook_name, body);
-    } else {
-        for target in &cb.targets {
-            fold_into_or_push(methods, model, hook_name, self_call(target));
-        }
+        let Some(guarded) = guard_validation_on(body, on, span) else { return };
+        body = guarded;
     }
+    // `if:` / `unless:` — the callback runs only when the condition
+    // holds, exactly as Rails. The condition was already negated for
+    // `unless:` at ingest.
+    if let Some(cond) = &cb.condition {
+        body = Expr::new(
+            span,
+            ExprNode::If {
+                cond: cond.clone(),
+                then_branch: body,
+                else_branch: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Nil },
+                ),
+            },
+        );
+    }
+    fold_into_or_push(methods, model, hook_name, body);
 }
 
 /// Wrap a validation-hook body in the `new_record?` guard its `on:`

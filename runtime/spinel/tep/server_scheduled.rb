@@ -205,6 +205,14 @@ module Tep
           return false
         end
 
+        # Before the drain, which is what held the bytes (Request#body_refusal).
+        refusal = req.body_refusal(Tep.max_body_bytes)
+        if refusal != 0
+          Tep::Server::Scheduled.send_simple(client, refusal,
+            refusal == 413 ? "request body too large" : "bad request")
+          return false
+        end
+
         req.consume_body_via_scheduler(client)
 
         res = Response.new
@@ -317,6 +325,7 @@ module Tep
         if res.file_path.length == 0 && res.body.length > 0 && !res.headers.key?("Content-Type")
           res.headers["Content-Type"] = "text/html; charset=utf-8"
         end
+        Tep.maybe_gzip!(req, res)
         reason = Tep.reason(res.status)
         head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
         res.headers.each do |k, v|
@@ -334,7 +343,7 @@ module Tep
           fs = Sock.sphttp_filesize(res.file_path)
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          Sock.sphttp_sendfile(client, res.file_path)
+          Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
         else
           # BYTES, both times. `length` counts characters, and
           # `write_str` crosses the FFI as a NUL-terminated C string —
@@ -347,7 +356,10 @@ module Tep
           # closed the connection under it (ERR_CONTENT_LENGTH_MISMATCH).
           head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          if res.body.bytesize > 0
+          # HEAD: the headers GET would send, Content-Length included, and
+          # no body (RFC 9110 9.3.2). A body here would be read by the
+          # client as the start of the NEXT response on a keep-alive socket.
+          if res.body.bytesize > 0 && req.verb != "HEAD"
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end

@@ -52,6 +52,19 @@ pub fn apply_job_test_only_lowering(app: &mut App) {
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
     let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else { return };
+    // `assert_enqueued_email_with PasswordsMailer, :reset` — the mailer
+    // is the first POSITIONAL argument, and a name like a job's.
+    if method.as_str() == "assert_enqueued_email_with" {
+        if let Some(first) = args.first_mut() {
+            if let Some(name) = class_names(first).filter(|n| n.len() == 1) {
+                *first = Expr::new(
+                    first.span,
+                    ExprNode::Lit { value: Literal::Str { value: name.into_iter().next().unwrap() } },
+                );
+            }
+        }
+        return;
+    }
     if !JOB_FILTER_HELPERS.contains(&method.as_str()) {
         return;
     }

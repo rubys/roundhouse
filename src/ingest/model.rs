@@ -249,6 +249,36 @@ pub(super) fn ingest_model_with_enum_constants(
             // place; `ingest_model_body_item` returns a single item and
             // can't. Library classes get the same treatment one level
             // down, in `walk_decl_body`.
+            if let Some(alias) = stmt.as_alias_method_node() {
+                let to = super::library_class::alias_keyword_name(&alias.new_name());
+                let from = super::library_class::alias_keyword_name(&alias.old_name());
+                let copied = to.zip(from).and_then(|(to, from)| {
+                    body.iter().rev().find_map(|item| match item {
+                        ModelBodyItem::Method { method, .. }
+                            if method.name.as_str() == from
+                                && method.receiver == crate::dialect::MethodReceiver::Instance =>
+                        {
+                            let mut copy = method.clone();
+                            copy.name = crate::ident::Symbol::from(to.as_str());
+                            Some(copy)
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(method) = copied {
+                    body.push(ModelBodyItem::Method {
+                        method,
+                        leading_comments: leading,
+                        leading_blank_line: leading_blank,
+                    });
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "alias names a method this body has not defined".into(),
+                });
+            }
             if let Some(sc) = stmt.as_singleton_class_node() {
                 match ingest_singleton_class_methods(&sc, file, &visibility) {
                     Ok(methods) => {
@@ -456,10 +486,11 @@ pub(super) fn ingest_model_body_item(
         // and `lower::validations` have always had and nothing ever
         // produced.
         //
-        // Bare symbols ONLY: `validate :x, on: :update` runs on one
-        // persistence context, `if:`/`unless:` on a condition, and
-        // running such a check unconditionally would reject records
-        // Rails accepts. Those keep today's behaviour (the call falls
+        // Bare symbols, plus `if:`/`unless:` naming a predicate (`validate
+        // :no_overlap, if: :validate_overlap?` was dropped, so the check
+        // never ran). `validate :x, on: :update` runs on one persistence
+        // context, and running it unconditionally would reject records
+        // Rails accepts: that keeps today's behaviour (the call falls
         // through to the unsupported-DSL ledger) rather than being
         // silently promoted to an always-on check.
         if method == "validate" {
@@ -476,7 +507,33 @@ pub(super) fn ingest_model_body_item(
                 .arguments()
                 .map(|args| args.arguments().iter().count())
                 .unwrap_or(0);
-            if !symbols.is_empty() && symbols.len() == arg_count {
+            // `if: :pred` / `unless: :pred` (Symbol conditions only) ride
+            // along on the rule; any other option — `on:`, a lambda —
+            // keeps the call out, as before.
+            let mut if_method: Option<Symbol> = None;
+            let mut unless_method: Option<Symbol> = None;
+            let mut options_ok = true;
+            let mut option_args = 0usize;
+            if let Some(args) = call.arguments() {
+                for a in args.arguments().iter() {
+                    let Some(kw) = a.as_keyword_hash_node() else { continue };
+                    option_args += 1;
+                    for el in kw.elements().iter() {
+                        let Some(assoc) = el.as_assoc_node() else {
+                            options_ok = false;
+                            continue;
+                        };
+                        let key = symbol_value(&assoc.key());
+                        let value = symbol_value(&assoc.value()).map(|v| Symbol::from(v.as_str()));
+                        match (key.as_deref(), value) {
+                            (Some("if"), Some(v)) => if_method = Some(v),
+                            (Some("unless"), Some(v)) => unless_method = Some(v),
+                            _ => options_ok = false,
+                        }
+                    }
+                }
+            }
+            if options_ok && !symbols.is_empty() && symbols.len() + option_args == arg_count {
                 // ONE Validation carrying one Custom rule per symbol:
                 // this function returns a single body item, and
                 // `push_validate_method` walks `rules`, so the list
@@ -490,7 +547,11 @@ pub(super) fn ingest_model_body_item(
                         attribute,
                         rules: symbols
                             .into_iter()
-                            .map(|m| crate::dialect::ValidationRule::Custom { method: m })
+                            .map(|m| crate::dialect::ValidationRule::Custom {
+                                method: m,
+                                if_method: if_method.clone(),
+                                unless_method: unless_method.clone(),
+                            })
                             .collect(),
                     },
                     leading_comments,
@@ -541,7 +602,7 @@ pub(super) fn ingest_model_body_item(
                 return Ok(ModelBodyItem::Scope { scope, leading_blank_line: false, leading_comments });
             }
         }
-        if let Some(callback) = parse_callback(&call, &method) {
+        if let Some(callback) = parse_callback(&call, &method, file) {
             return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments, span });
         }
         // The same classifier sees model declarations and a concern's
@@ -1373,6 +1434,7 @@ pub(super) fn ingest_method(
 fn parse_callback(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
+    file: &str,
 ) -> Option<crate::dialect::Callback> {
     use crate::dialect::{Callback, CallbackHook, CallbackOn};
 
@@ -1419,6 +1481,8 @@ fn parse_callback(
     let args = call.arguments()?;
     let mut targets: Vec<Symbol> = Vec::new();
     let mut on: Option<CallbackOn> = None;
+    let mut if_cond: Option<Expr> = None;
+    let mut unless_cond: Option<Expr> = None;
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
             targets.push(Symbol::from(sym.as_str()));
@@ -1437,11 +1501,17 @@ fn parse_callback(
                             _ => return None,
                         });
                     }
-                    // `if:` / `unless:` / `prepend:` — lowering the
-                    // callback while dropping these would run it in the
-                    // wrong circumstances, which is worse than dropping
-                    // the declaration with a warning. Reject: the item
-                    // falls through to Unknown and the ledger reports it.
+                    // `if:` / `unless:` — a zero-arity lambda/proc body
+                    // (Rails `instance_exec`s it with `self` the record)
+                    // or a Symbol naming a predicate method. Lowered to a
+                    // guard around the callback body, so the callback runs
+                    // in exactly Rails' circumstances. Dropping the
+                    // declaration instead would run it in no circumstance
+                    // at all, which is the wrong answer too.
+                    "if" => if_cond = Some(callback_condition(&assoc.value(), file)?),
+                    "unless" => unless_cond = Some(callback_condition(&assoc.value(), file)?),
+                    // `prepend:` and anything else: not modeled — reject
+                    // rather than run the callback in the wrong place.
                     _ => return None,
                 }
             }
@@ -1480,7 +1550,141 @@ fn parse_callback(
         return None;
     }
 
-    Some(Callback { hook, targets, on, condition: None })
+    let condition = match (if_cond, unless_cond) {
+        (None, None) => None,
+        (Some(c), None) => Some(c),
+        (None, Some(c)) => Some(negate_condition(c)),
+        (Some(a), Some(b)) => Some(and_condition(a, negate_condition(b))),
+    };
+
+    Some(Callback { hook, targets, on, condition })
+}
+
+/// A callback's `if:`/`unless:` value → the condition expression that
+/// guards the callback body. A zero-arity lambda/proc contributes its
+/// body (Rails `instance_exec`s it with `self` the record, which is what
+/// a spliced body sees). A Symbol is the predicate method, called on the
+/// record. Anything else (a lambda with parameters, an array of
+/// conditions) is unmodeled and declines.
+fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> {
+    if let Some(lambda) = value.as_lambda_node() {
+        let body = simple_condition_body(lambda.parameters(), lambda.body())?;
+        return ingest_expr(&body, file).ok();
+    }
+    if let Some(call) = value.as_call_node() {
+        if call.receiver().is_none() {
+            let name = constant_id_str(&call.name());
+            if name == "proc" || name == "lambda" {
+                let block = call.block()?.as_block_node()?;
+                let body = simple_condition_body(block.parameters(), block.body())?;
+                return ingest_expr(&body, file).ok();
+            }
+        }
+    }
+    let sym = symbol_value(value)?;
+    Some(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from(sym.as_str()),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ))
+}
+
+/// The one expression a lambda/proc callback condition may splice into the
+/// hook as its guard. The guard runs inline in the callback, with `self`
+/// as the record and no frame of its own, so only a body that is the same
+/// expression there is accepted:
+///
+/// * no parameters (`-> {}`, `->() {}`, `proc { }`, `proc { || }`) — a
+///   `->(r) { r.title… }` would splice `r` unbound (numbered params and
+///   `it` are parameters too);
+/// * exactly one statement, with no `return`/`next`/`break`/`redo`/
+///   `retry` — inside the hook a `return` exits the whole callback chain;
+/// * no local writes — they would leak into the hook's scope. That
+///   includes a local bound through a target: a multi-write
+///   `(a, b = …)`, a `=> t` match-write, a `rescue => e`; and any
+///   multi-write declines, its targets being locals or not.
+///
+/// Anything else declines (`None`), and the callback falls back to the
+/// unsupported-DSL warning, as it did before conditions were modelled.
+fn simple_condition_body<'pr>(
+    params: Option<ruby_prism::Node<'pr>>,
+    body: Option<ruby_prism::Node<'pr>>,
+) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(p) = params {
+        let bp = p.as_block_parameters_node()?;
+        if bp.parameters().is_some() || bp.locals().iter().next().is_some() {
+            return None;
+        }
+    }
+    let stmts = body?.as_statements_node()?;
+    let mut it = stmts.body().iter();
+    let only = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+
+    struct Escapes(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Escapes {
+        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.0 = true; }
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.0 = true; }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.0 = true; }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.0 = true; }
+        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.0 = true; }
+        fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_operator_write_node(
+            &mut self,
+            _: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        ) {
+            self.0 = true;
+        }
+        fn visit_local_variable_or_write_node(&mut self, _: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_and_write_node(&mut self, _: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_multi_write_node(&mut self, _: &ruby_prism::MultiWriteNode<'pr>) {
+            self.0 = true;
+        }
+    }
+    let mut v = Escapes(false);
+    ruby_prism::Visit::visit(&mut v, &only);
+    if v.0 { None } else { Some(only) }
+}
+
+fn negate_condition(cond: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(cond),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+fn and_condition(left: Expr, right: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left,
+            right,
+        },
+    )
 }
 
 fn parse_scope(
@@ -1819,6 +2023,8 @@ fn parse_association(
         }
     }
 
+    let foreign_key_explicit = foreign_key.is_some();
+
     // Rails `foreign_key` demodulizes: `Billing::Invoice` → `invoice_id`.
     let owner_snake = snake_case(crate::naming::demodulize(owner.0.as_str()));
 
@@ -1883,6 +2089,7 @@ fn parse_association(
                     Some(intf) => Symbol::from(format!("{intf}_id")),
                     None => Symbol::from(format!("{owner_snake}_id")),
                 }),
+            foreign_key_explicit,
             through: through.map(|s| Symbol::from(s.as_str())),
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
@@ -1899,6 +2106,7 @@ fn parse_association(
                     Some(intf) => Symbol::from(format!("{intf}_id")),
                     None => Symbol::from(format!("{owner_snake}_id")),
                 }),
+            foreign_key_explicit,
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
         }),

@@ -103,8 +103,8 @@ pub fn writer_method(
 /// into one.
 ///
 /// `table` is the model's schema table when it has one — used only to
-/// route temporal columns through `encode_datetime`, matching what the
-/// jbuilder lowerer does for the same reason. `assoc_names` are the
+/// route timestamp columns through `encode_datetime` and date columns
+/// through the date seam, matching what the jbuilder lowerer does. `assoc_names` are the
 /// model's association readers; a pair reading one serializes a RECORD,
 /// which needs that record's own writer and is not modeled yet.
 pub fn writer_body(
@@ -195,16 +195,7 @@ fn typed_value(pair: &JsonPair, enc: &PairEncoding) -> Expr {
                 Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
             );
             let text = if matches!(enc, PairEncoding::DateColumn) {
-                // Match the public reader, including absent storage
-                // encoded as "" for an unset nonnullable raw slot.
-                let date = with_ty(
-                    send(Some(const_ref("ActiveSupport")), "parse_db_date", vec![raw], true),
-                    Ty::Union { variants: vec![Ty::Date, Ty::Nil] },
-                );
-                with_ty(
-                    send(Some(const_ref("ActiveSupport")), "format_db_date", vec![date], true),
-                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-                )
+                date_column_text(raw)
             } else {
                 with_ty(
                     send(Some(const_ref("ActiveSupport")), "json_time", vec![raw], true),
@@ -269,25 +260,47 @@ fn encoded_value(pair: &JsonPair, table: Option<&Table>) -> Expr {
             // reader. Same call the jbuilder lowerer makes, for the same
             // reason: the string→string reformat is exact and skips a
             // parse/format round-trip per row.
-            if is_temporal_column(table, name) {
-                let raw = format!("{}_raw", name.as_str());
-                json_builder_call("encode_datetime", self_send(&raw))
-            } else {
-                json_builder_call("encode_value", self_send(name.as_str()))
+            //
+            // A date-only column has no clock to reformat: it goes
+            // through the date seam instead, as the typed writer's
+            // `DateColumn` does, so it serializes as Rails does — the
+            // ISO date, or `null` (also for "" storage).
+            let raw = format!("{}_raw", name.as_str());
+            match column_type(table, name) {
+                Some(ColumnType::Date) => json_builder_call(
+                    "encode_value",
+                    date_column_text(with_ty(
+                        self_send(&raw),
+                        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                    )),
+                ),
+                Some(ColumnType::DateTime | ColumnType::Time) => {
+                    json_builder_call("encode_datetime", self_send(&raw))
+                }
+                _ => json_builder_call("encode_value", self_send(name.as_str())),
             }
         }
     }
 }
 
-fn is_temporal_column(table: Option<&Table>, name: &Symbol) -> bool {
-    let Some(t) = table else { return false };
-    t.columns.iter().any(|c| {
-        c.name == *name
-            && matches!(
-                c.col_type,
-                ColumnType::DateTime | ColumnType::Date | ColumnType::Time
-            )
-    })
+fn column_type(table: Option<&Table>, name: &Symbol) -> Option<ColumnType> {
+    table?.columns.iter().find(|c| c.name == *name).map(|c| c.col_type.clone())
+}
+
+/// `ActiveSupport.format_db_date(ActiveSupport.parse_db_date(raw))` —
+/// a date column's stored text as its JSON text: the canonical
+/// `YYYY-MM-DD`, or nil for NULL and for the "" an unset nonnullable
+/// raw slot (or an adapter's NULL) holds. Same seam as the public
+/// reader, so JSON never disagrees with `record.<col>`.
+fn date_column_text(raw: Expr) -> Expr {
+    let date = with_ty(
+        send(Some(const_ref("ActiveSupport")), "parse_db_date", vec![raw], true),
+        Ty::Union { variants: vec![Ty::Date, Ty::Nil] },
+    );
+    with_ty(
+        send(Some(const_ref("ActiveSupport")), "format_db_date", vec![date], true),
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+    )
 }
 
 // ── IR construction ────────────────────────────────────────────────

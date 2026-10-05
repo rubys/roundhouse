@@ -159,14 +159,35 @@ module Tep
       # keep-alive loop, then both the wrapper's dup and the fd close.
       # Per-request work lives in handle_one so each keep-alive iteration
       # gets its own GC scope (see Tep::Server#handle_one, 210a5f6).
+      #
+      # Both closes run however the connection ends. They used to sit
+      # after the loop, so anything that raised -- the wrapper's own
+      # dup(2) at the fd limit first among them -- ended the thread with
+      # the socket still open: at RLIMIT_NOFILE 1024 and 512 kept-alive
+      # connections (two fds each), every failed accept leaked one more
+      # (koduki/example-rails-aot measured fd 1023 left open after
+      # `dup(2) failed for fd 1023`). The exception still propagates, so
+      # the thread's failure stays as visible as before.
+      #
+      # The wrapper is taken outside the `ensure` so `io` stays an IO,
+      # not an IO-or-nil, in handle_one's signature; a failed dup closes
+      # the fd itself.
       def self.handle_connection(client)
-        io = IO.for_fd(client, autoclose: false)
-        keep_going = true
-        while keep_going
-          keep_going = Tep::Server::Threaded.handle_one(client, io)
+        begin
+          io = IO.for_fd(client, autoclose: false)
+        rescue StandardError
+          Sock.sphttp_close(client)
+          raise
         end
-        io.close
-        Sock.sphttp_close(client)
+        begin
+          keep_going = true
+          while keep_going
+            keep_going = Tep::Server::Threaded.handle_one(client, io)
+          end
+        ensure
+          io.close
+          Sock.sphttp_close(client)
+        end
         0
       end
 
@@ -180,6 +201,14 @@ module Tep
         req = Parser.parse(blob)
         if req == nil
           Tep::Server::Threaded.send_simple(client, 400, "bad request")
+          return false
+        end
+
+        # Before the drain, which is what held the bytes (Request#body_refusal).
+        refusal = req.body_refusal(Tep.max_body_bytes)
+        if refusal != 0
+          Tep::Server::Threaded.send_simple(client, refusal,
+            refusal == 413 ? "request body too large" : "bad request")
           return false
         end
 
@@ -247,12 +276,18 @@ module Tep
           Sock.sphttp_write_str(client, head)
           res.ws_driver.set_fd(client)
           conn = Tep::WebSocket::Connection.new(res.ws_driver, io)
-          conn.run
           # The recv loop is done with the socket. Retire the driver
           # BEFORE the caller closes the fd: from here no ping thread or
           # broadcast can write to a number the kernel is about to hand
-          # to the next accept (Tep::WebSocket::Driver#write_frame).
-          res.ws_driver.retire
+          # to the next accept (Tep::WebSocket::Driver#write_frame). An
+          # `ensure`, because handle_connection now closes the fd on the
+          # way out of a raise too, and an unretired driver would write
+          # into whatever socket reuses that number.
+          begin
+            conn.run
+          ensure
+            res.ws_driver.retire
+          end
           return 0
         end
 
@@ -282,6 +317,7 @@ module Tep
         if res.file_path.length == 0 && res.body.length > 0 && !res.headers.key?("Content-Type")
           res.headers["Content-Type"] = "text/html; charset=utf-8"
         end
+        Tep.maybe_gzip!(req, res)
         reason = Tep.reason(res.status)
         head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
         res.headers.each do |k, v|
@@ -299,13 +335,16 @@ module Tep
           fs = Sock.sphttp_filesize(res.file_path)
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          Sock.sphttp_sendfile(client, res.file_path)
+          Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
         else
           # BYTES, both times: `length` counts characters, and
           # `write_str` crosses the FFI as a NUL-terminated C string.
           head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          if res.body.bytesize > 0
+          # HEAD: the headers GET would send, Content-Length included, and
+          # no body (RFC 9110 9.3.2). A body here would be read by the
+          # client as the start of the NEXT response on a keep-alive socket.
+          if res.body.bytesize > 0 && req.verb != "HEAD"
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end

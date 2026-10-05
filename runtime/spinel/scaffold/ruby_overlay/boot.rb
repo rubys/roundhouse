@@ -189,6 +189,11 @@ require_relative "runtime/action_mailer"
 # server boot unless some model happened to pull the anchor in.
 require_relative "runtime/gem_facades"
 require_relative "runtime/broadcasts"
+# Before `thread_state`: it replaces the queue methods with locked,
+# per-thread versions, and a later load puts the unlocked ones back.
+# An app with no jobs has no `ActiveJob::Base` subclass to load this
+# file, and `test/test_helper.rb` calls `ActiveJob` at load time.
+require_relative "runtime/active_job"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"

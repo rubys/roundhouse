@@ -140,6 +140,12 @@ def version_of(output, re = /(\d+\.\d+(?:\.\d+)?)/)
   m ? m[1] : nil
 end
 
+def requirement_met?(found, minimum)
+  found && (minimum.nil? || Gem::Version.new(found) >= Gem::Version.new(minimum))
+rescue ArgumentError
+  false
+end
+
 # Highest installed `rails` gem version satisfying a requirement string
 # (e.g. "~> 8.0.0"), as a concrete version usable with the `rails _X_`
 # selector. nil if none installed matches or the requirement is malformed.
@@ -157,11 +163,11 @@ end
 # Subcommand: doctor
 
 DOCTOR_CHECKS = [
-  { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: '3.4' },
+  { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: File.read(File.join(ROUNDHOUSE_ROOT, '.ruby-version')).strip },
   { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare, verify' },
   { key: :git,    label: 'Git',       unlocks: 'verify / verify --plan' },
   { key: :python, label: 'Python 3',  unlocks: 'optional verify hosted-coverage preview' },
-  { key: :node,   label: 'Node',      unlocks: 'typescript target' },
+  { key: :node,   label: 'Node',      unlocks: 'typescript target', min: '24' },
   { key: :sqlite, label: 'SQLite',    unlocks: 'ruby/spinel/rust targets' },
   { key: :rails,  label: 'Rails gem', unlocks: 'fixture' },
   { key: :wrk,    label: 'wrk',       unlocks: 'bench' },
@@ -195,9 +201,16 @@ def cmd_doctor(argv)
   puts ''
   DOCTOR_CHECKS.each do |c|
     v = versions[c[:key]]
-    mark = v ? "\u2713" : "\u2717"
-    val = v ? v.ljust(10) : 'not found'.ljust(10)
-    puts "  #{c[:label].ljust(10)} #{mark} #{val}  #{c[:unlocks]}"
+    old = v && !requirement_met?(v, c[:min])
+    mark = v && !old ? "\u2713" : "\u2717"
+    val = if v.nil?
+            'not found'
+          elsif old
+            "#{v} (< #{c[:min]})"
+          else
+            v
+          end
+    puts "  #{c[:label].ljust(10)} #{mark} #{val.ljust(14)}  #{c[:unlocks]}"
   end
 
   puts ''
@@ -217,7 +230,9 @@ def cmd_doctor(argv)
   puts 'Available now:'
   available.each { |s| puts "  bin/rh #{s}" }
 
-  missing = DOCTOR_CHECKS.reject { |c| [:ruby, :python].include?(c[:key]) || versions[c[:key]] }
+  missing = DOCTOR_CHECKS.reject do |c|
+    [:ruby, :python].include?(c[:key]) || requirement_met?(versions[c[:key]], c[:min])
+  end
   unless missing.empty?
     puts ''
     puts 'Install to unlock more:'
@@ -235,7 +250,7 @@ def install_hint(key)
   when :rust   then 'https://rustup.rs'
   when :git    then 'https://git-scm.com'
   when :python then 'https://www.python.org (optional for verify)'
-  when :node   then 'https://nodejs.org or `brew install node`'
+  when :node   then 'Node.js 24+ — https://nodejs.org or `brew install node`'
   when :sqlite then 'macOS: preinstalled; Debian/Ubuntu: apt install libsqlite3-dev'
   when :rails  then 'gem install rails'
   when :wrk    then 'macOS: brew install wrk; Debian/Ubuntu: apt install wrk'

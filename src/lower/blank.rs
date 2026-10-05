@@ -293,6 +293,17 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
             }
         }
         Ty::Union { variants } => {
+            // `String | Content` used to fall through to Runtime, and
+            // `compact_blank` then rejected through `ActiveSupport.blank?`,
+            // which does not call `Content#blank?`. Any arm that owns the
+            // predicate keeps the dynamic path, including a nilable
+            // `Content | Nil`.
+            if variants.iter().any(|v| {
+                !matches!(v, Ty::Nil)
+                    && matches!(classify(Some(v), defs), OwnDispatch | Skip(_))
+            }) {
+                return Skip("union includes a class with its own predicate");
+            }
             let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             if !has_nil || non_nil.len() != 1 {
@@ -306,11 +317,8 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 // stay correct.
                 BoolLike => BoolLike,
                 AlwaysNil => AlwaysNil,
-                // The app's own predicate must keep winning; the
-                // runtime helper knows nothing about it.
-                OwnDispatch => Skip("nilable receiver of a class with its own predicate"),
                 Runtime => Runtime,
-                other @ Skip(_) => other,
+                OwnDispatch | Skip(_) => unreachable!("own-predicate unions returned above"),
             }
         }
         Ty::Untyped | Ty::Var { .. } => Runtime,
@@ -425,6 +433,23 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
                 }
                 walk(body, defs, diags);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            walk(scrutinee, defs, diags);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| walk(e, defs, diags));
+                if let Some((_, g)) = &mut arm.guard {
+                    walk(g, defs, diags);
+                }
+                walk(&mut arm.body, defs, diags);
+            }
+            if let Some(e) = else_body {
+                walk(e, defs, diags);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            walk(value, defs, diags);
+            pattern.for_each_expr_mut(&mut |e| walk(e, defs, diags));
         }
         ExprNode::Assign { target, value } => {
             walk_lvalue(target, defs, diags);
@@ -696,50 +721,74 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
     expr.leading_blank_line = leading_blank_line;
 }
 
-/// `Array#compact_blank` — ActiveSupport's `reject(&:blank?)`, and the
-/// same problem the three predicates have: a core_ext reopen only the
-/// CRuby overlay could host, with no `blank?` for any other target to
-/// dispatch. Grounded through the ELEMENT type, using the answer
-/// `classify` gives that type, so `[a, b].compact_blank` and `a.blank?`
-/// cannot disagree about what blank means.
+/// `Array#compact_blank` / `Hash#compact_blank` — ActiveSupport's
+/// `reject(&:blank?)` (Array) and `reject { |_k, v| v.blank? }` (Hash).
+/// Same problem the three predicates have: a core_ext reopen only the
+/// CRuby overlay could host.
 ///
-/// campfire's `User#title` is `[ name, bio ].compact_blank.join(" – ")`
-/// — the label on every avatar, so it is on the message row, the user
-/// list and the sidebar.
+/// An Array grounds through the ELEMENT type, a Hash through the VALUE
+/// type, using the answer `classify` gives so `[a, b].compact_blank`
+/// and `a.blank?` cannot disagree. campfire's `User#title` is
+/// `[ name, bio ].compact_blank.join(" – ")`; its
+/// `SetCurrentRequest#default_url_options` is
+/// `{ host:, protocol: }.compact_blank` — a Hash of nilable Strings,
+/// which used to file residue ("receiver is not a typed Array") and
+/// then fail AOT (`unsupported call: compact_blank`).
 ///
-/// Only `empty?`-able element types ground; anything else keeps the
-/// call and files residue, the same policy the predicates use. A
-/// NEVER-BLANK element type would make the whole call a no-op — a fold
-/// worth having, but not one any corpus app forces yet.
+/// An element/value type with no `empty?` grounding (an open inference
+/// var, untyped, a multi-variant union) still rewrites: the reject
+/// body calls `ActiveSupport.blank?`, the same runtime predicate an
+/// untyped `blank?` send already takes. A class with its own
+/// predicate keeps residue — `ActiveSupport.blank?` would read
+/// markup where `ActionText::Content#blank?` reads plain text.
 fn try_rewrite_compact_blank(
     expr: &mut Expr,
     defs: &AppDefinitions,
     diags: &mut Vec<Diagnostic>,
 ) {
-    let (grounding, elem_ty, recv_ty) = {
+    enum Shape {
+        Array { elem: Ty },
+        Hash { key: Ty, value: Ty },
+    }
+    let (shape, grounding, recv_ty) = {
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
             return;
         };
         if method.as_str() != "compact_blank" || !args.is_empty() {
             return;
         }
-        let Some(Ty::Array { elem }) = r.ty.as_ref() else {
-            // Not an Array (or untyped): the ledger says so rather than
-            // guessing at a receiver whose surface we do not know.
-            diags.push(unlowered(
-                expr,
-                r.ty.as_ref(),
-                "compact_blank",
-                "receiver is not a typed Array",
-            ));
-            return;
+        let shape = match r.ty.as_ref() {
+            Some(Ty::Array { elem }) => Shape::Array { elem: (**elem).clone() },
+            Some(Ty::Hash { key, value }) => Shape::Hash {
+                key: (**key).clone(),
+                value: (**value).clone(),
+            },
+            _ => {
+                diags.push(unlowered(
+                    expr,
+                    r.ty.as_ref(),
+                    "compact_blank",
+                    "receiver is not a typed Array or Hash",
+                ));
+                return;
+            }
         };
-        let elem = (**elem).clone();
-        (classify(Some(&elem), defs), elem, r.ty.clone())
+        let inner = match &shape {
+            Shape::Array { elem } => elem.clone(),
+            Shape::Hash { value, .. } => value.clone(),
+        };
+        (shape, classify(Some(&inner), defs), r.ty.clone())
     };
-    let (nilable, whitespace) = match grounding {
-        Grounding::Container { nilable, whitespace } => (nilable, whitespace),
-        _ => {
+
+    let inner_ty = match &shape {
+        Shape::Array { elem } => elem.clone(),
+        Shape::Hash { value, .. } => value.clone(),
+    };
+    let cond_body = match grounding {
+        Grounding::Container { nilable, whitespace } => {
+            compact_blank_container_cond(expr.span, inner_ty.clone(), nilable, whitespace)
+        }
+        Grounding::OwnDispatch | Grounding::Skip(_) => {
             diags.push(unlowered(
                 expr,
                 recv_ty.as_ref(),
@@ -748,6 +797,18 @@ fn try_rewrite_compact_blank(
             ));
             return;
         }
+        _ => {
+            // Untyped / open-var / never-blank / bool: the runtime
+            // predicate branches on the value. campfire's helper
+            // `[ author.name, author.bio ].compact_blank` is an Array
+            // whose element is still an inference var.
+            runtime_predicate(
+                expr.span,
+                compact_blank_value_var(expr.span, inner_ty.clone()),
+                Pred::Blank,
+                Ty::Bool,
+            )
+        }
     };
 
     let span = expr.span;
@@ -755,43 +816,26 @@ fn try_rewrite_compact_blank(
     let old = std::mem::replace(&mut *expr.node, ExprNode::SelfRef);
     let ExprNode::Send { recv: Some(r), .. } = old else { unreachable!() };
 
-    // `reject { |__cb| … }`. The block parameter is read twice in the
-    // nilable form, which is free — it is a local, not the receiver
-    // expression, so none of the effect-free gating above applies.
-    let name = Symbol::new("__cb");
-    let param = |ty: Ty| {
-        mk(
-            span,
-            ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
-            ty,
-        )
-    };
-    // The ELEMENT's emptiness test, by the same rule `a.blank?` takes —
-    // `compact_blank` is documented as `reject(&:blank?)`, so an Array
-    // of Strings must reject a whitespace-only one. campfire's
-    // `User#title` is `[ name, bio ].compact_blank.join(" – ")`.
-    let empty_form = if whitespace { blank_str } else { plain_empty };
-    let cond = if nilable {
-        bool_op(
-            span,
-            crate::expr::BoolOpKind::Or,
-            nil_check(span, param(elem_ty.clone())),
-            empty_form(span, param(non_nil(&elem_ty))),
-        )
-    } else {
-        empty_form(span, param(elem_ty.clone()))
+    let (params, out_ty) = match shape {
+        Shape::Array { elem } => (
+            vec![Symbol::new("__cb")],
+            Ty::Array { elem: Box::new(non_nil(&elem)) },
+        ),
+        Shape::Hash { key, value } => (
+            vec![Symbol::new("_k"), Symbol::new("__cb")],
+            Ty::Hash { key: Box::new(key), value: Box::new(non_nil(&value)) },
+        ),
     };
     let block = mk(
         span,
         ExprNode::Lambda { rest_param: None,
-            params: vec![name],
+            params,
             block_param: None,
-            body: cond,
+            body: cond_body,
             block_style: Default::default(),
         },
         Ty::Untyped,
     );
-    let array_ty = Ty::Array { elem: Box::new(non_nil(&elem_ty)) };
     *expr = mk(
         span,
         ExprNode::Send {
@@ -801,9 +845,41 @@ fn try_rewrite_compact_blank(
             block: Some(block),
             parenthesized: false,
         },
-        array_ty,
+        out_ty,
     );
     expr.leading_blank_line = leading_blank_line;
+}
+
+fn compact_blank_value_var(span: crate::span::Span, ty: Ty) -> Expr {
+    mk(
+        span,
+        ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::new("__cb") },
+        ty,
+    )
+}
+
+/// The ELEMENT/VALUE emptiness test, by the same rule `a.blank?` takes —
+/// `compact_blank` is documented as `reject(&:blank?)`, so an Array of
+/// Strings must reject a whitespace-only one. campfire's `User#title`
+/// is `[ name, bio ].compact_blank.join(" – ")`.
+fn compact_blank_container_cond(
+    span: crate::span::Span,
+    elem_ty: Ty,
+    nilable: bool,
+    whitespace: bool,
+) -> Expr {
+    let param = |ty: Ty| compact_blank_value_var(span, ty);
+    let empty_form = if whitespace { blank_str } else { plain_empty };
+    if nilable {
+        bool_op(
+            span,
+            crate::expr::BoolOpKind::Or,
+            nil_check(span, param(elem_ty.clone())),
+            empty_form(span, param(non_nil(&elem_ty))),
+        )
+    } else {
+        empty_form(span, param(elem_ty))
+    }
 }
 
 /// The non-nil half of a nilable type — what survives the reject.

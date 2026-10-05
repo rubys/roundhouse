@@ -111,8 +111,8 @@ count_from_log() {
         match($0, /^[0-9]+ examples?/)       { cr     = num(substr($0, RSTART, RLENGTH)); next }
         # mix test / ExUnit
         match($0, /^[0-9]+ tests?,/)         { ex     = num(substr($0, RSTART, RLENGTH)); next }
-        # node:test TAP epilogue
-        match($0, /^# pass [0-9]+/)          { node   = num(substr($0, RSTART, RLENGTH)); next }
+        # node:test TAP or spec epilogue (Node 24 defaults to spec).
+        match($0, /^(#|ℹ) pass [0-9]+/)      { node   = num(substr($0, RSTART, RLENGTH)); next }
         # XCTest: per-suite lines AND a total line, so take the max
         match($0, /Executed [0-9]+ test/)    { n = num(substr($0, RSTART, RLENGTH))
                                                if (n > xc) xc = n; next }

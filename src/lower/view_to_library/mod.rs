@@ -1408,6 +1408,26 @@ pub(crate) fn insert_framework_stubs(
     // directly).
     insert_db_stub(classes);
 
+    // ActiveRecord — the module functions a lowered app body calls
+    // (runtime/ruby/active_record/base.rb). `lower_bound` is the run
+    // lookup in the `includes(:assoc)` distribute the Arel visitor
+    // emits; the controller body is re-typed after that rewrite, and an
+    // unresolved call there would erase the run bounds' Integer to
+    // untyped — which the strict targets then index wrongly.
+    if !classes.contains_key(&ClassId(Symbol::from("ActiveRecord"))) {
+        use crate::lower::typing::fn_sig;
+        let int_array = || crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Int) };
+        let mut ar = crate::analyze::ClassInfo::default();
+        ar.class_methods.insert(
+            Symbol::from("lower_bound"),
+            fn_sig(
+                vec![(Symbol::from("sorted"), int_array()), (Symbol::from("value"), crate::ty::Ty::Int)],
+                crate::ty::Ty::Int,
+            ),
+        );
+        classes.insert(ClassId(Symbol::from("ActiveRecord")), ar);
+    }
+
     // Params — narrowing accessors over the recursive request-params
     // tree (runtime/ruby/params.rb). The synthesized `<Resource>Params.
     // from_raw` calls these instead of open-coding `is_a?` narrowing at
@@ -2488,35 +2508,14 @@ pub(crate) fn action_view_ivar_map(
 /// no-recv/no-arg Send (`action_name`) or a Var (`action_name` already
 /// lowered to a local). Used to surface controller-context helpers
 /// (action_name/controller_name) as view params only when actually used.
-/// True when the view body holds a `url_for` options hash — a Hash
-/// literal whose keys are all Symbols and include both `controller` and
-/// `action` (`{controller: controller_name, action: action_name, page:
-/// @page + 1}`), the shape `lower_url_option_helpers` resolves.
+/// True when the view body holds a `url_for` options hash in a URL
+/// argument (`link_to "Next", {controller: controller_name, action:
+/// action_name, page: @page + 1}`), the shape `lower_url_option_helpers`
+/// resolves. Same collector, so the two cannot disagree.
 pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
-    fn walk(e: &Expr) -> bool {
-        if let ExprNode::Hash { entries, .. } = &*e.node {
-            let keys: Option<Vec<&str>> = entries
-                .iter()
-                .map(|(k, _)| match &*k.node {
-                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
-                    _ => None,
-                })
-                .collect();
-            if let Some(keys) = keys {
-                if keys.contains(&"controller") && keys.contains(&"action") {
-                    return true;
-                }
-            }
-        }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| {
-            if !found && walk(c) {
-                found = true;
-            }
-        });
-        found
-    }
-    walk(body)
+    let mut sets = Vec::new();
+    crate::lower::routes_to_library::collect_url_option_key_sets(body, &mut sets);
+    !sets.is_empty()
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
@@ -3634,6 +3633,23 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
                 rewrite_defined_to_nil_check(&mut arm.body);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            rewrite_defined_to_nil_check(scrutinee);
+            for arm in arms {
+                arm.pattern.for_each_expr_mut(&mut |e| rewrite_defined_to_nil_check(e));
+                if let Some((_, g)) = arm.guard.as_mut() {
+                    rewrite_defined_to_nil_check(g);
+                }
+                rewrite_defined_to_nil_check(&mut arm.body);
+            }
+            if let Some(e) = else_body {
+                rewrite_defined_to_nil_check(e);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            rewrite_defined_to_nil_check(value);
+            pattern.for_each_expr_mut(&mut |e| rewrite_defined_to_nil_check(e));
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 rewrite_defined_to_nil_check(e);
@@ -4430,6 +4446,13 @@ pub(super) fn todo_io_append(tag: &str, span: crate::span::Span) -> Expr {
              runs no side effect in the emitted view"
         ),
     ));
+    noop_io_append()
+}
+
+/// `io << ""` — a statement that keeps an arm non-empty while rendering
+/// nothing. The catch-all's body without its ledger line, for statements
+/// that genuinely have nothing to drop (a bare literal).
+pub(super) fn noop_io_append() -> Expr {
     send(
         Some(var_ref(Symbol::from("io"))),
         "<<",

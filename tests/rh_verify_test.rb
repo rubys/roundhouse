@@ -16,6 +16,7 @@ class RhVerifyTest < Minitest::Test
       FileUtils.mkdir_p(File.join(@root, dir))
     end
     FileUtils.cp(File.join(SOURCE, 'bin/rh'), File.join(@root, 'bin/rh'))
+    FileUtils.cp(File.join(SOURCE, '.ruby-version'), File.join(@root, '.ruby-version'))
     FileUtils.cp(File.join(SOURCE, 'scripts/ci-plan.py'), File.join(@root, 'scripts/ci-plan.py'))
     File.write(File.join(@root, '.gitignore'), "mocks/\ncargo.log\n")
     File.write(File.join(@root, 'src/emit/go.rs'), 'before')
@@ -351,6 +352,20 @@ class RhVerifyTest < Minitest::Test
     assert_includes out, 'bin/rh verify --plan'
     assert_includes out, 'bin/rh verify'
     assert_includes out, 'optional verify hosted-coverage preview'
+  end
+
+  def test_doctor_reads_ruby_minimum_from_the_checkout_not_the_workflow_or_cwd
+    [['99', '✗', "#{RUBY_VERSION} (< 99)"], ['0', '✓', RUBY_VERSION]].each do |minimum, mark, version|
+      File.write(File.join(@root, '.ruby-version'), "#{minimum}\n")
+      out, err, status = Open3.capture3(
+        { 'PATH' => File.join(@root, 'mocks') },
+        RbConfig.ruby, File.join(@root, 'bin/rh'), 'doctor', chdir: '/')
+      assert status.success?, err
+      ruby = out.lines.find { |line| line.start_with?('  Ruby ') }
+      assert_includes ruby, mark
+      assert_includes ruby, version
+      refute_includes ruby, '(< ' if minimum == '0'
+    end
   end
 
   def test_invalid_inputs_never_start_cargo

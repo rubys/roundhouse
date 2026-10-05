@@ -152,6 +152,8 @@ fn tiny_blog_round_trips() {
         module_mixins: Vec::new(),
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
+        graphql_types: Vec::new(),
+        graphql_signatures: Vec::new(),
         concern_spliced_actions: std::collections::HashMap::new(),
         concern_spliced_class_methods: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),

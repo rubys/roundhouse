@@ -42,6 +42,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    // graphql-ruby object types: their bodies, and each `null: false`
+    // field's resolved value.
+    out.extend(super::graphql::diagnose(app, diagnose_expr));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -84,6 +87,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         diagnose_expr(seeds, &mut out);
     }
     out.extend(super::forwarding::diagnose(app));
+    out.extend(super::filter_targets::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
@@ -222,6 +226,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                     reason.as_str()
                 )
             }
+            // Produced by `filter_targets::diagnose` as a returned list,
+            // never as an `Expr.diagnostic` annotation.
+            DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
+            // Produced by `graphql::diagnose` as a returned list.
+            DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
         };
         out.push(Diagnostic {
             span: expr.span,
@@ -386,6 +395,23 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 }
                 diagnose_expr(&arm.body, out);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            diagnose_expr(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| diagnose_expr(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    diagnose_expr(g, out);
+                }
+                diagnose_expr(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                diagnose_expr(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            diagnose_expr(value, out);
+            pattern.for_each_expr(&mut |e| diagnose_expr(e, out));
         }
         ExprNode::Let { value, body, .. } => {
             diagnose_expr(value, out);

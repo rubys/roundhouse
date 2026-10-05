@@ -408,6 +408,18 @@ fn collect_var_assign_counts(
             }
             collect_var_assign_counts(value, out);
         }
+        // `x += v` reassigns `x` (it desugars to `x = x + v`), so it
+        // counts toward `let mut` exactly as the spelled-out form does.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            *out.entry(name.as_str().to_string()).or_insert(0) += 1;
+            collect_var_assign_counts(value, out);
+        }
+        ExprNode::OpAssign { target, value, .. } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_var_assign_counts(recv, out);
+            }
+            collect_var_assign_counts(value, out);
+        }
         ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_assign_counts(e, out)),
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_var_assign_counts(cond, out);
@@ -1146,6 +1158,14 @@ fn emit_expr_inner(e: &Expr) -> String {
         }
         ExprNode::Seq { exprs } => emit_seq(exprs),
         ExprNode::Assign { target, value } => emit_assign(target, value),
+        // `x += v` / `x ||= v` — desugared to the plain Assign (or the
+        // `If` for `||=`/`&&=`) the arms above already emit, as Go and
+        // TypeScript do. Without this arm the catch-all dropped the
+        // whole statement, so every `i += 1` loop counter in a
+        // transpiled runtime body never advanced.
+        ExprNode::OpAssign { target, op, value } => {
+            emit_expr(&crate::expr::desugar_op_assign(target, *op, value, e.span))
+        }
         ExprNode::Return { value } => emit_return(value),
         ExprNode::While { cond, body, until_form } => emit_while(cond, body, *until_form),
         ExprNode::Hash { entries, .. } => emit_hash(entries),
@@ -1223,6 +1243,17 @@ fn emit_expr_inner(e: &Expr) -> String {
                 ExprNode::Ivar { name } => ivar_field_ty(name.as_str())
                     .map(|t| is_option_of(&t, target_ty))
                     .unwrap_or(false),
+                // `arr[i]` types as `T | nil`, as Ruby's does, but a
+                // typed Vec index renders as the element itself
+                // (`send/index.rs`: `v[(i) as usize]`), never an Option.
+                ExprNode::Send { recv: Some(r), method, args, .. }
+                    if method.as_str() == "[]"
+                        && args.len() == 1
+                        && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. }))
+                        && matches!(args[0].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Int)) =>
+                {
+                    false
+                }
                 _ => matches!(
                     value.ty.as_ref(),
                     Some(t) if is_option_of(t, target_ty)

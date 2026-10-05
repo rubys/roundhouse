@@ -2,7 +2,7 @@
 """PR-local execution receipts; uncertainty always executes.
 
 This is not a dependency cache or a general CI scheduler. The allowlist below
-owns the complete command contract. See docs/ci-reuse.md before expanding it.
+owns the command contract; tests/ci_reuse_test.py exercises its trust boundaries.
 """
 
 import argparse

@@ -46,8 +46,8 @@
 //! `head :too_many_requests`, actionpack's own defaults. `controller_path`
 //! is the class name underscored, which is what Rails derives too.
 //!
-//! WHAT IS LEFT. `if:`/`unless:`, `store:`, a `by:` or `with:` that is
-//! not a lambda, or a `name:` that is not a literal — the macro stays
+//! WHAT IS LEFT. `store:`, a `by:` or `with:` that is not a lambda, or a
+//! `name:` that is not a literal — the macro stays
 //! where it was and the survey names it, which is the contract for a
 //! class-body macro roundhouse cannot expand (`report_unrecognized_controller_macros`).
 //! The method reaches the ruby-family lanes fully; a strict target
@@ -66,6 +66,10 @@ struct Limit {
     with_src: String,
     only: Vec<Symbol>,
     except: Vec<Symbol>,
+    if_cond: Option<Symbol>,
+    unless_cond: Option<Symbol>,
+    if_cond_expr: Option<Expr>,
+    unless_cond_expr: Option<Expr>,
 }
 
 pub fn lower_rate_limit(app: &mut crate::App) {
@@ -169,10 +173,10 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
             except: limit.except.clone(),
             only_style: Default::default(),
             except_style: Default::default(),
-            if_cond: None,
-            unless_cond: None,
-            if_cond_expr: None,
-            unless_cond_expr: None,
+            if_cond: limit.if_cond.clone(),
+            unless_cond: limit.unless_cond.clone(),
+            if_cond_expr: limit.if_cond_expr.clone(),
+            unless_cond_expr: limit.unless_cond_expr.clone(),
             block: None,
             prepend: false,
         };
@@ -187,7 +191,7 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
 }
 
 /// `rate_limit to: N, within: D, by: -> {…}, with: -> {…}, name: "…",
-/// only: […], except: […]` → its parts, or None for any call this is
+/// scope: …, only: […], except: […]` → its parts, or None for any call this is
 /// not, or an option it cannot expand.
 fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else {
@@ -203,8 +207,13 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let mut by_src: Option<String> = None;
     let mut with_src: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut scope_src: Option<String> = None;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
+    let mut if_cond = None;
+    let mut unless_cond = None;
+    let mut if_cond_expr = None;
+    let mut unless_cond_expr = None;
     for (k, v) in entries {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
         match key.as_str() {
@@ -216,8 +225,38 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
                 let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else { return None };
                 name = Some(value.clone());
             }
+            // Rails defaults the cache-key scope to this controller's
+            // path. `scope:` replaces that, so two controllers can share
+            // one budget: a symbol, a string, or a call such as
+            // `OtherController.controller_path`.
+            "scope" => scope_src = Some(scope_source(v)?),
             "only" => only = symbol_list(v)?,
             "except" => except = symbol_list(v)?,
+            "if" => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => if_cond = Some(value.clone()),
+                // The guard evaluates the predicate. Storing the lambda
+                // would test the lambda object, which is always truthy.
+                // A parameter has no binding once the body is inlined.
+                ExprNode::Lambda { params, rest_param, block_param, body, .. }
+                    if params.is_empty() && rest_param.is_none() && block_param.is_none() =>
+                {
+                    if_cond_expr = Some((*body).clone())
+                }
+                _ => return None,
+            },
+            "unless" => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => unless_cond = Some(value.clone()),
+                ExprNode::Lambda { params, rest_param, block_param, body, .. }
+                    if params.is_empty() && rest_param.is_none() && block_param.is_none() =>
+                {
+                    unless_cond_expr = Some((*body).clone())
+                }
+                _ => return None,
+            },
+            // A custom store changes which counter increments. The shared
+            // limiter has no store argument, so expanding without it would
+            // silently use the default cache.
+            "store" => return None,
             _ => return None,
         }
     }
@@ -226,18 +265,39 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         (None, [one]) => format!("rate_limit_{}", one.as_str()),
         (None, _) => "rate_limit".to_string(),
     };
-    // Rails: ["rate-limit", controller_path, name, by].compact.join(":")
-    let mut prefix = format!("rate-limit:{controller_path}");
-    if let Some(n) = &name {
-        prefix.push(':');
-        prefix.push_str(n);
-    }
-    prefix.push(':');
-    let key_src = format!(
-        "{} + ({}).to_s",
-        ruby_string_literal(&prefix),
-        by_src.unwrap_or_else(|| "request.remote_ip".to_string())
-    );
+    // Rails: ["rate-limit", scope || controller_path, name, by].compact.join(":")
+    let key_src = match scope_src {
+        Some(scope) => {
+            let mut parts = vec![format!(
+                "{} + ({}).to_s",
+                ruby_string_literal("rate-limit:"),
+                scope
+            )];
+            if let Some(n) = &name {
+                parts.push(ruby_string_literal(&format!(":{n}:")));
+            } else {
+                parts.push(ruby_string_literal(":"));
+            }
+            parts.push(format!(
+                "({}).to_s",
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            ));
+            parts.join(" + ")
+        }
+        None => {
+            let mut prefix = format!("rate-limit:{controller_path}");
+            if let Some(n) = &name {
+                prefix.push(':');
+                prefix.push_str(n);
+            }
+            prefix.push(':');
+            format!(
+                "{} + ({}).to_s",
+                ruby_string_literal(&prefix),
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            )
+        }
+    };
     Some(Limit {
         method,
         to_src: to_src?,
@@ -246,7 +306,27 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         with_src: with_src.unwrap_or_else(|| "head(:too_many_requests)".to_string()),
         only,
         except,
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
     })
+}
+
+/// `scope:` as the cache-key segment Rails joins. A symbol or string is
+/// that segment; a call (`SessionsController.controller_path`) is
+/// evaluated, which is how one controller names another's path.
+fn scope_source(v: &Expr) -> Option<String> {
+    // A symbol or string is captured when the macro expands, which is
+    // when Rails evaluates `scope:`. A call is not: Rails would run it
+    // once at declaration, and a nil or false result would fall back to
+    // this controller's path. Emitting the call inside the request would
+    // re-run it, and a nil result would collapse unrelated budgets.
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(ruby_string_literal(value.as_str())),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(ruby_string_literal(value)),
+        _ => None,
+    }
 }
 
 /// The body of a `-> { … }` as source; None for anything else.
@@ -280,7 +360,20 @@ fn seconds_source(v: &Expr) -> String {
 }
 
 fn ruby_string_literal(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    // A double-quoted literal interpolates `#{…}`, `#@ivar`, and
+    // `#$global`. The scope was a literal, so each marker stays text.
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut out = String::with_capacity(escaped.len());
+    let chars: Vec<char> = escaped.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' && matches!(chars.get(i + 1), Some('{' | '@' | '$')) {
+            out.push('\\');
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    format!("\"{out}\"")
 }
 
 /// `:create` / `[:create, :update]` → the names; anything else → None.
@@ -349,12 +442,101 @@ mod tests {
     }
 
     #[test]
-    fn an_option_it_cannot_expand_leaves_the_macro_in_place() {
+    fn a_shared_scope_replaces_the_controller_path_in_the_cache_key() {
+        // Two controllers count against one budget when the second names
+        // the first's path, a symbol, or a string. Rails joins
+        // `scope || controller_path` between `rate-limit` and `name`.
+        // A call is evaluated by Rails when the filter is declared.
+        // Expanding it into the request method would re-run it, and a
+        // nil result would collapse this controller's budget into
+        // another. The macro stays in place.
+        let mut shared = controller(
+            "class Users::Sessions::OtpsController < ApplicationController\n  \
+             rate_limit to: 10, within: 3.minutes, only: :create, scope: Users::SessionsController.controller_path\nend\n",
+        );
+        assert!(take_from_controller_body(&mut shared).is_empty());
+
+        let mut symbol = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: :api_global\nend\n",
+        );
+        let symbol = &take_from_controller_body(&mut symbol)[0];
+        assert_eq!(
+            symbol.key_src,
+            "\"rate-limit:\" + (\"api_global\").to_s + \":\" + (request.remote_ip).to_s"
+        );
+
+        let mut named = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, name: \"burst\", scope: \"api\"\nend\n",
+        );
+        let named = &take_from_controller_body(&mut named)[0];
+        assert!(named.key_src.contains("\"api\""), "{}", named.key_src);
+        assert!(named.key_src.contains(":burst:"), "{}", named.key_src);
+
+        let mut marked = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: \"budget-\\#{id}\"\nend\n",
+        );
+        let marked = &take_from_controller_body(&mut marked)[0];
+        assert!(
+            marked.key_src.contains("\\#{"),
+            "a literal interpolation marker stays literal; {}",
+            marked.key_src
+        );
+
+        // Single quotes keep `#@` and `#$` as text. Emitting them inside
+        // a double-quoted key would interpolate the ivar or the global.
+        let mut shorthand = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: '#@token #$budget'\nend\n",
+        );
+        let shorthand = &take_from_controller_body(&mut shorthand)[0];
+        assert!(
+            shorthand.key_src.contains("\\#@token") && shorthand.key_src.contains("\\#$budget"),
+            "shorthand interpolation markers stay literal; {}",
+            shorthand.key_src
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_leaves_the_macro_in_place() {
         let mut c = controller(
             "class SessionsController < ApplicationController\n  \
-             rate_limit to: 10, within: 3.minutes, if: :guest?\nend\n",
+             rate_limit to: 10, within: 3.minutes, bogus: true\nend\n",
         );
         assert!(take_from_controller_body(&mut c).is_empty());
         assert!(c.body.iter().any(|i| matches!(i, ControllerBodyItem::Unknown { .. })));
+    }
+
+    #[test]
+    fn if_unless_and_by_lambda_are_kept() {
+        let mut c = controller(
+            "class TokensController < ApplicationController\n  \
+             rate_limit to: 5, within: 1.minute, only: :create, if: -> { @credential }, unless: :quiet?, by: -> { @token }\nend\n",
+        );
+        let limits = take_from_controller_body(&mut c);
+        assert_eq!(limits.len(), 1);
+        let limit = &limits[0];
+        assert_eq!(limit.only, vec![Symbol::from("create")]);
+        assert!(limit.if_cond_expr.is_some());
+        assert_eq!(limit.unless_cond.as_ref().map(|s| s.as_str()), Some("quiet?"));
+        assert!(limit.key_src.contains("@token"), "{}", limit.key_src);
+        let filter = c.body.iter().find_map(|item| match item {
+            ControllerBodyItem::Filter { filter, .. } => Some(filter),
+            _ => None,
+        }).expect("filter");
+        assert!(filter.if_cond_expr.is_some());
+        assert_eq!(filter.unless_cond.as_ref().map(|s| s.as_str()), Some("quiet?"));
+    }
+
+    #[test]
+    fn a_custom_store_is_not_dropped() {
+        let mut c = controller(
+            "class SessionsController < ApplicationController\n  \
+             rate_limit to: 10, within: 3.minutes, store: custom_store\nend\n",
+        );
+        assert!(take_from_controller_body(&mut c).is_empty());
+        assert!(c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { .. })));
     }
 }

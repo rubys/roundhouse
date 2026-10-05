@@ -261,9 +261,9 @@ Practical consequences:
   entry point — the pattern rust, go, and elixir all followed. The
   public identity (`crate::emit::rust::emit`, the `--target` CLI
   surface) never moves; the entry file shrinks to a shim once the
-  2-module carries everything. (The `ROUNDHOUSE_<TARGET>_V2` env
-  flags from the early migrations are vestigial — see
-  `docs/env-gates.md`.)
+  2-module carries everything. Temporary migration flags should leave
+  with the old path; inspect the actual readers rather than assuming
+  a historical flag still exists.
 - Flip the default once the new path is green; delete the old.
 - `expr.rs` is the exception — port forward, don't rewrite from
   scratch.

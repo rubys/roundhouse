@@ -7,7 +7,8 @@
 //! path references can — this is the same move as
 //! `every_runtime_method_body_is_fully_typed`: turn a discipline into
 //! a gate. Scope is the curated docs (README, DEVELOPMENT, AGENTS,
-//! WHY, BETS, docs/README, docs/data/, docs/pipeline/); working plans
+//! WHY, BETS, docs/README, docs/data/, docs/pipeline/, docs/development/,
+//! docs/ci/); working plans
 //! and docs/archive/ are point-in-time records and exempt.
 //!
 //! Extraction rules (deliberately conservative — a missed reference
@@ -59,7 +60,7 @@ const EXEMPT_EMITTED: &[&str] = &["src/db.rs", "src/runtime.rs", "src/main.rs"];
 
 fn doc_files() -> Vec<String> {
     let mut files: Vec<String> = DOCS.iter().map(|s| s.to_string()).collect();
-    for dir in ["docs/data", "docs/pipeline"] {
+    for dir in ["docs/data", "docs/pipeline", "docs/development", "docs/ci"] {
         for entry in fs::read_dir(dir).expect(dir) {
             let p = entry.unwrap().path();
             if p.extension().is_some_and(|e| e == "md") {

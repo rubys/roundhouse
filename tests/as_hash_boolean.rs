@@ -40,6 +40,25 @@ fn a_deep_conversion_over_nested_hashes_is_left_alone() {
 }
 
 #[test]
+fn array_wrap_folds_one_shape_and_branches_a_union() {
+    // A closed shape folds. `flag ? [1] : nil` is `Array | Nil`, so
+    // one shape would wrap nil or nest the array. The fold branches
+    // after binding the argument once.
+    assert_eq!(emit("Array.wrap(nil)"), "[]");
+    assert_eq!(emit("Array.wrap([1])"), "[1]");
+    assert_eq!(emit("Array.wrap(\"solo\")"), "[\"solo\"]");
+    let mixed = emit("Array.wrap(flag ? [1] : nil)");
+    assert!(
+        mixed.contains("nil?") && mixed.contains("__array_wrap"),
+        "a union branches after one binding; got: {mixed}"
+    );
+    assert!(
+        !mixed.contains("Array.wrap"),
+        "the union is folded, not left as a call the ruby emit cannot run; got: {mixed}"
+    );
+}
+
+#[test]
 fn cast_boolean_answers_like_activemodel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = Command::new("ruby")

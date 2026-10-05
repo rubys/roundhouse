@@ -31,11 +31,20 @@
 # Three outcomes per file, and the three are the point of the lane:
 # didn't link / linked and diverged / linked and agreed.
 #
-# The compiles are PARALLEL (`--jobs`, default 8) and the runs are
+# The compiles are PARALLEL (`--jobs`, default 8) and the SPINEL runs are
 # SERIAL — the binaries share one sqlite file. Each compile is a whole-
 # program build, so this lane costs minutes where the ruby lane costs
 # seconds. Never batch several test files into one compile: that is what
 # found matz/spinel#4340, and it measures a different thing.
+#
+# The RUBY runs are also parallel (`--jobs`), one process per file. Each
+# file already opens its own sqlite path from `$0`, but Active Storage
+# writes `storage/files` (or `tmp/storage` under RAILS_ENV=test). A parallel
+# file bind-mounts private directories over both roots and keeps the emit
+# as its working directory, so `$0`, `Dir.pwd` and `__dir__` stay what a serial run
+# sees. The tally is still printed in file-list order. `--jobs 1`, or a
+# box whose `unshare` cannot mount, runs the files in this process as
+# before.
 #
 # NO STUBS BY DEFAULT ON THAT LANE. walk_stubs.rb is Ruby spliced into
 # boot.rb, which every test requires — under spinel it must also COMPILE,
@@ -48,7 +57,9 @@
 #
 # Options:
 #   --target T   `ruby` (default) or `spinel` — see above.
-#   --jobs N     Parallel compiles for --target spinel (default 8).
+#   --jobs N     Parallel spinel compiles, and parallel ruby file runs
+#                (default 8). Ruby runs fall back to serial when the
+#                mount probe fails. Spinel RUNS stay serial either way.
 #   --timeout N  Seconds a single spinel binary may run (default 120).
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
@@ -190,6 +201,7 @@ cleanup() {
     local code=$?
     if [[ -n "$TMP_TALLY" ]]; then rm -f "$TMP_TALLY"; fi
     if [[ -n "$TMP_FAIL" ]]; then rm -f "$TMP_FAIL"; fi
+    if [[ -n "${RUBY_RUNS:-}" ]]; then rm -rf "$RUBY_RUNS"; fi
     if (( KEEP )); then
         echo ""
         echo "emit retained at $OUT"
@@ -314,7 +326,11 @@ if [[ "$TARGET" == spinel ]]; then
     echo "  compiled in $((SECONDS - started))s; logs in $BUILD_LOGS"
 fi
 
-step "running ${#TESTS[@]} test files"
+if [[ "$TARGET" == ruby && "$JOBS" -gt 1 ]]; then
+    step "running ${#TESTS[@]} test files (-j $JOBS)"
+else
+    step "running ${#TESTS[@]} test files"
+fi
 
 cd "$OUT"
 pass=0
@@ -355,14 +371,65 @@ fail_lines=""
 # emitted source, same autorun shim, same output to parse. The timeout is
 # `perl -e alarm` because a binary that hangs has no analogue on the ruby
 # lane and macOS ships no coreutils `timeout`.
+#
+# Ruby's SECRET_KEY_BASE default lives HERE, not in the parallel wrapper:
+# both paths call this function, so an unset key is the same string
+# either way.
 run_test() {
-    local t="$1"
+    local t="$1" priv="${2:-}"
     export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}"
     if [[ "$TARGET" == spinel ]]; then
         perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "./build/$t"
     else
-        ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb"
+        local ruby_command=(ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb")
+        if [[ -n "$priv" ]]; then
+            ruby_isolated "$priv" "${ruby_command[@]}"
+        else
+            "${ruby_command[@]}"
+        fi
     fi
+}
+
+# Active Storage uses `storage/files` by default and `tmp/storage` under
+# RAILS_ENV=test. Isolate both without changing the serial environment;
+# the sqlite file is already named from `$0`. Run the same ruby the
+# serial path uses, so argv0, cwd and the load path do not move.
+#
+# `--map-current-user` keeps the real uid. `--keep-caps` is what lets
+# the mount happen inside that mapping; it also fills every capability
+# set, including the ones a child would inherit. `setpriv` clears the
+# inherited and ambient sets before ruby. Effective and permitted are
+# already empty in the ruby process (it is not privileged), and the
+# bounding set is left as the caller's — clearing it is irreversible
+# and would make the process stricter than a serial run.
+ruby_isolated() {
+    local priv="$1"
+    shift
+    mkdir -p "$priv/tmp-storage" "$priv/files" "$OUT/tmp/storage" "$OUT/storage/files" || return
+    unshare --user --map-current-user --keep-caps --mount bash -c '
+        mount --bind "$1/tmp-storage" tmp/storage || exit $?
+        mount --bind "$1/files" storage/files || exit $?
+        shift
+        exec setpriv --inh-caps -all --ambient-caps -all "$@"
+    ' _ "$priv" "$@"
+}
+
+# True when parallel ruby runs can isolate the storage roots. Probed once:
+# a missing unshare, or a mount that the kernel refuses, is a serial
+# run rather than a suite of failed files.
+ruby_parallel_ok() {
+    command -v unshare >/dev/null 2>&1 || return 1
+    command -v setpriv >/dev/null 2>&1 || return 1
+    local probe
+    probe="$(mktemp -d -t campfire-suite-unshare.XXXXXX)"
+    mkdir -p "$probe/src" "$probe/dst"
+    if unshare --user --map-current-user --keep-caps --mount \
+        mount --bind "$probe/src" "$probe/dst" >/dev/null 2>&1; then
+        rm -rf "$probe"
+        return 0
+    fi
+    rm -rf "$probe"
+    return 1
 }
 
 # The first line of a failed compile, for the BUILD row's `why`.
@@ -397,6 +464,40 @@ build_error() {
     printf '%s' "$line" | sed "s|$OUT/||g" |
         ruby -e 'print ARGF.read.force_encoding("UTF-8").scrub("?")[0, 160].to_s' 
 }
+# Ruby file runs may overlap. Their output is captured per file and
+# folded below in the app's own file order, so the tally, the fail-log
+# and the printed rows do not depend on which file finished first.
+# Spinel stays in the loop: its binaries share one sqlite file.
+RUBY_PARALLEL=0
+RUBY_RUNS=""
+if [[ "$TARGET" == ruby && "$JOBS" -gt 1 && ${#TESTS[@]} -gt 0 ]] && ruby_parallel_ok; then
+    RUBY_PARALLEL=1
+    RUBY_RUNS="$(mktemp -d -t campfire-suite-runs.XXXXXX)"
+    started=$SECONDS
+    # Functions are exported because xargs starts a new shell. The
+    # runs directory is an environment variable: xargs appends each
+    # file as $1 and would shift a positional argument out from under it.
+    export -f ruby_isolated run_test
+    export REPO_ROOT OUT TARGET TIMEOUT
+    export RUBY_RUNS
+    # NUL-separated slot/path pairs preserve each file's position and name.
+    listed=0
+    for t in "${TESTS[@]}"; do
+        listed=$((listed + 1))
+        printf '%s\0%s\0' "$listed" "$t"
+    done | xargs -0 -P "$JOBS" -n 2 bash -c '
+            slot="$1"; t="$2"
+            # One combined stream, the same `2>&1` the serial path uses.
+            if run_test "$t" "$RUBY_RUNS/$slot" >"$RUBY_RUNS/$slot.log" 2>&1; then
+                printf 0 > "$RUBY_RUNS/$slot.status"
+            else
+                printf 1 > "$RUBY_RUNS/$slot.status"
+            fi
+        ' _ || true
+    echo "  ruby files ran in $((SECONDS - started))s"
+fi
+
+ruby_slot=0
 for t in "${TESTS[@]}"; do
     # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
     # EVERY test and prints one `FAIL <Class>#<test>: <msg>` line per
@@ -416,7 +517,18 @@ for t in "${TESTS[@]}"; do
         table+="BUILD|$t|0|$n|$why"$'\n'
         continue
     fi
-    if out=$(run_test "$t" 2>&1); then
+    ran_ok=0
+    if (( RUBY_PARALLEL )); then
+        ruby_slot=$((ruby_slot + 1))
+        # Missing status is a failed file, not a quiet skip: a worker
+        # that died before writing one must not be counted green.
+        status="$(cat "$RUBY_RUNS/$ruby_slot.status" 2>/dev/null || echo 1)"
+        out="$(cat "$RUBY_RUNS/$ruby_slot.log" 2>/dev/null || true)"
+        [[ "$status" == 0 ]] && ran_ok=1
+    elif out=$(run_test "$t" 2>&1); then
+        ran_ok=1
+    fi
+    if (( ran_ok )); then
         take_skips_out "$out"
         pass=$((pass + 1))
         tests_pass=$((tests_pass + n))

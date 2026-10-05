@@ -277,6 +277,7 @@ mod tests {
             name: sym(name),
             target: cid(target),
             foreign_key: sym(fk),
+            foreign_key_explicit: false,
             through: None,
             dependent: Dependent::None,
             as_interface: None,

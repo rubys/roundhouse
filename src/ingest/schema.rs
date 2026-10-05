@@ -618,23 +618,23 @@ fn table_from_create_table(
     let mut indexes: Vec<Index> = Vec::new();
     if has_id {
         let id_limit = hash_limit.unwrap_or(outer_limit);
-        let opts = ColumnOpts { nullable: Some(false), default: None, limit: id_limit };
         // `serial` and `bigserial` are the integer keys Postgres fills
         // from a sequence: Rails' PostgreSQL adapter makes `id: :integer`
-        // a `serial`, and dumps it as `id: :serial`. An integer key with
-        // no explicit `default:` is a `bigserial` when its `limit:` is 8
-        // and a `serial` otherwise; with one, it keeps its type, whose
-        // `limit:` 5 to 8 is a `bigint`.
-        let key_type = match id_type.as_deref() {
-            Some("serial") => Some("integer"),
-            Some("bigserial") => Some("bigint"),
-            Some("integer")
-                if id_limit == Some(8) || (id_default && matches!(id_limit, Some(5..=8))) =>
-            {
-                Some("bigint")
-            }
-            other => other,
+        // a `serial`, and dumps it as `id: :serial`. An `integer` key
+        // with no explicit `default:` has a sequence, and is a
+        // `bigserial` when its `limit:` is 8 and a `serial` otherwise;
+        // the sequence spends the `limit:`. Any other key is a column
+        // of its type, and `column_with_type` reads its `limit:` as any
+        // column's: an integer's 5 to 8 is a `bigint`, a string's is
+        // its length.
+        let (key_type, key_limit) = match id_type.as_deref() {
+            Some("serial") => (Some("integer"), None),
+            Some("bigserial") => (Some("bigint"), None),
+            Some("integer") if !id_default && id_limit == Some(8) => (Some("bigint"), None),
+            Some("integer") if !id_default => (Some("integer"), None),
+            other => (other, id_limit),
         };
+        let opts = ColumnOpts { nullable: Some(false), default: None, limit: key_limit };
         let key = match key_type {
             None | Some("bigint") | Some("primary_key") => Ok(Column {
                 name: Symbol::from(id_name.as_str()),
@@ -978,6 +978,12 @@ fn column_with_type(
     file: &str,
 ) -> Result<Column, IngestError> {
     let col_type = match type_name {
+        // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
+        // and MySQL adapters make 5 to 8 a `bigint`. Rails 4.2 and earlier
+        // dumped a bigint column as `t.integer …, limit: 8`, and
+        // solid_cache's and solid_cable's schemas still write it for their
+        // hash columns.
+        "integer" if matches!(opts.limit, Some(5..=8)) => ColumnType::BigInt,
         "integer" => ColumnType::Integer,
         "bigint" => ColumnType::BigInt,
         "float" => ColumnType::Float,
@@ -1290,6 +1296,59 @@ mod tests {
         assert!(!predicate_names("(\"revoked at\" IS NULL)", "revoked"));
         assert!(!predicate_names("(state = 'revoked_at')", "revoked_at"));
         assert!(predicate_names("(REVOKED_AT IS NULL)", "revoked_at"));
+    }
+
+    /// An integer's `limit:` is its size in bytes: 5 to 8 is a `bigint`,
+    /// in `t.integer`, `add_column` and `change_column` alike, and 4 or
+    /// no limit stays `integer`.
+    #[test]
+    fn an_eight_byte_integer_is_a_bigint() {
+        let schema = fold(&[
+            r#"
+            class CreateEntries < ActiveRecord::Migration[8.1]
+              def change
+                create_table :entries do |t|
+                  t.integer :key_hash, limit: 8, null: false
+                  t.integer :five, limit: 5
+                  t.integer :seven, limit: 7
+                  t.integer :byte_size, limit: 4, null: false
+                  t.integer :position
+                end
+                add_column :entries, :channel_hash, :integer, limit: 8
+                add_column :entries, :widened, :integer
+                add_column :entries, :narrowed, :integer, limit: 8
+              end
+            end
+            "#,
+            r#"
+            class ResizeEntries < ActiveRecord::Migration[8.1]
+              def change
+                change_column :entries, :widened, :integer, limit: 8
+                change_column :entries, :narrowed, :integer, limit: 4
+              end
+            end
+            "#,
+        ]);
+        let mut types: Vec<(&str, &ColumnType)> = schema.tables[&Symbol::from("entries")]
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), &c.col_type))
+            .collect();
+        types.sort_by_key(|(name, _)| *name);
+        assert_eq!(
+            types,
+            [
+                ("byte_size", &ColumnType::Integer),
+                ("channel_hash", &ColumnType::BigInt),
+                ("five", &ColumnType::BigInt),
+                ("id", &ColumnType::BigInt),
+                ("key_hash", &ColumnType::BigInt),
+                ("narrowed", &ColumnType::Integer),
+                ("position", &ColumnType::Integer),
+                ("seven", &ColumnType::BigInt),
+                ("widened", &ColumnType::BigInt),
+            ]
+        );
     }
 
     #[test]

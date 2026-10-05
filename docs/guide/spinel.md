@@ -42,22 +42,40 @@ calls it the Campfire tier for that reason.
   binary: glibc's malloc is a third of a server's CPU under load, and
   a build that silently varies between machines is a benchmark that
   silently compares two binaries. Note the *dev* package — the
-  `libjemalloc2` runtime alone links nothing.
+  `libjemalloc2` runtime alone links nothing. On Apple Silicon,
+  Homebrew installs it under `/opt/homebrew/lib`, which the linker does
+  not search by default; `spin` asks `pkg-config` where it is
+  (matz/spinel#7219), so with `pkg-config` installed it links as is. A
+  Spinel older than that, or a host without `pkg-config`, needs
+  `LIBRARY_PATH=$(brew --prefix)/lib` (or `export` it), or the link
+  fails with `library 'jemalloc' not found`.
+- **Ruby with Bundler** — for the asset step only (`make assets`, below),
+  which copies Turbo and Stimulus out of their gems; the binary itself
+  needs no Ruby.
 - **libvips** (`libvips-dev` to build, `libvips42` to run;
   `brew install vips`) — only when the app declares image variants
   (`has_one_attached` with `variant`), in which case `spin.toml` lists
   `ruby-vips`.
-- **Node.js 18+** — for the browser end-to-end suite only.
+- **Node.js 24+** — when the app builds Tailwind (the asset step runs
+  `npx @tailwindcss/cli`), and for the browser end-to-end suite.
 
 ## Build and run
 
 ```sh
 roundhouse --target spinel -o out/spinel /path/to/your/rails/app
 cd out/spinel
+BUNDLE_ONLY=assets bundle install && BUNDLE_ONLY=assets make assets
 spin build
 sqlite3 storage/development.sqlite3 < db/seed.sql
 ./build/bin/<app>
 ```
+
+`make assets` writes `static/`: the app's stylesheets and JavaScript,
+Turbo and Stimulus copied out of their gems, and the Tailwind build
+when the app has one. `BUNDLE_ONLY=assets` installs just the Gemfile's
+`assets` group for it, so no C-extension gem is compiled for a step
+that only copies files. Skip it and the binary still serves every page
+— with every stylesheet and script a 404.
 
 `spin build` resolves the manifest's dependencies (bcrypt when the
 app uses `has_secure_password`, ruby-vips for variants — native
@@ -84,6 +102,42 @@ compiles each `test/*.rb` — the app's own model and controller tests,
 translated — to its own binary and diffs its output against a
 `.expected` snapshot. The `e2e/` Playwright suite is the same one the
 other server targets ship.
+
+## One command: OCRAN
+
+[OCRAN](https://github.com/Largo/ocran) packages Ruby programs for
+people who have no Ruby, and its `--roundhouse` mode runs the steps
+above as one command:
+
+```sh
+ocran --roundhouse path/to/rails/app     # -> ./app-spinel/
+```
+
+It transpiles with `roundhouse --target spinel`, runs the asset step,
+runs `spin build`, and writes a directory with the binary, the
+`static/`, `public/`, `db/` and `config/` files it reads, and a
+`storage/` that a rebuild keeps, seeded from `db/seed.sql` on the first
+build. When the app is not covered yet it shows the useful part of
+`roundhouse check --continue` — the gem census, the first errors, the
+unsupported-construct list — instead of a compiler error. It finds
+`roundhouse`, `spinel` and `spin` through `ROUNDHOUSE`, `SPINEL` and
+`SPIN`, then `PATH`, and prints install steps for whichever is
+missing. The prerequisites above still apply.
+
+The mode is experimental and not yet in a released OCRAN (1.4.6 is
+older); until the next release, run it from a checkout of its `master`:
+
+```sh
+git clone https://github.com/Largo/ocran
+ruby -I ocran/lib ocran/exe/ocran --roundhouse path/to/rails/app
+```
+
+Its asset step came in with
+[largo/ocran#65](https://github.com/Largo/ocran/pull/65); an OCRAN
+without it produces a binary whose stylesheets and scripts all 404.
+`tests/ocran_contract.rs` pins the command lines and output OCRAN
+depends on, so a change on this side that would break it fails here
+first.
 
 ## Deploying
 
@@ -151,7 +205,7 @@ live updates over the socket — from `docker run -p 3000:3000`.
 [rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
 is that archive, refreshed by scheduled full validation or an explicitly
 publishing manual run on canonical main. PR archive checks never publish it;
-see [CI coverage](../ci-reuse.md). It is the fastest way to see the door's
+see [CI publication](../ci/README.md#publication-is-separate). It is the fastest way to see the door's
 end state before pointing it at your own app.
 
 ## What to expect

@@ -525,7 +525,7 @@ fn keyword_calls_with_index(
             );
         }
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |e| {
+    crate::lower::for_each_forwarding_body_ref(app, &mut |e| {
         visit(app, contracts, None, e, &mut plans, true)
     });
     plans

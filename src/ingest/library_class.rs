@@ -1331,6 +1331,63 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
         .is_some_and(|c| constant_id_str(&c.name()) == "ClassMethods"))
 }
 
+/// `if enabled; attr_reader :token; end` is a declaration this walk
+/// would lower when it stands alone. Inside a branch it sometimes runs,
+/// which a synthesized method cannot express. Reject it rather than
+/// drop the name. A modifier (`return x if x`) has no statement body,
+/// so it is not this shape.
+fn reject_conditional_accessor(node: &ruby_prism::Node<'_>, file: &str) -> IngestResult<()> {
+    fn body_declares(body: Option<ruby_prism::Node<'_>>) -> bool {
+        body.is_some_and(|body| {
+            flatten_statements(body).iter().any(|stmt| {
+                stmt.as_call_node().is_some_and(|call| {
+                    call.receiver().is_none()
+                        && matches!(
+                            constant_id_str(&call.name()),
+                            "attr_reader"
+                                | "attr_writer"
+                                | "attr_accessor"
+                                | "cattr_reader"
+                                | "cattr_writer"
+                                | "cattr_accessor"
+                                | "mattr_reader"
+                                | "mattr_writer"
+                                | "mattr_accessor"
+                        )
+                })
+            })
+        })
+    }
+    let declares = if let Some(branch) = node.as_if_node() {
+        body_declares(branch.statements().map(|s| s.as_node()))
+            || branch.subsequent().is_some_and(|sub| {
+                sub.as_else_node()
+                    .and_then(|e| e.statements())
+                    .is_some_and(|s| body_declares(Some(s.as_node())))
+                    || sub.as_if_node().is_some_and(|inner| {
+                        body_declares(inner.statements().map(|s| s.as_node()))
+                    })
+            })
+    } else if let Some(branch) = node.as_unless_node() {
+        body_declares(branch.statements().map(|s| s.as_node()))
+            || branch
+                .else_clause()
+                .and_then(|clause| clause.statements())
+                .is_some_and(|s| body_declares(Some(s.as_node())))
+    } else {
+        false
+    };
+    if declares {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "conditional attr_reader, attr_writer, attr_accessor, cattr_*, or mattr_* \
+                      is not a declaration this walk can keep"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
@@ -1377,6 +1434,17 @@ fn walk_decl_body_with_visibility<'pr>(
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
     for statement in statements {
+        // An `if` / `unless` around a `def`, a visibility marker, or an
+        // accessor this walk would otherwise lower is not a statement it
+        // can keep. Check the source statement, before a visibility
+        // wrapper replaces it with its inner `def`. An accessor in the
+        // branch has neither a `def` nor a marker, so reject it here:
+        // skipping it would drop `attr_reader :token` with no error.
+        if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
+            Visibility::reject_conditional_declaration(&statement, file)?;
+            reject_conditional_accessor(&statement, file)?;
+            continue;
+        }
         let definition = visibility::definition(&statement).map(|d| d.as_node());
         let stmt = definition.as_ref().unwrap_or(&statement);
         if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
@@ -1481,9 +1549,15 @@ fn walk_decl_body_with_visibility<'pr>(
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
                 // The retained singleton copy is public even if the original
-                // instance definition is private/protected. extend self shares
-                // the original method instead and must retain its visibility.
-                m.visibility = crate::dialect::MethodVisibility::Public;
+                // instance definition is private/protected, unless
+                // `private_class_method` / `public_class_method` already
+                // recorded a class-side change at this def. extend self
+                // shares the original method instead and must retain its
+                // visibility.
+                let class_visibility_changed = visibility.class_side_changed(m.name.as_str());
+                if !class_visibility_changed {
+                    m.visibility = crate::dialect::MethodVisibility::Public;
+                }
             }
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
@@ -1513,6 +1587,24 @@ fn walk_decl_body_with_visibility<'pr>(
                 continue;
             }
         }
+        if let Some(alias) = stmt.as_alias_method_node() {
+            let to = alias_keyword_name(&alias.new_name());
+            let from = alias_keyword_name(&alias.old_name());
+            let receiver = if force_class_receiver { MethodReceiver::Class } else { MethodReceiver::Instance };
+            if let Some((to, from)) = to.zip(from) {
+                if let Some(source) = out.methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
+                    let mut copy = out.methods[source].clone();
+                    copy.name = Symbol::from(to.as_str());
+                    visibility.apply(&statement, &mut copy);
+                    out.methods.push(copy);
+                    continue;
+                }
+            }
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "alias names a method this body has not defined".into(),
+            });
+        }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());
@@ -1530,6 +1622,20 @@ fn walk_decl_body_with_visibility<'pr>(
                 match kw {
                     "include" => {
                         if let Some(args) = call.arguments() {
+                            // `include Resolvers.for(:product)`: a module
+                            // computed at load time. Dropping it emitted
+                            // the class without its mixin and told every
+                            // reader the class had only its own methods.
+                            // Kept as an unknown call: the Ruby family
+                            // replays it, the rest see a class body they
+                            // cannot model.
+                            if args.arguments().iter().any(|arg| {
+                                constant_path_of(&arg).is_none() && !is_rails_url_helpers_chain(&arg)
+                            }) {
+                                if let Ok(e) = ingest_expr(&stmt, file) {
+                                    out.unknown_calls.push(e);
+                                }
+                            }
                             for arg in args.arguments().iter() {
                                 if let Some(path) = constant_path_of(&arg) {
                                     // lobsters' `TimeSeries` includes
@@ -1720,6 +1826,10 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         // Nested class/module declarations also fall through here; they
         // surface as separate entries via the plural API.
+        // An `if` / `unless` that wraps a `def` or a visibility marker
+        // is not one of those. Leaving it unrecorded dropped the method
+        // with no diagnostic. A modifier (`return x if x`) has no `def`
+        // in its body and stays an ordinary expression.
     }
 
     // `module_function :a, :b` promotions, applied before the classvar
@@ -1744,7 +1854,12 @@ fn walk_decl_body_with_visibility<'pr>(
                 .any(|n| n == out.methods[*pos].name.as_str())
             {
                 out.methods[*pos].receiver = MethodReceiver::Class;
-                out.methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                // Same rule as the bare marker: the copy starts public,
+                // and a later `private_class_method :name` keeps the
+                // visibility already recorded for that def.
+                if !visibility.class_side_changed(out.methods[*pos].name.as_str()) {
+                    out.methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                }
                 promoted.push(out.methods[*pos].name.clone());
             }
         }
@@ -1809,6 +1924,15 @@ fn normalize_classvars_to_ivars(e: &mut Expr, class_attributes: &HashSet<Symbol>
 /// last `old` already walked on the same side (instance, or class inside
 /// `class << self`). None when either name is not a literal symbol or
 /// the body has not defined `old`.
+pub(super) fn alias_keyword_name(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(symbol) = symbol_value(node) {
+        return Some(symbol);
+    }
+    node.as_call_node()
+        .filter(|call| call.receiver().is_none() && call.arguments().is_none())
+        .map(|call| constant_id_str(&call.name()).to_string())
+}
+
 fn alias_source(
     call: &ruby_prism::CallNode<'_>,
     methods: &[MethodDef],
@@ -2055,7 +2179,14 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        if keeps_keywords {
+                        // `target(**params)` forwards. `skip_before_action :name,
+                        // **options` consumes the hash as filter options and
+                        // must keep the flattened positional binding.
+                        let body_forwards_rest = def.body().is_some_and(|body| {
+                            let text = String::from_utf8_lossy(body.location().as_slice());
+                            text.contains(&format!("(**{s})")) || text.contains(&format!(", **{s})"))
+                        });
+                        if keeps_keywords || body_forwards_rest {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
@@ -2323,6 +2454,7 @@ pub fn is_unported_rails_base(parent: &str) -> bool {
     matches!(
         parent,
         "ActionMailbox::Base"
+            | "ActiveJob::Serializers::ObjectSerializer"
             | "ActiveModel::Validator"
             | "ActiveModel::EachValidator"
             | "ActiveRecord::Migration"
@@ -2516,6 +2648,14 @@ pub fn ingest_concern_class_method_spans(
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
+            if let Some(singleton) = stmt.as_singleton_class_node() {
+                // `class << self` is a class-method carrier. Record the
+                // defs so an includer receives them. `module_function`
+                // is not this node and stays on the module.
+                if singleton.expression().as_self_node().is_some() {
+                    defs_in(singleton.body(), file, &mut spans);
+                }
+            }
             if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);
@@ -2786,6 +2926,10 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "has_json",
     "typed_store",
     "broadcasts_to",
+    // `included do include Other end` runs on the includer: spliced
+    // after the includer's own `include` line, `Other` sits ahead of
+    // this concern in the lookup order, as in Ruby.
+    "include",
 ];
 
 /// True when an Unknown body item is one of [`CONCERN_MODEL_MACROS`].

@@ -82,13 +82,15 @@
 //! reasons, through [`crate::lower::view_to_library::turbo_frames`],
 //! which owns the rearranging and is shared with the view walker.
 
+use crate::analyze::ClassInfo;
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::lower::view_to_library::attr_parts::{append_attr_parts, string_interp};
 use crate::lower::view_to_library::turbo_frames;
 use crate::lower::view_to_library::{lit_str, view_helpers_call};
+use std::collections::{HashMap, HashSet};
 
 /// HELPER METHOD BODIES ONLY — views are deliberately not walked.
 ///
@@ -100,7 +102,10 @@ use crate::lower::view_to_library::{lit_str, view_helpers_call};
 /// first, so the walker's arm would never fire, and the `capture { … }`
 /// synthesized here cannot express template ops. One owner per body
 /// kind; the walker's own non-block gap is fixed in the walker.
-pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
+pub fn apply_tag_builder_lowering(
+    app: &mut App,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     // For `turbo_frame_tag`'s record test — the same snake-singular set
     // the view lowering's `ViewCtx` carries, built here because a hook
@@ -140,10 +145,65 @@ pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
             (crate::naming::snake_case(m.name.0.as_str()), stems)
         })
         .collect();
-    super::for_each_hook_body(app, &mut |body| {
-        rewrite(body, &models, &helpers, &sti_stems, &mut diags)
+    // A receiver-less `tag` is the builder only where nothing else
+    // answers it. A class with its own `tag` — `belongs_to :tag`, a
+    // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
+    // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
+    let owns_tag = classes_owning_tag(app, registry);
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
+        rewrite(body, own_tag, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
+}
+
+/// Classes whose bodies read a bare `tag` as their own method: APP
+/// classes with a `tag` instance method — the registry's
+/// `instance_methods` already hold associations, columns and `attr_*`
+/// readers alongside `def`s — directly or through an app module they
+/// include or an app class they inherit from, plus the MODULES such a
+/// class includes. A concern's body runs as its includer, so
+/// `tag.title` in `Taggable` is `Sticker#tag` once `Sticker` includes
+/// it; one includer owning `tag` is enough, because the same body
+/// cannot be both that reader and the builder.
+///
+/// Only app classes count. The framework's own `tag` is the builder
+/// (`ActionView::Base#tag` is in the registry), and
+/// `include ActionView::Helpers::TagHelper` is dropped by the analyzer
+/// as a view-helper marker, so a model that really uses the builder
+/// keeps the rewrite.
+fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> HashSet<ClassId> {
+    let app_classes: HashSet<&ClassId> = app
+        .models
+        .iter()
+        .map(|m| &m.name)
+        .chain(app.library_classes.iter().map(|lc| &lc.name))
+        .chain(app.controllers.iter().map(|c| &c.name))
+        .collect();
+    let tag = Symbol::from("tag");
+    let has_tag = |class: &ClassId| {
+        // Self, then app ancestors (includes and parents), each once.
+        let mut stack = vec![class];
+        let mut seen = HashSet::new();
+        while let Some(c) = stack.pop() {
+            if !app_classes.contains(c) || !seen.insert(c) {
+                continue;
+            }
+            let Some(info) = registry.get(c) else { continue };
+            if info.instance_methods.contains_key(&tag) {
+                return true;
+            }
+            stack.extend(info.includes.iter().chain(info.parent.iter()));
+        }
+        false
+    };
+    let owners: Vec<&ClassId> = app_classes.iter().copied().filter(|c| has_tag(c)).collect();
+    owners
+        .iter()
+        .flat_map(|c| registry.get(*c).into_iter().flat_map(|info| info.includes.iter()))
+        .chain(owners.iter().copied())
+        .cloned()
+        .collect()
 }
 
 /// HTML elements that never take content, so they render with no
@@ -304,20 +364,26 @@ fn is_tag_helper(recv: &Expr) -> bool {
     )
 }
 
+/// `own_tag`: the body's class answers `tag` itself, so neither `tag.x`
+/// nor `tag(:x)` is the builder there (see [`classes_owning_tag`]). The
+/// other helpers this pass expands have names of their own and still
+/// apply.
 fn rewrite(
     expr: &mut Expr,
+    own_tag: bool,
     models: &std::collections::HashSet<String>,
     helpers: &std::collections::HashSet<String>,
     sti_stems: &std::collections::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
-    expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, models, helpers, sti_stems, diags));
+    expr.node.for_each_child_mut(&mut |child| {
+        rewrite(child, own_tag, models, helpers, sti_stems, diags)
+    });
 
     if rewrite_turbo_frame_tag(expr, models) {
         return;
     }
-    if rewrite_legacy_tag(expr, diags) {
+    if !own_tag && rewrite_legacy_tag(expr, diags) {
         return;
     }
     if rewrite_button_tag(expr) {
@@ -333,7 +399,7 @@ fn rewrite(
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
     };
-    if !is_tag_helper(recv) {
+    if own_tag || !is_tag_helper(recv) {
         return;
     }
     let name = match method.as_str() {

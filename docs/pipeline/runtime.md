@@ -741,11 +741,28 @@ an already-encoded body, `render plain: v.as_json_str, content_type:
 target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
 writer the compiled lane does. Demand-gated and type-gated: only a class
 the analyzer typed at a `render json:` site is given the pair. A value
-with no writer — a Hash literal, a Relation, a class with its own
+with no writer — a collection containing objects or temporal values, a Relation, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
 encoder, CRuby-only and loud elsewhere; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
+
+Inline Hash/Array payloads whose inferred contents are JSON primitives use
+the target's existing `JSON.generate` encoder, including nested primitive
+collections. The shared `JsonBuilder.escape_html_entities` helper then
+escapes `<`, `>` and `&` to their JSON Unicode forms, matching Rails' default
+HTML-entity escaping without re-escaping the encoded document. Unknown values
+and values requiring Rails `as_json` hooks do not take this path. The generic
+`render_json_primitives` regression runs on CRuby and compiled Spinel, checks
+the exact bytes for `<b>&</b>`, and retains a CRuby nested-Time serialization
+control.
+
+Remaining divergences: non-finite Float values (NaN and positive/negative
+Infinity) still raise `JSON::GeneratorError` instead of Rails' `null` because
+this path delegates primitive encoding to `JSON.generate`. The helper applies
+the Rails 8.1+ defaults: HTML-entity escaping enabled, U+2028/U+2029 escaping
+disabled. Per-application changes to those Rails encoder settings are not
+reflected here.
 
 ### Active Storage: rows and bytes are modeled, variants are a seam
 
@@ -797,7 +814,14 @@ process keeps one record per digest scheme. Purging a blob purges its
 variant records, their image blobs and their files first. The app's
 libvips loader policy (`Vips.block_untrusted(true)`, `Vips.block(op,
 true)` in an initializer) is lifted at ingest onto the `Rails
-::Application` reopen and applied when the processor loads. `variable?`
+::Application` reopen and applied when the processor loads. The
+processor also wraps `Vips.vips_foreign_find_load` so a blocked
+loader is not selected: libvips 8.15+ skips BLOCKED classes in
+`vips_foreign_map`, but 8.14 still names Magick/Svg after
+`block_untrusted` even though load itself raises. The wrap reaches
+the C finder through `VipsExt` (the spinel package's binding, or an
+FFI stand-in on the gem). Wrapping the Ruby finder in place re-enters
+the wrapper on the spinel package. `variable?`
 is Rails' content-type question, answered from `variable_content_types`
 minus what the app's initializer subtracts (ingest lifts
 `config.active_storage.variable_content_types -= %w[…]` onto the same
@@ -1042,6 +1066,45 @@ Rails' `expires_at:` (an absolute instant) is not claimed; only
 `expires_in:`. A call passing it is left alone rather than rewritten,
 so it fails by name instead of silently minting a token that never
 expires.
+
+### `has_secure_password`'s reset token: only the default is claimed
+
+`has_secure_password` generates `<attr>_reset_token`,
+`find_by_<attr>_reset_token(!)` and `<attr>_reset_token_expires_in`
+(`lower::secure_password`, over `runtime/ruby/active_record/token_for.rb`).
+The WIRE FORMAT is Rails' own, and `tests/rails8_authentication.rs` holds
+it to a token minted by Rails 8.1.4: the signed-GlobalID envelope (url-safe
+base64 with padding, HMAC-SHA1) under the `active_record/token_for` salt,
+data `[id, password_salt.last(10)]`, purpose `"User\npassword_reset\n900"`.
+
+Only `reset_token: true`, the default, is reproduced. `reset_token: false`
+defines nothing, as in Rails; a custom `expires_in:` hash is left without
+methods rather than given the default lifetime. General
+`generates_token_for :purpose do … end` is still analyzer-typed with no
+runtime. `<attr>_reset_token_expires_in` answers the Integer `900` where
+Rails answers the Duration `15.minutes`; every reader in the generator
+takes seconds.
+
+### `normalizes` also applies to rows loaded from the database
+
+`normalizes :email_address, with: ->(e) { … }` (`lower::normalizes`)
+becomes `Model._normalize_<attr>(value)`, called by the column writer and
+wrapped around the matching keyword of `find_by`/`where`/`exists?`/
+`find_or_*_by`. Hydration assigns through that same writer, so a row
+loaded from the database is normalized too, where Rails leaves an
+existing row alone until the attribute is reassigned. The two agree on
+every row the app wrote after the declaration. A `with:` that is not a
+one-parameter lambda literal, and `apply_to_nil: true`, are not
+reproduced (the declaration is left without effect).
+
+### The mail assertions count deliveries
+
+`assert_enqueued_emails` and `assert_enqueued_email_with` read
+`ActionMailer::Base.deliveries`, which `deliver_later` appends to
+immediately (there is no queue in one process). So a `deliver_now`
+counts as enqueued too, and `assert_enqueued_email_with` checks that a
+mail went out, not the mailer, action, or arguments — the narrowing
+`assert_enqueued_with` already documents for jobs.
 
 ### `remote_connections.disconnect` selects an empty set
 
@@ -2852,8 +2915,16 @@ header. Grouped by cause, largest first:
   which every Rails response carries. Without `X-Frame-Options` any
   site can frame a signed-in campfire page. The one to close first.
 - **The app's own `config.ru` middleware is not applied.** campfire's
-  `config.ru` says `use Rack::Deflater`; no response of ours is gzipped
-  (65) and none varies on `Accept-Encoding` (71).
+  `config.ru` says `use Rack::Deflater`. The CRuby overlay now wraps
+  `Main.run_rack` in `GzipCache` (Static stays outside so `/cable`
+  hijack is never compressed; CSS/JS stay identity; identical HTML is
+  not deflated on every request). spinel tep gzips inline bodies when
+  `Accept-Encoding` includes gzip, from a cache keyed by SHA-256 of
+  the identity body (CRuby keys by the body itself — MRI's string
+  hash is cheaper than SHA-256 here). Gzip runs outside the lock on
+  both lanes.
+  Re-run `scripts/campfire-http-shape` before treating the 65
+  Content-Encoding misses as current.
 - **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak
   ETag on a 200 (52), no `Cache-Control: max-age=0, private,
   must-revalidate`, so a revisit is 200 where Rails answers 304 (10-14).

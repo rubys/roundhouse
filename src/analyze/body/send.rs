@@ -38,15 +38,19 @@ impl<'a> BodyTyper<'a> {
             _ => return None,
         };
         let methods = &self.classes().get(model)?.instance_methods;
-        match &*key_arg.node {
-            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-                methods.get(value).cloned()
-            }
+        let entry = match &*key_arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => methods.get(value),
             ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
-                methods.get(&Symbol::from(value.as_str())).cloned()
+                methods.get(&Symbol::from(value.as_str()))
             }
             _ => None,
-        }
+        }?;
+        // A reader declared as a method (an RBS or Sorbet signature, an
+        // input object's argument) is its return type, not the method.
+        Some(match entry {
+            Ty::Fn { ret, .. } => (**ret).clone(),
+            other => other.clone(),
+        })
     }
 
     /// `pluck(:col)` / `pick(:col)` on a relation over a known model.
@@ -725,6 +729,22 @@ impl<'a> BodyTyper<'a> {
         if method.as_str() == "tap" {
             if let Some(ty) = recv_ty {
                 return ty.clone();
+            }
+        }
+        // `presence` hands the receiver back or nil, so on a typed
+        // receiver it is `T?` — what `lower::blank` stamps on the
+        // `blank? ? nil : r` it rewrites the site to. Resolved ahead of
+        // the receiver-agnostic table, which answers `Untyped`.
+        //
+        // Not an Array: a `has_many` reader types as one while the
+        // runtime answers a Relation, and `lower::enumerable_ext` reads
+        // the untyped half of `rel.presence || [x]` as its sign that
+        // the value may be either.
+        if method.as_str() == "presence" {
+            if let Some(ty) = recv_ty.filter(|ty| {
+                !matches!(ty, Ty::Var { .. } | Ty::Array { .. } | Ty::Untyped)
+            }) {
+                return super::union_of(ty.clone(), Ty::Nil);
             }
         }
         // `.call` on a value TYPED as a function (an RBS `^() -> T`
@@ -1439,7 +1459,14 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
-            Some(Ty::Str) => str_method(method),
+            // A method the app adds by reopening `String` (campfire's
+            // `all_emoji?`) answers where the builtin table has nothing.
+            Some(Ty::Str) => match str_method(method) {
+                Ty::Var { .. } => self
+                    .lookup_string_instance(method)
+                    .unwrap_or_else(unknown),
+                ty => ty,
+            },
             Some(Ty::Sym) => sym_method(method),
             // A `Ty::Time` value (datetime-column read, `Time.now`, etc.)
             // dispatches through the same table the `Time` class constant
@@ -1540,6 +1567,24 @@ impl<'a> BodyTyper<'a> {
                 }
             }
             current = cls.parent.clone();
+        }
+        None
+    }
+
+    /// A method the app adds by reopening `String`, or by including a
+    /// module into it. Class methods do not answer `"text".foo`.
+    fn lookup_string_instance(&self, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![ClassId(Symbol::from("String"))];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            stack.extend(m.includes.iter().cloned());
         }
         None
     }
@@ -1955,6 +2000,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             Ty::Array { elem: Box::new(transformed_elem()) }
         }
         "filter_map" => Ty::Array { elem: Box::new(non_nil_elem(&transformed_elem())) },
+        "index_with" => Ty::Hash { key: Box::new(elem.clone()), value: Box::new(transformed_elem()) },
         // `flat_map` expects the block to return an Array, flattens by one.
         "flat_map" | "collect_concat" => match block_ret {
             Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
@@ -2273,6 +2319,10 @@ pub(super) fn hash_method(
         },
         // `values_at`/`fetch_values(*keys)` → Array of the value type.
         "values_at" | "fetch_values" => Ty::Array { elem: Box::new(value.clone()) },
+        // ActiveSupport `Hash#to_query` / `to_param` answers a String.
+        // The shared runtime hosts the scalar form; nesting stays in
+        // the ruby-family reopen.
+        "to_query" | "to_param" => Ty::Str,
         // `sort`/`sort_by` evaluate the hash to a sorted Array of
         // `[key, value]` pairs (same element shape as `to_a`).
         "sort" | "sort_by" => Ty::Array {
@@ -2481,6 +2531,7 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // Unary minus/plus: Ruby desugars `-n` to `n.-@`. Int stays Int.
         "-@" | "+@" => Ty::Int,
         "to_f" => Ty::Float,
+        "to_d" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("BigDecimal")), args: vec![] },
         "zero?" | "positive?" | "negative?" | "even?" | "odd?" => Ty::Bool,
         // Arithmetic: Int op Int → Int (we approximate Int/Float mixing here;
         // refine when a fixture demands it).
@@ -2608,8 +2659,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         "dig" => Some(Ty::Untyped),
         // `presence` and `present?` are ActiveSupport's
         // blank-aware predicates. `presence` returns the receiver or
-        // nil; we don't statically distinguish, so Untyped is the
-        // gradual answer. `present?` / `blank?` are universally Bool.
+        // nil; a typed receiver is answered `T?` before this table, so
+        // Untyped is the answer only for an unknown one. `present?` /
+        // `blank?` are universally Bool.
         "present?" | "blank?" => Some(Ty::Bool),
         "presence" => Some(Ty::Untyped),
         _ => None,

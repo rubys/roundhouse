@@ -233,6 +233,13 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             "LowerResidue".into(),
             format!("{}:{}:{}", pass.as_str(), construct.as_str(), reason.as_str()),
         ),
+        DiagnosticKind::UndefinedFilterTarget { target, macro_name } => (
+            "UndefinedFilterTarget".into(),
+            format!("{}:{}", macro_name.as_str(), target.as_str()),
+        ),
+        DiagnosticKind::GraphqlNullableField { field, .. } => {
+            ("GraphqlNullableField".into(), format!(":{}", field.as_str()))
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 //! spinel-shape statement list. Dispatches output-position expressions
 //! to the helper / partial / form-with / form-builder sub-modules.
 
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{BlockStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -25,7 +25,7 @@ use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, send, todo_io_append, view_helpers_call, ViewCtx,
+    nil_lit, seq, noop_io_append, send, todo_io_append, var_ref, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -431,6 +431,10 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        // A bare literal — most often the synthesized `nil` arm `<% unless
+        // %>` lowers to — renders nothing and does nothing: nothing is
+        // dropped, so no residue line.
+        ExprNode::Lit { .. } => vec![noop_io_append()],
         _ => vec![todo_io_append("unknown stmt", stmt.span)],
     }
 }
@@ -899,22 +903,25 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 ));
                 return out;
             }
-            // OPTION form: `partial:` (+ optional `locals:`) names the
-            // template. Same resolution a `render partial:` call site
+            // OPTION form: `partial:` (+ optional `locals:` / `collection:`
+            // / `as:`). Same resolution a `render partial:` call site
             // gets, through the same `named_partial_call` — a second
             // partial resolver here would be a second set of rules to
             // keep in step.
             if let (2, None) = (sa.len(), block.as_ref()) {
                 if let ExprNode::Hash { entries, .. } = &*sa[1].node {
-                    // ONLY `partial:` (+ `locals:`). `collection:` means
-                    // render the partial once per element, and lowering
-                    // it as a single render would drop every element but
-                    // the first — silently wrong, where declining is
-                    // merely unsupported. Any other option is unread for
-                    // the same reason.
+                    // `partial:` alone renders once. `collection:` is
+                    // Rails' "once per element" — campfire's
+                    // `accounts/users/index.turbo_stream.erb` writes
+                    // `turbo_stream.replace :next_page_container,
+                    // partial: "…/user", collection: @page.records,
+                    // as: :user`. Treating that as a single render
+                    // would keep only the first element, so the
+                    // collection walks into a capture accumulator and
+                    // the captured String is the fragment.
                     let understood = entries.iter().all(|(k, _)| {
                         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                            if matches!(value.as_str(), "partial" | "locals"))
+                            if matches!(value.as_str(), "partial" | "locals" | "collection" | "as"))
                     });
                     let opt = |name: &str| {
                         entries.iter().find_map(|(k, v)| match &*k.node {
@@ -930,31 +937,66 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
                         _ => None,
                     });
-                    let locals: Option<Vec<(Expr, Expr)>> =
-                        opt("locals").and_then(|l| match &*l.node {
-                            ExprNode::Hash { entries, .. } => Some(
+                    // Absent `locals:`/`as:` is fine. A supplied value
+                    // that is not a hash / name literal cannot be
+                    // lowered — dropping it would render the partial
+                    // under the wrong local. Decline the whole call.
+                    let locals = match opt("locals") {
+                        None => Some(None),
+                        Some(l) => match &*l.node {
+                            ExprNode::Hash { entries, .. } => Some(Some(
                                 entries
                                     .iter()
                                     .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
-                                    .collect(),
-                            ),
+                                    .collect::<Vec<_>>(),
+                            )),
                             _ => None,
-                        });
-                    if let (true, Some(partial)) = (understood, partial) {
-                        if let Some(html) = super::partial::named_partial_call(
-                            &partial,
-                            None,
-                            locals.as_deref(),
-                            ctx,
-                        ) {
-                            return vec![accumulator_append_call(
-                                super::helpers::turbo_stream_fragment_call(
-                                    method.as_str(),
-                                    super::helpers::turbo_stream_target(&sa[0], ctx),
-                                    html,
-                                ),
+                        },
+                    };
+                    let collection = opt("collection").map(|c| rewrite_helpers_in_expr(c, ctx));
+                    let as_name = match opt("as") {
+                        None => Some(None),
+                        Some(a) => match &*a.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                Some(Some(value.as_str().to_string()))
+                            }
+                            ExprNode::Lit { value: Literal::Str { value } } => {
+                                Some(Some(value.clone()))
+                            }
+                            _ => None,
+                        },
+                    };
+                    if let (true, Some(partial), Some(locals), Some(as_name)) =
+                        (understood, partial, locals, as_name)
+                    {
+                        if let Some(coll) = collection {
+                            if let Some(out) = turbo_stream_collection_fragment(
+                                method.as_str(),
+                                &sa[0],
+                                &partial,
+                                coll,
+                                as_name.as_deref(),
+                                locals.as_deref(),
                                 ctx,
-                            )];
+                            ) {
+                                return out;
+                            }
+                        } else if as_name.is_none() {
+                            if let Some(html) = super::partial::named_partial_call(
+                                &partial,
+                                None,
+                                locals.as_deref(),
+                                ctx,
+                            ) {
+                                return vec![accumulator_append_call(
+                                    super::helpers::turbo_stream_fragment_call(
+                                        method.as_str(),
+                                        super::helpers::turbo_stream_target(&sa[0], ctx),
+                                        html,
+                                    ),
+                                    ctx,
+                                )];
+                            }
                         }
                     }
                 }
@@ -1224,6 +1266,109 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
     let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
+}
+
+/// `turbo_stream.replace target, partial: "…", collection: xs, as: :x`.
+///
+/// Rails renders the named partial once per element and concatenates
+/// the markup into the fragment. The same `named_partial_call` a
+/// `render partial:, collection:` site uses supplies each element's
+/// HTML; the capture accumulator is the block-form's `_ts_cap`, so a
+/// nested block-form helper would still collide — no corpus view nests
+/// one inside a collection fragment.
+fn turbo_stream_collection_fragment(
+    action: &str,
+    target: &Expr,
+    partial: &str,
+    collection: Expr,
+    as_name: Option<&str>,
+    locals: Option<&[(Expr, Expr)]>,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let base = match partial.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => partial,
+    };
+    let var = Symbol::from(crate::naming::safe_local(
+        as_name.unwrap_or_else(|| base.trim_start_matches('_')),
+    ));
+    let mut prelude = Vec::new();
+    let bound_locals: Option<Vec<(Expr, Expr)>> = locals.map(|entries| {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, (k, v))| {
+                let name = Symbol::from(format!("_ts_local_{i}"));
+                prelude.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Var {
+                            id: VarId(0),
+                            name: name.clone(),
+                        },
+                        value: v.clone(),
+                    },
+                ));
+                (k.clone(), var_ref(name))
+            })
+            .collect()
+    });
+    let html = super::partial::named_partial_call_with_record(
+        partial,
+        None,
+        bound_locals.as_deref(),
+        Some(var_ref(var.clone())),
+        ctx,
+    )?;
+    let cap = "_ts_cap";
+    let cap_ctx = ViewCtx {
+        accumulator: cap.to_string(),
+        ..ctx.clone()
+    };
+    // Rails treats a nil collection as empty, not as `nil.each`.
+    let each_recv = Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: BoolOpKind::Or,
+            surface: BoolOpSurface::Symbol,
+            left: collection,
+            right: Expr::new(
+                Span::synthetic(),
+                ExprNode::Array {
+                    elements: vec![],
+                    style: Default::default(),
+                },
+            ),
+        },
+    );
+    let each = send(
+        Some(each_recv),
+        "each",
+        Vec::new(),
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                rest_param: None,
+                params: vec![var],
+                block_param: None,
+                body: accumulator_append_call(html, &cap_ctx),
+                block_style: BlockStyle::Brace,
+            },
+        )),
+        false,
+    );
+    let mut out = prelude;
+    out.push(assign_accumulator_string_new(cap));
+    out.push(each);
+    out.push(accumulator_append_call(
+        super::helpers::turbo_stream_fragment_call(
+            action,
+            super::helpers::turbo_stream_target(target, ctx),
+            accumulator_result_ref(cap),
+        ),
+        ctx,
+    ));
+    Some(out)
 }
 
 /// `turbo_frame_tag <ids…>[, opts][ do … end]` → the `<turbo-frame …>`

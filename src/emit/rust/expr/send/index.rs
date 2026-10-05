@@ -118,9 +118,15 @@ pub(super) fn try_recv_typed_method(
                     // both). Copy elems (i64, f64, bool) need no
                     // suffix.
                     let suffix = if is_copy_ty(elem) { "" } else { ".clone()" };
+                    // The receiver is borrowed by the index, so it emits
+                    // without the multi-read `.clone()` a bare Var read
+                    // takes: `v.clone()[i]` copied the whole Vec to read
+                    // one element, which made an index loop over it
+                    // quadratic (the `includes` distribute walks its
+                    // loaded rows this way).
                     return Some(format!(
                         "{}[({}) as usize]{}",
-                        emit_expr(r),
+                        super::super::emit_send_recv(r),
                         emit_expr(&args[0]),
                         suffix
                     ));

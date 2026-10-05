@@ -582,9 +582,11 @@ module ActionView
     # `<script src>` include for a JS source. The source resolves through
     # the same undigested `/assets/<name>.js` convention as
     # `javascript_path` (see the `image_path` note on why no digests);
-    # absolute paths and URLs pass verbatim.
+    # absolute paths and URLs pass verbatim. Rails takes a Symbol source
+    # too, and a value can hold one, so the source becomes a String here.
     def self.javascript_include_tag(source, opts = {})
-      name = source.include?(".") ? source : "#{source}.js"
+      source_s = source.to_s
+      name = source_s.include?(".") ? source_s : "#{source_s}.js"
       src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
       attrs = render_attrs({ src: src }.merge(opts.to_h))
       "<script#{attrs}></script>"

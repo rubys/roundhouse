@@ -214,6 +214,19 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
                 count_gradual_recurse(&arm.body, total);
             }
         }
+        N::CaseMatch { scrutinee, arms, else_body } => {
+            count_gradual_recurse(scrutinee, total);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| count_gradual_recurse(e, total));
+                if let Some((_, g)) = &arm.guard { count_gradual_recurse(g, total); }
+                count_gradual_recurse(&arm.body, total);
+            }
+            if let Some(e) = else_body { count_gradual_recurse(e, total); }
+        }
+        N::MatchPredicate { value, pattern } | N::MatchRequired { value, pattern } => {
+            count_gradual_recurse(value, total);
+            pattern.for_each_expr(&mut |e| count_gradual_recurse(e, total));
+        }
         N::Assign { value, .. } | N::OpAssign { value, .. } => count_gradual_recurse(value, total),
         N::Yield { args } => for a in args { count_gradual_recurse(a, total); },
         N::Raise { value } | N::Return { value } => count_gradual_recurse(value, total),
@@ -340,6 +353,27 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 }
                 collect_untyped(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_untyped(scrutinee, &format!("{path}/case_match.scrut"), out);
+            for (i, arm) in arms.iter().enumerate() {
+                arm.pattern.for_each_expr(&mut |e| {
+                    collect_untyped(e, &format!("{path}/case_match.arm[{i}].pattern"), out);
+                });
+                if let Some((_, g)) = &arm.guard {
+                    collect_untyped(g, &format!("{path}/case_match.arm[{i}].guard"), out);
+                }
+                collect_untyped(&arm.body, &format!("{path}/case_match.arm[{i}].body"), out);
+            }
+            if let Some(e) = else_body {
+                collect_untyped(e, &format!("{path}/case_match.else"), out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_untyped(value, &format!("{path}/match.value"), out);
+            pattern.for_each_expr(&mut |e| {
+                collect_untyped(e, &format!("{path}/match.pattern"), out);
+            });
         }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             collect_untyped(value, &format!("{path}/assign.value"), out)
@@ -1502,7 +1536,21 @@ fn every_runtime_method_body_concretely_typed() {
     // `to_s`. The readers (`current_page`, `total_pages`, …) add none.
     // What it buys: Kaminari chains, which the catalog already typed
     // as builders, run instead of raising NoMethodError.
-    const CEILING: usize = 520;
+    //
+    // 520 -> 521: `ActiveRecord::TokenFor.generate`'s `Time.now +
+    // expires_in` (active_record/token_for.rb, ONE site, MEASURED) —
+    // the `Time#+` that `signed_id.rb`'s entry explains, absorbed by
+    // `iso8601_ms`'s `::Time` parameter. What it bought:
+    // `has_secure_password`'s password-reset token, which the Rails 8
+    // authentication generator's PasswordsController and mailer use.
+    //
+    // 521 -> 537, +16 MEASURED: Relation#last_n as a SQL tail
+    // (relation.rb). reverse_order_term / reverse_one_order_term /
+    // loaded_tail / last_n itself. The residual is the same untyped
+    // @orders / @records / to_a seam every other terminal already
+    // pays. What it bought: campfire's ordered.last(PAGE_SIZE) is
+    // ORDER BY … DESC LIMIT n, not the whole room history.
+    const CEILING: usize = 537;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

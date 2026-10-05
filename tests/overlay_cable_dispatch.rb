@@ -51,8 +51,10 @@ load "#{root}/runtime/spinel/message_digest_cruby.rb"
 load "#{root}/runtime/ruby/action_controller/message_verifier.rb"
 
 # action_cable.rb's one require; the transport half is not under test.
-$LOADED_FEATURES << File.expand_path(
-  "#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/broadcasts.rb"
+# Not expand_path: require_relative resolves symlinks, so under a symlinked tree (Bazel's runfiles) the paths differ.
+$LOADED_FEATURES << File.join(
+  File.dirname(File.realpath("#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/action_cable.rb")),
+  "broadcasts.rb"
 )
 module Broadcasts
   LOG = []
@@ -69,7 +71,7 @@ load "#{root}/runtime/spinel/scaffold/ruby_overlay/runtime/action_cable.rb"
 # Loading the spinel action_cable here would replace `Channel::Base` with
 # the sibling whose methods raise — a green run against the wrong file.
 %w[action_cable base64 broadcasts].each do |sibling|
-  $LOADED_FEATURES << File.expand_path("#{root}/runtime/spinel/#{sibling}.rb")
+  $LOADED_FEATURES << File.join(File.dirname(File.realpath("#{root}/runtime/spinel/turbo_streams.rb")), "#{sibling}.rb")
 end
 load "#{root}/runtime/spinel/turbo_streams.rb"
 load "#{root}/runtime/spinel/global_id_locator.rb"

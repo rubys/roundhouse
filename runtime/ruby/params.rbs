@@ -2,5 +2,6 @@ module Params
   def self.sub: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
   def self.str: (Hash[String, Roundhouse::ParamValue], String, String) -> String
   def self.provided: (Hash[String, Roundhouse::ParamValue], String) -> bool
+  def self.permitted: (Hash[Symbol, String], Hash[String, Roundhouse::ParamValue], String, Symbol) -> Hash[Symbol, String]
   def self.require_key: (Hash[String, Roundhouse::ParamValue], String) -> Roundhouse::ParamValue
 end

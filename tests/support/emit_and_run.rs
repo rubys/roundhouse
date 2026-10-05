@@ -176,7 +176,7 @@ impl Overlay {
 
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
     /// target. Returns the emitted tree and `check`'s error diagnostics.
-    fn emit(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
+    pub fn emit(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
         let scratch = scratch_dir();
         let source = scratch.join("app");
         copy_tree(&self.base, &source);
@@ -272,7 +272,7 @@ impl Run {
 }
 
 /// `ruby`, with the prerequisite checked once and named on failure.
-fn ruby() -> Command {
+pub fn ruby() -> Command {
     static CHECKED: std::sync::Once = std::sync::Once::new();
     CHECKED.call_once(|| {
         let ok = Command::new("ruby")

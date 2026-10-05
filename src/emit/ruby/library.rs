@@ -1040,6 +1040,8 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
     true
 }
 
+/// Lower demanded model and association chains to Relations, including
+/// scope-free apps; each body still has its own rewrite demand gate.
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `has_rich_text`'s two preload scopes, and `has_one_attached`'s
     // one. Ahead of the `any_scopes` early return below, because an app
@@ -1084,16 +1086,14 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         }
     }
     let models = crate::lower::scope_chain::model_set(&app.models);
-    // …and it can call a terminal that has no home on the model CLASS
-    // (`Push::Subscription.destroy_by(…)`), which reaches nothing at all
-    // without the seed this pass writes. Unlike the three conditions
-    // above it is not a question about a REGISTRY — an app with not one
-    // scope in it can still write that call — so it is surveyed over the
-    // app's own bodies.
-    let mut wants_class_root_terminal = false;
+    // A model-root query needs the same Relation seed even when the app
+    // declares no scopes. Otherwise `Widget.order(...)` reaches no method
+    // and `Widget.where.not(...)` reaches Base.where with no argument.
+    // Keep the whole-app gate consistent with the per-body gate below.
+    let mut wants_model_chain = false;
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
-        wants_class_root_terminal = wants_class_root_terminal
-            || crate::lower::scope_chain::mentions_class_root_terminal(body, &models);
+        wants_model_chain = wants_model_chain
+            || crate::lower::scope_chain::mentions_model_chain_start(body, &models);
     });
     // …and an association read continuing into relation surface
     // (`@user.notifications.offset(n)`) needs the seed whether or not
@@ -1120,7 +1120,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // An app with no scopes at all can still declare an association
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
-        && !wants_class_root_terminal
+        && !wants_model_chain
     {
         return;
     }
@@ -1958,9 +1958,11 @@ fn resolve_through_chain(
         return None;
     }
     // The through association on the owner (`:votes`, `:taggings`, `:tags`).
-    let (thr_target, thr_fk, thr_through) = model.associations().find_map(|a| match a {
-        Association::HasMany { name, target, foreign_key, through, .. } if name == thr_name => {
-            Some((target, foreign_key, through))
+    let (thr_target, thr_fk, thr_through, as_interface) = model.associations().find_map(|a| match a {
+        Association::HasMany { name, target, foreign_key, through, as_interface, .. }
+            if name == thr_name =>
+        {
+            Some((target, foreign_key, through, as_interface))
         }
         _ => None,
     })?;
@@ -1973,6 +1975,7 @@ fn resolve_through_chain(
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
     let thr_table = pluralize_snake(thr_target.0.as_str());
     let target_table = pluralize_snake(target.0.as_str());
+    let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
     // The source belongs_to on the join model (`Vote.belongs_to :story`)
     // — matched by target class, so `source:` renames resolve without a
     // name convention.
@@ -1980,8 +1983,9 @@ fn resolve_through_chain(
         Association::BelongsTo { target: t, foreign_key, .. } if t == target => Some(foreign_key),
         _ => None,
     }) {
-        let mut joins =
-            vec![format!("INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id")];
+        let mut joins = vec![format!(
+            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
+        )];
         joins.extend(back_joins);
         return Some((joins, edge_table, edge_fk));
     }
@@ -1997,8 +2001,9 @@ fn resolve_through_chain(
         }
         _ => None,
     }) {
-        let mut joins =
-            vec![format!("INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}")];
+        let mut joins = vec![format!(
+            "INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}{owner_type}"
+        )];
         joins.extend(back_joins);
         return Some((joins, edge_table, edge_fk));
     }
@@ -2013,10 +2018,22 @@ fn resolve_through_chain(
         resolve_through_chain(models, thr_model, src_through, target, depth + 1)?;
     let mut joins = src_joins;
     joins.push(format!(
-        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}"
+        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}{owner_type}"
     ));
     joins.extend(back_joins);
     Some((joins, edge_table, edge_fk))
+}
+
+/// Keep the same polymorphic owner restriction on lazy and batched through joins.
+/// An id alone is not unique across the classes sharing an `as:` interface.
+fn through_owner_type_predicate(table: &str, as_interface: &Option<Symbol>, owner: &ClassId) -> String {
+    match as_interface {
+        Some(interface) => {
+            let owner_name = owner.0.as_str().replace('\'', "''");
+            format!(" AND {table}.{interface}_type = '{owner_name}'")
+        }
+        None => String::new(),
+    }
 }
 
 /// The joined Relation chain, carrying the eager-load cache (see
@@ -3495,6 +3512,29 @@ fn rewrite_helper_calls(
                 }
             }
         }
+        // Rails' `distance_of_time_in_words` takes seconds as readily as
+        // Times — the authentication generator's reset mailer passes
+        // `(0, @user.password_reset_token_expires_in)`. The runtime keeps
+        // the two apart (one parameter type each; a Time-or-Integer slot
+        // is poly on spinel), so a call whose first time is an Integer
+        // goes to the seconds entry when the second is an Integer too or
+        // has no type here (a mailer view's `user` parameter reaches emit
+        // untyped). A Time in that second slot does not slip through:
+        // spinel refuses `Time - Integer` there, and CRuby raises on it.
+        let is_int = |e: &Expr| matches!(e.ty, Some(crate::ty::Ty::Int));
+        let int_or_open = |e: &Expr| {
+            matches!(e.ty, None | Some(crate::ty::Ty::Int) | Some(crate::ty::Ty::Var { .. }))
+        };
+        let method = if method.as_str() == "distance_of_time_in_words"
+            && path == view_helpers_path()
+            && args.len() >= 2
+            && is_int(&args[0])
+            && int_or_open(&args[1])
+        {
+            Symbol::from("distance_of_seconds_in_words")
+        } else {
+            method
+        };
         *expr.node = ExprNode::Send {
             recv: Some(Expr::new(span, ExprNode::Const { path })),
             method,
@@ -7239,23 +7279,23 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 // campfire's `Message.with_attachment_details` costs the room page two
 // queries where it cost eighty.
 //
-// Known gaps, deliberate: has_one and scope-carrying through-assocs
-// (other than a plain `order("...")`) get no batch arm — the dispatch
+// Known gaps, deliberate: has_one, direct has_many with a scope or
+// polymorphic owner, and scope-carrying through-assocs (other than a
+// plain `order("...")`) get no batch arm — the dispatch
 // falls through and the lazy reader stays correct (just N+1, matching
 // Rails, which also lazy-loads what `includes` doesn't name). Assigning
 // a belongs_to (`c.story = s`) on a PRELOADED record does not refresh
 // the cache (fresh records never have the loaded flag set, so the
 // benchmark's build-then-render flows are unaffected).
+/// Synthesize runtime batch loaders when includes hints occur, leaving
+/// associations whose restrictions cannot be preserved to their lazy readers.
 pub(crate) fn apply_preload_lowering(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
 
-    // Gate: runtime Relations only arise in scope-chain apps (scope-free
-    // apps resolve every chain on the static arel path), and synthesis
-    // only pays for itself when some `includes(...)` survives to
-    // runtime. real-blog (`includes` but no scopes) and tiny-blog
-    // (scopes but no `includes`) both stay byte-identical.
-    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    if !crate::lower::scope_chain::any_scopes(&scopes) || !app_mentions_includes(app) {
+    // A dynamic query can reach Relation without any named scope (for
+    // example, a helper returning a where.not chain). Its includes hint
+    // needs the same batch loaders. Apps with no includes remain untouched.
+    if !app_mentions_includes(app) {
         return;
     }
 
@@ -7388,6 +7428,8 @@ enum PreloadKind {
     RichText { attr: String, owner: String },
 }
 
+/// Select association shapes whose batch queries preserve the reader's filters,
+/// resolving each against the app model registry and its table metadata.
 fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
     use crate::dialect::Association;
     use crate::naming::pluralize_snake;
@@ -7397,19 +7439,25 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
     for assoc in model.associations() {
         match assoc {
             Association::BelongsTo { name, target, foreign_key, .. } => {
-                if !model_exists(target) {
+                let Some(target_model) = app.models.iter().find(|m| &m.name == target) else {
                     continue;
-                }
+                };
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::BelongsTo {
                         fk: foreign_key.as_str().to_string(),
                         target: target.0.as_str().to_string(),
-                        table: pluralize_snake(target.0.as_str()),
+                        table: target_model.table.0.as_str().to_string(),
                     },
                 ));
             }
-            Association::HasMany { name, target, foreign_key, through: None, .. } => {
+            // This loader only applies the foreign-key predicate. A scope
+            // or polymorphic owner-type restriction must stay on the lazy
+            // reader until the batch query can preserve it as well.
+            Association::HasMany {
+                name, target, foreign_key, through: None,
+                scope: None, as_interface: None, ..
+            } => {
                 if !model_exists(target) {
                     continue;
                 }
@@ -7438,7 +7486,9 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                         None => continue,
                     },
                 };
-                let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
+                let Some(Association::HasMany {
+                    target: thr_target, foreign_key: thr_fk, as_interface, ..
+                }) =
                     model.associations().find(|a| {
                         matches!(a, Association::HasMany { name, .. } if name == thr_name)
                     })
@@ -7457,12 +7507,13 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 };
                 let thr_table = pluralize_snake(thr_target.0.as_str());
                 let target_table = pluralize_snake(target.0.as_str());
+                let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::Through {
                         target: target.0.as_str().to_string(),
                         join: format!(
-                            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id"
+                            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
                         ),
                         group_col: format!("{thr_table}.{thr_fk}"),
                         order: order.map(|o| o.to_string()),

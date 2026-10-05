@@ -77,8 +77,29 @@ module Tep
       @http_version == "HTTP/1.1"
     end
 
+    # The declared body length; -1 when the header is not a plain decimal
+    # byte count (see Tep.decimal_byte_count). The drains below only ever
+    # see a value `body_refusal` passed, but -1 reads nothing there too.
     def content_length
-      @req_headers["content-length"].to_i
+      Tep.decimal_byte_count(@req_headers["content-length"])
+    end
+
+    # What the server must answer instead of reading this request's body:
+    # 400 for a Content-Length that is not a byte count, 413 for one past
+    # `max`, 0 to go ahead. Decided from the headers alone, so a refused
+    # body is never read — each server asks this BEFORE its drain, since
+    # the drain itself is what held the bytes.
+    def body_refusal(max)
+      cl = content_length
+      if cl < 0
+        return 400
+      end
+      # A saturated length is "too large to represent", refused whatever
+      # `max` is — never compared as a size (see Tep.decimal_byte_count).
+      if cl >= Tep::BYTE_COUNT_CEILING || cl > max
+        return 413
+      end
+      0
     end
 
     def form?

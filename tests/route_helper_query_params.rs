@@ -324,3 +324,49 @@ fn the_url_spelling_feeds_the_path_helper() {
         "the _url call site lands on the _path helper: {ps:?}"
     );
 }
+
+/// A RECORD standing where a query key is not an Integer parameter.
+/// Rails puts it through `to_param` (the id, as a String on the wire);
+/// the call-site pass projects `.id.to_s`. Typing the key Integer is a
+/// seed that contradicts that emit — Spinel refuses
+/// `before: message.id.to_s` against `Integer?`. `id` / `*_id` stay
+/// Integer because those call sites pass `record.id` and the helper
+/// itself calls `to_s`.
+#[test]
+fn a_record_valued_non_id_query_key_is_a_string() {
+    let files = vec![
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/models/note.rb", "class Note < ApplicationRecord\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :rooms do\n    resources :notes\n  end\nend\n",
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/notes_controller.rb",
+            "class NotesController < ApplicationController\n  def index\n    @room = Room.first\n    @note = Note.first\n    redirect_to room_notes_path(@room, before: @note)\n  end\nend\n",
+        ),
+    ];
+    let tree = files
+        .into_iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest tree");
+    let ps = params(&app, "room_notes_path");
+    let before = ps
+        .iter()
+        .find(|p| p.name.as_str() == "before")
+        .unwrap_or_else(|| panic!("no before parameter: {ps:?}"));
+    let Ty::Union { variants } = &before.ty else {
+        panic!("expected a nilable union: {:?}", before.ty)
+    };
+    assert!(
+        variants.iter().any(|v| matches!(v, Ty::Str))
+            && !variants.iter().any(|v| matches!(v, Ty::Int)),
+        "before: @note is a String on the wire, not an Integer: {variants:?}"
+    );
+}

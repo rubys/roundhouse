@@ -250,6 +250,11 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     if let Some(census) = &census {
         eprintln!("roundhouse-check: {}", census.summary());
     }
+    // How much of a graphql-ruby schema the analysis followed, and why
+    // the rest was not: a clean result's denominator.
+    if let Some(coverage) = crate::analyze::graphql::coverage(&app) {
+        eprintln!("roundhouse-check: {}", coverage.summary());
+    }
     eprintln!(
         "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} gap-attributed note(s), {} survey gap(s)",
         fixture,

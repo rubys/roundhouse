@@ -67,11 +67,25 @@ impl Visibility {
         Ok(out)
     }
 
+    /// `private_class_method` / `public_class_method` named this method
+    /// after `module_function` copied it to the class side.
+    pub(super) fn class_side_changed(&self, name: &str) -> bool {
+        self.changed.contains(&(true, name.to_string()))
+    }
+
     pub(super) fn apply(&self, statement: &Node<'_>, method: &mut MethodDef) {
-        if let Some(value) = self
-            .values
-            .get(&(statement.location().start_offset(), method.name.to_string()))
-        {
+        let offset = statement.location().start_offset();
+        let name = method.name.to_string();
+        // A `module_function` class copy is recorded one past the def so an
+        // instance `private :name` cannot overwrite it. Prefer that copy
+        // only after a class-method visibility change named this method.
+        if self.class_side_changed(&name) {
+            if let Some(value) = self.values.get(&(offset.wrapping_add(1), name.clone())) {
+                method.visibility = *value;
+                return;
+            }
+        }
+        if let Some(value) = self.values.get(&(offset, name)) {
             method.visibility = *value;
         }
     }
@@ -167,6 +181,51 @@ impl Visibility {
         Ok(())
     }
 
+    pub(super) fn reject_conditional_declaration(node: &Node<'_>, file: &str) -> IngestResult<()> {
+        Self::reject_dynamic_declarations(node, file)
+    }
+
+    /// An `if` / `unless` whose body holds a `def` or a visibility marker.
+    /// A modifier (`return x if x`) does not.
+    pub(super) fn hides_declaration(node: &Node<'_>) -> bool {
+        struct Declarations {
+            invalid: bool,
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Declarations {
+            fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
+                let body_hides = |body: Option<Node<'pr>>| {
+                    body.is_some_and(|body| {
+                        super::util::flatten_statements(body).iter().any(|stmt| {
+                            stmt.as_def_node().is_some()
+                                || stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                        })
+                    })
+                };
+                self.invalid |= if let Some(branch) = node.as_if_node() {
+                    body_hides(branch.statements().map(|s| s.as_node()))
+                        || branch.subsequent().is_some_and(|sub| {
+                            sub.as_else_node()
+                                .and_then(|e| e.statements())
+                                .is_some_and(|s| body_hides(Some(s.as_node())))
+                                || sub.as_if_node().is_some()
+                        })
+                } else if let Some(branch) = node.as_unless_node() {
+                    body_hides(branch.statements().map(|s| s.as_node()))
+                        || branch
+                            .else_clause()
+                            .and_then(|clause| clause.statements())
+                            .is_some_and(|s| body_hides(Some(s.as_node())))
+                } else {
+                    false
+                };
+            }
+            fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
+        }
+        let mut declarations = Declarations { invalid: false };
+        ruby_prism::Visit::visit(&mut declarations, node);
+        declarations.invalid
+    }
+
     fn reject_dynamic_declarations(node: &Node<'_>, file: &str) -> IngestResult<()> {
         struct Declarations {
             invalid: bool,
@@ -174,9 +233,34 @@ impl Visibility {
         }
         impl<'pr> ruby_prism::Visit<'pr> for Declarations {
             fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
-                self.invalid |= node
-                    .as_call_node()
-                    .is_some_and(|c| c.receiver().is_none() && marker(&c));
+                // A modifier (`return value if value.is_a?(Kind)`) is one
+                // expression, not a declaration that sometimes runs. Only a
+                // branch whose body can hold a visibility marker is dynamic.
+                let body_has_marker = |body: Option<Node<'pr>>| {
+                    body.is_some_and(|body| {
+                        super::util::flatten_statements(body).iter().any(|stmt| {
+                            stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                        })
+                    })
+                };
+                self.invalid |= if let Some(branch) = node.as_if_node() {
+                    body_has_marker(branch.statements().map(|s| s.as_node()))
+                        || branch.subsequent().is_some_and(|sub| {
+                            sub.as_else_node()
+                                .and_then(|e| e.statements())
+                                .is_some_and(|s| body_has_marker(Some(s.as_node())))
+                                || sub.as_else_node().is_none() && body_has_marker(Some(sub))
+                        })
+                } else if let Some(branch) = node.as_unless_node() {
+                    // `statements` is the body; `else_clause` is the else.
+                    body_has_marker(branch.statements().map(|s| s.as_node()))
+                        || branch
+                            .else_clause()
+                            .and_then(|clause| clause.statements())
+                            .is_some_and(|s| body_has_marker(Some(s.as_node())))
+                } else {
+                    node.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                };
             }
             fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
                 // DSL blocks (e.g. has_many extensions) own their defs, not
@@ -209,6 +293,7 @@ impl Visibility {
         // A new lexical body always starts public. A marker in the enclosing
         // class must not privatize def self.x or leak into class_methods.
         let mut default = MethodVisibility::Public;
+        let mut module_function = false;
         for statement in flatten_statements(body) {
             let offset = statement.location().start_offset();
             let def = definition(&statement);
@@ -230,12 +315,16 @@ impl Visibility {
                 };
                 let named_class = kw.ends_with("_class_method");
                 if class_side && named_class {
-                    // These address the singleton of the current carrier,
-                    // not the methods flattened from its instance side.
-                    return Err(Self::unsupported(
-                        file,
-                        "class-method visibility on a nested singleton level is not modeled",
-                    ));
+                    // `class << self` has no further singleton to address.
+                    // A module's `def self` is already that singleton, so
+                    // `private_class_method :jwks` after it is the same
+                    // change a class body makes.
+                    if module_owner.is_none() {
+                        return Err(Self::unsupported(
+                            file,
+                            "class-method visibility on a nested singleton level is not modeled",
+                        ));
+                    }
                 }
                 if let Some(def) = &def {
                     let side = class_side || def.receiver().is_some();
@@ -248,13 +337,22 @@ impl Visibility {
                     inline = Some(visibility);
                 } else if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
+                        if arg.as_call_node().is_some_and(|call| call.receiver().is_none() && marker(&call)) {
+                            break;
+                        }
                         let Some(name) = symbol_or_string_value(&arg) else {
                             return Err(Self::unsupported(
                                 file,
                                 "visibility method names must be literal symbols or strings",
                             ));
                         };
-                        self.change(name, class_side || named_class, visibility, file)?;
+                        // `private_class_method :name` after `def self.name`.
+                        // The instance-side lookup misses that normal order.
+                        // A forward reference and an instance-only name still fail.
+                        let class_copy = named_class
+                            && !self.known.contains_key(&(false, name.clone()))
+                            && self.known.contains_key(&(true, name.clone()));
+                        self.change(name, class_side || named_class || class_copy, visibility, file)?;
                     }
                     continue;
                 } else {
@@ -265,6 +363,12 @@ impl Visibility {
                         ));
                     }
                     default = visibility;
+                    if !class_side && !named_class {
+                        // A bare public/protected/private ends Ruby's
+                        // module_function mode. The library walker stops
+                        // promoting later defs; copy tracking must stop too.
+                        module_function = false;
+                    }
                     continue;
                 }
             }
@@ -304,7 +408,21 @@ impl Visibility {
                         default
                     }
                 });
-                self.define(offset, name, side, visibility, file)?;
+                self.define(offset, name.clone(), side, visibility, file)?;
+                if module_function && !side {
+                    // The library walk keeps one class-side method and looks
+                    // visibility up by the def offset. A later instance
+                    // `private :name` must not clobber that class copy, so
+                    // the copy lives at the next offset and `apply` prefers
+                    // it once `private_class_method` names the method.
+                    self.define(
+                        offset.wrapping_add(1),
+                        name,
+                        true,
+                        MethodVisibility::Public,
+                        file,
+                    )?;
+                }
                 continue;
             }
             if let Some(sc) = node.as_singleton_class_node() {
@@ -328,6 +446,9 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // A `def` is handled above. Anything else — an `if` that
+                // wraps a definition, a modifier that does not — still
+                // has to be rejected when it hides a marker or a `def`.
                 Self::reject_dynamic_declarations(node, file)?;
                 continue;
             };
@@ -336,6 +457,36 @@ impl Visibility {
             }
             let name = call.name();
             let name = constant_id_str(&name);
+            if !class_side && name == "module_function" && call.arguments().is_none() {
+                module_function = true;
+                continue;
+            }
+            if !class_side && name == "module_function" {
+                // `module_function :a, :b` copies already-defined instance
+                // methods onto the class side. Record those names so a
+                // following `private_class_method :a` addresses the copy
+                // the library walk actually keeps.
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        let Some(copied) = symbol_or_string_value(&arg) else {
+                            continue;
+                        };
+                        if self.known.contains_key(&(false, copied.clone()))
+                            && !self.known.contains_key(&(true, copied.clone()))
+                        {
+                            let positions = self.known[&(false, copied.clone())].clone();
+                            let copies: Vec<usize> =
+                                positions.iter().map(|p| p.wrapping_add(1)).collect();
+                            self.known.insert((true, copied.clone()), copies.clone());
+                            for position in copies {
+                                self.values
+                                    .insert((position, copied.clone()), MethodVisibility::Public);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if class_side && name == "module_function" {
                 // Its public copy belongs to the carrier itself, not to the
                 // includer whose methods we retain after flattening.
@@ -386,7 +537,7 @@ impl Visibility {
                         }
                     }
                 }
-            } else {
+            } else if statement.as_def_node().is_none() {
                 Self::reject_dynamic_declarations(node, file)?;
             }
         }

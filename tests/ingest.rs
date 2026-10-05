@@ -1801,3 +1801,151 @@ fn native_initializers_keep_order_across_singleton_body_merges() {
     }).collect();
     assert_eq!(names, ["@@before", "@@middle", "@@after"]);
 }
+
+#[test]
+fn case_in_pattern_matching() {
+    use roundhouse::expr::{HashRest, MatchGuardKind, MatchPattern};
+
+    fn parse_one(source: &[u8]) -> roundhouse::expr::Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    // `nil`, a bare bind, and a guard (`if`).
+    let e = parse_one(
+        b"case p\nin nil\n  0\nin company if company.present?\n  1\nend",
+    );
+    let ExprNode::CaseMatch { arms, else_body, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    assert!(else_body.is_none());
+    assert_eq!(arms.len(), 2);
+    assert!(matches!(arms[0].pattern, MatchPattern::Nil));
+    assert!(arms[0].guard.is_none());
+    match &arms[1].pattern {
+        MatchPattern::Bind { name } => assert_eq!(name.as_str(), "company"),
+        other => panic!("expected Bind, got {other:?}"),
+    }
+    match &arms[1].guard {
+        Some((MatchGuardKind::If, _)) => {}
+        other => panic!("expected an `if` guard, got {other:?}"),
+    }
+
+    // Constant-narrowed array-style deconstruct (`Success(page)`) — the
+    // dominant real-world shape (dry-monads `Result`).
+    let e = parse_one(b"case r\nin Success(page)\n  page\nin Failure(error)\n  error\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    match &arms[0].pattern {
+        MatchPattern::Array { constant: Some(c), pre, rest, post } => {
+            assert!(matches!(&*c.node, ExprNode::Const { .. }));
+            assert_eq!(pre.len(), 1);
+            assert!(rest.is_none());
+            assert!(post.is_empty());
+            match &pre[0] {
+                MatchPattern::Bind { name } => assert_eq!(name.as_str(), "page"),
+                other => panic!("expected Bind, got {other:?}"),
+            }
+        }
+        other => panic!("expected constant-narrowed Array, got {other:?}"),
+    }
+
+    // Array pattern with a leading Capture and a named rest.
+    let e = parse_one(b"case a\nin [Integer => n, *rest]\n  n\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    match &arms[0].pattern {
+        MatchPattern::Array { constant: None, pre, rest: Some(Some(rest_name)), post } => {
+            assert_eq!(rest_name.as_str(), "rest");
+            assert!(post.is_empty());
+            match &pre[0] {
+                MatchPattern::Capture { pattern, name } => {
+                    assert_eq!(name.as_str(), "n");
+                    assert!(matches!(&**pattern, MatchPattern::Value { .. }));
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            }
+        }
+        other => panic!("expected plain Array with named rest, got {other:?}"),
+    }
+
+    // Find pattern: bare splats on both sides around a fixed middle.
+    let e = parse_one(b"case a\nin [*, 5, *post]\n  post\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    match &arms[0].pattern {
+        MatchPattern::Find { constant: None, pre_rest: None, middle, post_rest: Some(name) } => {
+            assert_eq!(middle.len(), 1);
+            assert_eq!(name.as_str(), "post");
+        }
+        other => panic!("expected Find, got {other:?}"),
+    }
+
+    // Hash pattern: value-omission bind, explicit sub-pattern, and
+    // `**rest` collection.
+    let e = parse_one(b"case h\nin {status: \"ok\", data:, **rest}\n  data\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    match &arms[0].pattern {
+        MatchPattern::Hash { constant: None, pairs, rest: Some(HashRest::Collect { name }) } => {
+            assert_eq!(name.as_str(), "rest");
+            assert_eq!(pairs.len(), 2);
+            assert_eq!(pairs[0].0.as_str(), "status");
+            assert!(pairs[0].1.is_some());
+            assert_eq!(pairs[1].0.as_str(), "data");
+            assert!(pairs[1].1.is_none());
+        }
+        other => panic!("expected Hash with **rest, got {other:?}"),
+    }
+
+    // `**nil` — no unmatched keys allowed.
+    let e = parse_one(b"case h\nin {a:, **nil}\n  a\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    assert!(matches!(
+        &arms[0].pattern,
+        MatchPattern::Hash { rest: Some(HashRest::Nil), .. }
+    ));
+
+    // Alternation flattens Prism's binary tree to one flat Vec.
+    let e = parse_one(b"case x\nin 'a' | 'b' | 'c'\n  1\nend");
+    let ExprNode::CaseMatch { arms, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    match &arms[0].pattern {
+        MatchPattern::Alt { alternatives } => assert_eq!(alternatives.len(), 3),
+        other => panic!("expected Alt, got {other:?}"),
+    }
+
+    // Pin operator: `^name` and `^(expr)` both fold into `Value`.
+    let e = parse_one(b"case x\nin ^expected\n  1\nelse\n  2\nend");
+    let ExprNode::CaseMatch { arms, else_body, .. } = &*e.node else {
+        panic!("expected CaseMatch, got {:?}", e.node);
+    };
+    assert!(else_body.is_some());
+    match &arms[0].pattern {
+        MatchPattern::Value { expr } => assert!(matches!(&*expr.node, ExprNode::Var { .. })),
+        other => panic!("expected pinned Value, got {other:?}"),
+    }
+
+    // `value in pattern` — MatchPredicate, never raises.
+    let e = parse_one(b"x in Integer");
+    match &*e.node {
+        ExprNode::MatchPredicate { pattern, .. } => {
+            assert!(matches!(pattern, MatchPattern::Value { .. }));
+        }
+        other => panic!("expected MatchPredicate, got {other:?}"),
+    }
+
+    // `value => pattern` — MatchRequired, binds or raises.
+    let e = parse_one(b"y => Integer");
+    assert!(matches!(&*e.node, ExprNode::MatchRequired { .. }));
+}

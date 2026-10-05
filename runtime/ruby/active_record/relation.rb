@@ -306,6 +306,45 @@ module ActiveRecord
       words.length == 2 && words[1].upcase == "DESC"
     end
 
+    # Flip ASC/DESC so `last_n` can LIMIT the tail in SQL. A term with
+    # no direction is ASC (SQLite and Rails). `order_term` joins a Hash
+    # into one comma-separated string (`"a ASC, b DESC"`), and a raw
+    # `"created_at DESC, id DESC"` is stored as one `@orders` entry, so
+    # each comma-separated fragment is reversed on its own.
+    def reverse_order_term(term)
+      t = term.strip
+      out = ""
+      start = 0
+      i = 0
+      n = t.length
+      while i <= n
+        comma = false
+        comma = true if i < n && t[i] == ","
+        if i == n || comma
+          part = t[start, i - start].to_s.strip
+          if part.length > 0
+            out = "#{out}, " if out.length > 0
+            out = "#{out}#{reverse_one_order_term(part)}"
+          end
+          start = i + 1
+        end
+        i += 1
+      end
+      out
+    end
+
+    def reverse_one_order_term(term)
+      t = term.strip
+      upper = t.upcase
+      if upper.end_with?(" DESC")
+        "#{t[0, t.length - 5]} ASC"
+      elsif upper.end_with?(" ASC")
+        "#{t[0, t.length - 4]} DESC"
+      else
+        "#{t} DESC"
+      end
+    end
+
     # SQLite's ordering of two attribute values: NULL sorts first, then
     # like compares with like. nil for a pair this cannot order, which
     # sends the caller back to the database.
@@ -937,8 +976,8 @@ module ActiveRecord
     end
 
     def last
-      rows = to_a
-      rows.length == 0 ? nil : rows[rows.length - 1]
+      rows = last_n(1)
+      rows.length == 0 ? nil : rows[0]
     end
 
     # Rails' `first(n)` / `last(n)` — the COUNTED forms, which answer an
@@ -968,12 +1007,65 @@ module ActiveRecord
     # (campfire's `ordered.last(PAGE_SIZE)` is the oldest-to-newest tail
     # of a room's messages, which is the order the page renders).
     #
-    # Materializes the whole relation, exactly as the bare `last` above
-    # already does: reversing the ORDER BY to push the tail into SQL
-    # would have to rewrite every `@order` entry's direction, and no
-    # caller in the corpus is on a table where that pays yet.
+    # Unloaded, no OFFSET: reverse each ORDER BY, LIMIT n, load, reverse
+    # the rows back. That is Rails' SQL tail, and it is what `/rooms/1`
+    # and `messages?before=` pay — `to_a.last(n)` was the whole history.
+    # A loaded relation, or one with OFFSET, still takes the in-memory
+    # tail: reversing ORDER BY under OFFSET is not the same window.
     def last_n(n)
-      to_a.last(n)
+      loaded = @records
+      unless loaded.nil?
+        return loaded_tail(loaded, n)
+      end
+      # Rails' `has_limit_or_offset?`: reversing ORDER BY under an
+      # existing LIMIT/OFFSET is a different window than the in-memory
+      # tail of that page.
+      unless @limit.nil? && @offset.nil?
+        return to_a.last(n)
+      end
+      prior_limit = @limit
+      prior_orders = []
+      i = 0
+      while i < @orders.length
+        prior_orders << @orders[i]
+        i += 1
+      end
+      if @orders.empty?
+        @orders << "#{@table}.#{@model.primary_key} DESC"
+      else
+        reversed = []
+        i = 0
+        while i < @orders.length
+          reversed << reverse_order_term(@orders[i])
+          i += 1
+        end
+        @orders = reversed
+      end
+      @limit = n
+      rows = to_a
+      @limit = prior_limit
+      @orders = prior_orders
+      @records = nil
+      out = []
+      i = rows.length - 1
+      while i >= 0
+        out << rows[i]
+        i -= 1
+      end
+      out
+    end
+
+    # The last n of an already-loaded page, still in relation order.
+    def loaded_tail(loaded, n)
+      start = loaded.length - n
+      start = 0 if start < 0
+      out = []
+      i = start
+      while i < loaded.length
+        out << loaded[i]
+        i += 1
+      end
+      out
     end
 
     def count

@@ -66,6 +66,7 @@ const SCHEMA: &str = "ActiveRecord::Schema.define do\n\
                       \x20   t.string :short_id\n\
                       \x20   t.integer :score\n\
                       \x20   t.datetime :created_at\n\
+                      \x20   t.date :ships_on\n\
                       \x20 end\n\
                       end\n";
 
@@ -127,6 +128,37 @@ fn a_temporal_column_routes_through_encode_datetime_and_the_raw_reader() {
         "got:\n{ruby}"
     );
     assert!(!ruby.contains("encode_value(self.created_at)"), "got:\n{ruby}");
+}
+
+#[test]
+fn a_date_column_routes_through_the_date_seam_not_encode_datetime() {
+    // A date has no clock: Rails renders the ISO date or `null`. The
+    // stored text goes through the reader's own seam, so "" storage
+    // (an unset nonnullable slot) is `null` too, not `""`.
+    let app = app_from(vec![
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n\
+             \x20 def as_json(_options = {})\n\
+             \x20   h = [ :ships_on ]\n\
+             \x20   js = {}\n\
+             \x20   h.each do |k|\n\
+             \x20     js[k] = self.send(k)\n\
+             \x20   end\n\
+             \x20   js\n\
+             \x20 end\n\
+             end\n",
+        ),
+    ]);
+    let ruby = writer_ruby(&app, "Widget", &[]);
+    assert!(
+        ruby.contains(
+            "JsonBuilder.encode_value(ActiveSupport.format_db_date(ActiveSupport.parse_db_date(self.ships_on_raw)))"
+        ),
+        "got:\n{ruby}"
+    );
+    assert!(!ruby.contains("encode_datetime"), "got:\n{ruby}");
 }
 
 #[test]

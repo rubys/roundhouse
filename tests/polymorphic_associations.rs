@@ -62,6 +62,40 @@ fn polymorphic_targets_resolve_from_inverse_as_decls() {
     assert_eq!(names, vec!["Comment", "Message"], "targets from inverse as: decls");
 }
 
+/// An inverse `as:` declared in a concern's `included do` counts as an
+/// implementor.
+#[test]
+fn polymorphic_targets_see_an_inverse_declared_in_a_concern() {
+    let app = app_from(vec![
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/notification.rb",
+            "class Notification < ApplicationRecord\n  belongs_to :notifiable, polymorphic: true\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  include Notifiable\nend\n",
+        ),
+        (
+            "app/models/concerns/notifiable.rb",
+            "module Notifiable\n  extend ActiveSupport::Concern\n\n  included do\n    has_many :notifications, as: :notifiable\n  end\nend\n",
+        ),
+    ]);
+    let notification = app.models.iter().find(|m| m.name.0.as_str() == "Notification").unwrap();
+    let Association::BelongsTo { polymorphic_targets, .. } =
+        notification.associations().next().expect("belongs_to")
+    else {
+        panic!("expected BelongsTo");
+    };
+    let names: Vec<&str> = polymorphic_targets.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(names, vec!["Comment"]);
+    let comment = app.models.iter().find(|m| m.name.0.as_str() == "Comment").unwrap();
+    let Association::HasMany { foreign_key, .. } = comment.associations().next().unwrap() else {
+        panic!("expected HasMany");
+    };
+    assert_eq!(foreign_key.as_str(), "notifiable_id", "an interface key is not owner-derived");
+}
+
 #[test]
 fn as_interface_defaults_foreign_key_to_interface_id() {
     let app = notification_app();

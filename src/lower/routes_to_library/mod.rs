@@ -408,32 +408,75 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
         .collect()
 }
 
-/// Every Hash literal in a view whose keys are all Symbols and include
-/// both `controller` and `action` — Rails' url-options form. Yields the
-/// remaining keys, sorted.
-fn collect_url_option_key_sets(e: &Expr, out: &mut Vec<Vec<String>>) {
-    if let ExprNode::Hash { entries, .. } = &*e.node {
-        let keys: Option<Vec<String>> = entries
-            .iter()
-            .map(|(k, _)| match &*k.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => {
-                    Some(value.as_str().to_string())
+/// Every url-options hash in a view: a Hash literal in the URL argument
+/// of `link_to`, `link_to_if` or `button_to`, whose keys are all Symbols
+/// and include both `controller` and `action`. Yields the remaining
+/// keys, sorted.
+///
+/// The view lowerer resolves a url-options hash only in that URL
+/// argument (`emit_url_options_hash`), so this looks only there. A Hash
+/// in another place renders as it is: a Stimulus `data:` hash
+/// (`data: { controller: "menu", action: "menu#open" }`) has the same
+/// keys, and it is `data-*` attributes, not a URL.
+pub(crate) fn collect_url_option_key_sets(e: &Expr, out: &mut Vec<Vec<String>>) {
+    if let ExprNode::Send { recv: None, method, args, block, .. } = &*e.node {
+        // The block form puts the URL first; the positional form puts
+        // the label first, as `classify_view_helper` reads it.
+        let url = if block.is_some() && matches!(method.as_str(), "link_to" | "button_to") {
+            args.first()
+        } else {
+            match crate::lower::view::classify_view_helper(method.as_str(), args) {
+                Some(crate::lower::view::ViewHelperKind::LinkTo { url, .. })
+                | Some(crate::lower::view::ViewHelperKind::LinkToIf { url, .. })
+                | Some(crate::lower::view::ViewHelperKind::ButtonTo { target: url, .. }) => {
+                    Some(url)
                 }
                 _ => None,
-            })
-            .collect();
-        if let Some(keys) = keys {
-            if keys.iter().any(|k| k == "controller") && keys.iter().any(|k| k == "action") {
-                let mut extras: Vec<String> = keys
-                    .into_iter()
-                    .filter(|k| k != "controller" && k != "action")
-                    .collect();
-                extras.sort();
-                out.push(extras);
             }
+        };
+        if let Some(url) = url {
+            collect_url_options_in_url(url, out);
         }
     }
     e.node.for_each_child(&mut |c| collect_url_option_key_sets(c, out));
+}
+
+/// The URL shapes `emit_url_arg` resolves to a url-options hash: the
+/// Hash itself, a `.merge` on it, and each branch of a conditional.
+fn collect_url_options_in_url(url: &Expr, out: &mut Vec<Vec<String>>) {
+    match &*url.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            collect_url_options_in_url(then_branch, out);
+            collect_url_options_in_url(else_branch, out);
+        }
+        ExprNode::Send { recv: Some(base), method, args, block: None, .. }
+            if method.as_str() == "merge" && args.len() == 1 =>
+        {
+            collect_url_options_in_url(base, out);
+        }
+        ExprNode::Hash { entries, .. } => {
+            let keys: Option<Vec<String>> = entries
+                .iter()
+                .map(|(k, _)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                        Some(value.as_str().to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if let Some(keys) = keys {
+                if keys.iter().any(|k| k == "controller") && keys.iter().any(|k| k == "action") {
+                    let mut extras: Vec<String> = keys
+                        .into_iter()
+                        .filter(|k| k != "controller" && k != "action")
+                        .collect();
+                    extras.sort();
+                    out.push(extras);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// One resolver: `path_for_controller_action_page(controller, action,
@@ -1042,10 +1085,20 @@ fn build_helper_function(
             // SINGULAR key would have been: `user_ids: [ user.id ]`
             // carries ids, and `param_ty` is name-based, so the
             // singular is what it must be asked about.
-            let value_ty = if let Some(slug) = key.record_slug {
-                if slug { Ty::Str } else { Ty::Int }
-            } else if key.array {
+            // A query value is a String on the wire. `id` / `*_id` stay
+            // Integer because call sites pass `record.id` and the helper
+            // calls `to_s` itself. Every other key — including a RECORD
+            // standing in for `before:` / `after:` — is projected to
+            // `.id.to_s` at the call site (`project_route_helper_ids`),
+            // so typing it Integer is a seed that contradicts the emit:
+            // spinel refuses `before: message.id.to_s` against `Integer?`.
+            // A slug `to_param` is already a String. `record_slug:
+            // Some(false)` used to override to Integer and is what made
+            // campfire's messages_controller_test never link.
+            let value_ty = if key.array {
                 Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
+            } else if key.record_slug == Some(true) {
+                Ty::Str
             } else {
                 param_ty(&key.name, false)
             };

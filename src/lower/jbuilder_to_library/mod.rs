@@ -35,6 +35,24 @@
 //!                                       partial render of ONE object
 //!   9. `json.cache! key do … end`      → transparent: the block's
 //!                                       statements ARE the object's
+//!  10. `if c … else … end` and the `if`/`unless` modifiers around any
+//!      of the above                    → the same `if`, each branch's
+//!                                       pairs appended inside it
+//!  11. `begin … rescue … end`          → the same `begin`; a `rescue`
+//!                                       first drops a pair the body
+//!                                       left half-written
+//!  12. `x = <expr>`                    → kept as written, in place; a
+//!                                       local the template reads
+//!                                       later
+//!  13. `json.<key> col do |x| … end`   → one pair whose value is an
+//!                                       array, one object per element
+//!                                       built by the block
+//!  14. `json.array! col do |x| … end`  → the same array, as the whole
+//!                                       template
+//!  15. `json.partial! @record`         → (4) with the path Rails takes
+//!                                       from the record's model
+//!                                       (`partial:` and `as:` after
+//!                                       the record do not change it)
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -49,12 +67,12 @@
 //! whole record.
 //!
 //! Still deferred: `json.merge!`, `json.key_format!`, `json.ignore_nil!`,
-//! `json.child!`, and the block form of `array!`.
+//! and `json.child!`.
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal, RescueClause};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::singularize;
 use crate::span::Span;
@@ -258,6 +276,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
             .map(|h| h.name.as_str().to_string())
             .collect(),
         models: known_models.iter().cloned().collect(),
+        temps: Default::default(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -332,6 +351,7 @@ fn type_method_body_solo(method: &mut MethodDef) {
 
 // ── walker ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Ctx {
     /// Source directory of the template — `articles` for
     /// `articles/_article.json.jbuilder`. Used by partial resolution
@@ -348,8 +368,8 @@ struct Ctx {
     /// Column-type table for the model that backs `arg_name`. Keyed
     /// by column-name symbol; empty when the arg has no resolvable
     /// model (e.g. layouts, untyped fixtures). Used to route
-    /// datetime columns through `JsonBuilder.encode_datetime` rather
-    /// than the generic `encode_value`.
+    /// temporal columns through their storage text (see
+    /// `temporal_column_json`) rather than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
@@ -366,6 +386,10 @@ struct Ctx {
     /// template SOLO, with only framework stubs registered, so
     /// `boost.message.room` has no type to ask.
     models: std::collections::HashSet<String>,
+    /// Counter for the method's synthesized collection locals
+    /// (`__col0`, `__col1`, …), shared by every clone of the template's
+    /// `Ctx` so two collection blocks never bind the same name.
+    temps: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -390,6 +414,10 @@ enum JbStmt<'a> {
         partial_path: String,
         arg: &'a Expr,
     },
+    /// `json.partial! @record` — the same call, with the path Rails
+    /// takes from the record (`to_partial_path`). Resolved at emit time,
+    /// where the app's models are known.
+    PartialRecord { arg: &'a Expr, as_name: Option<Symbol> },
     /// `json.<key> obj, partial: P, as: V` — one pair whose value is a
     /// partial render of a SINGLE object. The `array!`/`partial!`
     /// siblings above render a collection and own the whole template;
@@ -402,6 +430,38 @@ enum JbStmt<'a> {
     /// `json.<key> do … end` — one pair whose value is a nested object,
     /// built by re-entering the object walker on the block's body.
     Nested { key: Symbol, body: &'a Expr },
+    /// `if c … else … end`, `unless`, or a statement under an `if` /
+    /// `unless` modifier — the same branch, its pairs appended inside
+    /// it. (`unless` ingests as an `If` with the branches swapped.)
+    Cond {
+        cond: &'a Expr,
+        then_branch: &'a Expr,
+        else_branch: &'a Expr,
+    },
+    /// `begin … rescue … end` (no `else`, no `ensure`) — the same
+    /// `begin`, the body's pairs and each `rescue`'s appended inside it.
+    Guarded {
+        body: &'a Expr,
+        rescues: &'a [RescueClause],
+    },
+    /// `x = <expr>` — a template local. Emitted as written; it adds
+    /// no pair.
+    Local,
+    /// `json.<key> col do |x| … end` — one pair whose value is an array
+    /// with one element per member of `col`, each built by the block.
+    PairBlock {
+        key: Symbol,
+        collection: &'a Expr,
+        item_var: Symbol,
+        body: &'a Expr,
+    },
+    /// `json.array! col do |x| … end` — the same array as the whole
+    /// template.
+    ArrayBlock {
+        collection: &'a Expr,
+        item_var: Symbol,
+        body: &'a Expr,
+    },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -456,36 +516,118 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
 
     // Whole-template DSL forms (single stmt covers the entire JSON
     // body) — array! and partial! produce a top-level array or method
-    // call respectively, no `{}` wrap.
-    if classified.len() == 1 {
+    // call respectively, no `{}` wrap. Template locals around that one
+    // statement stay where they are and do not count.
+    let mut dsl = classified
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !matches!(c, JbStmt::Local));
+    if let (Some((index, only)), None) = (dsl.next(), dsl.next()) {
         // Synthesis choke point (whole-template forms): everything
         // emitted for the single DSL statement attributes back to it.
-        let src_span = raw_stmts[0].span;
-        match &classified[0] {
+        let src_span = raw_stmts[index].span;
+        let whole = match only {
             JbStmt::ArrayPartial { collection, partial_path, item_var } => {
-                let mut out = emit_array_partial(collection, partial_path, item_var, ctx);
-                for e in &mut out {
-                    e.inherit_span(src_span);
-                }
-                return out;
+                Some(emit_array_partial(collection, partial_path, item_var, ctx))
             }
             JbStmt::Partial { partial_path, arg } => {
-                let mut out = emit_partial_call(partial_path, arg, ctx);
-                for e in &mut out {
-                    e.inherit_span(src_span);
-                }
-                return out;
+                Some(emit_partial_call(partial_path, arg, ctx))
             }
-            _ => {}
+            JbStmt::ArrayBlock { collection, item_var, body } => {
+                Some(emit_array_block(collection, item_var, body, ctx))
+            }
+            JbStmt::PartialRecord { arg, as_name } => {
+                record_partial_path(arg, as_name.as_ref(), ctx)
+                    .map(|partial_path| emit_partial_call(&partial_path, arg, ctx))
+            }
+            _ => None,
+        };
+        if let Some(mut whole) = whole {
+            for e in &mut whole {
+                e.inherit_span(src_span);
+            }
+            let mut out: Vec<Expr> = Vec::new();
+            for (i, src) in raw_stmts.iter().enumerate() {
+                if i == index {
+                    out.append(&mut whole);
+                } else {
+                    out.push(emit_local(src, ctx));
+                }
+            }
+            return out;
         }
     }
 
     // Object form — wrap accumulated pair-emitting statements in
     // `{` … `}`. Comma is inserted between pairs; the lowerer knows
-    // statically how many pairs to emit, so no runtime "first" flag.
+    // statically whether a pair is the first, except after a branch
+    // that may or may not have emitted one (`Sep::Unknown`).
     let mut out: Vec<Expr> = Vec::new();
     out.push(io_append_lit(&ctx.accumulator, "{"));
-    let mut emitted = 0usize;
+    emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
+    out.push(io_append_lit(&ctx.accumulator, "}"));
+    out
+}
+
+/// Whether the next pair of an object takes a `,` before it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sep {
+    /// No pair yet: no comma.
+    First,
+    /// At least one pair on every path here: a comma.
+    After,
+    /// Some paths emitted a pair and some did not (a conditional with
+    /// pairs in one branch only): decided when the template runs.
+    Unknown,
+}
+
+/// The comma before a pair, per `sep`. `Unknown` asks the accumulator
+/// (`io << "," if !io.end_with?("{")`):
+/// the object's pairs are the only thing appended after its `{`, and
+/// no complete JSON value ends in `{`, so the last character is `{`
+/// exactly when no pair has been emitted yet.
+fn push_separator(out: &mut Vec<Expr>, ctx: &Ctx, sep: Sep) {
+    match sep {
+        Sep::First => {}
+        Sep::After => out.push(io_append_lit(&ctx.accumulator, ",")),
+        Sep::Unknown => {
+            let opened = send(
+                Some(var_ref(Symbol::from(ctx.accumulator.as_str()))),
+                "end_with?",
+                vec![lit_str("{".to_string())],
+                None,
+                true,
+            );
+            out.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: send(Some(opened), "!", Vec::new(), None, false),
+                    then_branch: io_append_lit(&ctx.accumulator, ","),
+                    else_branch: seq(Vec::new()),
+                },
+            ));
+        }
+    }
+}
+
+/// The statements of an `if` branch. A missing `else` (and the empty
+/// side of a modifier) ingests as `nil`, which has no pairs.
+fn branch_stmts(branch: &Expr) -> Vec<&Expr> {
+    match &*branch.node {
+        ExprNode::Lit { value: Literal::Nil } => Vec::new(),
+        _ => flatten_cache_blocks(stmts_of(branch)),
+    }
+}
+
+/// Append the pairs of an object's statements to `out`, starting from
+/// `sep`, and answer the separator state after them.
+fn emit_pairs(
+    classified: &[JbStmt<'_>],
+    raw_stmts: &[&Expr],
+    ctx: &Ctx,
+    out: &mut Vec<Expr>,
+    mut sep: Sep,
+) -> Sep {
     for (stmt, src) in classified.iter().zip(raw_stmts.iter()) {
         // Synthesis choke point: everything pushed for this DSL
         // statement (key/comma appends, encode_value calls) attributes
@@ -496,57 +638,35 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             JbStmt::Extract { obj, attrs } => {
                 let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
                 for attr in attrs {
-                    if emitted > 0 {
-                        out.push(io_append_lit(&ctx.accumulator, ","));
-                    }
+                    push_separator(out, ctx, sep);
                     out.push(io_append_lit(
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
                     ));
-                    // Route datetime / date columns through
-                    // `JsonBuilder.encode_datetime` for Rails-canonical
-                    // ISO 8601 output. Other columns (Integer, String,
-                    // …) ride encode_value's type dispatch.
-                    let use_datetime = obj_is_arg
-                        && matches!(
-                            ctx.arg_columns.get(attr),
-                            Some(crate::schema::ColumnType::DateTime)
-                                | Some(crate::schema::ColumnType::Date)
-                                | Some(crate::schema::ColumnType::Time)
-                        );
                     // A temporal column serializes from its `<col>_raw`
                     // storage reader (the stored ISO-8601 text), NOT the
-                    // parsing `<col>` reader: `encode_datetime`'s
-                    // string→string reformat is exact (no float
-                    // sub-second hazards) and skips a native
-                    // parse→format round-trip per row. The native-Time
-                    // reader stays for field access and arithmetic;
-                    // JSON never needs the object.
-                    let reader = if use_datetime {
-                        format!("{}_raw", attr.as_str())
-                    } else {
-                        attr.as_str().to_string()
-                    };
-                    let value = send(
-                        Some((*obj).clone()),
-                        &reader,
-                        Vec::new(),
-                        None,
-                        false,
-                    );
-                    let encoded = if use_datetime {
-                        json_builder_call("encode_datetime", value)
-                    } else {
-                        json_builder_encode(value)
-                    };
+                    // parsing `<col>` reader. Other columns (Integer,
+                    // String, …) ride encode_value's type dispatch.
+                    let encoded = ctx
+                        .arg_columns
+                        .get(attr)
+                        .filter(|_| obj_is_arg)
+                        .and_then(|t| temporal_column_json(obj, attr, t))
+                        .unwrap_or_else(|| {
+                        json_builder_encode(send(
+                            Some((*obj).clone()),
+                            attr.as_str(),
+                            Vec::new(),
+                            None,
+                            false,
+                        ))
+                    });
                     out.push(io_append_call(&ctx.accumulator, encoded));
-                    emitted += 1;
+                    sep = Sep::After;
                 }
             }
             JbStmt::Pair { key, value } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
@@ -560,32 +680,26 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                 // `encode_value` would otherwise render `Time#to_s`
                 // ("2026-09-12 13:26:25 UTC") where Rails renders
                 // `xmlschema(3)` ("2026-09-12T13:26:25.149Z").
-                let encoded = match temporal_column_read(value, ctx) {
-                    Some((obj, col)) => json_builder_call(
-                        "encode_datetime",
-                        send(Some(obj), &format!("{}_raw", col.as_str()), Vec::new(), None, false),
-                    ),
-                    None => json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx))),
-                };
+                let encoded = temporal_column_read(value, ctx)
+                    .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
+                    .unwrap_or_else(|| {
+                        json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
+                    });
                 out.push(io_append_call(&ctx.accumulator, encoded));
-                emitted += 1;
+                sep = Sep::After;
             }
             JbStmt::PairPartial { key, partial_path, arg } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
                 out.extend(emit_partial_call(partial_path, &arg, ctx));
-                emitted += 1;
+                sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
@@ -594,13 +708,58 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     &flatten_cache_blocks(stmts_of(body)),
                     ctx,
                 ));
-                emitted += 1;
+                sep = Sep::After;
             }
-            JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } => {
+            JbStmt::PairBlock { key, collection, item_var, body } => {
+                push_separator(out, ctx, sep);
+                out.push(io_append_lit(
+                    &ctx.accumulator,
+                    &format!("\"{}\":", key.as_str()),
+                ));
+                out.extend(emit_array_block(collection, item_var, body, ctx));
+                sep = Sep::After;
+            }
+            JbStmt::ArrayPartial { .. }
+            | JbStmt::Partial { .. }
+            | JbStmt::ArrayBlock { .. }
+            | JbStmt::PartialRecord { .. } => {
                 // These shouldn't appear in an object template, but if
                 // they do (mixed with pair-emitting stmts), drop a
                 // TODO marker rather than emit malformed JSON.
                 out.push(io_append_lit(&ctx.accumulator, ""));
+            }
+            JbStmt::Cond { cond, then_branch, else_branch } => {
+                let branch = |body: &Expr| {
+                    let stmts = branch_stmts(body);
+                    let classified: Vec<JbStmt<'_>> = stmts.iter().map(|s| classify(s)).collect();
+                    let mut appends = Vec::new();
+                    let after = emit_pairs(&classified, &stmts, ctx, &mut appends, sep);
+                    (seq(appends), after)
+                };
+                let (then_appends, then_sep) = branch(then_branch);
+                let (else_appends, else_sep) = branch(else_branch);
+                let is_empty = |e: &Expr| matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty());
+                // `x if c` keeps its `if`; `x unless c` ingests as an
+                // `if c` with an empty then-branch, which reads better
+                // as `if !c`.
+                let (cond, then_appends, else_appends) =
+                    if is_empty(&then_appends) && !is_empty(&else_appends) {
+                        let negated = send(Some((*cond).clone()), "!", Vec::new(), None, false);
+                        (negated, else_appends, then_appends)
+                    } else {
+                        ((*cond).clone(), then_appends, else_appends)
+                    };
+                out.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: then_appends, else_branch: else_appends },
+                ));
+                sep = if then_sep == else_sep { then_sep } else { Sep::Unknown };
+            }
+            JbStmt::Guarded { body, rescues } => {
+                sep = emit_guarded(body, rescues, ctx, out, sep);
+            }
+            JbStmt::Local => {
+                out.push(emit_local(src, ctx));
             }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
@@ -610,11 +769,124 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             e.inherit_span(src.span);
         }
     }
-    out.push(io_append_lit(&ctx.accumulator, "}"));
+    sep
+}
+
+/// `begin … rescue … end` around pairs, with Jbuilder's outcome when
+/// the body raises: the pairs it finished stay, and the rescue's pairs
+/// follow them.
+///
+///   io_mark = io.length
+///   begin
+///     io << "\"id\":"
+///     io << JsonBuilder.encode_value(widget.id)
+///     io_mark = io.length
+///     …
+///   rescue StandardError
+///     io.slice!(io_mark, io.length)
+///     io << "," if !(io.end_with?("{"))
+///     io << "\"error\":"
+///     …
+///   end
+///
+/// Jbuilder sets a pair only once its value is computed, so a raise
+/// inside one leaves nothing of it; here the key (and its comma) is
+/// already appended by then, which is what the mark after each finished
+/// statement is for. A rescue starts from the comma state of any mark,
+/// and the state after the whole statement is that of the body's end or
+/// any rescue's end.
+fn emit_guarded(
+    body: &Expr,
+    rescues: &[RescueClause],
+    ctx: &Ctx,
+    out: &mut Vec<Expr>,
+    sep: Sep,
+) -> Sep {
+    let mark = Symbol::from(format!("{}_mark", ctx.accumulator));
+    let length = || {
+        send(Some(var_ref(Symbol::from(ctx.accumulator.as_str()))), "length", Vec::new(), None, false)
+    };
+    let set_mark = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: mark.clone() }, value: length() },
+        )
+    };
+    let merge = |a: Sep, b: Sep| if a == b { a } else { Sep::Unknown };
+
+    out.push(set_mark());
+    let mut body_out: Vec<Expr> = Vec::new();
+    let mut at_mark = sep;
+    let mut state = sep;
+    for stmt in branch_stmts(body) {
+        state = emit_pairs(&[classify(stmt)], &[stmt], ctx, &mut body_out, state);
+        body_out.push(set_mark());
+        at_mark = merge(at_mark, state);
+    }
+
+    let mut after = state;
+    let mut clauses: Vec<RescueClause> = Vec::new();
+    for clause in rescues {
+        let mut appends = vec![send(
+            Some(var_ref(Symbol::from(ctx.accumulator.as_str()))),
+            "slice!",
+            vec![var_ref(mark.clone()), length()],
+            None,
+            true,
+        )];
+        let stmts = branch_stmts(&clause.body);
+        let classified: Vec<JbStmt<'_>> = stmts.iter().map(|s| classify(s)).collect();
+        let end = emit_pairs(&classified, &stmts, ctx, &mut appends, at_mark);
+        after = merge(after, end);
+        clauses.push(RescueClause {
+            classes: clause.classes.clone(),
+            binding: clause.binding.clone(),
+            body: seq(appends),
+        });
+    }
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::BeginRescue {
+            body: seq(body_out),
+            rescues: clauses,
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        },
+    ));
+    after
+}
+
+/// A template local as written, its value given the rewrites a pair's
+/// value gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`): the value is
+/// read by pairs later, and the emitted view has no `_url` helpers.
+fn emit_local(stmt: &Expr, ctx: &Ctx) -> Expr {
+    let ExprNode::Assign { target, value } = &*stmt.node else {
+        return stmt.clone();
+    };
+    let mut out = Expr::new(
+        stmt.span,
+        ExprNode::Assign {
+            target: target.clone(),
+            value: rewrite_h_escape(&rewrite_route_helpers(value, ctx)),
+        },
+    );
+    out.ty = stmt.ty.clone();
     out
 }
 
 fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
+    if let ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } = &*stmt.node {
+        if !rescues.is_empty() {
+            return JbStmt::Guarded { body, rescues };
+        }
+    }
+    if let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node {
+        return JbStmt::Cond { cond, then_branch, else_branch };
+    }
+    if let ExprNode::Assign { target: LValue::Var { .. }, .. } = &*stmt.node {
+        return JbStmt::Local;
+    }
     let ExprNode::Send {
         recv: Some(recv),
         method,
@@ -658,6 +930,17 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some(collection) = args.first() else {
                 return JbStmt::Unknown;
             };
+            // `json.array! col do |x| … end` — the block builds each
+            // element. Only with no options: Jbuilder renders a
+            // `partial:` before it looks at a block.
+            if args.len() == 1 {
+                if let Some((item_var, body)) = item_block(block) {
+                    if !element_body_supported(body) {
+                        return JbStmt::Unknown;
+                    }
+                    return JbStmt::ArrayBlock { collection, item_var, body };
+                }
+            }
             let Some(opts) = args.iter().skip(1).find_map(extract_hash) else {
                 return JbStmt::Unknown;
             };
@@ -708,6 +991,47 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some(path_arg) = args.first() else {
                 return JbStmt::Unknown;
             };
+            // `json.partial! @record` — a positional that is a record,
+            // not a path. Jbuilder renders the record's own partial
+            // (`record.to_partial_path`) with the record as its local.
+            // `partial:` and `as:` after it do not change that:
+            // jbuilder's `partial!` sets `options[:partial]` to the
+            // positional, over the option, and `as:` only names the
+            // local (`record_partial_path` checks it is the name the
+            // lowered partial takes the record under). Any other
+            // option is a local for the partial, which the call has no
+            // way to pass, so that form stays Unknown.
+            if block.is_none() && local_name(path_arg).is_some() {
+                let options_ok = match args.len() {
+                    1 => true,
+                    2 => extract_hash(&args[1]).is_some_and(|opts| {
+                        opts.iter().all(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                                if matches!(value.as_str(), "partial" | "as"))
+                        })
+                    }),
+                    _ => false,
+                };
+                if !options_ok {
+                    return JbStmt::Unknown;
+                }
+                // `as:` is a Symbol or a String: Action View `to_sym`s
+                // it (`as: "entry"` binds `entry`). Any other value is
+                // a name only known at run time.
+                let as_value =
+                    args.get(1).and_then(extract_hash).and_then(|opts| hash_get_value(opts, "as"));
+                let as_name = match as_value {
+                    None => None,
+                    Some(v) => match &*v.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                        _ => match string_literal(v) {
+                            Some(s) => Some(Symbol::from(s.as_str())),
+                            None => return JbStmt::Unknown,
+                        },
+                    },
+                };
+                return JbStmt::PartialRecord { arg: path_arg, as_name };
+            }
             let partial_path = match string_literal(path_arg) {
                 Some(s) => s,
                 None => return JbStmt::Unknown,
@@ -737,6 +1061,25 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             };
             JbStmt::Nested { key: Symbol::from(key), body }
         }
+        // `json.<key> col do |x| … end` — Jbuilder's `set!` with a value
+        // AND a block is `array!` on the value under that key: an array
+        // of objects, one per element, each built by the block. Checked
+        // before the single-pair shape below, which would otherwise take
+        // the collection as the value and drop the block.
+        key if args.len() == 1 && block.is_some() => {
+            let Some((item_var, body)) = item_block(block) else {
+                return JbStmt::Unknown;
+            };
+            if !element_body_supported(body) {
+                return JbStmt::Unknown;
+            }
+            JbStmt::PairBlock {
+                key: Symbol::from(key),
+                collection: &args[0],
+                item_var,
+                body,
+            }
+        }
         // `json.<key> <expr>` — single-pair shape. The method name IS
         // the JSON key; the single positional arg is the value.
         key if args.len() == 1 => JbStmt::Pair {
@@ -763,6 +1106,58 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         }
         _ => JbStmt::Unknown,
     }
+}
+
+/// The element variable and body of a one-parameter block,
+/// `do |x| … end` / `{ |x| … }`. Anything else is not the shape.
+fn item_block(block: &Option<Expr>) -> Option<(Symbol, &Expr)> {
+    let block = block.as_ref()?;
+    let ExprNode::Lambda { params, rest_param: None, body, .. } = &*block.node else {
+        return None;
+    };
+    let [item_var] = params.as_slice() else {
+        return None;
+    };
+    Some((item_var.clone(), body))
+}
+
+/// Whether a collection block's body lowers to the element Jbuilder
+/// builds. A lone `json.partial!` is the element; a partial next to
+/// other statements (or under a branch) renders into the same element
+/// in Jbuilder, which the object walker cannot do yet: it writes a
+/// partial there as an empty append and the element would lose the
+/// partial's fields. Such a body is reported as unsupported and the
+/// statement stays Unknown, rather than lowered without them. The same
+/// holds for a partial inside a nested `json.<key> do … end` object of
+/// the element, which the object walker writes the same way.
+fn element_body_supported(body: &Expr) -> bool {
+    fn has_partial(stmts: &[&Expr]) -> bool {
+        stmts.iter().any(|s| match classify(s) {
+            JbStmt::Partial { .. } => true,
+            JbStmt::Cond { then_branch, else_branch, .. } => {
+                has_partial(&branch_stmts(then_branch)) || has_partial(&branch_stmts(else_branch))
+            }
+            JbStmt::Nested { body, .. } => has_partial(&flatten_cache_blocks(stmts_of(body))),
+            JbStmt::Guarded { body, rescues } => {
+                has_partial(&branch_stmts(body))
+                    || rescues.iter().any(|r| has_partial(&branch_stmts(&r.body)))
+            }
+            _ => false,
+        })
+    }
+    let stmts = flatten_cache_blocks(stmts_of(body));
+    if stmts.len() == 1 && matches!(classify(stmts[0]), JbStmt::Partial { .. }) {
+        return true;
+    }
+    if !has_partial(&stmts) {
+        return true;
+    }
+    crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+        file: String::new(),
+        message: "jbuilder: a collection block that mixes `json.partial!` with other statements is not compiled"
+            .to_string(),
+    });
+    false
 }
 
 /// `json` parsed as a bare method call: `Send { recv: None, method:
@@ -909,6 +1304,154 @@ fn emit_array_partial(
     out.push(io_append_call(&ctx.accumulator, joined));
     out.push(io_append_lit(&ctx.accumulator, "]"));
     out
+}
+
+/// An array with one element per member of `collection`, each element
+/// the JSON the block's body builds for it:
+///
+///   __col0 = col
+///   io << "["
+///   if !(__col0.nil?)
+///     io << __col0.map do |x|
+///       io_x = String.new
+///       io_x << "{" … io_x << "}"
+///       io_x
+///     end.join(",")
+///   end
+///   io << "]"
+///
+/// Same map+join as `emit_array_partial`; the element is the block's
+/// body walked as a template of its own, into its own accumulator. A
+/// body that is one `json.partial!` call is that call, without the
+/// accumulator around it. The collection is bound once to a `__col<n>`
+/// local, so an expression (`@widget.parts`) is not evaluated twice by
+/// the nil check and the `map`.
+fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx) -> Vec<Expr> {
+    let stmts = flatten_cache_blocks(stmts_of(body));
+    let single_partial = match stmts.as_slice() {
+        [only] => match classify(only) {
+            JbStmt::Partial { partial_path, arg } => Some((partial_path, arg)),
+            _ => None,
+        },
+        _ => None,
+    };
+    // A one-call element reads as a one-line `{ |x| … }`; a built one
+    // is several statements and takes `do |x| … end`.
+    let block_style = if single_partial.is_some() {
+        crate::expr::BlockStyle::Brace
+    } else {
+        crate::expr::BlockStyle::Do
+    };
+    let element = match single_partial {
+        Some((partial_path, arg)) => {
+            let (mod_path, method) = partial_target(&partial_path, &ctx.resource_dir);
+            // The argument gets the rewrites a `PairPartial` argument
+            // gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`).
+            send(
+                Some(const_path(&mod_path)),
+                &format!("{method}_json"),
+                vec![rewrite_h_escape(&rewrite_route_helpers(arg, ctx))],
+                None,
+                true,
+            )
+        }
+        None => {
+            let mut inner = ctx.clone();
+            inner.accumulator = format!("{}_{}", ctx.accumulator, item_var.as_str());
+            let mut exprs = vec![assign_accumulator_string_new(&inner.accumulator)];
+            exprs.extend(emit_object(&stmts, &inner));
+            let mut result = var_ref(Symbol::from(inner.accumulator.as_str()));
+            result.hint = Some(IrHint::StringBuilderResult);
+            exprs.push(result);
+            seq(exprs)
+        }
+    };
+
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            rest_param: None,
+            params: vec![item_var.clone()],
+            block_param: None,
+            body: element,
+            block_style,
+        },
+    );
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let col = Symbol::from(format!("__col{n}"));
+    let bind = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: col.clone() },
+            value: collection.clone(),
+        },
+    );
+    let mapped = send(Some(var_ref(col.clone())), "map", Vec::new(), Some(block), false);
+    let joined = send(Some(mapped), "join", vec![lit_str(",".to_string())], None, true);
+    // Jbuilder's `array!` answers `[]` for a nil collection, and
+    // `json.<key>(nil) { … }` goes through it.
+    let present = send(
+        Some(send(Some(var_ref(col)), "nil?", Vec::new(), None, false)),
+        "!",
+        Vec::new(),
+        None,
+        false,
+    );
+    vec![
+        bind,
+        io_append_lit(&ctx.accumulator, "["),
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: present,
+                then_branch: io_append_call(&ctx.accumulator, joined),
+                else_branch: seq(Vec::new()),
+            },
+        ),
+        io_append_lit(&ctx.accumulator, "]"),
+    ]
+}
+
+/// The partial path `json.partial! <local>` renders: Active Model's
+/// `to_partial_path`, `"<plural>/<singular>"` of the record's model
+/// (`widgets/widget` for a `Widget`), under the namespace of the
+/// template's own directory (`admin/widgets/widget` from
+/// `admin/widgets/`), which is Action View's
+/// `prefix_partial_path_with_controller_namespace` default. The model
+/// is the one the local is named after, the same name-to-model reading
+/// the template's parameters get (`ivar_ty`). Unresolved when the
+/// local names no model of the app, or when `as:` names the partial's
+/// local something other than the model's singular: the lowered partial
+/// takes its record under that singular, and a partial reading the
+/// `as:` name would not find it.
+fn record_partial_path(arg: &Expr, as_name: Option<&Symbol>, ctx: &Ctx) -> Option<String> {
+    let name = local_name(arg)?;
+    let model = crate::naming::camelize(name.as_str());
+    if !ctx.models.contains(&model) {
+        return None;
+    }
+    let singular = crate::naming::snake_case(&model);
+    if as_name.is_some_and(|a| a.as_str() != singular) {
+        return None;
+    }
+    let path = format!("{}/{}", crate::naming::pluralize_snake(&model), singular);
+    Some(match ctx.resource_dir.rsplit_once('/') {
+        Some((namespace, _)) => format!("{namespace}/{path}"),
+        None => path,
+    })
+}
+
+/// The name of a bare local: a `Var`, or the receiverless, argless,
+/// blockless `Send` prism gives a partial's locals.
+fn local_name(e: &Expr) -> Option<Symbol> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.clone()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.clone())
+        }
+        _ => None,
+    }
 }
 
 fn emit_partial_call(partial_path: &str, arg: &Expr, ctx: &Ctx) -> Vec<Expr> {
@@ -1177,6 +1720,37 @@ fn json_builder_call(method: &str, value: Expr) -> Expr {
     send(Some(recv), method, vec![value], None, true)
 }
 
+/// The JSON value of `<obj>.<col>` for a temporal column, from its
+/// `<col>_raw` storage reader.
+///
+/// * datetime / time: `JsonBuilder.encode_datetime(<obj>.<col>_raw)`,
+///   the exact string→string reformat to `xmlschema(3)` (no float
+///   sub-second hazards, no native parse→format round-trip per row).
+/// * date: `JsonBuilder.encode_value(ActiveSupport.format_db_date(
+///   ActiveSupport.parse_db_date(<obj>.<col>_raw)))` — the column's
+///   own seam, as the model's `as_json` writer uses. A date has no
+///   clock, so `encode_datetime` is the wrong primitive for it, and it
+///   quoted the "" an unset nonnullable slot (or an adapter's NULL)
+///   holds where Rails renders `null`.
+///
+/// `None` for any other column type.
+fn temporal_column_json(obj: &Expr, col: &Symbol, ty: &crate::schema::ColumnType) -> Option<Expr> {
+    use crate::schema::ColumnType;
+    let raw = send(Some(obj.clone()), &format!("{}_raw", col.as_str()), Vec::new(), None, false);
+    match ty {
+        ColumnType::DateTime | ColumnType::Time => Some(json_builder_call("encode_datetime", raw)),
+        ColumnType::Date => {
+            let active_support = || {
+                Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })
+            };
+            let date = send(Some(active_support()), "parse_db_date", vec![raw], None, true);
+            let text = send(Some(active_support()), "format_db_date", vec![date], None, true);
+            Some(json_builder_encode(text))
+        }
+        _ => None,
+    }
+}
+
 /// True when `obj` reads as the named local — either a bare `Var`
 /// or a `Send` with no receiver, no args, no block (the bareword
 /// shape Prism produces for partial-scope locals).
@@ -1419,6 +1993,22 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 })
                 .collect(),
         },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: rewrite_ivars_to_locals(body),
+                rescues: rescues
+                    .iter()
+                    .map(|r| RescueClause {
+                        classes: r.classes.clone(),
+                        binding: r.binding.clone(),
+                        body: rewrite_ivars_to_locals(&r.body),
+                    })
+                    .collect(),
+                else_branch: else_branch.as_ref().map(rewrite_ivars_to_locals),
+                ensure: ensure.as_ref().map(rewrite_ivars_to_locals),
+                implicit: *implicit,
+            }
+        }
         other => other.clone(),
     };
     Expr::new(expr.span, new_node)

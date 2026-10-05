@@ -4,11 +4,19 @@ The user guide is [`guide/`](guide/README.md) — install, and one door
 each for analyzing, transpiling and compiling a Rails app. Everything
 below is for people working on roundhouse itself.
 
-Architecture references live in the two subdirectories; the loose files
-at this level are working plans. Status discipline: these docs describe
-*architecture*, not day-to-day status — when a status claim here
-disagrees with [`RELEASES.md`](../RELEASES.md) or CI, RELEASES.md and CI win
-(see [`AGENTS.md`](../AGENTS.md)).
+Use the current code and executed checks for current behavior;
+[`RELEASES.md`](../RELEASES.md) records dated release snapshots. Architecture
+references explain design, while working plans are point-in-time proposals.
+
+## Working on Roundhouse
+
+- [`development/`](development/README.md) — setup and local workflow;
+  [test selection](development/testing.md), [debugging](development/debugging.md),
+  and [compiler changes](development/compiler-changes.md).
+- [`ci/`](ci/README.md) — understand checks, request full/fresh validation,
+  and distinguish validation from publication. Implementation details stay
+  in the workflows, scripts, and their tests.
+- [`../AGENTS.md`](../AGENTS.md) — invariants and agent task navigation.
 
 ## Compiler inputs — [`data/`](data/)
 
@@ -34,14 +42,13 @@ disagrees with [`RELEASES.md`](../RELEASES.md) or CI, RELEASES.md and CI win
   (per-target primitives + transpiled framework Ruby), including the
   semantic-divergence ledger.
 - [`verification.md`](pipeline/verification.md) — how we know the
-  output is correct: the test layers and the CI gate topology.
+  output is correct: evidence layers and their limits, not CI job topology.
 - [`bytecode.md`](pipeline/bytecode.md) — experimental bytecode
   target; parked, test-only.
 
 ## Reference
 
-- [`env-gates.md`](env-gates.md) — every `ROUNDHOUSE_*` environment
-  variable the codebase reads.
+- [`writebook.md`](writebook.md) — pinned external-corpus inventory and its limits.
 
 ## Working plans
 

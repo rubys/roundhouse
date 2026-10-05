@@ -63,6 +63,7 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
     apply_to_test_modules(app);
     apply_to_library_class_calls(app);
     apply_to_instance_calls(app);
+    super::kwsplat::restore_kwrest_in_test_helpers(app);
     let params = helper_param_names(app);
     if params.is_empty() {
         return;

@@ -34,9 +34,10 @@
 //! inside a gap-touched blast radius renders as a coverage note until
 //! the gap is fixed — cheap compared to the trust cost of a false
 //! accusation. Only unresolved-shaped kinds (`IvarUnresolved`,
-//! `SendDispatchFailed`, `IncompatibleBinop`, `UnresolvedType`) are
-//! eligible; `Parse` (a real syntax error), `Unsupported` (already a
-//! tool statement), and `GradualUntyped` (author-signed) never move.
+//! `SendDispatchFailed`, `IncompatibleBinop`, `UnresolvedType`,
+//! `UndefinedFilterTarget`) are eligible; `Parse` (a real syntax
+//! error), `Unsupported` (already a tool statement), and
+//! `GradualUntyped` (author-signed) never move.
 
 use std::collections::{HashMap, HashSet};
 
@@ -126,6 +127,7 @@ fn eligible(kind: &DiagnosticKind) -> bool {
             | DiagnosticKind::SendDispatchFailed { .. }
             | DiagnosticKind::IncompatibleBinop { .. }
             | DiagnosticKind::UnresolvedType { .. }
+            | DiagnosticKind::UndefinedFilterTarget { .. }
     )
 }
 
@@ -354,7 +356,8 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
                         .map(|gem| (gem, None)),
                 }
             }
-            DiagnosticKind::UnresolvedType { name: Some(n), .. } => {
+            DiagnosticKind::UnresolvedType { name: Some(n), .. }
+            | DiagnosticKind::UndefinedFilterTarget { target: n, .. } => {
                 crate::gems::gem_claiming_method(lock, n.as_str()).map(|gem| (gem, None))
             }
             DiagnosticKind::Unsupported { construct, detail, .. }

@@ -216,6 +216,7 @@ fn parse_sequel_association(
             let target = class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .unwrap_or_else(|| ClassId(Symbol::from(singularize_camelize(name_str.as_str()))));
+            let foreign_key_explicit = key.is_some();
             let foreign_key = key
                 .map(|s| Symbol::from(s.as_str()))
                 .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id")));
@@ -232,6 +233,7 @@ fn parse_sequel_association(
                 name,
                 target,
                 foreign_key,
+                foreign_key_explicit,
                 through: None,
                 dependent,
                 as_interface: None,
@@ -243,6 +245,7 @@ fn parse_sequel_association(
         }
         "one_to_one" => Association::HasOne {
             name: name.clone(),
+            foreign_key_explicit: key.is_some(),
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .unwrap_or_else(|| ClassId(Symbol::from(camelize(name_str.as_str())))),

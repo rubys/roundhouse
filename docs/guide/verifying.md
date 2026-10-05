@@ -117,9 +117,10 @@ which:
 
 The third kind is what the oracle exists to find, and the project's
 position is that every one of them is a roundhouse bug, never an
-acceptable difference. That is why the compare matrix runs on every
-push and why a target that goes red stays off the
-[supported list](targets.md) until it is green.
+acceptable difference. [CI](../ci/README.md) selects comparison lanes on
+PRs/main pushes and runs the complete coverage in full validation. A green
+selected subset is not evidence that an unselected target passed; check the
+target's actual results before treating it as supported.
 
 ## Beyond the page
 

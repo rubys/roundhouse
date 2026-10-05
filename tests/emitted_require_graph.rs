@@ -180,7 +180,7 @@ fn bundled_class_constants_are_ledgered_only_on_targets_without_them() {
   def index
     [URI::HTTP, URI::InvalidURIError, Net::OpenTimeout, Net::ReadTimeout,
      Net::HTTPRedirection, Net::HTTPOK, StringIO, OpenSSL::OpenSSLError,
-     Rails::HTML5::SafeListSanitizer, JSON]
+     Rails::HTML5::SafeListSanitizer, JSON, JSON::ParserError, Struct, Mutex]
   end
 end
 "#),
@@ -212,10 +212,10 @@ end
             assert_eq!(gaps[0].severity, roundhouse::diagnostic::Severity::Error);
             assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
         } else {
-            assert_eq!(gaps.len(), 10, "{target:?}: {gaps:?}");
+            assert_eq!(gaps.len(), 13, "{target:?}: {gaps:?}");
             for name in ["URI::HTTP", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
                 "Net::HTTPRedirection", "Net::HTTPOK", "StringIO", "OpenSSL::OpenSSLError",
-                "Rails::HTML5::SafeListSanitizer", "JSON"] {
+                "Rails::HTML5::SafeListSanitizer", "JSON", "JSON::ParserError", "Struct", "Mutex"] {
                 let gap = gaps.iter().find(|d| d.message.contains(name)).expect(name);
                 assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
                 assert!(!gap.span.is_synthetic(), "{gap:?}");

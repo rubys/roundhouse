@@ -88,6 +88,8 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         }
     }
 
+    stmts.extend(secure_password_checks(model));
+
     if stmts.is_empty() {
         return;
     }
@@ -118,6 +120,79 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     if model.parent.is_none() {
         push_active_model_validation_surface(methods, model);
     }
+}
+
+/// The validations `has_secure_password` adds unless it is written
+/// with `validations: false` — the ones that make a password reset with
+/// a mismatched confirmation FAIL, as the Rails 8 authentication
+/// generator's PasswordsController and its test rely on:
+///
+///   errors << "Password can't be blank" if @password_digest blank
+///   errors << "Password is too long" if @password.bytesize > 72
+///   errors << "Password confirmation doesn't match Password"
+///     if @password_confirmation given and != @password (allow_blank)
+///
+/// The plaintext ivars are the ones `lower::secure_password` writes.
+fn secure_password_checks(model: &Model) -> Vec<Expr> {
+    if !secure_password_validates(model) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for attr in crate::lower::secure_password::secure_password_attrs(&model.body) {
+        let human = humanize(attr.as_str());
+        let plain = ivar(&attr);
+        let digest = ivar(&Symbol::from(format!("{}_digest", attr.as_str())));
+        let confirmation = ivar(&Symbol::from(format!("{}_confirmation", attr.as_str())));
+        let blank = |e: Expr| bool_op(BoolOpKind::Or, send(e.clone(), "nil?", vec![]), send(e, "empty?", vec![]));
+        let not = |e: Expr| Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false },
+        );
+        let present = |e: Expr| not(blank(e));
+        out.push(if_with_nil_else(blank(digest), errors_push(format!("{human} can't be blank"))));
+        out.push(if_with_nil_else(
+            bool_op(
+                BoolOpKind::And,
+                present(plain.clone()),
+                send(send(plain.clone(), "bytesize", vec![]), ">", vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Int { value: 72 } },
+                )]),
+            ),
+            errors_push(format!("{human} is too long")),
+        ));
+        out.push(if_with_nil_else(
+            bool_op(
+                BoolOpKind::And,
+                bool_op(BoolOpKind::And, present(plain.clone()), not(send(confirmation.clone(), "nil?", vec![]))),
+                send(confirmation, "!=", vec![plain]),
+            ),
+            errors_push(format!("{human} confirmation doesn't match {human}")),
+        ));
+    }
+    out
+}
+
+/// `has_secure_password` without `validations: false`.
+fn secure_password_validates(model: &Model) -> bool {
+    use crate::dialect::ModelBodyItem;
+    let mut declared = false;
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "has_secure_password" {
+            continue;
+        }
+        declared = true;
+        let off = args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. }
+            if entries.iter().any(|(k, v)|
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "validations")
+                    && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: false } }))));
+        if off {
+            return false;
+        }
+    }
+    declared
 }
 
 /// `ActiveModel::Model`'s attribute-hash constructor —
@@ -331,16 +406,41 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
         // calls it; everything else about the shape (when it runs, what
         // `valid?` does with `errors` afterwards) is already the same
         // for a rule-derived check.
-        ValidationRule::Custom { method } => vec![Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: None,
-                method: method.clone(),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        )],
+        ValidationRule::Custom { method, if_method, unless_method } => {
+            let bare = |m: &Symbol| {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: None,
+                        method: m.clone(),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                )
+            };
+            let call = bare(method);
+            let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+            // `if: :pred` / `unless: :pred` guard the call, as Rails'
+            // callback conditions do.
+            // Both given: Rails runs the check only when `if:` holds AND
+            // `unless:` does not — the `unless` guard nests inside the `if`.
+            let guarded = match unless_method {
+                Some(c) => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond: bare(c), then_branch: nil(), else_branch: call },
+                ),
+                None => call,
+            };
+            let guarded = match if_method {
+                Some(c) => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond: bare(c), then_branch: guarded, else_branch: nil() },
+                ),
+                None => guarded,
+            };
+            vec![guarded]
+        }
         ValidationRule::Uniqueness { .. } => {
             // Not yet exercised by real-blog; lands when a fixture forces the issue.
             Vec::new()

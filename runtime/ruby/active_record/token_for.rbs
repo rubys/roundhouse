@@ -1,0 +1,13 @@
+# Typing contract for token_for.rb beside this file.
+#
+# `verified_data` answers "" for every rejection and `data_id` answers 0
+# for it, so neither side carries a nilable — the same posture as
+# signed_id.rbs.
+module ActiveRecord
+  module TokenFor
+    def self.generate: (String data_json, String purpose, Integer expires_in) -> String
+    def self.verified_data: (String token, String purpose) -> String
+    def self.secure_password_data: (Integer id, String? digest) -> String
+    def self.data_id: (String data) -> Integer
+  end
+end

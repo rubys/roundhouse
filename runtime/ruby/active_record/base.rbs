@@ -58,6 +58,10 @@ module ActiveRecord
   def self.enum_label_str: (String value, Array[String] labels, Array[String] values) -> String?
   def self.enum_label: (Integer value, Array[String] labels, Array[Integer] values) -> String?
 
+  # First index in ascending `sorted` whose value is >= `value` (binary
+  # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.
+  def self.lower_bound: (Array[Integer] sorted, Integer value) -> Integer
+
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies

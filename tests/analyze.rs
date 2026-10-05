@@ -643,6 +643,23 @@ fn action_aggregate_equals_subtree_fold() {
                     fold(&arm.body, acc);
                 }
             }
+            ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+                fold(scrutinee, acc);
+                for arm in arms {
+                    arm.pattern.for_each_expr(&mut |e| fold(e, acc));
+                    if let Some((_, g)) = &arm.guard {
+                        fold(g, acc);
+                    }
+                    fold(&arm.body, acc);
+                }
+                if let Some(e) = else_body {
+                    fold(e, acc);
+                }
+            }
+            ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+                fold(value, acc);
+                pattern.for_each_expr(&mut |e| fold(e, acc));
+            }
             ExprNode::Seq { exprs } => {
                 for e in exprs {
                     fold(e, acc);
@@ -952,6 +969,23 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
                 collect_ivar_reads(&arm.body, out);
             }
         }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_ivar_reads(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| collect_ivar_reads(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    collect_ivar_reads(g, out);
+                }
+                collect_ivar_reads(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                collect_ivar_reads(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_ivar_reads(value, out);
+            pattern.for_each_expr(&mut |e| collect_ivar_reads(e, out));
+        }
         ExprNode::Let { value, body, .. } => {
             collect_ivar_reads(value, out);
             collect_ivar_reads(body, out);
@@ -1139,6 +1173,23 @@ fn collect_bare_name_sends(
                 }
                 collect_bare_name_sends(&arm.body, out);
             }
+        }
+        ExprNode::CaseMatch { scrutinee, arms, else_body } => {
+            collect_bare_name_sends(scrutinee, out);
+            for arm in arms {
+                arm.pattern.for_each_expr(&mut |e| collect_bare_name_sends(e, out));
+                if let Some((_, g)) = &arm.guard {
+                    collect_bare_name_sends(g, out);
+                }
+                collect_bare_name_sends(&arm.body, out);
+            }
+            if let Some(e) = else_body {
+                collect_bare_name_sends(e, out);
+            }
+        }
+        ExprNode::MatchPredicate { value, pattern } | ExprNode::MatchRequired { value, pattern } => {
+            collect_bare_name_sends(value, out);
+            pattern.for_each_expr(&mut |e| collect_bare_name_sends(e, out));
         }
         ExprNode::Let { value, body, .. } => {
             collect_bare_name_sends(value, out);

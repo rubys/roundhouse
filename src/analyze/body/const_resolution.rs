@@ -4,20 +4,21 @@
 //! Roundhouse retains source-position answers and keys inferred values
 //! by Rubydex declaration IDs.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
+use rubydex::diagnostic::{Diagnostic as RubydexDiagnostic, Rule};
 use rubydex::indexing::local_graph::LocalGraph;
 use rubydex::indexing::{IndexerBackend, LanguageId, build_local_graph};
 use rubydex::model::built_in::BUILT_IN_URI;
 use rubydex::model::declaration::Declaration;
 use rubydex::model::document::Document as RubydexDocument;
-use rubydex::model::definitions::Definition;
+use rubydex::model::definitions::{Definition, Receiver};
 use rubydex::model::graph::Graph;
 use rubydex::model::identity_maps::IdentityHashMap;
 use rubydex::model::name::ParentScope;
-use rubydex::model::ids::{DeclarationId, UriId};
+use rubydex::model::ids::{DeclarationId, NameId, UriId};
 use rubydex::resolution::Resolver;
 
 use crate::ident::{ClassId, Symbol};
@@ -35,6 +36,7 @@ class String < Object\nend\n\
 class Array < Object\nend\n\
 class Hash < Object\nend\n\
 class Symbol < Object\nend\n\
+class Data < Object\nend\n\
 class TrueClass < Object\nend\n\
 class FalseClass < Object\nend\n\
 class NilClass < Object\nend\n\
@@ -58,6 +60,11 @@ struct FileAnswers {
     /// Each constant definition as (offset where its name ends, name,
     /// declaration), sorted by offset.
     constants: Vec<(u32, Box<str>, DeclarationId)>,
+    /// Exact source declaration names, including their lexical owners.
+    constant_classes: IdentityHashMap<DeclarationId, ClassId>,
+    namespace_definitions: HashSet<Box<str>>,
+    class_definitions: HashSet<Box<str>>,
+    runtime_namespace_aliases: HashMap<Box<str>, Box<str>>,
 }
 
 pub(crate) struct ConstResolver {
@@ -113,8 +120,15 @@ impl Document<'_> {
 fn constant_graph(local: LocalGraph, text: &str) -> LocalGraph {
     let (uri_id, document, definitions, strings, names, constant_references, _, _) =
         local.into_parts();
-    let document = RubydexDocument::new(document.uri().into(), text);
-    let mut graph = LocalGraph::from_parts(uri_id, document, strings, names);
+    let mut constant_document = RubydexDocument::new(document.uri().into(), text);
+    for diagnostic in document.diagnostics().iter()
+        .filter(|diagnostic| *diagnostic.rule() == Rule::DynamicSingletonDefinition)
+    {
+        constant_document.add_diagnostic(RubydexDiagnostic::new(
+            *diagnostic.rule(), *diagnostic.uri_id(), diagnostic.offset().clone(), diagnostic.message().into(),
+        ));
+    }
+    let mut graph = LocalGraph::from_parts(uri_id, constant_document, strings, names);
     for definition in definitions.into_values() {
         let keep = match &definition {
             Definition::Class(_)
@@ -225,6 +239,12 @@ fn is_runtime_declaration(graph: &Graph, declaration: &Declaration) -> bool {
     })
 }
 
+fn resolved_namespace(graph: &Graph, name: NameId) -> Option<&Declaration> {
+    let id = graph.name_id_to_declaration_id(name)?;
+    let id = graph.resolve_alias(id).unwrap_or(*id);
+    graph.declarations().get(&id).filter(|declaration| declaration.as_namespace().is_some())
+}
+
 /// Rubydex promotes `X = <method call>` to a module when code calls a
 /// method on `X`, because the call could build a class (`Struct.new`).
 /// Roundhouse types the assigned value instead. A `class` or `module`
@@ -329,6 +349,27 @@ impl ConstResolver {
         let index = constants.partition_point(|(end, ..)| *end <= value.start).checked_sub(1)?;
         let (_, defined, id) = &constants[index];
         (defined.as_ref() == name).then_some(*id)
+    }
+
+    pub(crate) fn constant_class(&self, value: Span, name: &str) -> Option<ClassId> {
+        let declaration = self.constant_declaration(value, name)?;
+        self.file(value.file)?.constant_classes.get(&declaration).cloned()
+    }
+
+    pub(crate) fn has_source_namespace(&self, name: &str) -> bool {
+        self.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
+            || self.files.iter().flatten().any(|file| {
+                file.runtime_namespace_aliases.iter().any(|(alias, target)| {
+                    target.as_ref() == name && self.files.iter().flatten()
+                        .any(|source| source.class_definitions.contains(alias.as_ref()))
+                })
+            })
+    }
+
+    pub(crate) fn is_runtime_class(&self, span: Span, path: &[Symbol], name: &str) -> bool {
+        matches!(self.reference(span, path),
+            Some(Some(ResolvedConstant::Namespace { class, runtime: true }))
+                if class.0.as_str() == name)
     }
 }
 
@@ -466,6 +507,38 @@ fn answer_files(graph: &Graph, sources: &[SourceFile]) -> Vec<Option<FileAnswers
         .collect()
 }
 
+// Rubydex skips parenthesized receivers; retain only literal constant `.define` mutations.
+fn parenthesized_factory_receivers(text: &str) -> HashSet<u32> {
+    struct Receivers(HashSet<u32>);
+    impl<'pr> ruby_prism::Visit<'pr> for Receivers {
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if node.name_loc().as_slice() == b"define"
+                && let Some(receiver) = node.receiver()
+                && let Some(parentheses) = receiver.as_parentheses_node()
+                && let Some(receiver) = parentheses.body()
+            {
+                let location = if let Some(path) = receiver.as_constant_path_node() {
+                    Some(path.name_loc())
+                } else {
+                    receiver.as_constant_read_node().map(|_| receiver.location())
+                };
+                if let Some(location) = location {
+                    self.0.insert(location.start_offset() as u32);
+                }
+            }
+            if let Some(body) = node.body() {
+                ruby_prism::Visit::visit(self, &body);
+            }
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut receivers = Receivers(HashSet::new());
+    if parsed.errors().next().is_none() {
+        ruby_prism::Visit::visit(&mut receivers, &parsed.node());
+    }
+    receivers.0
+}
+
 fn answer_file(
     graph: &Graph,
     source: &SourceFile,
@@ -474,6 +547,13 @@ fn answer_file(
     let mut answers = FileAnswers::default();
     let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else {
         return answers;
+    };
+    let parenthesized_receivers = if document.diagnostics().iter()
+        .any(|diagnostic| *diagnostic.rule() == Rule::DynamicSingletonDefinition)
+    {
+        parenthesized_factory_receivers(&source.text)
+    } else {
+        HashSet::new()
     };
     for reference_id in document.constant_references() {
         let Some(reference) = graph.constant_references().get(reference_id) else {
@@ -491,6 +571,12 @@ fn answer_file(
             .and_then(|name| graph.strings().get(name.str()));
         if !name.is_some_and(|name| written == Some(name.as_str())) {
             continue;
+        }
+        if parenthesized_receivers.contains(&offset.start())
+            && let Some(target) = resolved_namespace(graph, *reference.name_id())
+                .filter(|target| is_runtime_declaration(graph, target))
+        {
+            answers.namespace_definitions.insert(target.name().into());
         }
         let target = graph
             .name_id_to_declaration_id(*reference.name_id())
@@ -537,6 +623,52 @@ fn answer_file(
     }
     for definition_id in document.definitions() {
         let definition = graph.definitions().get(definition_id);
+        if let Some(name) = definition
+            .filter(|definition| matches!(definition,
+                Definition::Class(_) | Definition::Module(_) | Definition::Constant(_) | Definition::ConstantAlias(_)))
+            .and_then(Definition::name_id)
+            .and_then(|id| graph.names().get(id))
+        {
+            let parent = match name.parent_scope() {
+                ParentScope::TopLevel => None,
+                ParentScope::None => name.nesting().as_ref(),
+                ParentScope::Some(id) | ParentScope::Attached(id) => Some(id),
+            };
+            if let Some(written) = graph.strings().get(name.str()) {
+                let owner = parent.and_then(|id| graph.name_id_to_declaration_id(*id))
+                    .and_then(|id| graph.declarations().get(id));
+                let full = owner.map_or_else(|| written.to_string(), |owner| format!("{}::{}", owner.name(), written.as_str()));
+                if matches!(definition, Some(Definition::Class(_) | Definition::Module(_))) {
+                    answers.class_definitions.insert(full.clone().into());
+                }
+                if let Some(Definition::ConstantAlias(alias)) = definition {
+                    if let Some(target) = resolved_namespace(graph, *alias.target_name_id())
+                        .filter(|target| is_runtime_declaration(graph, target))
+                    {
+                        answers.runtime_namespace_aliases.insert(full.clone().into(), target.name().into());
+                    }
+                }
+                answers.namespace_definitions.insert(full.into());
+            }
+        }
+        if let Some(Definition::SingletonClass(singleton)) = definition
+            && let Some(ParentScope::Attached(receiver)) = graph.names().get(singleton.name_id())
+                .map(|name| name.parent_scope())
+            && let Some(target) = resolved_namespace(graph, *receiver)
+                .filter(|target| is_runtime_declaration(graph, target))
+        {
+            answers.namespace_definitions.insert(target.name().into());
+        }
+        if let Some(Definition::Method(method)) = definition {
+            if let Some(Receiver::ConstantReceiver(receiver)) = method.receiver()
+                && graph.strings().get(method.str_id()).is_some_and(|name| name.as_str() == "define()")
+                && let Some(target) = resolved_namespace(graph, *receiver)
+                    .filter(|target| is_runtime_declaration(graph, target))
+            {
+                // A named singleton definition can override a core factory without a class reopen.
+                answers.namespace_definitions.insert(target.name().into());
+            }
+        }
         let (name_id, offset) = match definition {
             Some(Definition::Constant(it)) => (it.name_id(), it.offset()),
             Some(Definition::ConstantAlias(it)) => (it.name_id(), it.offset()),
@@ -546,6 +678,9 @@ fn answer_file(
         let id = definition.and_then(|definition| graph.definition_to_declaration_id(definition));
         if let (Some(name), Some(id)) = (name, id) {
             answers.constants.push((offset.end(), name.as_str().into(), *id));
+            if let Some(declaration) = graph.declarations().get(id) {
+                answers.constant_classes.insert(*id, ClassId(Symbol::from(declaration.name())));
+            }
         }
     }
     answers.constants.sort_unstable_by_key(|(end, ..)| *end);

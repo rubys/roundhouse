@@ -13,6 +13,7 @@ module Tep
     if status == 401; return "Unauthorized"; end
     if status == 403; return "Forbidden"; end
     if status == 404; return "Not Found"; end
+    if status == 413; return "Content Too Large"; end
     if status == 500; return "Internal Server Error"; end
     "OK"
   end
@@ -162,6 +163,12 @@ module Tep
         send_simple(client, 400, "bad request")
         return false
       end
+      # Before the drain, which is what held the bytes (Request#body_refusal).
+      refusal = req.body_refusal(Tep.max_body_bytes)
+      if refusal != 0
+        send_simple(client, refusal, refusal == 413 ? "request body too large" : "bad request")
+        return false
+      end
       req.consume_body(client)
       res = Response.new
       begin
@@ -225,13 +232,14 @@ module Tep
         end
         head = build_head(req, res)
         Sock.sphttp_write_str(client, head)
-        Sock.sphttp_sendfile(client, res.file_path)
+        Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
         return
       end
 
       if res.body.length > 0 && !res.headers.key?("Content-Type")
         res.headers["Content-Type"] = "text/html; charset=utf-8"
       end
+      Tep.maybe_gzip!(req, res)
       # BYTES, both times — `length` counts characters and `write_str`
       # stops at the first NUL. See the twin comment in
       # server_scheduled.rb#write_response for the failure this caused.
@@ -244,7 +252,10 @@ module Tep
 
       head = build_head(req, res)
       Sock.sphttp_write_str(client, head)
-      if res.body.bytesize > 0
+      # HEAD: the headers GET would send, Content-Length included, and
+      # no body (RFC 9110 9.3.2). A body here would be read by the
+      # client as the start of the NEXT response on a keep-alive socket.
+      if res.body.bytesize > 0 && req.verb != "HEAD"
         Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
       end
     end

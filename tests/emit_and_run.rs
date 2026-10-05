@@ -9,8 +9,95 @@
 mod emit_and_run;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/data_factory.rs"]
+mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+
+/// Build each query case independently: declaring a model class method
+/// must not accidentally open the old gate for the order/where.not cases.
+fn scope_free_query_app(action: &str) -> emit_and_run::Overlay {
+    let (model, query) = match action {
+        "index" => ("class Widget < ApplicationRecord\nend\n", "Widget.order(:name).limit(1)"),
+        "named" => ("class Widget < ApplicationRecord\nend\n", "Widget.where.not(name: nil).order(:name)"),
+        "recent" => (
+            "class Widget < ApplicationRecord\n  def self.recent\n    order(:name).limit(1)\n  end\nend\n",
+            "Widget.recent",
+        ),
+        _ => panic!("unknown scope-free query action: {action}"),
+    };
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", model)
+        .write("config/routes.rb", &format!(
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#{action}\"\nend\n"
+        ))
+        .write("app/controllers/widgets_controller.rb", &format!(
+            "class WidgetsController < ApplicationController\n  def {action}\n    render plain: {query}.map {{ |w| w.name }}.join(\",\")\n  end\nend\n"
+        ))
+}
+
+/// Exercise one action independently, so an order failure cannot mask
+/// where.not or the model class method's implicit-self query root.
+fn scope_free_query_assertions(action: &str, expected: &str) -> String {
+    let nullable_row = if action == "named" { "Widget.create!(name: nil)" } else { "" };
+    format!(r#"
+require_relative "app/controllers/widgets_controller"
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+{nullable_row}
+controller = WidgetsController.new
+controller.process_action(:{action})
+raise "{action} lost its relation: #{{controller.body}}" unless controller.body == "{expected}"
+puts "scope-free {action} passed"
+"#)
+}
+
+/// Class-root order needs a Relation even without any declared scope.
+#[test]
+fn scope_free_model_order_runs() {
+    scope_free_query_app("index")
+        .run_ruby(&scope_free_query_assertions("index", "alpha"))
+        .assert_passes();
+}
+
+/// Zero-argument where reaches WhereChain independently of the order case.
+#[test]
+fn scope_free_model_where_not_runs() {
+    scope_free_query_app("named")
+        .run_ruby(&scope_free_query_assertions("named", "alpha,beta"))
+        .assert_passes();
+}
+
+/// A model class method's bare order root remains supported without named
+/// scopes; this control is independent of other class-root query demands.
+#[test]
+fn scope_free_model_bare_root_class_method_runs() {
+    scope_free_query_app("recent")
+        .run_ruby(&scope_free_query_assertions("recent", "alpha"))
+        .assert_passes();
+}
+
+/// Compile and execute the same three controller actions after booting
+/// their emitted in-memory SQLite database.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn scope_free_model_query_builders_run_on_spinel() {
+    for (action, expected) in [("index", "alpha"), ("named", "alpha,beta"), ("recent", "alpha")] {
+        let script = format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+            scope_free_query_assertions(action, expected)
+        );
+        scope_free_query_app(action).run_spinel(&script).assert_passes();
+    }
+}
 
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
@@ -299,6 +386,34 @@ end
         .assert_passes();
 }
 
+/// An app with no jobs still runs its tests. The test helper switches
+/// `ActiveJob` to enqueue at load, so it needs the runtime even when no
+/// app file names `ActiveJob`.
+#[test]
+fn an_app_without_jobs_runs_its_tests() {
+    emit_and_run::real_blog()
+        .remove("app/jobs/application_job.rb")
+        .run_test("test/models/article_test.rb")
+        .assert_passes();
+}
+
+/// `thread_state` replaces the job queue methods with locked, per-thread
+/// versions. Boot loads `active_job` first, so a job class that loads it
+/// again later does not put the unlocked versions back.
+#[test]
+fn the_job_queue_keeps_its_thread_safe_methods() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r#"%i[enqueue drain pending_count record_performed performed].each do |m|
+  file = ActiveJob.method(m).source_location[0]
+  raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
+end
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Source inference must preserve Ruby parameter binding and the existing
 /// test lowering; inferred signatures are not permission to rewrite calls.
 #[test]
@@ -470,6 +585,37 @@ raise entry.as_json_str.inspect unless entry.as_json_str == expected
 actual = ActionController::JsonRender.encode(entry.as_json)
 raise actual.inspect unless actual == expected
 puts "Unset nonnullable Date JSON is null in both paths"
+"#)
+        .assert_passes();
+}
+
+/// A jbuilder view over a date column renders what Rails 8.1 + jbuilder
+/// 2.15 render: the ISO date, or `null` — both through `json.extract!`
+/// and a bare `json.key record.col` pair. The view used to send the
+/// date's stored text through `encode_datetime`, which quoted the ""
+/// an unset nonnullable slot holds (`"due_on":""`). A timestamp column
+/// in the same view keeps its `encode_datetime` route.
+#[test]
+fn jbuilder_date_column_renders_the_iso_date_or_null() {
+    date_blog()
+        .edit("db/schema.rb", "t.date \"due_on\"", "t.date \"due_on\", null: false")
+        .write("app/controllers/calendar_entries_controller.rb", "class CalendarEntriesController < ApplicationController\n  def show\n    @calendar_entry = CalendarEntry.find(params[:id])\n  end\n\n  def fresh\n    @calendar_entry = CalendarEntry.new\n    render :show\n  end\nend\n")
+        .write("app/views/calendar_entries/show.json.jbuilder", "json.extract! @calendar_entry, :due_on, :observed_at\njson.due @calendar_entry.due_on\n")
+        .edit("config/routes.rb", "  resources :articles do", "  resources :calendar_entries, only: [:show] do\n    get :fresh, on: :collection\n  end\n  resources :articles do")
+        .run_ruby(r#"
+require_relative "app/controllers/calendar_entries_controller"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), observed_at: Time.utc(2024, 1, 31, 23, 47, 19, 123456))
+controller = CalendarEntriesController.new
+controller.params = {"id" => entry.id.to_s}
+controller.process_action(:show)
+expected = '{"due_on":"2024-01-31","observed_at":"2024-01-31T23:47:19.123Z","due":"2024-01-31"}'
+raise controller.body.inspect unless controller.body == expected
+controller = CalendarEntriesController.new
+controller.params = {}
+controller.process_action(:fresh)
+expected = '{"due_on":null,"observed_at":null,"due":null}'
+raise controller.body.inspect unless controller.body == expected
+puts "jbuilder Date JSON is the ISO date or null"
 "#)
         .assert_passes();
 }
@@ -708,6 +854,62 @@ puts "ok"
         .assert_passes();
 }
 
+/// `Relation#last_n` is Rails' SQL tail (`ORDER BY … DESC LIMIT n`, then
+/// reverse), not `to_a.last(n)` over the whole history. Campfire's
+/// `ordered.last(PAGE_SIZE)` is every room page.
+#[test]
+fn relation_last_n_limits_in_sql() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+seen = []
+orig = Db.method(:prepare)
+Db.define_singleton_method(:prepare) do |sql|
+  seen << sql
+  orig.call(sql)
+end
+
+Article.create!(title: "tail-a", body: "long enough body")
+Article.create!(title: "tail-b", body: "long enough body")
+Article.create!(title: "tail-c", body: "long enough body")
+Article.create!(title: "tail-d", body: "long enough body")
+Article.create!(title: "tail-e", body: "long enough body")
+
+rel = ActiveRecord::Relation.new(Article).where("title LIKE 'tail-%'").order(:title)
+prior = rel.to_sql
+seen.clear
+titles = rel.last_n(2).map(&:title)
+raise "tail in relation order: #{titles.inspect}" unless titles == ["tail-d", "tail-e"]
+raise "last_n poisoned the chain: #{rel.to_sql}" unless rel.to_sql == prior
+sql = seen.find { |s| s.include?("FROM articles") && s.include?("LIMIT") }
+raise "last_n did not LIMIT in SQL: #{seen.inspect}" if sql.nil?
+raise "reversed order missing: #{sql}" unless sql.upcase.include?("TITLE DESC")
+raise "LIMIT 2 missing: #{sql}" unless sql.include?("LIMIT 2")
+raise "count poisoned" unless rel.count == 5
+
+raise "bare last" unless rel.last.title == "tail-e"
+raise "last poisoned the chain" unless rel.to_sql == prior
+
+rel.to_a
+seen.clear
+loaded = rel.last_n(2).map(&:title)
+raise "loaded tail: #{loaded.inspect}" unless loaded == ["tail-d", "tail-e"]
+raise "loaded last_n re-queried: #{seen.inspect}" if seen.any? { |s| s.include?("FROM articles") && s.include?("LIMIT") }
+
+off = ActiveRecord::Relation.new(Article).where("title LIKE 'tail-%'").order(:title).offset(1)
+raise "offset tail" unless off.last_n(2).map(&:title) == ["tail-d", "tail-e"]
+
+rel = ActiveRecord::Relation.new(Article)
+raise "one col" unless rel.reverse_order_term("title DESC") == "title ASC"
+raise "hash join" unless rel.reverse_order_term("a ASC, b DESC") == "a DESC, b ASC"
+raise "raw pair" unless rel.reverse_order_term("created_at DESC, id DESC") == "created_at ASC, id ASC"
+raise "bare" unless rel.reverse_order_term("title") == "title DESC"
+puts "ok"
+"##,
+        )
+        .assert_passes();
+}
+
 /// The runtime defines this exception in `active_support_ext.rb`.
 #[test]
 fn framework_exception_resolves_from_real_runtime_source() {
@@ -751,6 +953,204 @@ fn a_concern_class_reference_survives_the_copy_into_its_controller() {
         )
         .run_ruby(
             "require_relative 'app/controllers/quotes_controller'\nraise 'concern class reference' unless QuotesController.new.price == 7",
+        )
+        .assert_passes();
+}
+
+/// A concern that includes another concern inside its `included do`
+/// block: ActiveSupport::Concern runs that block on the includer, so
+/// the model gets the inner concern's methods too.
+#[test]
+fn a_concern_included_from_an_included_block_reaches_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @loudest = @articles.first&.shout\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
+/// Ruby's lookup order for a module included from `included do`: the
+/// block runs on the includer after the outer module is appended, so
+/// the inner module sits AHEAD of the outer one and its method wins.
+#[test]
+fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\n\n  def shout\n    \"outer\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    \"inner\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"inner\"",
+        )
+        .assert_passes();
+}
+
+/// The inner concern's own `included do` runs on the includer too: its
+/// scope is declared on the model.
+#[test]
+fn an_include_from_an_included_block_brings_its_own_included_items() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  included do\n    scope :titled, ->(title) { where(title: title) }\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "Article.create!(title: \"Hi\", body: \"Body text here\")\nraise \"scope missing\" unless Article.titled(\"Hi\").count == 1",
+        )
+        .assert_passes();
+}
+
+/// An action whose whole body is a call to a rendering helper defined
+/// on a PARENT controller. The default response appended to the action
+/// must be guarded by `performed?`, as it is for a helper on the
+/// action's own controller, or it overwrites what the helper rendered.
+#[test]
+fn an_action_responding_through_an_inherited_helper_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    render_title(Article.find(params[:id]))\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through the base controller's helper\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same, one call further: the action calls an inherited helper
+/// that delegates to the inherited helper that renders.
+#[test]
+fn an_action_responding_through_a_delegating_inherited_helper_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def report(article)\n    render_title(article)\n  end\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    report(Article.find(params[:id]))\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through a delegating helper\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same when the nearest helper is an override that reaches the
+/// rendering one through `super`.
+#[test]
+fn an_action_responding_through_an_override_calling_super_keeps_its_response() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/base_reports_controller.rb",
+            "class BaseReportsController < ApplicationController\n  private\n\n  def render_title(article)\n    render json: {title: article.title}\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < BaseReportsController\n  def show\n    render_title(Article.find(params[:id]))\n  end\n\n  private\n\n  def render_title(article)\n    super\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"/reports/:id\", to: \"reports#show\"\n  resources :articles do",
+        )
+        .write(
+            "test/controllers/reports_controller_test.rb",
+            "require \"test_helper\"\n\nclass ReportsControllerTest < ActionDispatch::IntegrationTest\n  test \"a subclass action responds through super\" do\n    article = Article.create!(title: \"Quarterly\", body: \"Body text here\")\n    get \"/reports/#{article.id}\"\n    assert_response :success\n    assert_equal \"Quarterly\", JSON.parse(response.body)[\"title\"]\n  end\nend\n",
+        )
+        .run_test("test/controllers/reports_controller_test.rb")
+        .assert_passes();
+}
+
+/// `render_code(size: 2, **opts)` into `def render_code(size:, color:
+/// "black")`: a keyword bundle splatted AFTER a literal keyword, in a
+/// receiverless call. Ingest desugars it to `{ size: 2 }.merge(opts)`;
+/// `kwsplat` recovers the keywords, with the literal as the default
+/// the bundle is read against — Ruby lets the later `**` win.
+#[test]
+fn a_keyword_bundle_after_a_literal_keyword_reaches_a_keyword_callee() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def code_svg(**opts)\n    render_code(size: 2, **opts)\n  end\n\n  def render_code(size:, color: \"black\")\n    \"#{title}:#{size}:#{color}\"\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.code_svg(color: \"red\") unless a.code_svg(color: \"red\") == \"Hi:2:red\"\nraise a.code_svg unless a.code_svg == \"Hi:2:black\"\nraise a.code_svg(size: 9) unless a.code_svg(size: 9) == \"Hi:9:black\"",
+        )
+        .assert_passes();
+}
+
+/// The same call where the callee comes from an included concern: the
+/// receiverless send resolves through the model's includes.
+#[test]
+fn a_keyword_bundle_reaches_a_keyword_callee_from_an_included_concern() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/coded.rb",
+            "module Coded\n  extend ActiveSupport::Concern\n\n  def render_code(size:, color: \"black\")\n    \"#{size}:#{color}\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Coded\n\n  def code_svg(**opts)\n    render_code(size: 2, **opts)\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.code_svg(color: \"red\") unless a.code_svg(color: \"red\") == \"2:red\"\nraise a.code_svg unless a.code_svg == \"2:black\"",
         )
         .assert_passes();
 }
@@ -1517,6 +1917,103 @@ end
 "#,
         )
         .run_test("test/models/article_as_hash_boolean_test.rb")
+        .assert_passes();
+}
+
+/// `Hash#to_query` is the scalar query string Rails builds: symbol or
+/// string keys, a nil value with no `=`, and insertion order. Nested
+/// hashes stay on the ruby-family reopen.
+#[test]
+fn a_hash_to_query_renders_symbol_and_string_keys() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def query_probe
+    [
+      { name: "Ada", role: nil }.to_query,
+      { "name" => "Ada", "role" => "editor" }.to_query,
+      {}.to_query
+    ].join("|")
+  end
+"#,
+        )
+        .write(
+            "test/models/article_hash_query_test.rb",
+            r#"require "test_helper"
+
+class ArticleHashQueryTest < ActiveSupport::TestCase
+  test "Hash#to_query renders symbol keys, string keys, and a nil value" do
+    assert_equal "name=Ada&role|name=Ada&role=editor|", Article.new.query_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_hash_query_test.rb")
+        .assert_passes();
+}
+
+/// `Array.wrap` is ActiveSupport's class method: nil is empty, an array
+/// stays an array, and a scalar becomes a one-element array.
+#[test]
+fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def wrapped_nil
+    Array.wrap(nil).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_array
+    Array.wrap(%w[a b]).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_string
+    Array.wrap("solo").map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_integer
+    Array.wrap(7).map { |item| item.to_s }.join(",")
+  end
+
+  # One caller passes an array, the default is nil, so the parameter
+  # is `Array | Nil`. Folding that to one shape would nest the array
+  # or wrap nil. The call stays and answers both.
+  def wrapped_either(value = nil)
+    Array.wrap(value).map { |item| item.to_s }.join(",")
+  end
+
+  def either_from_array
+    wrapped_either(%w[a b])
+  end
+"#,
+        )
+        .write(
+            "test/models/article_array_wrap_test.rb",
+            r#"require "test_helper"
+
+class ArticleArrayWrapTest < ActiveSupport::TestCase
+  test "Array.wrap keeps nil, an array, and a scalar distinct" do
+    article = Article.new
+    assert_equal "", article.wrapped_nil
+    assert_equal "a,b", article.wrapped_array
+    assert_equal "solo", article.wrapped_string
+    assert_equal "7", article.wrapped_integer
+    assert_equal "", article.wrapped_either
+    assert_equal "", article.wrapped_either(nil)
+    assert_equal "a,b", article.wrapped_either(%w[a b])
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_array_wrap_test.rb")
         .assert_passes();
 }
 
@@ -3603,6 +4100,44 @@ fn a_template_only_action_is_fed_by_its_before_action() {
         .assert_passes();
 }
 
+/// `case/in` structural pattern matching (#f9): taking `CaseMatchNode`
+/// from an ingest error to a typed `CaseMatch` node is a claim the
+/// emitted program actually dispatches through it (invariant 6), not
+/// just that `check` stops reporting `unsupported expression node:
+/// CaseMatchNode`. A PORO under `app/lib` (same placement as the
+/// `Deprecation` overlay above) exercises a `Capture` pattern
+/// (`Integer => n`) and a plain-class `Value` pattern (`String`) — the
+/// two shapes real-blog's own model/controller code never uses, so
+/// this is the only thing that runs them through CRuby at all.
+#[test]
+fn case_in_pattern_matching_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/pattern_matcher.rb",
+            "class PatternMatcher\n  \
+               def self.classify(x)\n    \
+                 case x\n    \
+                 in Integer => n\n      \
+                   n * 2\n    \
+                 in String\n      \
+                   0\n    \
+                 end\n  \
+               end\nend\n",
+        )
+        .write(
+            "test/models/pattern_matcher_test.rb",
+            "require \"test_helper\"\n\n\
+             class PatternMatcherTest < ActiveSupport::TestCase\n  \
+               test \"case/in dispatches by pattern and captures a binding\" do\n    \
+                 assert_equal 10, PatternMatcher.classify(5)\n    \
+                 assert_equal 0, PatternMatcher.classify(\"hi\")\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/pattern_matcher_test.rb")
+        .assert_passes();
+}
+
 /// `Pathname#join` takes any number of parts, and an app writes
 /// `Rails.root.join("source", "posts")` as often as the one-part form.
 /// `check` is clean on the call, so the emitted `Rails::AppPath#join`
@@ -3612,4 +4147,786 @@ fn rails_root_join_takes_any_number_of_parts() {
     let run = rails_root_join::overlay().run_ruby(rails_root_join::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root.join contract passed"));
+}
+
+/// An Active Job argument serializer extends a Rails base that the
+/// runtime does not port. The emit drops the class with a
+/// `lower_residue` warning, so the tree still loads. Before, the class
+/// was kept, and `app/models.rb` raised `uninitialized constant
+/// ActiveJob::Serializers` at boot.
+#[test]
+fn an_active_job_object_serializer_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/serializers/article_serializer.rb",
+            r#"class ArticleSerializer < ActiveJob::Serializers::ObjectSerializer
+  def klass
+    Article
+  end
+
+  def serialize(article)
+    super("id" => article.id)
+  end
+
+  def deserialize(hash)
+    Article.find(hash["id"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// `include ActiveSupport::NumberHelper` in a helper gives it the same
+/// number helpers as `ActionView::Helpers::NumberHelper`. No target
+/// ships that namespace, so the include must not reach the emitted
+/// module. Before, `application_helper.rb` raised `uninitialized
+/// constant ActiveSupport::NumberHelper` at boot.
+#[test]
+fn an_active_support_number_helper_include_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include ActiveSupport::NumberHelper
+
+  def article_total(count)
+    number_with_delimiter(count)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "delimiter" unless ApplicationHelper.article_total(1234567) == "1,234,567"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `javascript_include_tag :application` names the source with a
+/// Symbol, as Rails allows. The call is hoisted to a constant, so it
+/// runs at load. Before, the runtime called `include?` on the Symbol,
+/// and the layout raised `NoMethodError` at boot.
+#[test]
+fn a_symbol_source_for_javascript_include_tag_renders_a_script_tag() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= javascript_include_tag :application %>\n",
+        )
+        .write(
+            "app/views/articles/_scripts.html.erb",
+            "<%= javascript_include_tag :admin, defer: true %>",
+        )
+        .run_ruby(
+            r#"html = Views::Articles.scripts(nil)
+raise "script tag: #{html}" unless html == %(<script src="/assets/admin.js" defer="defer"></script>)
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A Symbol source that a value holds, not a literal, reaches the
+/// runtime as a Symbol. Before, the runtime called `include?` on it and
+/// raised `NoMethodError`.
+#[test]
+fn a_symbol_source_in_a_value_for_javascript_include_tag_renders_a_script_tag() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/articles/_scripts.html.erb",
+            "<% source = :admin %><%= javascript_include_tag source %>",
+        )
+        .run_ruby(
+            r#"html = Views::Articles.scripts(nil)
+raise "script tag: #{html}" unless html == %(<script src="/assets/admin.js"></script>)
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A Stimulus `data:` hash has `controller:` and `action:` keys, as
+/// `url_for` options do. Before, the lowerer read it as `url_for`
+/// options and wrote a route helper named after its keys. A dashed key
+/// made that name a syntax error, and the app did not load.
+#[test]
+fn a_stimulus_data_hash_on_link_to_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= link_to "Open", articles_path, data: { controller: "menu", action: "menu#open", "menu-id-value": 1 } %>"#,
+        &[r#"href="/articles""#, ">Open</a>"],
+    );
+}
+
+/// `form_with` takes the `data:` hash for its `<form>` in `html:`, one
+/// level deeper.
+#[test]
+fn a_stimulus_data_hash_in_form_with_html_options_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= form_with url: articles_path, html: { data: { controller: "menu", action: "menu#open", "menu-id-value": 1 } } do |f| %><%= f.submit "Go" %><% end %>"#,
+        &[r#"action="/articles""#, r#"value="Go""#],
+    );
+}
+
+/// A `data:` hash that a local holds is not a literal at the call.
+#[test]
+fn a_stimulus_data_hash_in_a_local_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<% d = { controller: "menu", action: "menu#open", "menu-id-value": 1 } %><%= link_to "Open", articles_path, data: d %>"#,
+        &[r#"href="/articles""#, ">Open</a>"],
+    );
+}
+
+/// A `data:` hash with a `.merge` on it is a call, not a Hash literal.
+#[test]
+fn a_merged_stimulus_data_hash_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= link_to "Open", articles_path, data: { controller: "menu", action: "menu#open", "menu-id-value": 1 }.merge(turbo: false) %>"#,
+        &[r#"href="/articles""#, r#"data-turbo="false""#, ">Open</a>"],
+    );
+}
+
+/// Renders `erb` as a partial, and expects the Stimulus attributes and
+/// each of `parts` in the HTML.
+fn a_stimulus_data_hash_renders(erb: &str, parts: &[&str]) {
+    let stimulus = [r#"data-controller="menu""#, r#"data-action="menu#open""#, r#"data-menu-id-value="1""#];
+    let expected: Vec<String> = stimulus
+        .iter()
+        .chain(parts)
+        .map(|p| format!("{p:?}"))
+        .collect();
+    emit_and_run::real_blog()
+        .write("app/views/articles/_menu.html.erb", erb)
+        .run_ruby(&format!(
+            r#"html = Views::Articles.menu(nil)
+[{}].each do |part|
+  raise "missing #{{part}}: #{{html}}" unless html.include?(part)
+end
+puts "ok"
+"#,
+            expected.join(", ")
+        ))
+        .assert_passes();
+}
+
+/// `t.integer …, limit: 8` is a `bigint` now (the width Rails creates),
+/// where it was an `integer`. On SQLite both are INTEGER and both type
+/// as `Integer`, so the emitted program must keep a value past 32 bits
+/// through a save and a reload, as it did before.
+#[test]
+fn an_eight_byte_integer_column_keeps_a_value_past_32_bits() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"views\", limit: 8, default: 0, null: false",
+        )
+        .write(
+            "test/models/article_views_test.rb",
+            r#"require "test_helper"
+
+class ArticleViewsTest < ActiveSupport::TestCase
+  test "a value past 32 bits survives a reload" do
+    article = Article.create!(title: "Popular", body: "A long enough body", views: 5_000_000_000)
+    assert_equal 5_000_000_000, Article.find(article.id).views
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_views_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn literal_data_factories_and_aliases_check_cleanly_and_execute() {
+    use roundhouse::ident::{ClassId, Symbol};
+    use roundhouse::ty::Ty;
+
+    let run = emit_and_run::real_blog()
+        .write("app/lib/factory_examples.rb", data_factory::DECLARATIONS)
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @declared = FactoryExamples::First::Result.new("first", 1.0, false)
+    @alias = FactoryExamples::First::ChainedAlias.new(name: nil, score: 0.0, enabled: true)
+    @second = FactoryExamples::Second::Result.new(name: "second")
+    @empty = FactoryExamples::Empty::Result.new
+  end
+end
+"#)
+        .run_ruby(r#"
+first = FactoryExamples::First.build
+aliased = FactoryExamples::First.aliased
+qualified = FactoryExamples::First.qualified
+second = FactoryExamples::Second.build
+empty = FactoryExamples::Empty.build
+raise "wrong declared class" unless first.class == FactoryExamples::First::Result
+raise "alias created another class" unless aliased.class == first.class && FactoryExamples::First::Alias == first.class && FactoryExamples::First::ChainedAlias == first.class
+raise "member values changed" unless first.name == "first" && first.score == 0.8 && first.enabled == false
+raise "nil/zero/true changed" unless aliased.name.nil? && aliased.score == 0.0 && aliased.enabled == true
+raise "positional constructor changed" unless qualified.name == "qualified" && qualified.score == 1.0 && qualified.enabled == false
+raise "same-named factory crossed owners" unless second.class == FactoryExamples::Second::Result && second.name == "second" && second.class != first.class
+raise "empty factory changed" unless empty.class == FactoryExamples::Empty::Result && empty.members.empty?
+raise "Data lost immutability" unless first.frozen? && !first.respond_to?(:name=)
+puts "Data factory identity, aliases, constructors, values and immutability passed"
+"#);
+    run.assert_passes();
+    let emitted = std::fs::read_to_string(run.emitted.join("app/models/factory_examples/first.rb")).unwrap();
+    assert!(emitted.contains("Data.define"), "{emitted}");
+    for (owner, stem, readers) in [
+        ("FactoryExamples::First", "first", vec!["name", "score", "enabled"]),
+        ("FactoryExamples::Second", "second", vec!["name"]),
+        ("FactoryExamples::Empty", "empty", vec![]),
+    ] {
+        let sidecar = std::fs::read_to_string(run.emitted.join(
+            format!("sig/app/models/factory_examples/{stem}.rbs")
+        )).unwrap();
+        assert!(sidecar.contains("class Result < ::Data"), "{sidecar}");
+        assert!(!sidecar.contains("class Alias") && !sidecar.contains("class ChainedAlias"), "{sidecar}");
+        let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+        let id = ClassId(Symbol::from(format!("{owner}::Result")));
+        let factory = signatures.get(&id).expect("factory return type is declared");
+        assert!(factory.contains_key(&Symbol::from("new")), "{sidecar}");
+        for reader in readers {
+            let signature = &factory[&Symbol::from(reader)];
+            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::Untyped), "{sidecar}");
+            assert!(!factory.contains_key(&Symbol::from(format!("{reader}="))), "{sidecar}");
+        }
+        let owner_methods = &signatures[&ClassId(Symbol::from(owner))];
+        let Ty::Fn { ret, .. } = &owner_methods[&Symbol::from("build")] else {
+            panic!("build has no function signature: {sidecar}");
+        };
+        assert_eq!(ret.as_ref(), &Ty::Class { id, args: vec![] }, "{sidecar}");
+    }
+}
+
+/// A file in `app/models/<model>/` often reopens the model only to
+/// hold a nested class. That reopen is a namespace, so the model keeps
+/// its own file. Before, the reopen became a library class whose file
+/// was the model's file, so the emit wrote the nested class over the
+/// model, and `Article.find` raised `NoMethodError`.
+#[test]
+fn a_model_reopened_to_hold_a_nested_class_keeps_its_model() {
+    a_reopen_at_keeps_the_model("app/models/article/summary.rb");
+}
+
+/// The same reopen outside `app/models`. The ingest reads these
+/// folders later, and the reopen must not write over the model there
+/// either.
+#[test]
+fn a_model_reopened_in_app_services_keeps_its_model() {
+    a_reopen_at_keeps_the_model("app/services/article/summary.rb");
+}
+
+#[test]
+fn a_model_reopened_in_lib_keeps_its_model() {
+    a_reopen_at_keeps_the_model("lib/article/summary.rb");
+}
+
+fn a_reopen_at_keeps_the_model(path: &str) {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  DRAFT = \"draft\".freeze\n\n  def summary\n    Summary.new(self)\n  end\n",
+        )
+        .write(
+            path,
+            r##"class Article
+  class Summary
+    def initialize(article)
+      @article = article
+    end
+
+    def text
+      "#{@article.title} (#{Article::DRAFT})"
+    end
+  end
+end
+"##,
+        )
+        .write(
+            "test/models/article_summary_test.rb",
+            r##"require "test_helper"
+
+class ArticleSummaryTest < ActiveSupport::TestCase
+  test "the model and its nested class both load" do
+    article = Article.find(articles(:one).id)
+    assert_equal "#{article.title} (draft)", article.summary.text
+    assert Article < ApplicationRecord
+  end
+end
+"##,
+        )
+        .run_test("test/models/article_summary_test.rb")
+        .assert_passes();
+}
+
+/// `if:` / `unless:` guards a callback. Ingest used to reject the
+/// declaration outright, so the callback was silently dropped and ran in
+/// no circumstance. A zero-arity lambda body (`if: -> { color.blank? }`)
+/// is spliced as the guard; a Symbol (`unless: :loud?`) is the predicate
+/// call, negated. This runs the emitted program to prove the callback
+/// fires exactly when Rails would.
+#[test]
+fn a_conditional_callback_runs_only_when_its_condition_holds() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "config/application.rb",
+            "module TestApp\n  class Application < Rails::Application\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  before_validation :assign_color, on: :create, if: -> { color.blank? }
+  before_save :shout, unless: :loud?
+
+  private
+    def assign_color
+      self.color = "default"
+    end
+
+    def loud?
+      self.name == "LOUD"
+    end
+
+    def shout
+      self.name = self.name.to_s.upcase
+    end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"color\"\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"quiet = Widget.create!(name: "quiet")
+raise "if: true must run the callback: #{quiet.color.inspect}" unless quiet.color == "default"
+raise "unless: true (not loud?) must run the callback: #{quiet.name.inspect}" unless quiet.name == "QUIET"
+loud = Widget.create!(name: "LOUD", color: "red")
+raise "if: false must skip the callback: #{loud.color.inspect}" unless loud.color == "red"
+raise "unless: false (loud?) must skip the callback: #{loud.name.inspect}" unless loud.name == "LOUD"
+"#,
+        );
+    run.assert_passes();
+}
+
+/// Both `if:` and `unless:` on one callback: Rails runs it only when the
+/// `if:` holds AND the `unless:` does not, so the two guards compose as
+/// `if` and `!unless`. The emitted program must honour all four
+/// combinations.
+#[test]
+fn a_callback_with_both_if_and_unless_requires_both() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "config/application.rb",
+            "module TestApp\n  class Application < Rails::Application\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  before_save :stamp, if: :ready?, unless: :blocked?
+
+  def ready?
+    self.color.present?
+  end
+
+  def blocked?
+    self.name == "blocked"
+  end
+
+  def stamp
+    self.name = "STAMPED"
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"color\"\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"not_ready = Widget.create!(name: "x")
+raise "if: false must skip: #{not_ready.name.inspect}" unless not_ready.name == "x"
+blocked = Widget.create!(color: "red", name: "blocked")
+raise "unless: true must skip: #{blocked.name.inspect}" unless blocked.name == "blocked"
+runs = Widget.create!(color: "red", name: "x")
+raise "if: true and unless: false must run: #{runs.name.inspect}" unless runs.name == "STAMPED"
+"#,
+        );
+    run.assert_passes();
+}
+/// A predicate the app defines on `String` is that method, not an
+/// inquirer comparison against its own name.
+#[test]
+fn a_string_predicate_the_app_defines_is_not_folded_as_an_inquiry() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/string.rb",
+            "class String\n  def shout?\n    self == upcase\n  end\n\n  def self.special?\n    true\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ApplicationRecord\n  def shouting?\n    title.to_s.shout?\n  end\n\n  def shouting_inquirer?\n    title.to_s.inquiry.shout?\n  end\n\n  def class_side_inquirer?\n    title.to_s.inquiry.special?\n  end",
+        )
+        .run_ruby(
+            r#"
+raise "folded to a comparison" unless Article.new(title: "LOUD", body: "b").shouting?
+raise "answers true for everything" if Article.new(title: "quiet", body: "b").shouting?
+raise "inquirer folded to a comparison" unless Article.new(title: "LOUD", body: "b").shouting_inquirer?
+raise "inquirer answers true for everything" if Article.new(title: "quiet", body: "b").shouting_inquirer?
+raise "class-side predicate blocked the fold" unless Article.new(title: "special", body: "b").class_side_inquirer?
+raise "class-side fold answers true for everything" if Article.new(title: "quiet", body: "b").class_side_inquirer?
+"#,
+        )
+        .assert_passes();
+}
+
+/// The same through a module the app includes into `String`.
+#[test]
+fn a_string_predicate_from_an_included_module_is_not_folded_as_an_inquiry() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/string.rb",
+            "module Shouting\n  def shout?\n    self == upcase\n  end\nend\n\nclass String\n  include Shouting\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ApplicationRecord\n  def shouting?\n    title.to_s.shout?\n  end",
+        )
+        .run_ruby(
+            r#"
+raise "folded to a comparison" unless Article.new(title: "LOUD", body: "b").shouting?
+raise "answers true for everything" if Article.new(title: "quiet", body: "b").shouting?
+"#,
+        )
+        .assert_passes();
+}
+
+/// `includes(:comments)` distributes each parent's children by binary
+/// search over the children's foreign keys, sorted by the preload query
+/// (`ActiveRecord.lower_bound`), where it used to scan every child per
+/// parent — O(N * M), a million comparisons at 1,000 x 1,000, which put
+/// the emitted index behind Rails' keyed preloader
+/// (koduki/example-rails-aot). The comment-byte gates are blind to
+/// grouping, so this renders each article's preloaded comments by body:
+/// inserts interleaved across articles, a parent with no children, and
+/// a run at the end of the sorted list all have to land, in insertion
+/// order within each article.
+#[test]
+fn includes_distributes_each_parents_children_in_order() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/_article.html.erb",
+            "(<%= pluralize(article.comments.size, \"comment\") %>)",
+            "(<%= pluralize(article.comments.size, \"comment\") %>)<i class=\"pc\"><%= article.title %>=<%= article.comments.map(&:body).join(\",\") %></i>",
+        )
+        .write(
+            "test/controllers/articles_preload_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesPreloadControllerTest < ActionDispatch::IntegrationTest
+  test "includes distributes each article's comments" do
+    a = Article.create!(title: "Alpha", body: "A sufficiently long body for validation.")
+    b = Article.create!(title: "Beta", body: "A sufficiently long body for validation.")
+    c = Article.create!(title: "Gamma", body: "A sufficiently long body for validation.")
+    Article.create!(title: "Delta", body: "A sufficiently long body for validation.")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c1")
+    Comment.create!(article_id: a.id, commenter: "x", body: "a1")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c2")
+    Comment.create!(article_id: b.id, commenter: "x", body: "b1")
+    Comment.create!(article_id: a.id, commenter: "x", body: "a2")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c3")
+    get articles_url
+    assert_response :success
+    assert_match(/<i class="pc">Alpha=a1,a2<\/i>/, response.body)
+    assert_match(/<i class="pc">Beta=b1<\/i>/, response.body)
+    assert_match(/<i class="pc">Gamma=c1,c2,c3<\/i>/, response.body)
+    assert_match(/<i class="pc">Delta=<\/i>/, response.body)
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_preload_controller_test.rb")
+        .assert_passes();
+}
+
+/// Interface keys belong to `as:`, even when the Concern name matches it.
+#[test]
+fn a_polymorphic_inverse_from_a_concern_runs() {
+    assert_polymorphic_inverse_from_a_concern_runs("Notifiable");
+}
+
+/// A different Concern name must preserve the same id/type interface.
+#[test]
+fn a_polymorphic_inverse_from_a_differently_named_concern_runs() {
+    assert_polymorphic_inverse_from_a_concern_runs("NotificationOwner");
+}
+
+fn assert_polymorphic_inverse_from_a_concern_runs(concern: &str) {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|",
+            "  create_table \"notifications\", force: :cascade do |t|\n    t.integer \"notifiable_id\"\n    t.string \"notifiable_type\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/notification.rb",
+            "class Notification < ApplicationRecord\n  belongs_to :notifiable, polymorphic: true\n  def owner_title\n    notifiable.title\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/notifiable.rb",
+            &format!("module {concern}\n  extend ActiveSupport::Concern\n  included do\n    has_many :notifications, as: :notifiable\n    has_many :explicit_notifications, class_name: \"Notification\", as: :notifiable, foreign_key: :notifiable_id\n    has_one :first_notification, class_name: \"Notification\", as: :notifiable\n    has_one :last_notification, class_name: \"Notification\", as: :notifiable, foreign_key: :notifiable_id\n  end\nend\n"),
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n  include {concern}\n"),
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Owner", body: "Body text here")
+note = Notification.create!(notifiable_id: article.id, notifiable_type: "Article")
+reloaded = Notification.find(note.id)
+raise "owner id changed" unless reloaded.notifiable_id == article.id
+raise "owner type changed" unless reloaded.notifiable_type == "Article"
+raise "polymorphic read" unless reloaded.owner_title == "Owner"
+raise "inverse read" unless article.notifications.count == 1
+raise "explicit inverse read" unless article.explicit_notifications.count == 1
+raise "default singular inverse read" unless article.first_notification.owner_title == "Owner"
+raise "explicit singular inverse read" unless article.last_notification.owner_title == "Owner"
+"#,
+        )
+        .assert_passes();
+}
+
+/// An explicit `foreign_key:` is the key, even when its name matches
+/// the Concern-derived default. Only a defaulted key is rehomed.
+#[test]
+fn an_explicit_key_named_like_its_concern_is_kept() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|",
+            "  create_table \"remarks\", force: :cascade do |t|\n    t.integer \"remarkable_id\"\n    t.string \"body\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/remark.rb",
+            "class Remark < ApplicationRecord\n  belongs_to :article, foreign_key: :remarkable_id\nend\n",
+        )
+        .write(
+            "app/models/concerns/remarkable.rb",
+            "module Remarkable\n  extend ActiveSupport::Concern\n  included do\n    has_many :remarks, foreign_key: :remarkable_id\n    has_one :first_remark, class_name: \"Remark\", foreign_key: :remarkable_id\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Remarkable\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Owner", body: "Body text here")
+Remark.create!(remarkable_id: article.id, body: "hi")
+raise "inverse read" unless article.remarks.count == 1
+raise "singular inverse read" unless article.first_remark.body == "hi"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Not `super: no superclass method 'password='`: a model's own password writer that calls `super` reaches `has_secure_password`'s writer, as the macro's module method does in Rails.
+#[test]
+fn a_password_writer_that_calls_super_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"\n    t.string \"recovery_password_digest\"",
+        )
+        .edit(
+            "db/schema.rb",
+            "create_table \"comments\", force: :cascade do |t|",
+            "create_table \"comments\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password
+  has_secure_password :recovery_password
+
+  def password=(value)
+    @password_supplied = true
+    super(value == "" ? nil : value)
+  end
+
+  def password_supplied?
+    @password_supplied == true
+  end
+
+  def seed_plaintext(value)
+    @password = value
+    @recovery_password = value
+  end
+
+  def recovery_password=(value)
+    @recovery_password_supplied = true
+    super
+  end
+
+  def recovery_password_supplied?
+    @recovery_password_supplied == true
+  end
+
+  def recovery_plaintext
+    @recovery_password
+  end"#,
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord",
+            r#"class Comment < ApplicationRecord
+  has_secure_password
+
+  def password=(value)
+    @password_supplied = true
+    super
+  end
+
+  def password_supplied?
+    @password_supplied == true
+  end
+
+  def seed_plaintext(value)
+    @password = value
+  end"#,
+        )
+        .write(
+            "test/models/article_password_writer_test.rb",
+            r#"require "test_helper"
+
+class ArticlePasswordWriterTest < ActiveSupport::TestCase
+  # Each assignment ends in nil, which the macro's writer stores
+  # without reaching bcrypt (CI's unit job does not install it).
+  test "super(x) passes x to the macro's writer" do
+    article = articles(:one)
+    article.seed_plaintext("seeded")
+    assert !article.password_supplied?
+    article.password = ""
+    assert article.password_supplied?
+    assert_nil article.password
+  end
+
+  test "a bare super passes the writer's own argument" do
+    comment = comments(:one)
+    comment.seed_plaintext("seeded")
+    assert !comment.password_supplied?
+    comment.password = nil
+    assert comment.password_supplied?
+    assert_nil comment.password
+  end
+
+  test "each secure-password attribute reaches its own macro writer" do
+    article = articles(:one)
+    article.seed_plaintext("seeded")
+    article.password = ""
+    assert article.password_supplied?
+    assert_nil article.password
+    assert_equal "seeded", article.recovery_plaintext
+    assert !article.recovery_password_supplied?
+    article.recovery_password = nil
+    assert article.recovery_password_supplied?
+    assert_nil article.recovery_plaintext
+    assert_nil article.password
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_password_writer_test.rb")
+        .assert_passes();
+}
+
+#[path = "emit_and_run/relation_finders.rs"]
+mod relation_finders;
+
+/// A controller under `ActionController::API`, the base `rails new
+/// --api` writes, dispatches (#163). The runtime defined only `Base`,
+/// so the ruby tree raised NameError loading ApplicationController, and
+/// every request to the spinel binary answered 500 (`undefined method
+/// 'params='`). The `before_action` reads `params[:id]`, which is the
+/// writer the spinel dispatcher failed on.
+#[test]
+fn an_action_controller_api_controller_dispatches() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::API\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  before_action :set_widget, only: :show
+
+  def index
+    head :no_content
+  end
+
+  def show
+    head :not_found unless @widget
+  end
+
+  private
+
+  def set_widget
+    @widget = Widget.find_by(id: params[:id])
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"widgets#index\"\n  resources :widgets, only: %i[index show]\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"widget = Widget.create!(name: "a")
+def get(path)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  status
+end
+{ "/widgets" => 204, "/widgets/#{widget.id}" => 204, "/widgets/#{widget.id + 1}" => 404 }.each do |path, want|
+  got = get(path)
+  raise "GET #{path} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
+        .assert_passes();
 }

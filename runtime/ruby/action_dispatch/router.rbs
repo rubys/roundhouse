@@ -54,6 +54,15 @@ module ActionDispatch
       String format
     ) -> ::ActionDispatch::Router::MatchResult?
 
+    # One pass of the table for one (already upcased) verb over the
+    # already-split path; `match_path` makes a second, GET, pass for HEAD.
+    def self.scan_routes: (
+      String method_upcase,
+      Array[String] path_parts,
+      Array[::ActionDispatch::Router::Route] table,
+      String format
+    ) -> ::ActionDispatch::Router::MatchResult?
+
     # Is `ext` one of Rails' registered format extensions?
     def self.format_extension: (String ext) -> bool
 

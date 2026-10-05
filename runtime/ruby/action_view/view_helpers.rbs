@@ -103,7 +103,7 @@ module ActionView
   
     # `name` is the asset stem (e.g., "application" → /assets/application.css).
     def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
-    def self.javascript_include_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
+    def self.javascript_include_tag: (String | Symbol source, ?Hash[Symbol, untyped] opts) -> String
 
     # Asset helpers. `source` is the image path/name; `skip_pipeline`
     # (and absolute/protocol-relative sources) returns it verbatim.

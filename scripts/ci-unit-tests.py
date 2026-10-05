@@ -12,6 +12,11 @@ artifacts stay until the job ends.
 Peak disk is reduced because only one integration batch is resident at a time.
 Compile-everything-before-any-execute is intentionally not preserved: a later
 batch can fail to compile after earlier batches have already run.
+
+Optional --shard-index/--shard-count stride sorted integration targets across
+jobs. Coverage is checked on the global metadata set first. Shard 0 also runs
+library and binary unit tests; every integration target still executes exactly
+once across the shards.
 """
 
 from __future__ import annotations
@@ -80,6 +85,17 @@ def chunks(items: list[str], size: int) -> list[list[str]]:
     if size < 1:
         raise SystemExit("--batch-size must be >= 1")
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def validate_shard(index: int, count: int) -> None:
+    if count < 1:
+        raise SystemExit("--shard-count must be >= 1")
+    if not 0 <= index < count:
+        raise SystemExit("--shard-index must satisfy 0 <= index < --shard-count")
+
+
+def select_shard(names: list[str], index: int, count: int) -> list[str]:
+    return names[index::count]
 
 
 def verify_coverage(names: list[str]) -> None:
@@ -231,35 +247,55 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--list-only",
         action="store_true",
-        help="print discovered integration targets and exit",
+        help="print this shard's integration targets after coverage validation and exit",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="zero-based shard to run (default 0)",
+    )
+    parser.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="number of shards to partition integration targets across (default 1)",
     )
     args = parser.parse_args(argv)
+    validate_shard(args.shard_index, args.shard_count)
 
     started = time.monotonic()
     names, target_root = package_plan(cargo_metadata())
     verify_coverage(names)
-    batches = chunks(names, args.batch_size)
+    selected = select_shard(names, args.shard_index, args.shard_count)
+    batches = chunks(selected, args.batch_size)
+    shard_note = (
+        f"shard {args.shard_index} of {args.shard_count}: "
+        f"{len(selected)} selected of {len(names)} integration targets"
+    )
     if args.list_only:
-        for name in names:
+        for name in selected:
             print(name)
         print(
-            f"# {len(names)} integration targets in {len(batches)} batch(es) "
-            f"of up to {args.batch_size}",
+            f"# {shard_note}; {len(batches)} batch(es) of up to {args.batch_size}",
             file=sys.stderr,
         )
         return 0
 
     deps = target_root / "debug" / "deps"
+    lib_bins = args.shard_index == 0
     print(
-        f"unit CI: {len(names)} integration targets, "
+        f"unit CI: {shard_note}, "
         f"{len(batches)} batch(es) of up to {args.batch_size}; "
-        f"lib+bins first; reclaim finished integration artifacts only",
+        f"{'lib+bins first; ' if lib_bins else 'lib+bins skipped; '}"
+        f"reclaim finished integration artifacts only",
         flush=True,
     )
 
-    status = build_and_run_lib_bins(timings=args.timings)
-    if status != 0:
-        return status
+    if lib_bins:
+        status = build_and_run_lib_bins(timings=args.timings)
+        if status != 0:
+            return status
 
     for index, batch in enumerate(batches, start=1):
         status = build_and_run_integration_batch(

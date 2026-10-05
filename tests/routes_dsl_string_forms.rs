@@ -65,14 +65,25 @@ end
     assert!(flat.iter().any(|r| r.path == "/scan"), "{flat:?}");
 }
 
-/// The ledger line #82 added is for the redirects that STILL cannot be
-/// served: a block redirect has no literal to send anyone to.
+/// A block that returns a string is served. A block whose value is not
+/// a string stays the survey gap #82 recorded.
 #[test]
-fn a_block_redirect_records_a_survey_line() {
+fn a_string_block_redirect_is_served_and_a_non_string_stays_a_gap() {
+    let table = ingest_routes(
+        br#"Rails.application.routes.draw do
+  get "/old", to: redirect { |params, request| "/scan" }
+end
+"#,
+        "config/routes.rb",
+    )
+    .expect("ingest routes");
+    assert_eq!(table.redirects.len(), 1, "{:?}", table.redirects);
+    assert!(table.redirects[0].location.contains("/scan"), "{:?}", table.redirects);
+
     roundhouse::ingest::survey::activate();
     ingest_routes(
         br#"Rails.application.routes.draw do
-  get "/old", to: redirect { |params, request| "/scan" }
+  get "/old", to: redirect { |params, request| 7 }
 end
 "#,
         "config/routes.rb",
@@ -81,6 +92,24 @@ end
     let gaps = roundhouse::ingest::survey::drain();
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     assert!(gaps[0].to_string().contains("non-string target"), "{}", gaps[0]);
+}
+
+/// Every verb of a `via:` route can be dropped. That is a missing
+/// route, not an ingest panic, and the survey line is recorded once.
+#[test]
+fn via_with_a_dropped_target_does_not_panic() {
+    roundhouse::ingest::survey::activate();
+    let table = ingest_routes(
+        br#"Rails.application.routes.draw do
+  match "/old", to: redirect { |params, request| 7 }, via: [:get, :post]
+end
+"#,
+        "config/routes.rb",
+    )
+    .expect("dropped via target");
+    assert!(table.entries.is_empty(), "{:?}", table.entries);
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
 }
 
 #[test]

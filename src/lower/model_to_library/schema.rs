@@ -46,6 +46,12 @@ pub(super) fn push_schema_methods(
     // public `<col>=` writer normalizes through the column's selected
     // format intrinsic; hydration writes stored text via `<col>_raw=`
     // directly. Date seams are native-Ruby-only for now.
+    // `normalizes` — the class method the column writers below call.
+    crate::lower::normalizes::push_normalize_methods(
+        methods,
+        model,
+        &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
+    );
     let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col, model));
@@ -1307,6 +1313,8 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     let rhs = if is_generic_json_col(col, model) {
         json_dump_value(col, value)
     } else {
+        let value = crate::lower::normalizes::normalized_write(model, &col.name, value.clone())
+            .unwrap_or(value);
         enum_setter_value(model, col, value.clone()).unwrap_or(value)
     };
     // Assign expression evaluates to the RHS in Ruby; same in TS.

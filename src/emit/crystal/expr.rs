@@ -589,6 +589,12 @@ fn emit_node(n: &ExprNode) -> String {
             s.push_str("end");
             s
         }
+        ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. } => {
+            crate::emit::diagnostics::report_unsupported(
+                crate::span::Span::synthetic(), "crystal", n.kind_str(),
+                "structural pattern matching requires a native Ruby target",
+            )
+        }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
             for (i, e) in exprs.iter().enumerate() {

@@ -81,13 +81,23 @@ module Tep
             # and truncates the carried tail after a parse (stream
             # misalignment) whenever XOR'd bytes form multi-byte UTF-8
             # sequences — mask-dependent, so it flakes per connection.
-            r = Tep::WebSocket::Frame.parse_from_buf(inbuf, 0, inbuf.bytesize)
+            # `@driver.max_frame_size` is what bounds `inbuf`: the parse
+            # refuses an over-cap frame from its length field, so the
+            # loop below can only ever carry a partial frame of at most
+            # the cap plus a header. Passing the cap is not optional —
+            # without it the parse says "need" for any size and the
+            # accumulator grows until the worker OOMs.
+            r = Tep::WebSocket::Frame.parse_from_buf(inbuf, 0, inbuf.bytesize, @driver.max_frame_size)
             if r.outcome == "need"
               break
             end
             if r.outcome == "close"
-              @driver.close(r.close_code, "protocol error")
-              Connection.dispatch_close(@driver, r.close_code, "protocol error")
+              reason = "protocol error"
+              if r.close_code == Tep::WebSocket::CLOSE_MESSAGE_TOO_BIG
+                reason = "message too big"
+              end
+              @driver.close(r.close_code, reason)
+              Connection.dispatch_close(@driver, r.close_code, reason)
               return 0
             end
             Connection.dispatch_frame(@driver, r.frame)

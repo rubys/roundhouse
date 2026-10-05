@@ -13,6 +13,7 @@
 require "rack"
 require_relative "main"
 require_relative "cable"
+require_relative "runtime/gzip_cache"
 
 Main.configure_default_adapter!
 
@@ -52,6 +53,15 @@ end)
 # `Main.dispatch_core_inner` instead, where it also covers the CGI and
 # future spinel serving shapes.
 
+# Campfire's own config.ru is `use Rack::Deflater` then `run` the app.
+# GzipCache is that plus a body cache: the same identity HTML is not
+# deflated on every wrk GET. HTML only — Static sits outside this
+# lambda, so CSS/JS stay identity. NOT around the whole app: the
+# hijack tuple `[-1, {}, []]` has no skip, so gzip wraps only run_rack.
+gzip = GzipCache.wrap(lambda { |env|
+  Db.with_connection { Main.run_rack(env) }
+})
+
 app = lambda do |env|
   # WebSocket upgrade: `/cable`. Cable hijacks the socket out of Puma
   # and hands it to the reactor thread, which owns every connection
@@ -84,8 +94,9 @@ app = lambda do |env|
   # Lease one pooled DB connection for the whole request so concurrent
   # Puma worker threads each read/write through their own handle rather
   # than serializing on a single shared one. `run_rack` reads the Rack
-  # env directly and returns the response tuple.
-  Db.with_connection { Main.run_rack(env) }
+  # env directly and returns the response tuple. Gzip sits on this path
+  # only — see gzip above.
+  gzip.call(env)
 end
 
 run app
