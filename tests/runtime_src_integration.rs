@@ -1578,7 +1578,13 @@ fn every_runtime_method_body_concretely_typed() {
     // 571 -> 560, -11 MEASURED (relation.rb / base.rb): more_than?,
     // loaded_records, Base.any? via exists?; offset_row_exists? gone.
     // Net drop because each/find_each share one load helper.
-    const CEILING: usize = 560;
+    //
+    // 560 -> 521, -39 MEASURED: Base.any?/none? stay on COUNT (strict
+    // targets have no Relation); the SELECT-1 forms live only in the
+    // ruby-family connection.rb reopen. last_page? short-circuit
+    // requires a non-empty short page. Residual drop is Base losing
+    // Relation.new typing sites this probe counted.
+    const CEILING: usize = 521;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

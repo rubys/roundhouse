@@ -353,6 +353,18 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
+    # Class-side emptiness — override base.rb's COUNT form with the
+    # existence probe Relation already pays. Same ruby-family reopen
+    # rule as `where`/`all` above: strict targets keep the adapter
+    # COUNT in base.rb because they have no Relation class.
+    def self.any?
+      ActiveRecord::Relation.new(self).exists?
+    end
+
+    def self.none?
+      !any?
+    end
+
     # Rails-shape `none` fallback, same story as `where`/`all` above:
     # an empty Relation off the class. lobsters' `Search` reaches it
     # through a class-valued method (`searched_model.none`), which no

@@ -983,7 +983,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // shared by each/find_each, Base.any?/none? via exists?. Dropped
     // offset_row_exists?. Residual is the same unresolved self-send /
     // `@joins` / `@wheres` every SQL composer pays.
-    const CEILING: usize = 1395;
+    // 2026-10-05 1395 -> 1400, +5, MEASURED: Base.any?/none? restored
+    // to COUNT for strict targets; Relation.exists? forms moved to
+    // connection.rb reopen. last_page? requires non-empty short page.
+    // This probe sees the connection reopen's new self-sends.
+    const CEILING: usize = 1400;
 
     assert!(
         all_untyped.len() <= CEILING,

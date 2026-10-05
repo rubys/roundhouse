@@ -324,8 +324,19 @@ class BaseTest < Minitest::Test
     3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
     rel = ActiveRecord::Relation.new(Item).order("id").limit(10)
     rel.to_a
-    # Loaded page has 3 < 10, so last_page? is true without total_count.
+    # Loaded page has 3 < 10 and is non-empty, so last_page? is true
+    # without total_count.
     assert rel.last_page?
+  end
+
+  def test_relation_last_page_empty_out_of_range_is_not_last
+    it = Item.new; it.title = "A"; it.save()
+    # Page past the end loads empty; Kaminari's last_page? is false there
+    # (current_page > total_pages), not true via the short-page shortcut.
+    rel = ActiveRecord::Relation.new(Item).order("id").limit(10).offset(10)
+    rel.to_a
+    refute rel.last_page?
+    assert rel.out_of_range?
   end
 
 

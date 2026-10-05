@@ -454,15 +454,17 @@ module ActiveRecord
     end
 
     # Kaminari compares `current_page` to `total_pages`, and the latter
-    # is a COUNT. When the page is already loaded and shorter than
-    # `limit_value`, there cannot be a successor page — same answer
-    # without the COUNT. A full page still needs `total_pages`.
+    # is a COUNT. When the page is already loaded, non-empty, and
+    # shorter than `limit_value`, there cannot be a successor page —
+    # same answer without the COUNT. An empty loaded page is ambiguous
+    # (page 1 of nothing vs. an out-of-range page), and a full page
+    # still needs `total_pages`.
     def last_page?
       per_page = @limit
       return true if per_page.nil?
       raise ZeroDivisionError, "Total pages was incalculable. Perhaps you called .per(0)?" if per_page == 0
       r = @records
-      return true if !r.nil? && r.length < per_page
+      return true if !r.nil? && r.length > 0 && r.length < per_page
       current_page == total_pages
     end
 
