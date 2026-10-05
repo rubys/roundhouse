@@ -972,7 +972,13 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // size / one? / many? / last_page? paths that share them, and
     // `find_each`'s duplicated zero-copy loop. Same unresolved
     // self-send / `@limit` residual every terminal pays.
-    const CEILING: usize = 1380;
+    // 2026-10-05 1380 -> 1386, +6, MEASURED (relation.rb 904 -> 910):
+    // limited `size` counts a `SELECT 1` subquery (orders cleared for
+    // the inner select), and `exists_sql` projects `DISTINCT pk` so
+    // `distinct.many?`/`one?` see separate rows. The find_by(id: nil)
+    // short-circuit that this ceiling once paid for is gone; the net
+    // still rises by six unresolved self-send / `@orders` sites.
+    const CEILING: usize = 1386;
 
     assert!(
         all_untyped.len() <= CEILING,

@@ -53,6 +53,8 @@ module ActionView
     def self.to_query_value: (String name, untyped value) -> String
     def self.url_encode_component: (String s) -> String
     def self.url_encode_mailto_address: (String s) -> String
+    def self.needs_url_escape?: (String s) -> bool
+    def self.needs_mailto_escape?: (String s) -> bool
 
     # Same monomorphization rationale as html_escape: callers handle
     # nil/non-String coercion explicitly. Real-blog's only caller

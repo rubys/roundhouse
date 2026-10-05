@@ -126,8 +126,14 @@ module ActionView
     # numeric ids) contain none of `&<>"'`. Returning the input is
     # what ERB::Util does for an already-safe string; the caller
     # appends into a buffer.
+    #
+    # The probe is `include?` of each special character, not
+    # `String#match?(re)`: that call still has no portable emit on
+    # Rust/Python (they emit `match_pred`/`match_p` on `&str`/`str`),
+    # and YJIT prefers the monomorphic include? path over Regexp
+    # entry for the common "already clean" case.
     def self.html_escape(s)
-      return s unless s.match?(HTML_ESCAPE_PATTERN)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
@@ -145,7 +151,7 @@ module ActionView
     BUILDER_TEXT_PATTERN = /[&<>]/.freeze
 
     def self.builder_text(s)
-      return s unless s.match?(BUILDER_TEXT_PATTERN)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">")
       s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
     end
 
@@ -163,7 +169,7 @@ module ActionView
     BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
 
     def self.builder_attr(s)
-      return s unless s.match?(BUILDER_ATTR_PATTERN)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
       s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
     end
 
@@ -218,8 +224,11 @@ module ActionView
     URL_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
     # Monomorphic: param typed String, like `html_escape`.
+    # Fast-path probe is `needs_url_escape?` (character `include?`s),
+    # not `match?(URL_ESCAPE_PATTERN)` — same emit portability reason
+    # as `html_escape` above.
     def self.url_encode(s)
-      return s unless s.match?(URL_ESCAPE_PATTERN)
+      return s unless needs_url_escape?(s)
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
     end
 
@@ -296,13 +305,39 @@ module ActionView
 
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
-      return s unless s.match?(URL_ESCAPE_PATTERN)
+      return s unless needs_url_escape?(s)
       s.gsub(URL_ESCAPE_PATTERN, URI_ESCAPES)
     end
 
     def self.url_encode_mailto_address(s)
-      return s unless s.match?(MAILTO_ESCAPE_PATTERN)
+      return s unless needs_mailto_escape?(s)
       s.gsub(MAILTO_ESCAPE_PATTERN, URI_ESCAPES)
+    end
+
+    # True when `s` contains a character `URL_ESCAPE_PATTERN` would
+    # match. Hand-expanded `include?` chain so strict targets do not
+    # need `String#match?` / `Regexp#match?` emit.
+    def self.needs_url_escape?(s)
+      s.include?(" ") || s.include?("!") || s.include?("\"") || s.include?("#") ||
+        s.include?("$") || s.include?("%") || s.include?("&") || s.include?("'") ||
+        s.include?("(") || s.include?(")") || s.include?("*") || s.include?("+") ||
+        s.include?(",") || s.include?("/") || s.include?(":") || s.include?(";") ||
+        s.include?("<") || s.include?("=") || s.include?(">") || s.include?("?") ||
+        s.include?("@") || s.include?("[") || s.include?("\\") || s.include?("]") ||
+        s.include?("^") || s.include?("`") || s.include?("{") || s.include?("|") ||
+        s.include?("}")
+    end
+
+    # Like `needs_url_escape?` but without `@` — `MAILTO_ESCAPE_PATTERN`.
+    def self.needs_mailto_escape?(s)
+      s.include?(" ") || s.include?("!") || s.include?("\"") || s.include?("#") ||
+        s.include?("$") || s.include?("%") || s.include?("&") || s.include?("'") ||
+        s.include?("(") || s.include?(")") || s.include?("*") || s.include?("+") ||
+        s.include?(",") || s.include?("/") || s.include?(":") || s.include?(";") ||
+        s.include?("<") || s.include?("=") || s.include?(">") || s.include?("?") ||
+        s.include?("[") || s.include?("\\") || s.include?("]") ||
+        s.include?("^") || s.include?("`") || s.include?("{") || s.include?("|") ||
+        s.include?("}")
     end
 
     def self.truncate(s, length: 30, omission: "...")
@@ -405,7 +440,11 @@ module ActionView
       # (Crystal a NamedTuple, Swift a `[String: String]` cast on the
       # receiver), where every other merge in this file has the
       # literal as the receiver. Same escape `render_attrs` applies.
-      given = opts.is_a?(Hash) ? opts : opts.to_h
+      # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
+      # conversion under Crystal. Do not gate on `opts.is_a?(Hash)`:
+      # Rust emit maps that to `HashMap#is_object`, which does not exist
+      # on a typed HashMap parameter.
+      given = opts.to_h
       attrs = render_attrs(given)
       attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)
       "<a#{attrs}>#{html_escape(text)}</a>"
@@ -733,8 +772,7 @@ module ActionView
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
-      given = opts.is_a?(Hash) ? opts : opts.to_h
-      "<#{n}#{render_attrs(given)}>#{html_escape(content.to_s)}</#{n}>"
+      "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
     end
 
     # Emit the importmap script + per-pin modulepreload hints + a
