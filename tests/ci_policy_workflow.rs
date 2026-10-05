@@ -183,11 +183,14 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
                 "{name}: {required}"
             );
         }
-        // Do not use bare always(): cancel-in-progress would still schedule
-        // these gates, leaving them QUEUED and blocking the PR concurrency group.
+        // always() && !cancelled() still queued these after plan cancelled
+        // (holding the concurrency group). Require plan success and no
+        // cancelled need so superseded runs skip instead of queuing.
         assert_eq!(
             jobs[name]["if"].as_str(),
-            Some("${{ always() && !cancelled() }}")
+            Some(
+                "${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}"
+            )
         );
     }
 }
@@ -479,7 +482,9 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     for name in ["compact-required", "ci-summary"] {
         assert_eq!(
             jobs[name]["if"].as_str(),
-            Some("${{ always() && !cancelled() }}")
+            Some(
+                "${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}"
+            )
         );
     }
     let gate = jobs["ci-summary"]["needs"].as_sequence().unwrap();

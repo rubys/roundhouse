@@ -83,9 +83,10 @@ the publication and floating-pin catch-up.
 Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
 SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
-explicitly reused execution evidence. The compact and summary gates skip when
-the workflow itself was cancelled so a superseded run cannot leave those jobs
-QUEUED and hold the PR concurrency lock ahead of the replacement run.
+explicitly reused execution evidence. The compact and summary gates run only
+when `plan` succeeded and no needed job was cancelled. That skips them on
+cancel-in-progress instead of leaving `always()` gates QUEUED (which holds
+the concurrency lock ahead of the replacement run).
 
 A draft with no CI label looks almost empty on purpose (`plan` + gates only;
 everything else skipped). Marking the same PR ready does **not** keep that

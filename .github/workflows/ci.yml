@@ -3465,11 +3465,13 @@ jobs:
   compact-required:
     # compare and browser-smoke-typescript stay in needs so a full/main run
     # can still require them. Unselected PR skips must not fail this gate.
-    # Skip when the workflow itself was cancelled: always()-only gates still
-    # schedule on cancel-in-progress, then sit QUEUED and hold the PR
-    # concurrency group so the superseding ready/full run never starts.
+    # Do not use always()/cancelled() here: always() still schedules the job
+    # on cancel-in-progress (run 37366559376: plan cancelled, this gate sat
+    # QUEUED and held validation-push-refs/heads/main). Require a successful
+    # plan and no cancelled need so superseded runs skip immediately instead
+    # of queuing. Custom if still runs when other needs fail or skip.
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
-    if: ${{ always() && !cancelled() }}
+    if: ${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -3489,7 +3491,9 @@ jobs:
   ci-summary:
     name: CI summary
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
-    if: ${{ always() && !cancelled() }}
+    # Same cancel/concurrency rule as compact-required: skip when plan did not
+    # succeed or any need was cancelled, so the job is never left QUEUED.
+    if: ${{ needs.plan.result == 'success' && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
