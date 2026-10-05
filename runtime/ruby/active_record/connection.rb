@@ -177,6 +177,13 @@ module ActiveRecord
       out
     end
 
+    # Rails' array-form entry point (`sanitize_sql_array([...])`). Same
+    # bind interleave as `sanitize_sql` — apps that name the `_array`
+    # form (raw upserts, hand-built fragments) must resolve here (#400).
+    def self.sanitize_sql_array(statement)
+      sanitize_sql(statement)
+    end
+
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
     # ROLLBACK + re-raise on any exception. Flat transactions only: the
     # corpus never nests (a nested BEGIN would error in SQLite rather

@@ -499,6 +499,67 @@ fn named_binds_reach_the_query_on_spinel() {
     named_binds_app().run_spinel(&script).assert_passes();
 }
 
+/// `sanitize_sql_array` is the documented array-form entry point (#400).
+fn sanitize_sql_array_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def index
+    render plain: Widget.quoted(1)
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn sanitize_sql_array_is_supported() {
+    sanitize_sql_array_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+sql = Widget.quoted(1)
+raise "sanitize_sql_array: #{sql.inspect}" unless sql == "SELECT 1 AS v"
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "controller: #{controller.body}" unless controller.body == "SELECT 1 AS v"
+puts "sanitize_sql_array passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Rails 7.2's query assertions and the notification they are built on,
 /// over the runtime's statement capture, with `connection.select_rows`
 /// answering Arrays: campfire's tests count queries, assert none match a
