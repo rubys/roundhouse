@@ -6118,7 +6118,10 @@ fn is_clean_binding(ty: &Ty) -> bool {
     }
 }
 
-pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
+/// Harvest `@ivar = expr` / OpAssign / MultiAssign writes from a typed
+/// body, union-merging repeated assignments. Used by the analyzer's
+/// two-pass library typing and by the Spinel AR RBS probe.
+pub fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             if let Some(ty) = value.ty.clone() {

@@ -57,7 +57,12 @@ module ActiveRecord
     def with_recursive(ctes)
       @records = nil
       ctes.each do |name, parts|
-        @ctes << "#{name} AS (#{parts.map { |p| p.to_sql }.join(" UNION ALL ")})"
+        # Build the UNION list with pushes rather than `map.join`: the
+        # body typer's Array#map still returns Untyped, so the join
+        # terminal would stay Ty::Var under RBS-seeded typing.
+        sql_parts = []
+        parts.each { |p| sql_parts << p.to_sql }
+        @ctes << "#{name} AS (#{sql_parts.join(" UNION ALL ")})"
       end
       self
     end

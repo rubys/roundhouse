@@ -35,6 +35,18 @@ use roundhouse::ty::Ty;
 
 const RUNTIME_DIR: &str = "runtime/ruby/active_record";
 
+/// Sidecars outside `active_record/` that AR bodies call. Without these
+/// the probe reports Ty::Var on real, already-declared surfaces (Db,
+/// Rails.application, MessageVerifier, ActiveSupport.json_time) — the
+/// same gap `runtime_src_integration` avoids via `insert_db_stub` /
+/// stdlib seeding. Not an app inventory; shared-runtime contracts only.
+const DEPENDENCY_RBS: &[&str] = &[
+    "runtime/ruby/db.rbs",
+    "runtime/ruby/rails.rbs",
+    "runtime/ruby/action_controller/message_verifier.rbs",
+    "runtime/ruby/active_support_time_parsing.rbs",
+];
+
 /// Walk a typed expression tree, collecting every node whose `ty` is
 /// missing or `Ty::Var`. Same shape as the no-RBS probe so the two
 /// numbers are directly comparable.
@@ -217,48 +229,92 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Walk one method body collecting every `@x = expr` assignment so
-/// the second typing pass can seed `ivar_bindings` with discovered
-/// types. Mirrors the analyzer's two-pass discipline (model + library
-/// passes).
-fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
-    match &*expr.node {
-        ExprNode::Assign {
-            target: roundhouse::expr::LValue::Ivar { name },
-            value,
-        } => {
-            if let Some(ty) = value.ty.clone() {
-                out.entry(name.clone()).or_insert(ty);
-            }
+/// Seed ivar_bindings: union-merge flow assignments (so `initialize`'s
+/// `@limit = nil` does not permanently beat `limit`'s `@limit = n`),
+/// then overlay RBS-declared / cross-method query & lifecycle ivars.
+///
+/// `ActiveRecord::Base` methods are split across stems (`base.rb`,
+/// `connection.rb`, …). Callers must merge seeds for the same
+/// `ClassId` — a per-stem insert would drop `initialize`'s writes.
+fn seed_ivars_for_class(
+    class_id: &ClassId,
+    methods: &[roundhouse::dialect::MethodDef],
+) -> HashMap<Symbol, Ty> {
+    let mut flow: HashMap<Symbol, Ty> = HashMap::new();
+    for method in methods {
+        roundhouse::analyze::extract_ivar_assignments(&method.body, &mut flow);
+    }
+    match class_id.0.as_str() {
+        "ActiveRecord::Relation" | "Relation" => {
+            let int_n = Ty::Union {
+                variants: vec![Ty::Int, Ty::Nil],
+            };
+            let arr_n = Ty::Union {
+                variants: vec![
+                    Ty::Array {
+                        elem: Box::new(Ty::Untyped),
+                    },
+                    Ty::Nil,
+                ],
+            };
+            flow.insert(Symbol::new("limit"), int_n.clone());
+            flow.insert(Symbol::new("offset"), int_n);
+            flow.insert(Symbol::new("records"), arr_n);
         }
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                extract_ivar_assignments(e, out);
-            }
+        "ActiveRecord::Base" | "Base" => {
+            // base.rbs `@errors: Array[String]`; lifecycle flags are
+            // written in `initialize` / `mark_persisted!` / `destroy`.
+            // Declared so a connection.rb-only stem cannot leave the
+            // reader methods as Ty::Var after a bad per-stem harvest.
+            flow.insert(
+                Symbol::new("errors"),
+                Ty::Array {
+                    elem: Box::new(Ty::Str),
+                },
+            );
+            flow.insert(Symbol::new("persisted"), Ty::Bool);
+            flow.insert(Symbol::new("destroyed"), Ty::Bool);
         }
-        ExprNode::If { then_branch, else_branch, .. } => {
-            extract_ivar_assignments(then_branch, out);
-            extract_ivar_assignments(else_branch, out);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            extract_ivar_assignments(left, out);
-            extract_ivar_assignments(right, out);
-        }
-        ExprNode::Lambda { body, .. } => extract_ivar_assignments(body, out),
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            extract_ivar_assignments(body, out);
-            for r in rescues {
-                extract_ivar_assignments(&r.body, out);
-            }
-            if let Some(e) = else_branch {
-                extract_ivar_assignments(e, out);
-            }
-            if let Some(e) = ensure {
-                extract_ivar_assignments(e, out);
-            }
-        }
-        ExprNode::Return { value } => extract_ivar_assignments(value, out),
         _ => {}
+    }
+    flow
+        .into_iter()
+        .map(|(name, ty)| {
+            // Already nilable overlays stay; flow Int becomes Int|Nil.
+            let wrapped = match &ty {
+                Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => ty,
+                other => Ty::Union {
+                    variants: vec![other.clone(), Ty::Nil],
+                },
+            };
+            (name, wrapped)
+        })
+        .collect()
+}
+
+/// Union-merge two ivar maps (same join as the analyzer harvest).
+fn merge_ivar_maps(into: &mut HashMap<Symbol, Ty>, from: HashMap<Symbol, Ty>) {
+    for (name, ty) in from {
+        match into.remove(&name) {
+            Some(prev) => {
+                into.insert(name, match (prev, ty) {
+                    (a, b) if a == b => a,
+                    (Ty::Union { mut variants }, other)
+                    | (other, Ty::Union { mut variants }) => {
+                        if !variants.iter().any(|v| v == &other) {
+                            variants.push(other);
+                        }
+                        Ty::Union { variants }
+                    }
+                    (a, b) => Ty::Union {
+                        variants: vec![a, b],
+                    },
+                });
+            }
+            None => {
+                into.insert(name, ty);
+            }
+        }
     }
 }
 
@@ -266,6 +322,10 @@ fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// dispatch. This probe has no ConstantResolver, so unique short-name
 /// aliases also serve bare constants. Ambiguous suffixes must never
 /// merge unrelated classes.
+///
+/// Also merges dependency sidecars + the Db stub the production /
+/// Bar-A paths already seed, so AR bodies are not scored as unresolved
+/// for calls that are already contracted elsewhere in `runtime/ruby/`.
 fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
     let dir = Path::new(RUNTIME_DIR);
     let mut entries: Vec<_> = fs::read_dir(dir)
@@ -275,6 +335,9 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rbs"))
         .collect();
     entries.sort();
+    for dep in DEPENDENCY_RBS {
+        entries.push(Path::new(dep).to_path_buf());
+    }
 
     let mut sigs: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
     for path in entries {
@@ -289,18 +352,26 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
             sigs.entry(class_id).or_default().extend(methods);
         }
     }
-    (registry_with_unique_aliases(&sigs), sigs)
+    let mut registry = registry_with_unique_aliases(&sigs);
+    // Db lives in class_methods on the production stub; mirror that so
+    // `Db.exec` / `Db.escape_string` resolve the same way as Bar A.
+    roundhouse::lower::view_to_library::insert_db_stub(&mut registry);
+    (registry, sigs)
 }
 
 /// Build exact entries first, then alias only unambiguous short references.
 /// Keep full Fn signatures so dispatch and body contexts see the same RBS.
+/// Mirror each sig into `class_methods` too: `parse_app_signatures` does
+/// not split `def self`, and Const receivers consult class_methods first.
 fn registry_with_unique_aliases(
     sigs: &HashMap<ClassId, HashMap<Symbol, Ty>>,
 ) -> HashMap<ClassId, ClassInfo> {
     let mut registry: HashMap<ClassId, ClassInfo> = HashMap::new();
     let mut aliases: HashMap<ClassId, Option<ClassId>> = HashMap::new();
     for (class_id, methods) in sigs {
-        registry.entry(class_id.clone()).or_default().instance_methods = methods.clone();
+        let entry = registry.entry(class_id.clone()).or_default();
+        entry.instance_methods = methods.clone();
+        entry.class_methods = methods.clone();
         let short = ClassId(Symbol::new(
             class_id.0.as_str().rsplit("::").next().unwrap_or(class_id.0.as_str()),
         ));
@@ -318,6 +389,7 @@ fn registry_with_unique_aliases(
             registry.entry(short).or_insert_with(|| {
                 let mut info = ClassInfo::default();
                 info.instance_methods = sigs[&owner].clone();
+                info.class_methods = sigs[&owner].clone();
                 info
             });
         }
@@ -457,25 +529,18 @@ fn untyped_subexpressions_with_rbs_baseline() {
         }
     }
 
-    // Harvest ivar assignments per class. Then re-type with the
-    // discovered ivars (each wrapped in `Union<T, Nil>` to reflect
-    // a possible pre-write nil read) seeded into Ctx.
+    // Harvest ivars per ClassId across every stem (Base spans base.rb
+    // + connection.rb). Union-merge so a later stem cannot wipe
+    // initialize's writes.
     let mut ivars_by_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
     for (_, lc) in &classes {
-        let entry = ivars_by_class.entry(lc.name.clone()).or_default();
-        for method in &lc.methods {
-            extract_ivar_assignments(&method.body, entry);
-        }
+        let seeded = seed_ivars_for_class(&lc.name, &lc.methods);
+        merge_ivar_maps(ivars_by_class.entry(lc.name.clone()).or_default(), seeded);
     }
 
     for (_, lc) in &mut classes {
         let lc_name = lc.name.clone();
-        let mut wrapped: HashMap<Symbol, Ty> = HashMap::new();
-        if let Some(found) = ivars_by_class.get(&lc_name) {
-            for (k, v) in found {
-                wrapped.insert(k.clone(), Ty::Union { variants: vec![v.clone(), Ty::Nil] });
-            }
-        }
+        let wrapped = ivars_by_class.get(&lc_name).cloned().unwrap_or_default();
         for method in &mut lc.methods {
             let ctx = build_method_ctx(&lc_name, method, &sigs, &wrapped);
             typer.analyze_expr(&mut method.body, &ctx);
@@ -517,10 +582,10 @@ fn untyped_subexpressions_with_rbs_baseline() {
         }
     }
 
-    // Soft ratchet under canonical class-ID lookup (Fixes #435). Fails
-    // only when the residual rises. Growth here is mostly Relation SQL
-    // composers (self-sends and query ivars), not a substitute for Bar B.
-    const CEILING: usize = 57;
+    // Soft ratchet under canonical class-ID lookup (Fixes #435), then
+    // dependency RBS + cross-stem ivar merge + Relation/Base overlays.
+    // Fails only when the residual rises. Not a substitute for Bar B.
+    const CEILING: usize = 0;
 
     assert!(
         all_untyped.len() <= CEILING,

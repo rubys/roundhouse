@@ -11,6 +11,14 @@ module ActiveRecord
 
     def where: (?untyped condition, *untyped args) -> Relation
 
+    # Query ivars the body reads after builders write them. Declared so
+    # probes / RBS-seeded typing do not freeze on `initialize`'s `nil`
+    # assignment (first-write harvest) and leave `page` / `current_page`
+    # / loaded Enumerable terminals as Ty::Var.
+    @limit: Integer?
+    @offset: Integer?
+    @records: Array[untyped]?
+
     @from: String?
     @ctes: Array[String]
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation

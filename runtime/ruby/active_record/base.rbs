@@ -169,6 +169,11 @@ module ActiveRecord
     def _note_unloaded: (Hash[String, untyped] _row) -> void
 
     # Persistence state — backed by `@persisted` / `@destroyed`.
+    # Declared so RBS-seeded typing (and the Spinel AR RBS probe) does
+    # not leave the readers as Ty::Var when a stem other than base.rb
+    # is the only harvest surface for ActiveRecord::Base.
+    @persisted: bool
+    @destroyed: bool
     def persisted?: () -> bool
     def new_record?: () -> bool
     def destroyed?: () -> bool
