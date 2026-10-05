@@ -83,7 +83,8 @@ pub fn ingest_model(
     let mut constants = EnumConstants::default();
     constants.record(source, file);
     constants.finish();
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants)
+    let bases = super::library_class::ModelBases::new();
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants, &bases)
 }
 
 pub(super) fn ingest_model_with_enum_constants(
@@ -92,6 +93,7 @@ pub(super) fn ingest_model_with_enum_constants(
     schema: &Schema,
     prefixes: &TablePrefixes,
     enum_constants: &EnumConstants,
+    model_bases: &super::library_class::ModelBases,
 ) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
@@ -114,7 +116,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let enum_owners = enum_constants.nesting
         .get(&(file.to_string(), class.location().start_offset()))
         .cloned().unwrap_or_default();
-    let mut name_path = scope;
+    let mut name_path = scope.clone();
     name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "model class name must be a simple constant or path".into(),
@@ -347,7 +349,20 @@ pub(super) fn ingest_model_with_enum_constants(
     }
 
     let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
+        constant_path_of(&n).map(|p| {
+            let resolved = model_bases.resolve_superclass(&scope, &p);
+            // `ActionText::Record` is seeded in ModelBases so Writebook's
+            // `Markdown < Record` under `module ActionText` classifies as
+            // a model, but the gem abstract base is not ingested. Parent
+            // `ApplicationRecord` the same way RichText synthesis does —
+            // emit must not produce `class Markdown < Record`.
+            let emit_parent = if resolved == "ActionText::Record" {
+                "ApplicationRecord"
+            } else {
+                resolved.as_str()
+            };
+            ClassId(Symbol::from(emit_parent))
+        })
     });
 
     let class_loc = class.location();

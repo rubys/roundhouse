@@ -362,6 +362,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     };
 
     let mut table_prefixes = super::model::TablePrefixes::new();
+    // Action Text engine `isolate_namespace` → `action_text_` prefix.
+    // Writebook's Markdown model lives under `module ActionText` without
+    // an app-declared `table_name_prefix`, but its schema table is
+    // `action_text_markdowns` (not `markdowns`). Seed the framework
+    // prefix so ordinary model ingest matches the gem.
+    table_prefixes.insert("ActionText".to_string(), "action_text_".to_string());
     // Qualified enum arrays can live in a later file (e.g. a service
     // module). Collect literal inputs before expanding any model DSL.
     let mut enum_constants = super::model::EnumConstants::default();
@@ -425,6 +431,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     if let Some(maybe_model) =
                         unwrap_or_record(ingest_model_with_enum_constants(
                             &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                            &model_bases,
                         ))?
                     {
                         if let Some(model) = maybe_model {
@@ -577,6 +584,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             if super::library_class::has_active_record_base(&source, &model_bases) {
                 match ingest_model_with_enum_constants(
                     &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                    &model_bases,
                 ) {
                     Ok(Some(model)) => {
                         let outer = model.name.clone();

@@ -614,6 +614,64 @@ puts "relation ids uuid passed"
         .assert_passes();
 }
 
+/// Writebook-shaped `ActionText::Markdown < Record` under `module ActionText`
+/// in `lib/` is an ordinary model (table `action_text_markdowns`, attr
+/// `content`). Storage-only — does not claim `has_markdown`.
+#[test]
+fn action_text_markdown_saves_and_reloads_content() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content"
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "lib/rails_ext/action_text_markdown.rb",
+            r#"module ActionText
+  class Markdown < Record
+    belongs_to :record, polymorphic: true
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+m = ActionText::Markdown.new
+m.content = "# Hello"
+m.name = "body"
+m.record_type = "Article"
+m.record_id = 1
+m.save!
+reloaded = ActionText::Markdown.find(m.id)
+raise "content lost: #{reloaded.content.inspect}" unless reloaded.content == "# Hello"
+raise "name lost: #{reloaded.name.inspect}" unless reloaded.name == "body"
+puts "action_text markdown storage passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// Rails 7.2's query assertions and the notification they are built on,
 /// over the runtime's statement capture, with `connection.select_rows`
 /// answering Arrays: campfire's tests count queries, assert none match a

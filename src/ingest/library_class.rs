@@ -2314,7 +2314,47 @@ impl ModelBases {
         let mut names = std::collections::HashSet::new();
         names.insert("ApplicationRecord".to_string());
         names.insert("ActiveRecord::Base".to_string());
+        // Rails' Action Text abstract base (`ActionText::Record <
+        // ActiveRecord::Base; self.abstract_class = true`). The gem
+        // file is not ingested, but Writebook's
+        // `lib/rails_ext/action_text_markdown.rb` subclasses the
+        // lexical bare `Record` under `module ActionText`. Seeding the
+        // qualified name lets `has_active_record_base` + lexical
+        // resolution classify that class as a model rather than a
+        // library class that emits `class Markdown < Record`.
+        names.insert("ActionText::Record".to_string());
         Self { names }
+    }
+
+    /// Is `name` (possibly after lexical qualification) an AR base?
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Resolve a superclass path against enclosing modules the way Ruby
+    /// constant lookup walks `module_parents`: bare `Record` under
+    /// `module ActionText` becomes `ActionText::Record` when that base
+    /// is known. Qualified paths are unchanged. Falls back to the
+    /// lexical spelling when no enclosing candidate is a known base.
+    pub fn resolve_superclass(&self, scope: &[String], parent_path: &[String]) -> String {
+        let joined = parent_path.join("::");
+        if self.contains(&joined) {
+            return joined;
+        }
+        // Only bare names participate in lexical search — a written
+        // `Foo::Bar` is already absolute enough for ModelBases.
+        if parent_path.len() == 1 {
+            let bare = &parent_path[0];
+            let mut segs = scope.to_vec();
+            while !segs.is_empty() {
+                let candidate = format!("{}::{}", segs.join("::"), bare);
+                if self.contains(&candidate) {
+                    return candidate;
+                }
+                segs.pop();
+            }
+        }
+        joined
     }
 
     /// One file's `class X < Y` pairs, for the closure below — but
@@ -2361,9 +2401,6 @@ impl ModelBases {
         }
     }
 
-    fn contains(&self, name: &str) -> bool {
-        self.names.contains(name)
-    }
 }
 
 /// Does this file's first class descend from an ActiveRecord base?
@@ -2376,21 +2413,25 @@ impl ModelBases {
 /// own way, and routing it to the model path breaks that.
 ///
 /// So the rule outside `app/models` is ancestry to ActiveRecord, and
-/// nothing else.
+/// nothing else. Lexical superclass resolution applies: bare `Record`
+/// under `module ActionText` matches the seeded `ActionText::Record`
+/// base (Writebook Markdown).
 pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
     let result = parse(source);
     let root = result.node();
-    let Some(class) = find_first_class(&root) else { return false };
+    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
+        return false;
+    };
     class
         .superclass()
         .and_then(|n| constant_path_of(&n))
-        .is_some_and(|p| bases.contains(&p.join("::")))
+        .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
 }
 
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
-    let Some(class) = find_first_class(&root) else {
+    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
         // No class node. A bare top-level module under app/models/
         // (`module InactiveUser; def self.x; …; end`) is a namespace of
         // singleton methods, not a model — classify it as a library
@@ -2407,7 +2448,7 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
     let parent_path = class
         .superclass()
         .and_then(|n| constant_path_of(&n))
-        .map(|p| p.join("::"));
+        .map(|p| bases.resolve_superclass(&scope, &p));
 
     Some(match parent_path.as_deref() {
         // Resolved through the app's own bases, not against two
