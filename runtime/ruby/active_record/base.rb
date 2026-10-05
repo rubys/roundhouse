@@ -593,17 +593,14 @@ module ActiveRecord
 
     # Rails delegates the Enumerable predicates from the class to `all`,
     # so `User.none?` asks whether the table has any row at all —
-    # campfire's first-run check. Answered from COUNT rather than by
-    # materializing: `none?`/`any?` on the class carry no conditions, so
-    # there is nothing for the Relation to hold that the count doesn't.
-    # The scoped forms (`User.where(…).none?`) go through Relation#none?
-    # beside it.
+    # campfire's first-run check. `SELECT 1 LIMIT 1`, not COUNT(*):
+    # emptiness does not need a total. Scoped forms go through Relation.
     def self.none?
-      count == 0
+      !any?
     end
 
     def self.any?
-      count > 0
+      ActiveRecord::Relation.new(self).exists?
     end
 
     # Bulk DELETE without instantiating records or running callbacks —

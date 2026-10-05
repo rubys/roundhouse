@@ -626,8 +626,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
     // `first(n)`/`last(n)` on an analyzer-typed Relation -> `first_n` /
-    // `last_n`, including the arms send_static_dispatch synthesizes from
-    // a `public_send(selector, n)`, so it observes that pass's output.
+    // `last_n`, and `rel.count > n` -> `more_than?(n)`, including the
+    // arms send_static_dispatch synthesizes from a `public_send(selector, n)`,
+    // so it observes that pass's output.
     ("relation_counted_terminal", &["send_static_dispatch"]),
     // Grounds `attach(io:, filename:, content_type:)` to positional
     // Strings by reading the io at the call site — the runtime's RBS

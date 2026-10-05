@@ -1500,6 +1500,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::Bool),
     },
     CatalogedMethod {
+        name: "more_than?",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
         name: "ids",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
@@ -1932,6 +1939,7 @@ mod tests {
             ("find_by", ReturnKind::SelfOrNil),
             ("count", ReturnKind::Int),
             ("exists?", ReturnKind::Bool),
+            ("more_than?", ReturnKind::Bool),
             ("pluck", ReturnKind::ArrayOfUntyped),
             ("pick", ReturnKind::Untyped),
             ("ids", ReturnKind::ArrayOfInt),

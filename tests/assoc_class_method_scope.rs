@@ -261,8 +261,8 @@ fn a_query_shaped_class_method_roots_its_terminal_on_the_relation() {
         "the query-shaped method grows the same trailing parameter:\n{note}"
     );
     assert!(
-        note.contains("__rel.count >"),
-        "and its bare terminal roots on the threaded relation:\n{note}"
+        note.contains("__rel.more_than?(PAGE_SIZE)"),
+        "and count > PAGE_SIZE becomes a LIMIT 1 OFFSET probe:\n{note}"
     );
 }
 

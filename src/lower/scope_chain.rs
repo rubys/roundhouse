@@ -2021,6 +2021,46 @@ fn is_relation_chain_method(name: &str) -> bool {
     )
 }
 
+/// True when `e` is a Relation this pass has already rooted — the
+/// threaded `__rel`, a local holding one, `ActiveRecord::Relation.new`,
+/// or a chain hop off either. Gates `count > n` → `more_than?(n)` so
+/// `Array#count` is left alone.
+fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
+    match &*e.node {
+        ExprNode::Var { name, .. } => {
+            locals.rel.contains_key(name)
+                || ctx.scope_body.as_ref().is_some_and(|(_, rel)| rel == name)
+        }
+        ExprNode::Send { method, recv: Some(r), args, block: None, .. } => {
+            if let Some(m) = const_model(r, ctx.models) {
+                if ctx.scope_of(&m, method) {
+                    return true;
+                }
+            }
+            let name = method.as_str();
+            if name == "new"
+                && args.len() == 1
+                && matches!(
+                    &*r.node,
+                    ExprNode::Const { path }
+                        if path.len() == 2
+                            && path[0].as_str() == "ActiveRecord"
+                            && path[1].as_str() == "Relation"
+                )
+            {
+                return true;
+            }
+            let hop = is_relation_chain_method(name)
+                || matches!(
+                    name,
+                    "where_scope" | "preloaded" | "skip_preloading!" | "page" | "per"
+                );
+            hop && is_relation_expr(r, ctx, locals)
+        }
+        _ => false,
+    }
+}
+
 /// Shared lookup tables; `scope_body` is `Some((self_model, rel_param))`
 /// when rewriting a scope's own body (so implicit-self query roots thread
 /// the relation parameter), `None` at every other call site.
@@ -3043,7 +3083,13 @@ pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option
             *expr.node = ExprNode::Assign { target, value };
             m
         }
-        ExprNode::Send { .. } => rewrite_send(expr, ctx, locals),
+        ExprNode::Send { .. } => {
+            let model = rewrite_send(expr, ctx, locals);
+            crate::lower::relation_counted_terminal::rewrite_count_gt_when(expr, |rel| {
+                is_relation_expr(rel, ctx, locals)
+            });
+            model
+        }
         _ => {
             // Any other node (If/BoolOp/Case/…): recurse children, keeping
             // the same ctx + locals so the relation thread survives across

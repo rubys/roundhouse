@@ -1345,6 +1345,38 @@ puts "ok"
         .assert_passes();
 }
 
+/// `rel.count > n` is `more_than?(n)`: `SELECT 1 LIMIT 1 OFFSET n` with
+/// the same FROM/JOIN/WHERE as COUNT, and the relation is not mutated.
+/// Campfire's `Message.paged?` is `count > PAGE_SIZE`.
+#[test]
+fn relation_more_than_probes_offset_without_count() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+seen = []
+orig = Db.method(:prepare)
+Db.define_singleton_method(:prepare) do |sql|
+  seen << sql
+  orig.call(sql)
+end
+
+3.times { |i| Article.create!(title: "more-#{i}", body: "long enough body") }
+rel = ActiveRecord::Relation.new(Article).where("title LIKE 'more-%'")
+prior = rel.to_sql
+seen.clear
+raise "more_than? 2" unless rel.more_than?(2)
+raise "more_than? 3" if rel.more_than?(3)
+raise "more_than? poisoned: #{rel.to_sql}" unless rel.to_sql == prior
+sql = seen.find { |s| s.include?("FROM articles") && s.include?("OFFSET 2") }
+raise "more_than? did not OFFSET: #{seen.inspect}" if sql.nil?
+raise "COUNT leaked: #{sql}" if sql.upcase.include?("COUNT")
+raise "LIMIT 1 missing: #{sql}" unless sql.include?("LIMIT 1")
+puts "ok"
+"##,
+        )
+        .assert_passes();
+}
+
 /// The runtime defines this exception in `active_support_ext.rb`.
 #[test]
 fn framework_exception_resolves_from_real_runtime_source() {

@@ -59,6 +59,10 @@ end
   scope :newest, -> { ordered.last }
   scope :search, ->(q) { where("body like ?", q) }
   scope :shared, -> { where(room_id: 1) }
+
+  def self.paged?
+    count > PAGE_SIZE
+  end
 end
 "#,
         ),
@@ -77,6 +81,7 @@ end
   def show
     @room = Room.find(params[:id])
     @head = @room.messages.ordered.first(3)
+    @paged = @room.messages.paged?
     @words = summary.split.first(4).join(" ")
     @tail = summary.split.last(2).join(" ")
     @found = anything.search("hi").last(100)
@@ -126,6 +131,14 @@ fn counted_terminal_on_a_threaded_relation_is_renamed() {
     assert!(
         message.contains("Message.ordered(__rel).first_n(PAGE_SIZE)"),
         "first(n) on a relation becomes first_n:\n{message}"
+    );
+    assert!(
+        message.contains("__rel.more_than?(PAGE_SIZE)"),
+        "count > PAGE_SIZE becomes more_than?:\n{message}"
+    );
+    assert!(
+        !message.contains("__rel.count >"),
+        "the COUNT comparison must not remain:\n{message}"
     );
 }
 

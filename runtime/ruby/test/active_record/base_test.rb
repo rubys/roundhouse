@@ -434,6 +434,28 @@ class BaseTest < Minitest::Test
     assert_equal ["T3", "T4"], tail.map(&:title)
   end
 
+  def test_relation_more_than_probes_without_hydrate_or_mutation
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).where("title LIKE 'T%'")
+    prior = rel.to_sql
+    Item.hydrate_count = 0
+    assert rel.more_than?(4)
+    refute rel.more_than?(5)
+    assert_equal 0, Item.hydrate_count
+    assert_equal prior, rel.to_sql
+    assert_nil rel.offset_value
+  end
+
+  def test_model_any_none_do_not_hydrate
+    Item.hydrate_count = 0
+    refute Item.any?
+    assert Item.none?
+    it = Item.new; it.title = "A"; it.save()
+    assert Item.any?
+    refute Item.none?
+    assert_equal 0, Item.hydrate_count
+  end
+
   # ── update + destroy ────────────────────────────────────────
 
   def test_save_updates_existing_record

@@ -104,8 +104,8 @@ module ActiveRecord
 
     def to_a: () -> Array[untyped]
     def load_records: () -> Array[untyped]
+    def loaded_records: () -> Array[untyped]
     def to_set: () -> Set[untyped]
-    def offset_row_exists?: () -> bool
     def to_ary: () -> Array[untyped]
     def ==: (untyped other) -> bool
     def filter: () { (untyped) -> bool } -> Array[untyped]
@@ -165,6 +165,7 @@ module ActiveRecord
     def all?: () { (untyped) -> bool } -> bool
     def exists?: (?Integer? id) -> bool
     def probe_existence: (Integer n) -> Integer
+    def more_than?: (Integer n) -> bool
     def length: () -> Integer
     def size: () -> Integer
     def delete_all: () -> Integer

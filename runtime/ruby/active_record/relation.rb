@@ -872,20 +872,9 @@ module ActiveRecord
       records.map { |r| r.id }
     end
 
-    # `include?(record)` — Rails' `Relation#include?(record)`: a loaded
-    # relation asks its records; an unloaded one asks the database
-    # (`exists?(id)`). Either way the question is the RECORD's identity
-    # — class and id — never object identity, so two hydrations of one
-    # row agree. Compared by id rather than `==` because record equality
-    # is defined only on the CRuby overlay (`active_record_bang.rb`); a
-    # compiled target compares boxed objects by pointer.
-    #
-    # The id is coerced through `_cast_primary_key` before `exists?` so
-    # the `Integer?` parameter stays a real Integer on every target
-    # (handing a bare untyped `record.id` to spinel was a C-level type
-    # error). Unloaded membership is then `SELECT 1 … LIMIT 1`, not a
-    # full `ids` projection — `ordered` scopes no longer force a sort
-    # just to answer "is this row in the set?".
+    # `include?(record)` — loaded relations scan the cache; unloaded
+    # ones ask `exists?(id)` (`SELECT 1 LIMIT 1`), not an `ids`
+    # projection that would ORDER BY just to test membership.
     def include?(record)
       return false if record.nil?
       rid = record.id
@@ -899,16 +888,20 @@ module ActiveRecord
       exists?(key)
     end
 
-    # Walk the loaded cache without `to_a`'s dup. Yields the same
-    # records `to_a` would; returns `self` (Enumerable/Rails), never
-    # the mutable `@records` array — a caller that mutates the return
-    # value must not corrupt later iteration.
-    def each
+    # Load once and return the memoized array (not a dup). `each` /
+    # `find_each` walk this so they do not copy, and they still return
+    # `self` so a caller cannot mutate the cache through the result.
+    def loaded_records
       records = @records
       if records.nil?
         records = load_records
         @records = records
       end
+      records
+    end
+
+    def each
+      records = loaded_records
       i = 0
       n = records.length
       while i < n
@@ -927,18 +920,11 @@ module ActiveRecord
       h
     end
 
-    # `find_each` — Rails batches in groups of 1000; the result set sizes
-    # this runtime serves make plain iteration the same observable
-    # behavior (ordering aside, which our callers don't rely on).
-    # Body duplicated from `each` rather than block-forwarded: a nested
-    # `{ |x| yield x }` left `x` as TyVar under Bar A, and strict targets
-    # want a real definition, not a rest-arg forward.
+    # `find_each` — Rails batches; corpus sizes make one load the same
+    # answer. Loop duplicated from `each`: a nested `{ |x| yield x }`
+    # left `x` as TyVar under Bar A.
     def find_each
-      records = @records
-      if records.nil?
-        records = load_records
-        @records = records
-      end
+      records = loaded_records
       i = 0
       n = records.length
       while i < n
@@ -1079,17 +1065,9 @@ module ActiveRecord
       rows
     end
 
-    # The last n IN RELATION ORDER — Rails does not reverse them
-    # (`ordered.last(n)` is the oldest-to-newest tail when the scope
-    # orders ascending, which is the order a page typically renders).
-    #
-    # Unloaded, no LIMIT/OFFSET: reverse each ORDER BY, LIMIT n, load,
-    # reverse the rows back. That is Rails' SQL tail — without it,
-    # materializing the whole relation hydrates every row and runs
-    # `includes` for all of them once the table grows past one page.
-    # A loaded relation, or one with LIMIT/OFFSET, still takes the
-    # in-memory tail: reversing ORDER BY under OFFSET is not the same
-    # window.
+    # Last n in relation order (Rails does not reverse the page).
+    # Unloaded and unwindowed: reverse ORDER BY, LIMIT n, reverse rows.
+    # Loaded or already LIMIT/OFFSET: in-memory tail of that window.
     def last_n(n)
       loaded = @records
       unless loaded.nil?
@@ -1279,7 +1257,7 @@ module ActiveRecord
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
       # asked on.
-      @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
+      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
       found = probe_existence(1) > 0
       @wheres.pop
       found
@@ -1292,13 +1270,17 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(exists_sql(n)).length
     end
 
-    # `offset(n).exists?` — whether a row lies past the first n. A COUNT
-    # ignores OFFSET and answers whether ANY row matches; Rails asks for
-    # one row past the offset (`SELECT 1 … LIMIT 1 OFFSET n`). Kept as
-    # a named entry point for call sites that probe "is there a next
-    # page?" without loading it.
-    def offset_row_exists?
-      probe_existence(1) > 0
+    # `count > n` without a COUNT(*): same FROM/JOIN/WHERE as
+    # `count_sql` (LIMIT/OFFSET/ORDER ignored), then `LIMIT 1 OFFSET n`.
+    # Does not mutate the relation — `offset(n).exists?` would, and a
+    # loaded `exists?` would ignore that offset.
+    def more_than?(n)
+      return true if n < 0
+      sql = "#{cte_prefix}SELECT 1 AS one FROM #{from_source}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "#{sql} LIMIT 1 OFFSET #{n}"
+      ActiveRecord.adapter.select_rows(sql).length > 0
     end
 
     def length
@@ -1668,10 +1650,7 @@ module ActiveRecord
     end
 
     # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
-    # (existence does not care about order) and never projects model
-    # columns, so `exists?` / `one?` / `many?` do not hydrate. Keeps
-    # joins / WHERE / GROUP / HAVING / OFFSET so a scoped or paged
-    # relation answers about the same rows `to_a` would.
+    # and never hydrates. Keeps joins / WHERE / GROUP / HAVING / OFFSET.
     def exists_sql(n)
       # DISTINCT 1 collapses every row into one — `distinct.many?` would
       # always be false. Project the primary key so each distinct row
