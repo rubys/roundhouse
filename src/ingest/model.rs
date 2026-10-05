@@ -451,6 +451,76 @@ pub(super) fn ingest_model_body_items(
                     })
                     .collect());
             }
+            // `attr_*` / `cattr_*` / `mattr_*` — same expansion library
+            // ingest applies. Models that carry class attrs (Writebook
+            // `ActionText::Markdown.mattr_accessor :renderer`) must
+            // synthesize the singleton reader/writer or `to_html` and
+            // inventory resolve as unresolved `renderer`.
+            if matches!(
+                name.as_str(),
+                "attr_reader"
+                    | "attr_writer"
+                    | "attr_accessor"
+                    | "cattr_reader"
+                    | "cattr_writer"
+                    | "cattr_accessor"
+                    | "mattr_reader"
+                    | "mattr_writer"
+                    | "mattr_accessor"
+            ) {
+                let is_class_attr =
+                    name.starts_with("cattr_") || name.starts_with("mattr_");
+                let mut names: Vec<Symbol> = Vec::new();
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        if let Some(s) = symbol_value(&arg) {
+                            names.push(Symbol::from(s));
+                        }
+                    }
+                }
+                let recv = if is_class_attr {
+                    crate::dialect::MethodReceiver::Class
+                } else {
+                    crate::dialect::MethodReceiver::Instance
+                };
+                let want_reader =
+                    name.ends_with("_reader") || name.ends_with("_accessor");
+                let want_writer =
+                    name.ends_with("_writer") || name.ends_with("_accessor");
+                let mut out = Vec::new();
+                for (i, attr) in names.iter().enumerate() {
+                    let lead = if i == 0 {
+                        leading_comments.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    if want_reader {
+                        out.push(ModelBodyItem::Method {
+                            method: super::library_class::synth_attr_reader(
+                                owner, attr, recv,
+                            ),
+                            leading_comments: lead.clone(),
+                            leading_blank_line: false,
+                        });
+                    }
+                    if want_writer {
+                        out.push(ModelBodyItem::Method {
+                            method: super::library_class::synth_attr_writer(
+                                owner, attr, recv,
+                            ),
+                            leading_comments: if want_reader {
+                                Vec::new()
+                            } else {
+                                lead
+                            },
+                            leading_blank_line: false,
+                        });
+                    }
+                }
+                if !out.is_empty() {
+                    return Ok(out);
+                }
+            }
         }
     }
     Ok(vec![ingest_model_body_item(stmt, owner, file, leading_comments)?])

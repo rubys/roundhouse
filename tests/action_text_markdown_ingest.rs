@@ -29,7 +29,12 @@ end
 
 const MARKDOWN: &str = r#"module ActionText
   class Markdown < Record
+    mattr_accessor :renderer
     belongs_to :record, polymorphic: true
+
+    def to_html
+      renderer
+    end
   end
 end
 "#;
@@ -81,6 +86,15 @@ fn markdown_under_action_text_ingests_as_model() {
             .contains_key(&roundhouse::ident::Symbol::from("content")),
         "content column from schema; got {:?}",
         md.attributes.fields.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        md.body.iter().any(|item| matches!(
+            item,
+            roundhouse::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "renderer"
+                    && method.receiver == roundhouse::dialect::MethodReceiver::Class
+        )),
+        "mattr_accessor :renderer must synthesize a class reader on the model"
     );
 }
 
