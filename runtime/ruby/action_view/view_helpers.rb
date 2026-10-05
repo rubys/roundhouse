@@ -120,7 +120,14 @@ module ActionView
     # Monomorphic: param typed String. Callers handle nil/non-String
     # coercion explicitly. Contracts the dispatch surface so every
     # backend compiler sees a stable input shape.
+    #
+    # Skip gsub when the scan finds nothing: CRuby#gsub always
+    # allocates a copy, and campfire's room page html-escapes author
+    # names, CSS classes, and timestamps — almost none of which contain
+    # `&<>"'`. Returning the input is what ERB::Util does for an
+    # already-safe string; the caller appends into a buffer.
     def self.html_escape(s)
+      return s unless s.match?(HTML_ESCAPE_PATTERN)
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
@@ -138,6 +145,7 @@ module ActionView
     BUILDER_TEXT_PATTERN = /[&<>]/.freeze
 
     def self.builder_text(s)
+      return s unless s.match?(BUILDER_TEXT_PATTERN)
       s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
     end
 
@@ -155,6 +163,7 @@ module ActionView
     BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
 
     def self.builder_attr(s)
+      return s unless s.match?(BUILDER_ATTR_PATTERN)
       s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
     end
 
@@ -210,6 +219,7 @@ module ActionView
 
     # Monomorphic: param typed String, like `html_escape`.
     def self.url_encode(s)
+      return s unless s.match?(URL_ESCAPE_PATTERN)
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
     end
 
@@ -286,10 +296,12 @@ module ActionView
 
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
+      return s unless s.match?(URL_ESCAPE_PATTERN)
       s.gsub(URL_ESCAPE_PATTERN, URI_ESCAPES)
     end
 
     def self.url_encode_mailto_address(s)
+      return s unless s.match?(MAILTO_ESCAPE_PATTERN)
       s.gsub(MAILTO_ESCAPE_PATTERN, URI_ESCAPES)
     end
 

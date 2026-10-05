@@ -110,6 +110,16 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.html_escape("<b>hi</b>")
   end
 
+  def test_html_escape_returns_plain_text_unchanged
+    plain = "Alice"
+    assert_same plain, ViewHelpers.html_escape(plain)
+  end
+
+  def test_url_encode_returns_safe_token_unchanged
+    token = "1234567890"
+    assert_same token, ViewHelpers.url_encode(token)
+  end
+
   def test_html_escape_handles_quotes_and_apostrophes
     assert_equal "&quot;hi&quot; &amp; &#39;bye&#39;",
       ViewHelpers.html_escape(%("hi" & 'bye'))
