@@ -353,10 +353,7 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
-    # Class-side emptiness — override base.rb's COUNT form with the
-    # existence probe Relation already pays. Same ruby-family reopen
-    # rule as `where`/`all` above: strict targets keep the adapter
-    # COUNT in base.rb because they have no Relation class.
+    # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.
     def self.any?
       ActiveRecord::Relation.new(self).exists?
     end

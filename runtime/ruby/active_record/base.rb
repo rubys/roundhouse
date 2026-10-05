@@ -591,15 +591,8 @@ module ActiveRecord
       _adapter_exists_by_id?(id)
     end
 
-    # Rails delegates the Enumerable predicates from the class to `all`,
-    # so `User.none?` asks whether the table has any row at all —
-    # campfire's first-run check. Answered from COUNT rather than by
-    # materializing: `none?`/`any?` on the class carry no conditions, so
-    # there is nothing for the Relation to hold that the count doesn't.
-    # The scoped forms (`User.where(…).none?`) go through Relation#none?
-    # beside it. The ruby-family reopen in connection.rb overrides these
-    # to `Relation.new(self).exists?` (SELECT 1 LIMIT 1); this COUNT
-    # form stays for strict targets, which have no Relation class.
+    # Unscoped class emptiness via COUNT. Scoped forms go through
+    # Relation; ruby-family connection.rb overrides these to exists?.
     def self.none?
       count == 0
     end

@@ -453,12 +453,8 @@ module ActiveRecord
       current_page == 1
     end
 
-    # Kaminari compares `current_page` to `total_pages`, and the latter
-    # is a COUNT. When the page is already loaded, non-empty, and
-    # shorter than `limit_value`, there cannot be a successor page —
-    # same answer without the COUNT. An empty loaded page is ambiguous
-    # (page 1 of nothing vs. an out-of-range page), and a full page
-    # still needs `total_pages`.
+    # Loaded non-empty short page cannot have a successor — skip COUNT.
+    # Empty pages are ambiguous (page 1 of nothing vs. out of range).
     def last_page?
       per_page = @limit
       return true if per_page.nil?
@@ -874,9 +870,7 @@ module ActiveRecord
       records.map { |r| r.id }
     end
 
-    # `include?(record)` — loaded relations scan the cache; unloaded
-    # ones ask `exists?(id)` (`SELECT 1 LIMIT 1`), not an `ids`
-    # projection that would ORDER BY just to test membership.
+    # Loaded: scan the cache. Unloaded: exists?(id), not ids (ORDER BY).
     def include?(record)
       return false if record.nil?
       rid = record.id
@@ -890,9 +884,7 @@ module ActiveRecord
       exists?(key)
     end
 
-    # Load once and return the memoized array (not a dup). `each` /
-    # `find_each` walk this so they do not copy, and they still return
-    # `self` so a caller cannot mutate the cache through the result.
+    # Memoized rows, not a dup. each/find_each return self.
     def loaded_records
       records = @records
       if records.nil?
@@ -1162,30 +1154,19 @@ module ActiveRecord
       h
     end
 
-    # Loaded relations answer from the cache; unloaded ones ask
-    # `exists?` (Rails' SELECT 1 LIMIT 1), not COUNT(*).
+    # Loaded: cache length. Unloaded: exists? (SELECT 1 LIMIT 1).
     def empty?
       r = @records
       r.nil? ? !exists? : r.length == 0
     end
 
-    # Like `empty?`: a loaded relation answers from its records, an
-    # unloaded one asks `exists?`.
     def any?
       r = @records
       r.nil? ? exists? : r.length > 0
     end
 
-    # ActiveSupport's blank family on a relation. Rails answers `blank?`
-    # through `records.blank?`, which LOADS; spelled against `empty?`
-    # here so an unloaded relation pays the existence probe `empty?`
-    # already pays rather than materialising every row.
-    #
-    # `lower::blank` folds these away where the receiver's static type
-    # is known (a typed relation grounds to `!empty?`). These are the
-    # runtime answers for the sites it declines: a has_many extension
-    # that takes a relation through an untyped kwarg reaches
-    # `granted.present?` by dispatch.
+    # Rails loads for blank?; empty? keeps the existence probe.
+    # lower::blank folds typed sites; these cover untyped dispatch.
     def blank?
       empty?
     end
@@ -1198,33 +1179,19 @@ module ActiveRecord
       empty? ? nil : self
     end
 
-    # Rails reaches Enumerable#none? through the relation, and without a
-    # block it is `any?` inverted. Spelled against `empty?` rather than
-    # `!any?` so the loaded case answers from the cache the way `empty?`
-    # does instead of paying an existence probe.
+    # Enumerable#none? without a block is empty? (uses the loaded cache).
     def none?
       empty?
     end
 
-    # `one?` — EXACTLY one row, the third of the Enumerable predicates
-    # Rails reaches through a relation. Its siblings have been here
-    # since `any?`; this one had no caller until a `has_many :through`
-    # reader started answering a real Relation.
-    #
-    # Unloaded: `SELECT 1 LIMIT 2` and check the row count — cheaper
-    # than COUNT(*) on a large match set. Block form is absent for the
-    # same reason `any?`'s is: it would have to materialize and
-    # iterate, and no call site asks.
+    # Exactly one row. Unloaded: SELECT 1 LIMIT 2. No block form.
     def one?
       r = @records
       return r.length == 1 unless r.nil?
       probe_existence(2) == 1
     end
 
-    # `many?` — MORE than one row, ActiveSupport's Enumerable addition
-    # Rails answers on a relation with `limit_value ? records.many? :
-    # size > 1`. Loaded answers from the cache like `any?`; unloaded
-    # probes with `SELECT 1 LIMIT 2`.
+    # More than one row. Unloaded: SELECT 1 LIMIT 2.
     def many?
       r = @records
       return r.length > 1 unless r.nil?
@@ -1240,15 +1207,9 @@ module ActiveRecord
       ok
     end
 
-    # `exists?` / `exists?(id)` — Rails also takes a conditions Hash or
-    # a String; the id form is what the corpus spells
-    # (`Membership.connected.exists?(@membership.id)`), and a Hash
-    # would be the untyped-Hash-surface problem `has_json` mapped out.
-    # An `Integer?` param narrows by early return, not by a guard —
-    # rust2 does not narrow an `Option` across `unless x.nil?`.
-    #
-    # Unloaded SQL is `SELECT 1 AS one … LIMIT 1` (see `exists_sql`),
-    # not COUNT(*). Loaded relations answer from the cache.
+    # `exists?` / `exists?(id)`. Hash/String forms are unsupported.
+    # Integer? narrows by early return — rust2 does not narrow Option
+    # across `unless x.nil?`. Unloaded: exists_sql (SELECT 1 LIMIT 1).
     def exists?(id = nil)
       return false if @limit == 0
       if id.nil?

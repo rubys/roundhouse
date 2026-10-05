@@ -117,21 +117,9 @@ module ActionView
   
     HTML_ESCAPE_PATTERN = /[&<>"']/.freeze
   
-    # Monomorphic: param typed String. Callers handle nil/non-String
-    # coercion explicitly. Contracts the dispatch surface so every
-    # backend compiler sees a stable input shape.
-    #
-    # Skip gsub when the scan finds nothing: CRuby#gsub always
-    # allocates a copy, and most escaped values (names, CSS classes,
-    # numeric ids) contain none of `&<>"'`. Returning the input is
-    # what ERB::Util does for an already-safe string; the caller
-    # appends into a buffer.
-    #
-    # The probe is `include?` of each special character, not
-    # `String#match?(re)`: that call still has no portable emit on
-    # Rust/Python (they emit `match_pred`/`match_p` on `&str`/`str`),
-    # and YJIT prefers the monomorphic include? path over Regexp
-    # entry for the common "already clean" case.
+    # Monomorphic String. Skip gsub when already safe (ERB::Util).
+    # Probe with `include?`, not `match?(re)` — Rust/Python have no
+    # portable match? emit.
     def self.html_escape(s)
       return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
@@ -223,10 +211,7 @@ module ActionView
 
     URL_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
-    # Monomorphic: param typed String, like `html_escape`.
-    # Fast-path probe is `needs_url_escape?` (character `include?`s),
-    # not `match?(URL_ESCAPE_PATTERN)` — same emit portability reason
-    # as `html_escape` above.
+    # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
       return s unless needs_url_escape?(s)
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
@@ -314,9 +299,7 @@ module ActionView
       s.gsub(MAILTO_ESCAPE_PATTERN, URI_ESCAPES)
     end
 
-    # True when `s` contains a character `URL_ESCAPE_PATTERN` would
-    # match. Hand-expanded `include?` chain so strict targets do not
-    # need `String#match?` / `Regexp#match?` emit.
+    # True when URL_ESCAPE_PATTERN would match. include?, not match?.
     def self.needs_url_escape?(s)
       s.include?(" ") || s.include?("!") || s.include?("\"") || s.include?("#") ||
         s.include?("$") || s.include?("%") || s.include?("&") || s.include?("'") ||
@@ -413,37 +396,19 @@ module ActionView
   
     # ── HTML element helpers ─────────────────────────────────────────
 
-    # Shared default for helpers that take an optional html-options Hash.
-    # `def f(opts = {})` allocates a fresh Hash on every no-opts call;
-    # a frozen constant does not. Callers that pass options still
-    # allocate at the call site. Methods that delete keys dup first.
+    # Frozen empty default so no-opts helpers do not allocate a Hash.
+    # Methods that delete keys dup first.
     EMPTY_HTML_OPTS = {}.freeze
 
     def self.link_to(text, href, opts = EMPTY_HTML_OPTS)
-      # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
-      # conversion under Crystal. Call sites that use kwargs syntax
-      # (`link_to "Show", "/x", class: "btn"`) lift to NamedTuple
-      # in Crystal, but the receiver builds a Hash via `merge` —
-      # NamedTuple#merge can't take a Hash, and Hash#merge can't
-      # take a NamedTuple. Same `.to_h` pattern applies to every
-      # helper below that merges user opts into a default Hash.
+      # `opts.to_h` is a no-op on Ruby Hash and NamedTuple→Hash on
+      # Crystal. Do not gate `opts.is_a?(Hash)`: Rust emit maps that
+      # to `HashMap#is_object`, which does not exist.
       #
-      # ORDER IS RAILS' ORDER: the html options first and `href` LAST
-      # (`link_to` does `html_options["href"] ||= url` after the options
-      # are in hand), so `link_to "T", url, rel: "noreferrer", target:
-      # "_blank"` is `<a rel="noreferrer" target="_blank" href="…">`.
-      # campfire's opengraph-embed test matches on exactly that
-      # string. An `href:` the caller put in the options wins, as
-      # `||=` has it. The href is appended as text rather than merged
-      # in: `opts.merge({ href: … })` puts a Hash literal in ARGUMENT
-      # position, which two strict emitters type from the literal
-      # (Crystal a NamedTuple, Swift a `[String: String]` cast on the
-      # receiver), where every other merge in this file has the
-      # literal as the receiver. Same escape `render_attrs` applies.
-      # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
-      # conversion under Crystal. Do not gate on `opts.is_a?(Hash)`:
-      # Rust emit maps that to `HashMap#is_object`, which does not exist
-      # on a typed HashMap parameter.
+      # Html options first, href last (Rails). An explicit `href:` in
+      # opts wins. Append href as text: merging `{ href: … }` in
+      # argument position types as a NamedTuple / `[String: String]`
+      # on strict targets.
       given = opts.to_h
       attrs = render_attrs(given)
       attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)

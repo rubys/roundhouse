@@ -1,29 +1,13 @@
 //! Shared lowering: counted Relation terminals.
 //!
-//! `first(n)` / `last(n)` on a receiver the analyzer typed as a Relation
-//! become the runtime's `first_n` / `last_n`.
+//! Typed `first(n)` / `last(n)` rename to `first_n` / `last_n` — one
+//! method cannot carry both a record and an Array on a strict target.
+//! Syntactic chains go through `scope_chain::counted_terminal`.
 //!
-//! The runtime splits the counted forms from the bare ones because one
-//! method cannot carry both return types on a strict target: `last`
-//! answers a record or nil, `last(n)` an Array (see
-//! `scope_chain::counted_terminal`, which renames the chains it can
-//! prove relations syntactically, on the Ruby emit path). A typed
-//! receiver needs no syntax to prove it: campfire's `Page.load` takes
-//! its relation as a parameter, and once `send_dispatch` grounds its
-//! `public_send(direction, size)` the arms read
-//! `relation.skip_preloading!.last(size)`, which reached the zero-arg
-//! `last` and raised ArgumentError.
-//!
-//! `rel.count > n` becomes `rel.more_than?(n)` — `SELECT 1 LIMIT 1
-//! OFFSET n` matching `count_sql`'s FROM/JOIN/WHERE, not a COUNT(*)
-//! and not `offset(n).exists?` (`offset` mutates; loaded `exists?`
-//! ignores it). Only a non-negative integer literal or a Const
-//! (`PAGE_SIZE`) is rewritten, so an effectful right-hand side keeps
-//! source evaluation order.
-//!
-//! Only `Ty::Relation` counts. `Ty::Array` receivers keep `first(n)`
-//! and `Array#count`. A block form is Enumerable#detect and is left
-//! alone.
+//! `rel.count > n` → `rel.more_than?(n)` (`SELECT 1 LIMIT 1 OFFSET n`).
+//! Not `offset(n).exists?`: offset mutates, and loaded exists? ignores
+//! it. Only a non-negative integer literal or Const (`PAGE_SIZE`).
+//! Arrays and block forms stay Enumerable.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};

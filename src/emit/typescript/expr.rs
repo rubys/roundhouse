@@ -2069,10 +2069,7 @@ fn js_send_inner(
         return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
     // Ruby has both `Regexp#match?(str)` and `String#match?(re)`.
-    // JS only has `RegExp#test(str)`, so the String-receiver form must
-    // swap: `s.match?(re)` → `re.test(s)`. Emitting `s.test(re)` is a
-    // TypeError (`String.prototype.test` does not exist) — which is
-    // exactly what six `html_escape`-family fast-paths hit under TS.
+    // JS only has `RegExp#test(str)`, so `s.match?(re)` → `re.test(s)`.
     if method == "match?" && args.len() == 1 && recv.is_some() {
         let r = recv.unwrap();
         let arg = &args[0];

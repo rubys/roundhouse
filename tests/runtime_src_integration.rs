@@ -1607,9 +1607,7 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
     let kt = roundhouse::emit::kotlin::emit_constant_for_runtime(&empty.1);
     assert_eq!(kt, "mutableMapOf<String, Any?>()");
 
-    // Explicit `{}` call-arg (view_helpers_test) typed as Hash[untyped,
-    // untyped] must not emit MutableMap<Any?, Any?> against String-keyed
-    // helper opts params — Kotlin map invariance rejects the mismatch.
+    // Explicit `{}` typed Hash[untyped, untyped] must stay String-keyed.
     use roundhouse::expr::{Expr, ExprNode};
     use roundhouse::span::Span;
     use roundhouse::ty::Ty;
