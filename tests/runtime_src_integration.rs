@@ -1590,7 +1590,12 @@ fn every_runtime_method_body_concretely_typed() {
     // sort_in_place!/loaded_tail as Array[untyped], order_key_of /
     // include?(Base). Not Class (breaks Bar A); preloaded stays bare
     // for Spinel integer seeds.
-    const CEILING: usize = 458;
+    //
+    // 458 -> 435, -23 MEASURED (relation.rbs): first/take/last/first!
+    // as Base?/Base; find_by/find_by!/first_or_initialize/
+    // find_or_create_by as Base?/Base. Interim before Relation[T] —
+    // not a per-model element claim. find(Array) stays untyped.
+    const CEILING: usize = 435;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -149,10 +149,10 @@ module ActiveRecord
     def sort_by: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def each_with_object: (untyped memo) { (untyped, untyped) -> untyped } -> untyped
-    def first: () -> untyped
-    def take: () -> untyped
-    def first!: () -> untyped
-    def last: () -> untyped
+    def first: () -> Base?
+    def take: () -> Base?
+    def first!: () -> Base
+    def last: () -> Base?
     def first_n: (Integer n) -> Array[untyped]
     def last_n: (Integer n) -> Array[untyped]
     def count: () -> Integer
@@ -202,10 +202,10 @@ module ActiveRecord
     def ids: () -> Array[Integer]
     def find: (Integer | String | Array[Integer | String] id) -> untyped
     def find_ids: (Array[Integer | String] ids) -> Array[untyped]
-    def find_by: (untyped conditions) -> untyped
-    def find_by!: (untyped conditions) -> untyped
-    def first_or_initialize: () -> untyped
-    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped
+    def find_by: (untyped conditions) -> Base?
+    def find_by!: (untyped conditions) -> Base
+    def first_or_initialize: () -> Base
+    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
     def to_subquery_sql: () -> String
