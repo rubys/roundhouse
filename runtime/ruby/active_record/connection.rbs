@@ -42,6 +42,9 @@ module ActiveRecord
     def self.all: () -> Relation
     def self.none: () -> Relation
     def self.page: (?untyped num) -> Relation
+    # Existence probe overrides of base.rb's COUNT forms (Relation.exists?).
+    def self.any?: () -> bool
+    def self.none?: () -> bool
     def _note_hydrated: () -> void
     def _note_unloaded: (Hash[String, untyped] row) -> nil
     def has_attribute?: (Symbol name) -> bool

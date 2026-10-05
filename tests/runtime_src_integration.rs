@@ -1590,3 +1590,40 @@ fn every_runtime_method_body_concretely_typed() {
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
     );
 }
+
+#[test]
+fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
+    let src = include_str!("../runtime/ruby/action_view/view_helpers.rb");
+    let consts = roundhouse::runtime_src::parse_module_constant_exprs(src).unwrap();
+    let empty = consts
+        .iter()
+        .find(|(n, _)| n.as_str() == "EMPTY_HTML_OPTS")
+        .expect("EMPTY_HTML_OPTS");
+    let cs = roundhouse::emit::csharp::emit_module_constant(empty.0.as_str(), &empty.1);
+    assert!(
+        cs.contains("Dictionary<string, object?> EMPTY_HTML_OPTS"),
+        "empty frozen opts constant must not degrade to object?: {cs}"
+    );
+    let kt = roundhouse::emit::kotlin::emit_constant_for_runtime(&empty.1);
+    assert_eq!(kt, "mutableMapOf<String, Any?>()");
+
+    // Explicit `{}` call-arg (view_helpers_test) typed as Hash[untyped,
+    // untyped] must not emit MutableMap<Any?, Any?> against String-keyed
+    // helper opts params — Kotlin map invariance rejects the mismatch.
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::span::Span;
+    use roundhouse::ty::Ty;
+    let mut arg = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries: vec![], kwargs: false },
+    );
+    arg.ty = Some(Ty::Hash {
+        key: Box::new(Ty::Untyped),
+        value: Box::new(Ty::Untyped),
+    });
+    let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
+    assert_eq!(
+        emitted, "mutableMapOf<String, Any?>()",
+        "empty untyped hash arg must pin String keys for Kotlin invariance"
+    );
+}

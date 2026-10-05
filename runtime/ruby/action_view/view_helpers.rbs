@@ -27,7 +27,8 @@ module ActionView
     def self.get_yield: () -> String
     def self.set_yield: (String content) -> void
 
-    EMPTY_HTML_OPTS: Hash[untyped, untyped]
+    # Same key type as the helpers' `opts` params (`Hash[Symbol, untyped]`).
+    EMPTY_HTML_OPTS: Hash[Symbol, untyped]
   
     # ── escaping / formatting ───────────────────────────────────────
 
