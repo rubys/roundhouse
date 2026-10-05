@@ -601,7 +601,14 @@ def main():
     parser.add_argument("command", choices=["plan", "gate", "compact-gate"])
     args = parser.parse_args()
     if args.command != "plan":
-        plan = json.loads(os.environ["CI_PLAN"])
+        raw_plan = os.environ.get("CI_PLAN", "")
+        if not raw_plan.strip():
+            # Plan cancelled/skipped leaves an empty output; do not crash the
+            # always() gates or claim a green floor.
+            write_outputs({"complete": False})
+            print("::notice::No plan output (cancelled or skipped); incomplete")
+            return True
+        plan = json.loads(raw_plan)
         failures, complete = check_results(
             plan,
             json.loads(os.environ["CI_NEEDS"]),

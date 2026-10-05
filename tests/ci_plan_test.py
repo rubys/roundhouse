@@ -168,6 +168,22 @@ class Routing(unittest.TestCase):
         self.assertEqual(ci.check_results(plan, needs), ([], True))
         self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
 
+    def test_empty_plan_output_does_not_crash_always_gates(self):
+        with (
+            patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
+            patch("sys.argv", ["ci-plan.py", "compact-gate"]),
+            patch.object(ci, "write_outputs") as output,
+        ):
+            self.assertEqual(ci.main(), 1)
+        self.assertEqual(output.call_args.args[0]["complete"], False)
+        with (
+            patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
+            patch("sys.argv", ["ci-plan.py", "gate"]),
+            patch.object(ci, "write_outputs") as output,
+        ):
+            self.assertEqual(ci.main(), 1)
+        self.assertEqual(output.call_args.args[0]["complete"], False)
+
     def test_spinel_lane_skips_other_languages(self):
         plan = ci.select(
             ["src/emit/go.rs", "wasm/lib/driver.mjs"],
