@@ -112,12 +112,14 @@ class ViewHelpersTest < Minitest::Test
 
   def test_html_escape_returns_plain_text_unchanged
     plain = "Alice"
-    assert_same plain, ViewHelpers.html_escape(plain)
+    # Value equality — identity (`assert_same`) is a CRuby allocation
+    # property and is not meaningful under TS/Kotlin/Swift string copies.
+    assert_equal plain, ViewHelpers.html_escape(plain)
   end
 
   def test_url_encode_returns_safe_token_unchanged
     token = "1234567890"
-    assert_same token, ViewHelpers.url_encode(token)
+    assert_equal token, ViewHelpers.url_encode(token)
   end
 
   def test_html_escape_handles_quotes_and_apostrophes

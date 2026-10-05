@@ -1305,12 +1305,22 @@ module ActiveRecord
       to_a.length
     end
 
-    # Rails' `Relation#size`: COUNT when unloaded, `length` when loaded.
-    # `length` always materializes; size must not hydrate a whole table
-    # just to answer how many rows match.
+    # Rails' `Relation#size`: length when loaded; COUNT when unloaded
+    # and unbounded. A LIMIT/OFFSET window must not answer the table
+    # total — `limit(2).size` is at most 2 — so the limited path counts
+    # a `SELECT 1` subquery rather than `count_sql` (which omits LIMIT
+    # on purpose for Kaminari `total_count`).
     def size
       r = @records
-      r.nil? ? count : r.length
+      return r.length unless r.nil?
+      return count if @limit.nil? && @offset.nil?
+      prior_orders = @orders
+      @orders = []
+      inner = select_sql_with("1 AS one")
+      @orders = prior_orders
+      sql = "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_size"
+      rows = ActiveRecord.adapter.select_rows(sql)
+      rows.length == 0 ? 0 : rows[0]["n"].to_i
     end
 
     # `delete_all` — bulk DELETE scoped by the accumulated WHEREs.
@@ -1550,33 +1560,11 @@ module ActiveRecord
     # `add_condition` answers whether it pushed — a nil or empty
     # condition pushes nothing — so the pop is guarded by that rather
     # than issued unconditionally.
-    #
-    # A sole `{primary_key: nil}` (or `{id: nil}`) can never match a
-    # row: primary keys are NOT NULL. Answer nil without the
-    # `WHERE id IS NULL LIMIT 1` round trip — the plain room-show
-    # path of `find_messages` when no message_id is present.
     def find_by(conditions)
-      return nil if nil_primary_key_lookup?(conditions)
       pushed = add_condition(conditions, [], false)
       record = first
       @wheres.pop if pushed
       record
-    end
-
-    # True when `conditions` is exactly one entry whose key is the
-    # primary key (or bare `id`) and whose value is nil.
-    def nil_primary_key_lookup?(conditions)
-      return false unless conditions.is_a?(Hash)
-      return false if conditions.length != 1
-      key = nil
-      val = :__missing
-      conditions.each do |k, v|
-        key = k
-        val = v
-      end
-      return false unless val.nil?
-      name = key.to_s
-      name == "id" || name == @model.primary_key
     end
 
     # `find_by!` — `find_by` that raises `RecordNotFound` on no match.
@@ -1680,13 +1668,26 @@ module ActiveRecord
     # joins / WHERE / GROUP / HAVING / OFFSET so a scoped or paged
     # relation answers about the same rows `to_a` would.
     def exists_sql(n)
-      distinct = @distinct ? "DISTINCT " : ""
-      sql = "#{cte_prefix}SELECT #{distinct}1 AS one FROM #{from_source}"
+      # DISTINCT 1 collapses every row into one — `distinct.many?` would
+      # always be false. Project the primary key so each distinct row
+      # still occupies a probe slot under LIMIT n.
+      cols = if @distinct
+        "DISTINCT #{@table}.#{@model.primary_key} AS one"
+      else
+        "1 AS one"
+      end
+      sql = "#{cte_prefix}SELECT #{cols} FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
       sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
-      sql = "#{sql} LIMIT #{n}"
+      # Respect an existing relation LIMIT: many?/one? on limit(1) must
+      # not look past the window.
+      lim = n
+      unless @limit.nil?
+        lim = @limit < n ? @limit : n
+      end
+      sql = "#{sql} LIMIT #{lim}"
       sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
       sql
     end

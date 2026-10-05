@@ -220,7 +220,7 @@ module Rails
     # legitimately render to nothing, and treating that as a miss would
     # re-render it on every request forever.
     def read_str(key)
-      k = key.is_a?(String) ? key : key.to_s
+      k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
       return @entries[k] if due == 0
@@ -230,7 +230,7 @@ module Rails
     end
 
     def write_str(key, value, ttl)
-      k = key.is_a?(String) ? key : key.to_s
+      k = key.to_s
       @entries[k] = value
       @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
       # FLUSH THE WHOLE STORE at the cap, rather than evicting the

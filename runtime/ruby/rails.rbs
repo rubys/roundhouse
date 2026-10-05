@@ -40,8 +40,8 @@ module Rails
     # `String?` because nil is the MISS. An empty String is a HIT — a
     # fragment can legitimately render to nothing, and reading that back
     # as a miss would re-render it on every request forever.
-    def read_str: (untyped key) -> String?
-    def write_str: (untyped key, String value, Integer ttl) -> String
+    def read_str: (String key) -> String?
+    def write_str: (String key, String value, Integer ttl) -> String
     def increment_str: (String key, Integer ttl) -> Integer
     def forget: (String k) -> void
     def clear: () -> void

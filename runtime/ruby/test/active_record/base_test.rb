@@ -328,21 +328,7 @@ class BaseTest < Minitest::Test
     assert rel.last_page?
   end
 
-  def test_relation_find_by_nil_primary_key_skips_sql
-    it = Item.new; it.title = "A"; it.save()
-    rel = ActiveRecord::Relation.new(Item)
-    Item.hydrate_count = 0
-    assert_nil rel.find_by(id: nil)
-    assert_equal 0, Item.hydrate_count
-    # Relation stays unscoped — same guarantee as the predicate pop.
-    assert_equal 1, rel.count
-  end
 
-  def test_relation_find_by_nil_non_pk_still_queries
-    it = Item.new; it.title = "A"; it.save()
-    # title IS NULL can match; must not take the primary-key short circuit.
-    assert_nil ActiveRecord::Relation.new(Item).find_by(title: nil)
-  end
 
   def test_relation_include_unloaded_does_not_hydrate
     a = Item.new; a.title = "A"; a.save()
@@ -374,13 +360,6 @@ class BaseTest < Minitest::Test
     assert_equal "T49", page[-1].title
   end
 
-  def test_campfire_find_messages_nil_message_id_skips_probe
-    it = Item.new; it.title = "A"; it.save()
-    rel = ActiveRecord::Relation.new(Item).order("id")
-    Item.hydrate_count = 0
-    assert_nil rel.find_by(id: nil)
-    assert_equal 0, Item.hydrate_count
-  end
 
   def test_campfire_messages_any_uses_exists_sql
     it = Item.new; it.title = "A"; it.save()
@@ -391,6 +370,19 @@ class BaseTest < Minitest::Test
     Item.hydrate_count = 0
     assert rel.any?
     assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_size_respects_limit_when_unloaded
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    assert_equal 2, ActiveRecord::Relation.new(Item).limit(2).size
+    assert_equal 1, ActiveRecord::Relation.new(Item).limit(2).offset(4).size
+  end
+
+  def test_relation_distinct_many_and_one_see_separate_rows
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    assert ActiveRecord::Relation.new(Item).distinct.many?
+    refute ActiveRecord::Relation.new(Item).where(title: "T0").distinct.many?
+    assert ActiveRecord::Relation.new(Item).where(title: "T0").distinct.one?
   end
 
   def test_relation_each_does_not_rehydrate_and_returns_self
