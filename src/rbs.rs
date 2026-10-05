@@ -94,6 +94,25 @@ pub fn parse_app_signatures(
     Ok(out)
 }
 
+/// Parse RBS `@ivar: T` declarations grouped by enclosing class/module.
+/// Names are stored without the leading `@` so they match
+/// `ExprNode::Ivar` / `Ctx::ivar_bindings` keys.
+pub fn parse_app_ivars(
+    source: &str,
+) -> Result<std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>, String> {
+    let signature = parse(source)?;
+    let mut out: std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>> =
+        std::collections::HashMap::new();
+    let decls: Vec<Node<'_>> = signature.declarations().iter().collect();
+    let top_aliases = resolve_aliases(&decls, None, &AliasTable::new());
+
+    for decl in decls {
+        walk_ivars(&decl, None, &top_aliases, &mut out)?;
+    }
+
+    Ok(out)
+}
+
 /// Extract `include X` declarations from each class/module in an RBS
 /// source. Pairs with `parse_app_signatures` for callers that need
 /// to flatten included-module methods into the including class
@@ -216,6 +235,64 @@ fn walk_decl(
             collect_class_methods(iface.members().iter(), &name, aliases, out)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn walk_ivars(
+    decl: &Node<'_>,
+    parent: Option<&str>,
+    aliases: &AliasTable,
+    out: &mut std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>,
+) -> Result<(), String> {
+    match decl {
+        Node::Class(class) => {
+            let name = namespace_join(parent, &declared_name(&class.name()));
+            collect_class_ivars(class.members().iter(), &name, aliases, out)?;
+        }
+        Node::Module(module) => {
+            let name = namespace_join(parent, &declared_name(&module.name()));
+            collect_class_ivars(module.members().iter(), &name, aliases, out)?;
+        }
+        Node::Interface(iface) => {
+            let name = namespace_join(parent, &declared_name(&iface.name()));
+            collect_class_ivars(iface.members().iter(), &name, aliases, out)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_class_ivars<'a, I: Iterator<Item = Node<'a>>>(
+    members: I,
+    class_name: &str,
+    outer: &AliasTable,
+    out: &mut std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>,
+) -> Result<(), String> {
+    let class_id = ClassId(Symbol::new(class_name));
+    let members: Vec<Node<'a>> = members.collect();
+    let aliases = resolve_aliases(&members, Some(class_name), outer);
+    let aliases = &aliases;
+    let ctx = TyCtx {
+        scope: Some(class_name),
+        self_is_instance: true,
+        aliases,
+    };
+    for member in members {
+        match member {
+            Node::InstanceVariable(ivar) => {
+                let raw = ivar.name().as_str().to_string();
+                let bare = raw.strip_prefix('@').unwrap_or(raw.as_str());
+                let ty = ty_from_node(&ivar.type_(), ctx)?;
+                out.entry(class_id.clone())
+                    .or_default()
+                    .insert(Symbol::new(bare), ty);
+            }
+            Node::Class(_) | Node::Module(_) | Node::Interface(_) => {
+                walk_ivars(&member, Some(class_name), aliases, out)?;
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1430,6 +1507,42 @@ end
         let post_methods = &out[&post_id];
         assert_eq!(post_methods.len(), 1);
         assert!(post_methods.contains_key(&Symbol::from("title")));
+    }
+
+    #[test]
+    fn app_ivars_group_by_class_without_at_prefix() {
+        let src = "\
+module ActiveRecord
+  class Relation
+    @limit: Integer?
+    @records: Array[untyped]?
+    def page: (Integer n) -> Relation
+  end
+  class Base
+    @errors: Array[String]
+    @persisted: bool
+  end
+end
+";
+        let out = parse_app_ivars(src).expect("parses");
+        let rel = &out[&ClassId(Symbol::from("ActiveRecord::Relation"))];
+        assert_eq!(rel[&Symbol::from("limit")], Ty::Union {
+            variants: vec![Ty::Int, Ty::Nil],
+        });
+        assert!(matches!(
+            &rel[&Symbol::from("records")],
+            Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
+                && variants.iter().any(|v| matches!(v, Ty::Array { .. }))
+        ));
+        assert!(!rel.contains_key(&Symbol::from("@limit")));
+        let base = &out[&ClassId(Symbol::from("ActiveRecord::Base"))];
+        assert_eq!(
+            base[&Symbol::from("errors")],
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            }
+        );
+        assert_eq!(base[&Symbol::from("persisted")], Ty::Bool);
     }
 
     #[test]

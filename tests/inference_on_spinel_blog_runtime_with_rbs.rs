@@ -30,7 +30,7 @@ use roundhouse::dialect::{LibraryClass, MethodDef};
 use roundhouse::expr::{Expr, ExprNode, InterpPart};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_library_classes;
-use roundhouse::rbs::parse_app_signatures;
+use roundhouse::rbs::{parse_app_ivars, parse_app_signatures};
 use roundhouse::ty::Ty;
 
 const RUNTIME_DIR: &str = "runtime/ruby/active_record";
@@ -231,7 +231,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 
 /// Seed ivar_bindings: union-merge flow assignments (so `initialize`'s
 /// `@limit = nil` does not permanently beat `limit`'s `@limit = n`),
-/// then overlay RBS-declared / cross-method query & lifecycle ivars.
+/// then overlay RBS-declared ivars for this class (single source of
+/// truth — no parallel class-name match table).
 ///
 /// `ActiveRecord::Base` methods are split across stems (`base.rb`,
 /// `connection.rb`, …). Callers must merge seeds for the same
@@ -239,43 +240,27 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 fn seed_ivars_for_class(
     class_id: &ClassId,
     methods: &[roundhouse::dialect::MethodDef],
+    rbs_ivars: &HashMap<ClassId, HashMap<Symbol, Ty>>,
 ) -> HashMap<Symbol, Ty> {
     let mut flow: HashMap<Symbol, Ty> = HashMap::new();
     for method in methods {
         roundhouse::analyze::extract_ivar_assignments(&method.body, &mut flow);
     }
-    match class_id.0.as_str() {
-        "ActiveRecord::Relation" | "Relation" => {
-            let int_n = Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
-            };
-            let arr_n = Ty::Union {
-                variants: vec![
-                    Ty::Array {
-                        elem: Box::new(Ty::Untyped),
-                    },
-                    Ty::Nil,
-                ],
-            };
-            flow.insert(Symbol::new("limit"), int_n.clone());
-            flow.insert(Symbol::new("offset"), int_n);
-            flow.insert(Symbol::new("records"), arr_n);
+    if let Some(declared) = rbs_ivars.get(class_id) {
+        for (name, ty) in declared {
+            flow.insert(name.clone(), ty.clone());
         }
-        "ActiveRecord::Base" | "Base" => {
-            // base.rbs `@errors: Array[String]`; lifecycle flags are
-            // written in `initialize` / `mark_persisted!` / `destroy`.
-            // Declared so a connection.rb-only stem cannot leave the
-            // reader methods as Ty::Var after a bad per-stem harvest.
-            flow.insert(
-                Symbol::new("errors"),
-                Ty::Array {
-                    elem: Box::new(Ty::Str),
-                },
-            );
-            flow.insert(Symbol::new("persisted"), Ty::Bool);
-            flow.insert(Symbol::new("destroyed"), Ty::Bool);
+    }
+    // Short-name RBS keys (rare) — only when exact ClassId missed.
+    if let Some(short) = class_id.0.as_str().rsplit("::").next() {
+        let short_id = ClassId(Symbol::new(short));
+        if short_id != *class_id {
+            if let Some(declared) = rbs_ivars.get(&short_id) {
+                for (name, ty) in declared {
+                    flow.entry(name.clone()).or_insert_with(|| ty.clone());
+                }
+            }
         }
-        _ => {}
     }
     flow
         .into_iter()
@@ -326,7 +311,11 @@ fn merge_ivar_maps(into: &mut HashMap<Symbol, Ty>, from: HashMap<Symbol, Ty>) {
 /// Also merges dependency sidecars + the Db stub the production /
 /// Bar-A paths already seed, so AR bodies are not scored as unresolved
 /// for calls that are already contracted elsewhere in `runtime/ruby/`.
-fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, HashMap<Symbol, Ty>>) {
+fn build_class_registry() -> (
+    HashMap<ClassId, ClassInfo>,
+    HashMap<ClassId, HashMap<Symbol, Ty>>,
+    HashMap<ClassId, HashMap<Symbol, Ty>>,
+) {
     let dir = Path::new(RUNTIME_DIR);
     let mut entries: Vec<_> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read_dir {RUNTIME_DIR}: {e}"))
@@ -340,6 +329,7 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
     }
 
     let mut sigs: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+    let mut ivars: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
     for path in entries {
         let source = fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!("read {}: {e}", path.display())
@@ -351,12 +341,18 @@ fn build_class_registry() -> (HashMap<ClassId, ClassInfo>, HashMap<ClassId, Hash
             // Sorted sidecars retain the existing reopen/override order.
             sigs.entry(class_id).or_default().extend(methods);
         }
+        let by_ivar = parse_app_ivars(&source).unwrap_or_else(|e| {
+            panic!("parse ivars {}: {e}", path.display())
+        });
+        for (class_id, class_ivars) in by_ivar {
+            ivars.entry(class_id).or_default().extend(class_ivars);
+        }
     }
     let mut registry = registry_with_unique_aliases(&sigs);
     // Db lives in class_methods on the production stub; mirror that so
     // `Db.exec` / `Db.escape_string` resolve the same way as Bar A.
     roundhouse::lower::view_to_library::insert_db_stub(&mut registry);
-    (registry, sigs)
+    (registry, sigs, ivars)
 }
 
 /// Build exact entries first, then alias only unambiguous short references.
@@ -452,7 +448,7 @@ fn ingest_runtime_classes() -> Vec<(String, LibraryClass)> {
 /// types, and fully-qualified receiver types must resolve their readers.
 #[test]
 fn qualified_runtime_signatures_seed_contexts_and_results() {
-    let (registry, sigs) = build_class_registry();
+    let (registry, sigs, _) = build_class_registry();
     let classes = ingest_runtime_classes();
     let row = Ty::Hash {
         key: Box::new(Ty::Str),
@@ -515,7 +511,7 @@ fn ambiguous_short_aliases_do_not_merge_signatures() {
 
 #[test]
 fn untyped_subexpressions_with_rbs_baseline() {
-    let (registry, sigs) = build_class_registry();
+    let (registry, sigs, rbs_ivars) = build_class_registry();
     let mut classes = ingest_runtime_classes();
     let typer = BodyTyper::new(&registry);
 
@@ -531,10 +527,10 @@ fn untyped_subexpressions_with_rbs_baseline() {
 
     // Harvest ivars per ClassId across every stem (Base spans base.rb
     // + connection.rb). Union-merge so a later stem cannot wipe
-    // initialize's writes.
+    // initialize's writes. Overlay from parsed RBS `@ivar` decls.
     let mut ivars_by_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
     for (_, lc) in &classes {
-        let seeded = seed_ivars_for_class(&lc.name, &lc.methods);
+        let seeded = seed_ivars_for_class(&lc.name, &lc.methods, &rbs_ivars);
         merge_ivar_maps(ivars_by_class.entry(lc.name.clone()).or_default(), seeded);
     }
 
