@@ -896,6 +896,10 @@ module ActiveRecord
       ids.include?(record.id)
     end
 
+    # Walk the loaded cache without `to_a`'s dup. Yields the same
+    # records `to_a` would; returns `self` (Enumerable/Rails), never
+    # the mutable `@records` array — a caller that mutates the return
+    # value must not corrupt later iteration.
     def each
       records = @records
       if records.nil?
@@ -908,7 +912,7 @@ module ActiveRecord
         yield records[i]
         i += 1
       end
-      records
+      self
     end
 
     # `index_by { |r| key }` — the records as a Hash keyed by the

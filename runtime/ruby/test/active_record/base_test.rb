@@ -344,14 +344,46 @@ class BaseTest < Minitest::Test
     assert_nil ActiveRecord::Relation.new(Item).find_by(title: nil)
   end
 
-  def test_relation_each_reuses_the_loaded_array
+  def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)
     first = rel.each { }
     Item.hydrate_count = 0
     second = rel.each { }
-    assert_same first, second
+    assert_same rel, first
+    assert_same rel, second
     assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_each_return_is_not_the_mutable_cache
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    out = rel.each { }
+    assert_same rel, out
+    refute_kind_of Array, out
+  end
+
+  def test_relation_last_n_on_loaded_takes_in_memory_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).order("id")
+    rel.to_a
+    Item.hydrate_count = 0
+    tail = rel.last_n(2)
+    assert_equal ["T3", "T4"], tail.map(&:title)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_last_n_with_prior_limit_uses_window_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    # limit(3).last_n(2) is the last 2 of those 3, not the last 2 of all.
+    tail = ActiveRecord::Relation.new(Item).order("id").limit(3).last_n(2)
+    assert_equal ["T1", "T2"], tail.map(&:title)
+  end
+
+  def test_relation_last_n_with_offset_falls_back_to_materialize
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    tail = ActiveRecord::Relation.new(Item).order("id").offset(1).last_n(2)
+    assert_equal ["T3", "T4"], tail.map(&:title)
   end
 
   # ── update + destroy ────────────────────────────────────────

@@ -406,9 +406,6 @@ module ActionView
       # receiver), where every other merge in this file has the
       # literal as the receiver. Same escape `render_attrs` applies.
       given = opts.is_a?(Hash) ? opts : opts.to_h
-      if given.empty?
-        return "<a href=\"" + html_escape(href) + "\">" + html_escape(text) + "</a>"
-      end
       attrs = render_attrs(given)
       attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)
       "<a#{attrs}>#{html_escape(text)}</a>"
@@ -737,9 +734,6 @@ module ActionView
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
       given = opts.is_a?(Hash) ? opts : opts.to_h
-      if given.empty?
-        return "<#{n}>#{html_escape(content.to_s)}</#{n}>"
-      end
       "<#{n}#{render_attrs(given)}>#{html_escape(content.to_s)}</#{n}>"
     end
 
