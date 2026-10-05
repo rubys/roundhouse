@@ -915,7 +915,7 @@ module ActiveRecord
     # this runtime serves make plain iteration the same observable
     # behavior (ordering aside, which our callers don't rely on).
     def find_each
-      to_a.each { |x| yield x }
+      each { |x| yield x }
     end
 
     def map
