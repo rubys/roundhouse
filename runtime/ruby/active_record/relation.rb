@@ -872,28 +872,31 @@ module ActiveRecord
       records.map { |r| r.id }
     end
 
-    # `include?(record)` — Rails checks membership against the loaded
-    # records (`load` then id-compare); materializing matches that
-    # contract at our result-set sizes.
-    # Rails' `Relation#include?(record)`: a loaded relation asks its
-    # records, an unloaded one asks the database (`exists?(record.id)`).
-    # Either way the question is the RECORD's identity — class and id —
-    # never object identity, so two hydrations of one row agree.
-    # Compared by id here rather than through `==` because record
-    # equality is defined only on the CRuby overlay
-    # (`active_record_bang.rb`); a compiled target compares boxed objects
-    # by pointer, and campfire's `room.users.include?(users(:david))`
-    # read false for a user the room had just been granted.
+    # `include?(record)` — Rails' `Relation#include?(record)`: a loaded
+    # relation asks its records; an unloaded one asks the database
+    # (`exists?(id)`). Either way the question is the RECORD's identity
+    # — class and id — never object identity, so two hydrations of one
+    # row agree. Compared by id rather than `==` because record equality
+    # is defined only on the CRuby overlay (`active_record_bang.rb`); a
+    # compiled target compares boxed objects by pointer.
     #
-    # Through `ids` rather than `exists?(record.id)` the way Rails asks
-    # it: the caller's record is untyped, and handing its `id` to the
-    # nullable `Integer?` parameter is a shape spinel refuses at the C
-    # level (`passing 'int' to parameter of incompatible type
-    # 'sp_RbVal'`). `ids` is one projected query and a typed
-    # `Array[Integer]`, so the comparison stays typed end to end.
+    # The id is coerced through `_cast_primary_key` before `exists?` so
+    # the `Integer?` parameter stays a real Integer on every target
+    # (handing a bare untyped `record.id` to spinel was a C-level type
+    # error). Unloaded membership is then `SELECT 1 … LIMIT 1`, not a
+    # full `ids` projection — `ordered` scopes no longer force a sort
+    # just to answer "is this row in the set?".
     def include?(record)
       return false if record.nil?
-      ids.include?(record.id)
+      rid = record.id
+      return false if rid.nil?
+      key = @model._cast_primary_key(rid)
+      return false if key.nil?
+      loaded = @records
+      unless loaded.nil?
+        return loaded.any? { |x| x.id == key }
+      end
+      exists?(key)
     end
 
     # Walk the loaded cache without `to_a`'s dup. Yields the same

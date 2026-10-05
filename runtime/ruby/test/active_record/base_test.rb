@@ -344,6 +344,55 @@ class BaseTest < Minitest::Test
     assert_nil ActiveRecord::Relation.new(Item).find_by(title: nil)
   end
 
+  def test_relation_include_unloaded_does_not_hydrate
+    a = Item.new; a.title = "A"; a.save()
+    b = Item.new; b.title = "B"; b.save()
+    rel = ActiveRecord::Relation.new(Item).order("id")
+    Item.hydrate_count = 0
+    assert rel.include?(a)
+    refute rel.where(title: "Nope").include?(a)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_include_loaded_uses_cache
+    a = Item.new; a.title = "A"; a.save()
+    rel = ActiveRecord::Relation.new(Item)
+    rel.to_a
+    Item.hydrate_count = 0
+    assert rel.include?(a)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_campfire_last_page_shape_limits_in_sql
+    # Message::Pagination.last_page is ordered.last(PAGE_SIZE).
+    50.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    page = ActiveRecord::Relation.new(Item).order("id").last_n(40)
+    assert_equal 40, page.length
+    assert_equal 40, Item.hydrate_count
+    assert_equal "T10", page[0].title
+    assert_equal "T49", page[-1].title
+  end
+
+  def test_campfire_find_messages_nil_message_id_skips_probe
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item).order("id")
+    Item.hydrate_count = 0
+    assert_nil rel.find_by(id: nil)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_campfire_messages_any_uses_exists_sql
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    sql = rel.exists_sql(1)
+    assert_match(/SELECT 1 AS one/, sql)
+    refute_match(/ORDER BY/, sql)
+    Item.hydrate_count = 0
+    assert rel.any?
+    assert_equal 0, Item.hydrate_count
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)
