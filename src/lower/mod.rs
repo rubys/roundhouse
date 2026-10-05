@@ -75,6 +75,7 @@ pub mod mocha;
 pub mod webmock;
 pub mod global_id_locate;
 pub mod array_ordinal;
+pub mod each_with_index;
 pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
@@ -327,6 +328,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // a typed-Array receiver, which no other pass produces or
     // consumes, so no ordering constraints.
     ("array_ordinal", &[]),
+    // `recv.each.with_index(n?) { }` → `each_with_index` (+ offset bind).
+    // Keys on an Enumerator chain no other pass produces or consumes,
+    // so no ordering constraints. Unblocks Spinel AOT on Writebook
+    // Positionable#move_to_position (keyword call closing over index).
+    ("each_with_index", &[]),
     // `save(validate: false)` → `save_after_validation`. Keys on a
     // literal `validate: false` kwarg no other pass produces or
     // consumes, so no ordering constraints.
@@ -791,6 +797,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     array_ordinal::apply_array_ordinal_lowering(app);
     ran!("array_ordinal");
+    each_with_index::apply_each_with_index_lowering(app);
+    ran!("each_with_index");
     save_without_validation::apply_save_without_validation_lowering(app);
     ran!("save_without_validation");
     assoc_pluck::apply_assoc_pluck_lowering(app);
