@@ -224,15 +224,20 @@ directives. The compiler continues diagnosing those unsupported paths.
 JRuby and other targets keep their existing Date boundary until they
 have their own runtime.
 
-The class, its RBS, the date JSON reopen, and the boot requires are
-emitted only when `app_uses_date` is true (schema date columns or date
-values in emitted roots). Loading `Date#strftime` into every Spinel
-app currently breaks poly `Time | Date` receivers for `Time#strftime`
-(matz/spinel#7334); Campfire has no date columns and must not pay that
-cost. Once upstream fixes the poly method table, unconditional load is
-safe again.
+The class, its RBS, the date JSON reopen
+(`runtime/spinel/active_record_date_serialization.rb`), and the boot
+requires are emitted only when `app_uses_date` is true (schema date
+columns or date values in emitted roots). Loading `Date#strftime` into
+every Spinel app currently breaks poly `Time | Date` receivers for
+`Time#strftime` (matz/spinel#7334); Campfire has no date columns and
+must not pay that cost. Once upstream fixes the poly method table,
+unconditional load is safe again.
 
-Raw `where(due_on: some_date)` predicates format through
+Date-column JSON is rewritten in that Spinel reopen (after the shared
+time-aware `_as_json_only`), not in `runtime/ruby/active_record/
+connection.rb` — the CRuby overlay has its own reflection-aware Date
+path, and a shared date branch would tax Bar B / AR RBS probes for
+every app. Raw `where(due_on: some_date)` predicates format through
 `SqliteAdapter.escape_value` → `ActiveSupport.format_db_date` so the
 SQL compares against `YYYY-MM-DD` text, not a timestamp.
 

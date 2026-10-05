@@ -49,5 +49,7 @@ end
 module ActiveRecord
   class Base
     def as_json: (?Hash[Symbol, untyped] options) -> Hash[String, untyped]
+    def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
   end
 end
+

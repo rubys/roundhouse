@@ -987,9 +987,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to COUNT for strict targets; Relation.exists? forms moved to
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
-    // 1400 -> 1407: date-column branch in `_as_json_only`
-    // (schema_date_columns / format_db_date).
-    const CEILING: usize = 1407;
+    // Date JSON reopen moved to Spinel-only
+    // `active_record_date_serialization.rb` (outside this probe's
+    // `runtime/ruby/active_record/` corpus), so Date no longer adds
+    // the seven TyVar sites that once lived in shared `_as_json_only`.
+    const CEILING: usize = 1400;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
