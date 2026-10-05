@@ -122,10 +122,10 @@ module ActionView
     # backend compiler sees a stable input shape.
     #
     # Skip gsub when the scan finds nothing: CRuby#gsub always
-    # allocates a copy, and campfire's room page html-escapes author
-    # names, CSS classes, and timestamps — almost none of which contain
-    # `&<>"'`. Returning the input is what ERB::Util does for an
-    # already-safe string; the caller appends into a buffer.
+    # allocates a copy, and most escaped values (names, CSS classes,
+    # numeric ids) contain none of `&<>"'`. Returning the input is
+    # what ERB::Util does for an already-safe string; the caller
+    # appends into a buffer.
     def self.html_escape(s)
       return s unless s.match?(HTML_ESCAPE_PATTERN)
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)

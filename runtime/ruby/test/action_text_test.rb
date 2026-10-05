@@ -270,6 +270,15 @@ class ActionTextContentTest < Minitest::Test
     assert_same first, second
   end
 
+  def test_blank_reuses_to_plain_text_memo
+    content = ActionText::Content.new("<div></div>")
+    assert content.blank?
+    first = content.to_plain_text
+    assert content.blank?
+    assert_same first, content.to_plain_text
+    assert_equal "", first
+  end
+
   def test_tag_name_is_the_canonical_attachment_element
     assert_equal "action-text-attachment", ActionText::Attachment.tag_name
   end

@@ -21,7 +21,8 @@ class CacheStrTest < Minitest::Test
 
   def test_ttl_zero_never_expires_on_read
     @cache.write_str("views/stable", "cached", 0)
-    # Campfire fragment caches use ttl 0; entry must survive without expiry.
+    # Rails fragment caches often use ttl 0 (never expire); the entry
+    # must survive a read without consulting the clock.
     assert_equal "cached", @cache.read_str("views/stable")
   end
 

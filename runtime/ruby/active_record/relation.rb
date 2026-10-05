@@ -453,7 +453,16 @@ module ActiveRecord
       current_page == 1
     end
 
+    # Kaminari compares `current_page` to `total_pages`, and the latter
+    # is a COUNT. When the page is already loaded and shorter than
+    # `limit_value`, there cannot be a successor page — same answer
+    # without the COUNT. A full page still needs `total_pages`.
     def last_page?
+      per_page = @limit
+      return true if per_page.nil?
+      raise ZeroDivisionError, "Total pages was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      r = @records
+      return true if !r.nil? && r.length < per_page
       current_page == total_pages
     end
 
@@ -1050,14 +1059,16 @@ module ActiveRecord
     end
 
     # The last n IN RELATION ORDER — Rails does not reverse them
-    # (campfire's `ordered.last(PAGE_SIZE)` is the oldest-to-newest tail
-    # of a room's messages, which is the order the page renders).
+    # (`ordered.last(n)` is the oldest-to-newest tail when the scope
+    # orders ascending, which is the order a page typically renders).
     #
-    # Unloaded, no OFFSET: reverse each ORDER BY, LIMIT n, load, reverse
-    # the rows back. That is Rails' SQL tail, and it is what `/rooms/1`
-    # and `messages?before=` pay — `to_a.last(n)` was the whole history.
-    # A loaded relation, or one with OFFSET, still takes the in-memory
-    # tail: reversing ORDER BY under OFFSET is not the same window.
+    # Unloaded, no LIMIT/OFFSET: reverse each ORDER BY, LIMIT n, load,
+    # reverse the rows back. That is Rails' SQL tail — without it,
+    # materializing the whole relation hydrates every row and runs
+    # `includes` for all of them once the table grows past one page.
+    # A loaded relation, or one with LIMIT/OFFSET, still takes the
+    # in-memory tail: reversing ORDER BY under OFFSET is not the same
+    # window.
     def last_n(n)
       loaded = @records
       unless loaded.nil?
@@ -1150,18 +1161,18 @@ module ActiveRecord
       h
     end
 
-    # Loaded relations answer from the cache; unloaded ones keep the
-    # COUNT round-trip (Rails asks EXISTS here — one row either way).
+    # Loaded relations answer from the cache; unloaded ones ask
+    # `exists?` (Rails' SELECT 1 LIMIT 1), not COUNT(*).
     def empty?
       r = @records
-      r.nil? ? count == 0 : r.length == 0
+      r.nil? ? !exists? : r.length == 0
     end
 
     # Like `empty?`: a loaded relation answers from its records, an
-    # unloaded one asks the database for a count.
+    # unloaded one asks `exists?`.
     def any?
       r = @records
-      r.nil? ? count > 0 : r.length > 0
+      r.nil? ? exists? : r.length > 0
     end
 
     # ActiveSupport's blank family on a relation. Rails answers `blank?`
@@ -1602,6 +1613,23 @@ module ActiveRecord
       sql = "#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql
+    end
+
+    # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
+    # (existence does not care about order) and never projects model
+    # columns, so `exists?` / `one?` / `many?` do not hydrate. Keeps
+    # joins / WHERE / GROUP / HAVING / OFFSET so a scoped or paged
+    # relation answers about the same rows `to_a` would.
+    def exists_sql(n)
+      distinct = @distinct ? "DISTINCT " : ""
+      sql = "#{cte_prefix}SELECT #{distinct}1 AS one FROM #{from_source}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
+      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      sql = "#{sql} LIMIT #{n}"
+      sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
       sql
     end
 

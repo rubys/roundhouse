@@ -1285,8 +1285,8 @@ module ActionText
     end
 
     # The scan `to_plain_text` memoizes. `blank?` / `empty?` / `present?`
-    # all call it, and campfire's message presentation asks more than
-    # once per body on a cache miss.
+    # all call it, and a fragment-cache miss often asks more than once
+    # per body (blank? then presentation).
     def convert_html_to_plain_text
       out = +""
       names = []
