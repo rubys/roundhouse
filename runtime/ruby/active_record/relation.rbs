@@ -128,9 +128,9 @@ module ActiveRecord
     def ids_of: (Array[untyped] records) -> Array[untyped]
     def id_filter: (Array[untyped] records, Array[untyped] ids, bool keep) -> Array[untyped]
     def include?: (untyped record) -> bool
-    def each: () { (untyped) -> void } -> Array[untyped]
+    def each: () { (untyped) -> void } -> Relation
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
-    def find_each: () { (untyped) -> void } -> Array[untyped]
+    def find_each: () { (untyped) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so

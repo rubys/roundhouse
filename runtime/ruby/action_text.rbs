@@ -142,6 +142,7 @@ module ActionText
     def attachables: () -> Array[untyped]
     def attachable_ids: (String model_name) -> Array[Integer]
     def to_plain_text: () -> String
+    def convert_html_to_plain_text: () -> String
     def self.scoped_element: (String name) -> bool
     def self.close_scoped: (String name, String segment, Array[String] list_names, Array[Integer] list_counts) -> String
     def self.quote_wrap: (String text) -> String

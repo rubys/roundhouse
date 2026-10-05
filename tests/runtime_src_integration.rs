@@ -1566,7 +1566,15 @@ fn every_runtime_method_body_concretely_typed() {
     // unread notice, encoded once and broadcast `coder: nil`
     // (basecamp/once-campfire#292), and #296's tests, which post first
     // and perform the held fanout job after.
-    const CEILING: usize = 543;
+    //
+    // 543 -> 571, +28 MEASURED (relation.rb): `exists_sql` /
+    // `probe_existence` / `nil_primary_key_lookup?`, plus `size` /
+    // `one?` / `many?` / `empty?` / `any?` / `last_page?` routing through
+    // them, and `find_each`'s duplicated zero-copy loop (same residual
+    // as `each`). What it bought: room-page cardinality without
+    // COUNT(*) scans, and find_messages' nil message_id probe without
+    // `WHERE id IS NULL LIMIT 1`.
+    const CEILING: usize = 571;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

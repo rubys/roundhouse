@@ -927,8 +927,22 @@ module ActiveRecord
     # `find_each` — Rails batches in groups of 1000; the result set sizes
     # this runtime serves make plain iteration the same observable
     # behavior (ordering aside, which our callers don't rely on).
+    # Body duplicated from `each` rather than block-forwarded: a nested
+    # `{ |x| yield x }` left `x` as TyVar under Bar A, and strict targets
+    # want a real definition, not a rest-arg forward.
     def find_each
-      each { |x| yield x }
+      records = @records
+      if records.nil?
+        records = load_records
+        @records = records
+      end
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      self
     end
 
     def map

@@ -966,7 +966,13 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // unresolved self-sends and `@limit` reads every terminal pays. What
     // it buys: `offset(n).exists?` asks for a row past n, campfire's
     // `paged?` (basecamp/once-campfire#297), where a COUNT ignored it.
-    const CEILING: usize = 1350;
+    // 2026-10-05 1350 -> 1380, +30, MEASURED (relation.rb 874 -> 904):
+    // `exists_sql` / `probe_existence` (cardinality without COUNT),
+    // `nil_primary_key_lookup?` (find_by id: nil short-circuit), the
+    // size / one? / many? / last_page? paths that share them, and
+    // `find_each`'s duplicated zero-copy loop. Same unresolved
+    // self-send / `@limit` residual every terminal pays.
+    const CEILING: usize = 1380;
 
     assert!(
         all_untyped.len() <= CEILING,

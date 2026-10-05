@@ -1286,8 +1286,9 @@ module ActionText
 
     # The scan `to_plain_text` memoizes. `blank?` / `empty?` / `present?`
     # all call it, and a fragment-cache miss often asks more than once
-    # per body (blank? then presentation).
-    private def convert_html_to_plain_text
+    # per body (blank? then presentation). Public (not `private def`) so
+    # the RBS signature matches a Ruby method the Bar A gate can see.
+    def convert_html_to_plain_text
       out = +""
       names = []
       starts = []
