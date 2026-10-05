@@ -451,32 +451,36 @@ pub(super) fn ingest_model_body_items(
                     })
                     .collect());
             }
-            // `attr_*` / `cattr_*` / `mattr_*` — same expansion library
-            // ingest applies. Models that carry class attrs (Writebook
-            // `ActionText::Markdown.mattr_accessor :renderer`) must
-            // synthesize the singleton reader/writer or `to_html` and
-            // inventory resolve as unresolved `renderer`.
+            // `cattr_*` / `mattr_*` — class-attribute expansion library
+            // ingest already applies. Models that carry class attrs
+            // (Writebook `ActionText::Markdown.mattr_accessor :renderer`)
+            // must synthesize the singleton reader/writer or `to_html`
+            // and inventory resolve as unresolved `renderer`.
+            //
+            // Plain `attr_*` stays Unknown here on purpose: concern
+            // `included` blocks share this walker, and
+            // `concern_accessors::{is_candidate,is_supported}` plus
+            // visibility's `included_has_accessor` gate all match the
+            // raw `attr_accessor` Send — expanding those into Method
+            // items made `included_has_accessor` false (so `private;`
+            // inside `included` hard-failed ingest) and dropped
+            // concern virtual accessors from the splice.
             if matches!(
                 name.as_str(),
-                "attr_reader"
-                    | "attr_writer"
-                    | "attr_accessor"
-                    | "cattr_reader"
+                "cattr_reader"
                     | "cattr_writer"
                     | "cattr_accessor"
                     | "mattr_reader"
                     | "mattr_writer"
                     | "mattr_accessor"
             ) {
-                let is_class_attr =
-                    name.starts_with("cattr_") || name.starts_with("mattr_");
                 let mut names: Vec<Symbol> = Vec::new();
-                let mut has_options = is_class_attr && call.block().is_some();
+                let mut has_options = call.block().is_some();
                 if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
                         if let Some(s) = symbol_value(&arg) {
                             names.push(Symbol::from(s));
-                        } else if is_class_attr {
+                        } else {
                             // `default:` / other kwargs are not modeled —
                             // partial expansion would drop the initializer.
                             has_options = true;
@@ -506,16 +510,12 @@ pub(super) fn ingest_model_body_items(
                     // that share the same @ivar storage approximation used
                     // by library ingest (Rails instance copies read the
                     // class attribute; here both sides use the ivar).
-                    let receivers: &[crate::dialect::MethodReceiver] = if is_class_attr {
-                        &[
-                            crate::dialect::MethodReceiver::Class,
-                            crate::dialect::MethodReceiver::Instance,
-                        ]
-                    } else {
-                        &[crate::dialect::MethodReceiver::Instance]
-                    };
+                    let receivers = [
+                        crate::dialect::MethodReceiver::Class,
+                        crate::dialect::MethodReceiver::Instance,
+                    ];
                     let mut first_method = true;
-                    for &recv in receivers {
+                    for &recv in &receivers {
                         if want_reader {
                             out.push(ModelBodyItem::Method {
                                 method: super::library_class::synth_attr_reader(
