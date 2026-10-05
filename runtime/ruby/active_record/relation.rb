@@ -888,7 +888,18 @@ module ActiveRecord
     end
 
     def each
-      to_a.each { |x| yield x }
+      records = @records
+      if records.nil?
+        records = load_records
+        @records = records
+      end
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      records
     end
 
     # `index_by { |r| key }` — the records as a Hash keyed by the

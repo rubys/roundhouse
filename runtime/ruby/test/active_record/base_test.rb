@@ -271,6 +271,16 @@ class BaseTest < Minitest::Test
     assert_equal 1, Item.hydrate_count
   end
 
+  def test_relation_each_reuses_the_loaded_array
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    first = rel.each { }
+    Item.hydrate_count = 0
+    second = rel.each { }
+    assert_same first, second
+    assert_equal 0, Item.hydrate_count
+  end
+
   # ── update + destroy ────────────────────────────────────────
 
   def test_save_updates_existing_record
