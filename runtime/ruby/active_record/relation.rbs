@@ -6,7 +6,10 @@ module ActiveRecord
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
-    # and breaks Bar A.
+    # and breaks Bar A. Spinel's emit rewrites this parameter to
+    # `untyped` (`spinel_relation_model_handle`): Spinel treats `Base` as
+    # an instance (`sp_ActiveRecord__Base *`), so `Relation.new(User)`
+    # would otherwise fail campfire AOT.
     def initialize: (Base model) -> void
 
     def where: (?untyped condition, *untyped args) -> Relation
