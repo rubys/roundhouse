@@ -275,7 +275,13 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
         Ty::Class { id, .. } => {
             let raw = id.0.as_str();
             let last = raw.rsplit("::").next().unwrap_or(raw);
-            if defs.own_predicate.contains(last) {
+            if defs.own_predicate.contains(last) || raw == "ActionText::Content" {
+                // `ActionText::Content#blank?` is a RUNTIME method that
+                // tracks plain text, not markup. The app's class
+                // registry often misses it when a single runtime file
+                // is the fixture under test (framework_tests_ruby), and
+                // folding to NeverBlank made `content.blank?` emit as
+                // `false` — wrong for an empty `<div></div>` body.
                 OwnDispatch
             } else if last == "Relation" || last == "Errors" || defs.own_empty.contains(last) {
                 // Registry classes the analyzer types but the app
