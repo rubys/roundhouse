@@ -475,6 +475,21 @@ class BaseTest < Minitest::Test
     assert_match(/DISTINCT id/, sql)
   end
 
+  def test_relation_from_joined_distinct_count_qualifies_primary_key
+    Db.exec("CREATE TABLE parents (id INTEGER PRIMARY KEY, title TEXT)")
+    Db.exec("CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER, title TEXT)")
+    Db.exec("INSERT INTO parents (id, title) VALUES (1, 'P')")
+    Db.exec("INSERT INTO children (id, parent_id, title) VALUES (10, 1, 'C')")
+    rel = ActiveRecord::Relation.new(Item)
+      .from("parents")
+      .joins("INNER JOIN children ON children.parent_id = parents.id")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT parents\.id/, sql)
+    refute_match(/DISTINCT id FROM/, sql)
+    assert_equal 1, rel.count
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

@@ -1653,6 +1653,10 @@ module ActiveRecord
           @select_sql
         elsif @from.nil?
           "#{@table}.#{@model.primary_key}"
+        elsif @joins.length > 0
+          # Bare pk is ambiguous once another joined table also has
+          # that column (`from("parents").joins(...).distinct.count`).
+          "#{from_source}.#{@model.primary_key}"
         else
           @model.primary_key.to_s
         end

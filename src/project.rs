@@ -1180,7 +1180,10 @@ pub fn target_files(
     }
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(files, _)| spin_shape(files)),
+        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(mut files, _)| {
+            spinel_relation_model_handle(&mut files)?;
+            spin_shape(files)
+        }),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
@@ -3660,6 +3663,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
     let (mut files, _) = spinel_files(app, fixture)?;
+    spinel_relation_model_handle(&mut files)?;
 
     write_bundled_requires(&mut files);
     Ok(files)
@@ -4180,7 +4184,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         )?;
     }
     widen_key_contract(app, &mut files)?;
-    spinel_relation_model_handle(&mut files)?;
+    // Relation Base→untyped rewrite is Spinel-only (see
+    // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
+    // shares this tree and must keep Base for CRuby/JRuby Bar A/B.
     for stem in [
         "rails",
         "active_record",
@@ -8188,6 +8194,21 @@ mod tests {
         assert!(
             shared.contains("def initialize: (Base model) -> void"),
             "shared relation.rbs must keep Base for Bar A/B"
+        );
+        // CRuby/JRuby share `spinel_files` but must NOT get the rewrite.
+        let ruby = ruby_runtime_files(&app, fixture).expect("ruby runtime files");
+        let ruby_relation = ruby
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/relation.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("relation.rbs in ruby tree");
+        assert!(
+            ruby_relation.contains("def initialize: (Base model) -> void"),
+            "CRuby relation.rbs must keep Base: {ruby_relation}"
+        );
+        assert!(
+            ruby_relation.contains("def first: () -> Base?"),
+            "CRuby relation.rbs must keep first:()->Base?: {ruby_relation}"
         );
     }
 }
