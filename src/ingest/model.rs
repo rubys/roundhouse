@@ -351,17 +351,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| {
             let resolved = model_bases.resolve_superclass(&scope, &p);
-            // `ActionText::Record` is seeded in ModelBases so Writebook's
-            // `Markdown < Record` under `module ActionText` classifies as
-            // a model, but the gem abstract base is not ingested. Parent
-            // `ApplicationRecord` the same way RichText synthesis does —
-            // emit must not produce `class Markdown < Record`.
-            let emit_parent = if resolved == "ActionText::Record" {
-                "ApplicationRecord"
-            } else {
-                resolved.as_str()
-            };
-            ClassId(Symbol::from(emit_parent))
+            ClassId(Symbol::from(model_bases.emit_superclass(&resolved)))
         })
     });
 

@@ -1616,30 +1616,39 @@ module ActiveRecord
       sql
     end
 
+    # JOIN + WHERE only — shared by count_sql / exists_sql so DISTINCT
+    # and GROUP arms do not re-paste the ladder.
+    def append_join_where(sql)
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql
+    end
+
+    def append_group_having(sql)
+      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
+      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      sql
+    end
+
     def count_sql
       # DISTINCT / GROUP BY must count the result-set shape, not the
       # underlying rows (#343). Mirror exists_sql's DISTINCT-pk
       # discipline; scalar `count` on a grouped relation counts groups
       # (Hash form is `group_count`). LIMIT/OFFSET stay off total_count.
       if !@groups.empty?
-        inner = "#{cte_prefix}SELECT 1 AS one FROM #{from_source}"
-        inner = "#{inner} #{@joins.join(" ")}" if @joins.length > 0
-        inner = "#{inner} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
-        inner = "#{inner} GROUP BY #{@groups.join(", ")}"
-        inner = "#{inner} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+        inner = append_group_having(
+          append_join_where("#{cte_prefix}SELECT 1 AS one FROM #{from_source}")
+        )
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
       if @distinct
         cols = "#{@table}.#{@model.primary_key}"
-        inner = "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
-        inner = "#{inner} #{@joins.join(" ")}" if @joins.length > 0
-        inner = "#{inner} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+        inner = append_join_where(
+          "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
+        )
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
-      sql = "#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}"
-      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
-      sql
+      append_join_where("#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}")
     end
 
     # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
@@ -1653,11 +1662,9 @@ module ActiveRecord
       else
         "1 AS one"
       end
-      sql = "#{cte_prefix}SELECT #{cols} FROM #{from_source}"
-      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
-      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
-      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      sql = append_group_having(
+        append_join_where("#{cte_prefix}SELECT #{cols} FROM #{from_source}")
+      )
       # Respect an existing relation LIMIT: many?/one? on limit(1) must
       # not look past the window.
       lim = n

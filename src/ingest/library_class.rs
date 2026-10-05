@@ -2331,6 +2331,18 @@ impl ModelBases {
         self.names.contains(name)
     }
 
+    /// Superclass name written into emitted model IR. Gem abstract bases
+    /// that are seeded for classification but not ingested (today:
+    /// `ActionText::Record`) parent as `ApplicationRecord`, matching
+    /// RichText synthesis — callers must not special-case the name.
+    pub fn emit_superclass(&self, resolved: &str) -> String {
+        if resolved == "ActionText::Record" {
+            "ApplicationRecord".to_string()
+        } else {
+            resolved.to_string()
+        }
+    }
+
     /// Resolve a superclass path against enclosing modules the way Ruby
     /// constant lookup walks `module_parents`: bare `Record` under
     /// `module ActionText` becomes `ActionText::Record` when that base

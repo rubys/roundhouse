@@ -218,6 +218,8 @@ module ActiveRecord
     def to_sql: () -> String
     def to_subquery_sql: () -> String
     def select_sql_with: (String default_cols) -> String
+    def append_join_where: (String sql) -> String
+    def append_group_having: (String sql) -> String
     def count_sql: () -> String
     def exists_sql: (Integer n) -> String
     def hash_conditions: (untyped hash) -> String

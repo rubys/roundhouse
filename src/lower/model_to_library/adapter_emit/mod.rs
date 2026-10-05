@@ -49,6 +49,9 @@ use crate::ty::Ty;
 
 use super::{fn_sig, ty_of_column};
 
+mod exists;
+use exists::{synth_adapter_any, synth_adapter_exists_by_id};
+
 pub(super) fn push_adapter_methods(
     methods: &mut Vec<MethodDef>,
     owner: &ClassId,
@@ -398,73 +401,6 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Int)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-            mutates_self: false,
-            block_param: None,
-    }
-}
-
-/// Unscoped emptiness without COUNT(*) — `Base.any?` / `none?` on
-/// Level-3 models. Same Exists emit as `_adapter_exists_by_id?`, no WHERE.
-fn synth_adapter_any(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let op = ArelOp::Select(Select {
-        single_record: false,
-        table: TableRef(table.name.clone()),
-        columns: ColumnSpec::Exists,
-        conditions: None,
-        orders: vec![],
-        limit: Some(LimitSpec(1)),
-        joins: vec![],
-        preloads: vec![],
-    });
-
-    MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from("_adapter_any?"),
-        receiver: MethodReceiver::Class,
-        params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![], Ty::Bool)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self: false,
-        block_param: None,
-    }
-}
-
-fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let id = Symbol::from("id");
-    let key_ty = key_ty(table);
-
-    let op = ArelOp::Select(Select {
-        single_record: false, // _adapter_exists_by_id — a Bool
-        table: TableRef(table.name.clone()),
-        columns: ColumnSpec::Exists,
-        conditions: Some(eq_id_param(table, &id)),
-        orders: vec![],
-        limit: Some(LimitSpec(1)),
-        joins: vec![],
-            preloads: vec![],
-    });
-
-    MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from("_adapter_exists_by_id?"),
-        receiver: MethodReceiver::Class,
-        params: vec![Param::positional(id.clone())],
-        body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(id, key_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -948,7 +884,7 @@ fn key_column_name(table: &Table) -> Symbol {
     key_column(table).map(|c| c.name.clone()).unwrap_or_else(|| Symbol::from("id"))
 }
 
-fn key_ty(table: &Table) -> Ty {
+pub(super) fn key_ty(table: &Table) -> Ty {
     key_column(table).map(|c| ty_of_column(&c.col_type)).unwrap_or(Ty::Int)
 }
 
@@ -958,7 +894,7 @@ fn key_value_type(table: &Table) -> ValueType {
 
 /// `Eq(<table>.<key>, Runtime(<id-param>, <key type>))` — find_by_id /
 /// exists_by_id? shape (id arrives as a method param).
-fn eq_id_param(table: &Table, id_param: &Symbol) -> Predicate {
+pub(super) fn eq_id_param(table: &Table, id_param: &Symbol) -> Predicate {
     Predicate::Eq(
         ColRef { table: TableRef(table.name.clone()), column: key_column_name(table) },
         Value::Runtime { expr: var_ref(id_param), ty: key_value_type(table) },
