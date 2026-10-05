@@ -12,10 +12,10 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     assert!(unit.get("continue-on-error").is_none());
     assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
     assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
-    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(3));
+    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(4));
     assert_eq!(
         unit["strategy"]["matrix"]["shard"],
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2]").unwrap()
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2, 3]").unwrap()
     );
     assert!(
         unit.get("outputs").is_none(),

@@ -544,9 +544,9 @@ jobs:
     strategy:
       # A failed shard must not cancel coverage or diagnostic output from others.
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 4
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
     env:
       # Share first-party split DWARF instead of copying it into every test
       # executable. Integration sidecars are freed with their finished batch;

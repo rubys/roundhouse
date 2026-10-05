@@ -19,7 +19,7 @@ the PR draft state, labels, and changed paths:
 
 Ready PRs without a special label run a Ruby floor: fixture preparation, unit
 tests, Store analysis, the CRuby comparison against Rails, and Campfire
-conformance/comparison. Unit shards cover all package test targets in
+conformance/comparison. Four unit shards cover all package test targets in
 bounded batches; ignored integrations need selected toolchain lanes. Framework
 and toolchain suites also run inside comparison jobs, not necessarily as
 standalone checks.
