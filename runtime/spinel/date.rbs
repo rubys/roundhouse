@@ -34,6 +34,8 @@ class Date
   def to_time: () -> Time
   def iso8601: () -> String
   def to_s: () -> String
+  def inspect: () -> String
+  def xmlschema: () -> String
   def as_json: (?Hash[untyped, untyped] options) -> String
   def strftime: (String pattern) -> String
   def <=>: (Date? other) -> Integer?

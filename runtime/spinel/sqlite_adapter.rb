@@ -152,6 +152,11 @@ module SqliteAdapter
       "NULL"
     elsif v.is_a?(Time)
       Db.escape_string(ActiveSupport.format_db_time(v).to_s)
+    elsif defined?(Date) && v.is_a?(Date)
+      # Date-only predicates compare against YYYY-MM-DD text, never a
+      # zoned timestamp (see issue #303 / Date column contract). Date is
+      # only loaded when the app uses date values (matz/spinel#7334).
+      Db.escape_string(ActiveSupport.format_db_date(v).to_s)
     else
       Db.escape_string(v.to_s)
     end

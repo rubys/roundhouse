@@ -168,7 +168,7 @@ fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
     let mut app = app_with(SCHEMA, include_str!("date_columns_model.rb"));
     assert!(errors(&mut app).is_empty());
     let (result, diagnostics) =
-        scope(|| target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel));
+        scope(|| target_files(&app, std::path::Path::new("not-a-fixture"), BuildTarget::Spinel));
     assert!(result.is_ok(), "{diagnostics:?}");
     let files = result.unwrap();
     let runtime = files.iter().find(|(path, _)| path == "runtime/date.rb").unwrap();
@@ -177,6 +177,15 @@ fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
         files.iter().any(|(path, _)| path == "runtime/date.rbs"),
         "signature files: {:?}",
         files.iter().map(|(path, _)| path).filter(|path| path.ends_with(".rbs")).collect::<Vec<_>>()
+    );
+    let boot = files.iter().find(|(path, _)| path == "boot.rb").unwrap();
+    assert!(
+        boot.1.contains("require_relative \"runtime/date\""),
+        "date apps must load the program-defined Date"
+    );
+    assert!(
+        boot.1.contains("require_relative \"runtime/active_record_date_serialization\""),
+        "date apps must load date-aware JSON serialization"
     );
     let model = files
         .iter()
@@ -188,6 +197,53 @@ fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
         &d.kind,
         DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "Date"
     )));
+}
+
+#[test]
+fn spinel_omits_date_runtime_when_the_app_has_no_dates() {
+    // Campfire-shaped: no t.date columns and no Date constructors.
+    // Loading Date#strftime into every Spinel tree breaks poly
+    // Time|Date receivers (matz/spinel#7334) — omit until needed.
+    let mut app = app_with(
+        r#"ActiveRecord::Schema.define do
+  create_table "widgets" do |t|
+    t.string "name"
+    t.datetime "shipped_at"
+  end
+end
+"#,
+        "class Widget < ApplicationRecord\nend\n",
+    );
+    assert!(errors(&mut app).is_empty());
+    let (result, diagnostics) =
+        scope(|| target_files(&app, std::path::Path::new("not-a-fixture"), BuildTarget::Spinel));
+    assert!(result.is_ok(), "{diagnostics:?}");
+    assert!(
+        !diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "Date"
+        )),
+        "{diagnostics:?}"
+    );
+    let files = result.unwrap();
+    assert!(
+        !files.iter().any(|(path, _)| path == "runtime/date.rb"),
+        "date.rb must not ship when unused"
+    );
+    assert!(
+        !files.iter().any(|(path, _)| path == "runtime/active_record_date_serialization.rb"),
+        "date serialization reopen must not ship when unused"
+    );
+    let boot = files.iter().find(|(path, _)| path == "boot.rb").unwrap();
+    assert!(
+        !boot.1.contains("runtime/date"),
+        "boot must not require Date when unused:\n{}",
+        boot.1
+    );
+    assert!(
+        !boot.1.contains("active_record_date_serialization"),
+        "boot must not require date JSON reopen when unused"
+    );
 }
 
 #[test]

@@ -29,6 +29,7 @@ module ActiveSupport
 
   def self.format_db_date(value)
     return nil if value.nil?
+    return nil if value.is_a?(String) && value == ""
     return value.iso8601 if value.is_a?(Date)
     return Date.iso8601(value).iso8601 if value.is_a?(String)
     raise TypeError, "expected Date, String, or nil"

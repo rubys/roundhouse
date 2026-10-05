@@ -167,6 +167,14 @@ class Date
     iso8601
   end
 
+  def inspect
+    iso8601
+  end
+
+  def xmlschema
+    iso8601
+  end
+
   def as_json(_options = {})
     iso8601
   end

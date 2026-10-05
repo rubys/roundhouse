@@ -61,11 +61,15 @@ raise ActiveSupport.parse_db_date("").inspect unless ActiveSupport.parse_db_date
 raise ActiveSupport.parse_db_date(nil).inspect unless ActiveSupport.parse_db_date(nil).nil?
 raise ActiveSupport.format_db_date(Date.new(2024, 2, 29)).inspect unless ActiveSupport.format_db_date(Date.new(2024, 2, 29)) == "2024-02-29"
 raise ActiveSupport.format_db_date(nil).inspect unless ActiveSupport.format_db_date(nil).nil?
+raise ActiveSupport.format_db_date("").inspect unless ActiveSupport.format_db_date("").nil?
 begin
   ActiveSupport.format_db_date(42)
   raise "invalid DB date value was accepted"
 rescue TypeError
 end
+raise SqliteAdapter.escape_value(Date.new(2024, 2, 29)).inspect unless SqliteAdapter.escape_value(Date.new(2024, 2, 29)) == "'2024-02-29'"
+raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "2024-01-31"
+raise Date.new(2024, 1, 31).xmlschema.inspect unless Date.new(2024, 1, 31).xmlschema == "2024-01-31"
 puts "Spinel Date column contract passed"
 "#);
     run.assert_passes();

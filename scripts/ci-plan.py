@@ -124,8 +124,10 @@ def native_coverage(path):
             owned_tests.update(("spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"))
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
-        if name in {"date.rb", "date.rbs"}:
+        if name in {"date.rb", "date.rbs", "active_record_date_serialization.rb"}:
             owned_tests.add("date_columns_spinel")
+        if name == "active_record_date_serialization.rb":
+            owned_tests.add("framework_tests_spinel")
         if (
             path.startswith("runtime/spinel/")
             and not path.startswith("runtime/spinel/scaffold/")

@@ -953,8 +953,9 @@ jobs:
   # rewiring of the test_helper.
   framework-tests-spinel:
     # Re-enabled 2026-06-17 (5/5 green on matz/spinel master). Advisory.
-    needs: [build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'framework-tests-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
+    # Needs the real-blog fixture: date_columns_spinel overlays it.
+    needs: [generate-fixture, build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'framework-tests-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
@@ -964,6 +965,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist

@@ -34,6 +34,7 @@ module ActiveSupport
 
   def self.format_db_date(value)
     return nil if value.nil?
+    return nil if value.is_a?(String) && value.empty?
     date = case value
     when Date then value.to_date
     when String then Date.iso8601(value)
