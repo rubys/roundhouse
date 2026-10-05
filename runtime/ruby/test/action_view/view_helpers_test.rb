@@ -243,6 +243,21 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, "&lt;b&gt;hi&lt;/b&gt;"
   end
 
+  def test_link_to_with_explicit_empty_options_hash
+    out = ViewHelpers.link_to("Show", "/articles/42", {})
+    assert_equal %(<a href="/articles/42">Show</a>), out
+  end
+
+  def test_content_tag_without_options
+    out = ViewHelpers.content_tag(:span, "hi")
+    assert_equal "<span>hi</span>", out
+  end
+
+  def test_content_tag_with_options
+    out = ViewHelpers.content_tag(:span, "hi", class: "badge")
+    assert_equal %(<span class="badge">hi</span>), out
+  end
+
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
   # puts the html options before the href; `link_to` above follows

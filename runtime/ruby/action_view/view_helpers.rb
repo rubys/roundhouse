@@ -405,7 +405,10 @@ module ActionView
       # (Crystal a NamedTuple, Swift a `[String: String]` cast on the
       # receiver), where every other merge in this file has the
       # literal as the receiver. Same escape `render_attrs` applies.
-      given = opts.to_h
+      given = opts.is_a?(Hash) ? opts : opts.to_h
+      if given.empty?
+        return "<a href=\"" + html_escape(href) + "\">" + html_escape(text) + "</a>"
+      end
       attrs = render_attrs(given)
       attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)
       "<a#{attrs}>#{html_escape(text)}</a>"
@@ -733,7 +736,11 @@ module ActionView
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
-      "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
+      given = opts.is_a?(Hash) ? opts : opts.to_h
+      if given.empty?
+        return "<#{n}>#{html_escape(content.to_s)}</#{n}>"
+      end
+      "<#{n}#{render_attrs(given)}>#{html_escape(content.to_s)}</#{n}>"
     end
 
     # Emit the importmap script + per-pin modulepreload hints + a
