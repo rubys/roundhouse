@@ -1745,6 +1745,11 @@ pub(crate) fn build_class_info(
     );
     insert_default(
         &mut info.class_methods,
+        "_adapter_any?",
+        fn_sig(vec![], Ty::Bool),
+    );
+    insert_default(
+        &mut info.class_methods,
         "_adapter_exists_by_id?",
         fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Bool),
     );

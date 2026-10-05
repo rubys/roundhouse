@@ -29,6 +29,7 @@
 //!   `_adapter_update(id, instance)` — UPDATE WHERE id, returns void
 //!   `_adapter_delete(id)` — DELETE WHERE id, returns void
 //!   `_adapter_count` — SELECT COUNT(*), returns Integer
+//!   `_adapter_any?` — SELECT 1 LIMIT 1 (table non-empty), returns Bool
 //!   `_adapter_exists_by_id?(id)` — SELECT 1 LIMIT 1, returns Bool
 //!   `_adapter_truncate` — DELETE FROM table (test setup)
 //!   `_columns_sql` — the schema columns as a qualified SELECT list
@@ -61,6 +62,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_update(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
     methods.push(synth_adapter_count(owner, table, schema));
+    methods.push(synth_adapter_any(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema));
     methods.push(synth_adapter_truncate(owner, table, schema));
     methods.push(synth_delete_all(owner, table));
@@ -402,6 +404,39 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// Unscoped emptiness without COUNT(*) — `Base.any?` / `none?` on
+/// Level-3 models. Same Exists emit as `_adapter_exists_by_id?`, no WHERE.
+fn synth_adapter_any(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    let op = ArelOp::Select(Select {
+        single_record: false,
+        table: TableRef(table.name.clone()),
+        columns: ColumnSpec::Exists,
+        conditions: None,
+        orders: vec![],
+        limit: Some(LimitSpec(1)),
+        joins: vec![],
+        preloads: vec![],
+    });
+
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("_adapter_any?"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body: SqliteVisitor.visit(&op, schema, owner),
+        signature: Some(fn_sig(vec![], Ty::Bool)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 

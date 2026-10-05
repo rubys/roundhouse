@@ -170,6 +170,7 @@ fn article_lowers_with_schema_methods() {
         "_adapter_all",
         "_adapter_last",
         "_adapter_count",
+        "_adapter_any?",
         "_adapter_exists_by_id?",
         "_adapter_truncate",
         "delete_all",
@@ -192,6 +193,21 @@ fn article_lowers_with_schema_methods() {
             );
         }
     }
+
+    let any = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "_adapter_any?")
+        .expect("_adapter_any? synthesized");
+    let any_body = format!("{:?}", any.body);
+    assert!(
+        any_body.contains("SELECT 1 FROM") && any_body.contains("LIMIT 1"),
+        "_adapter_any? must probe existence, not COUNT(*): {any_body}"
+    );
+    assert!(
+        !any_body.contains("COUNT(*)"),
+        "_adapter_any? must not COUNT: {any_body}"
+    );
 }
 
 #[test]

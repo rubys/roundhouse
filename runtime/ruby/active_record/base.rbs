@@ -199,6 +199,7 @@ module ActiveRecord
     def _adapter_update: () -> void
     def _adapter_delete: () -> void
     def self._adapter_count: () -> Integer
+    def self._adapter_any?: () -> bool
     def self._adapter_exists_by_id?: (Integer id) -> bool
     def self._adapter_truncate: () -> void
     def _adapter_reload: () -> Base?

@@ -421,6 +421,13 @@ module ActiveRecord
       ActiveRecord.adapter.count(table_name)
     end
 
+    # Unscoped non-emptiness. Level-3 models override with SELECT 1 LIMIT 1;
+    # this default keeps hand-written / Base tests on the universal count
+    # adapter method (strict AdapterInterface has no select_rows).
+    def self._adapter_any?
+      count > 0
+    end
+
     def self._adapter_exists_by_id?(id)
       ActiveRecord.adapter.exists?(table_name, id)
     end
@@ -595,14 +602,15 @@ module ActiveRecord
       _adapter_exists_by_id?(id)
     end
 
-    # Unscoped class emptiness via COUNT. Scoped forms go through
-    # Relation; ruby-family connection.rb overrides these to exists?.
+    # Unscoped class emptiness via `_adapter_any?` (Level-3: SELECT 1
+    # LIMIT 1; Base default: count > 0). Scoped forms go through Relation;
+    # ruby-family connection.rb still overrides with Relation.exists?.
     def self.none?
-      count == 0
+      !_adapter_any?
     end
 
     def self.any?
-      count > 0
+      _adapter_any?
     end
 
     # Bulk DELETE without instantiating records or running callbacks —
