@@ -1249,6 +1249,7 @@ module ActiveRecord
     # Unloaded SQL is `SELECT 1 AS one … LIMIT 1` (see `exists_sql`),
     # not COUNT(*). Loaded relations answer from the cache.
     def exists?(id = nil)
+      return false if @limit == 0
       if id.nil?
         r = @records
         return r.length > 0 unless r.nil?
@@ -1266,6 +1267,7 @@ module ActiveRecord
     # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
     # `one?`, and `many?` so cardinality questions never hydrate.
     def probe_existence(n)
+      return 0 if @limit == 0
       ActiveRecord.adapter.select_rows(exists_sql(n)).length
     end
 

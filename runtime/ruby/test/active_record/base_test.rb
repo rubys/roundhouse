@@ -281,6 +281,11 @@ class BaseTest < Minitest::Test
     assert_equal 0, Item.hydrate_count
   end
 
+  def test_relation_limit_zero_exists_is_false
+    it = Item.new; it.title = "A"; it.save()
+    refute ActiveRecord::Relation.new(Item).limit(0).exists?
+  end
+
   def test_relation_empty_any_use_exists_not_hydrate
     it = Item.new; it.title = "A"; it.save()
     Item.hydrate_count = 0
