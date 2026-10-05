@@ -1529,11 +1529,33 @@ module ActiveRecord
     # `add_condition` answers whether it pushed — a nil or empty
     # condition pushes nothing — so the pop is guarded by that rather
     # than issued unconditionally.
+    #
+    # A sole `{primary_key: nil}` (or `{id: nil}`) can never match a
+    # row: primary keys are NOT NULL. Answer nil without the
+    # `WHERE id IS NULL LIMIT 1` round trip — the plain room-show
+    # path of `find_messages` when no message_id is present.
     def find_by(conditions)
+      return nil if nil_primary_key_lookup?(conditions)
       pushed = add_condition(conditions, [], false)
       record = first
       @wheres.pop if pushed
       record
+    end
+
+    # True when `conditions` is exactly one entry whose key is the
+    # primary key (or bare `id`) and whose value is nil.
+    def nil_primary_key_lookup?(conditions)
+      return false unless conditions.is_a?(Hash)
+      return false if conditions.length != 1
+      key = nil
+      val = :__missing
+      conditions.each do |k, v|
+        key = k
+        val = v
+      end
+      return false unless val.nil?
+      name = key.to_s
+      name == "id" || name == @model.primary_key
     end
 
     # `find_by!` — `find_by` that raises `RecordNotFound` on no match.

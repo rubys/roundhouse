@@ -328,6 +328,22 @@ class BaseTest < Minitest::Test
     assert rel.last_page?
   end
 
+  def test_relation_find_by_nil_primary_key_skips_sql
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    Item.hydrate_count = 0
+    assert_nil rel.find_by(id: nil)
+    assert_equal 0, Item.hydrate_count
+    # Relation stays unscoped — same guarantee as the predicate pop.
+    assert_equal 1, rel.count
+  end
+
+  def test_relation_find_by_nil_non_pk_still_queries
+    it = Item.new; it.title = "A"; it.save()
+    # title IS NULL can match; must not take the primary-key short circuit.
+    assert_nil ActiveRecord::Relation.new(Item).find_by(title: nil)
+  end
+
   def test_relation_each_reuses_the_loaded_array
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

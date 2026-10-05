@@ -198,6 +198,7 @@ module ActiveRecord
     def find: (Integer | String | Array[Integer | String] id) -> untyped
     def find_ids: (Array[Integer | String] ids) -> Array[untyped]
     def find_by: (untyped conditions) -> untyped
+    def nil_primary_key_lookup?: (untyped conditions) -> bool
     def find_by!: (untyped conditions) -> untyped
     def first_or_initialize: () -> untyped
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped
