@@ -2404,11 +2404,17 @@ impl ModelBases {
     /// Close the set: anything whose parent is already a base is one.
     /// Iterated rather than recursive because the pairs arrive in file
     /// order, and a base can be declared after its user.
+    ///
+    /// `record` stores a bare parent (`MidBase`) when that name is not
+    /// yet a known base. After a later iteration inserts the qualified
+    /// form (`ActionText::MidBase`), match the stored spelling against
+    /// the child's enclosing modules the same way `resolve_superclass`
+    /// does at record time.
     pub fn close_over(&mut self, pairs: &[(String, String)]) {
         loop {
             let before = self.names.len();
             for (child, parent) in pairs {
-                if self.names.contains(parent) {
+                if self.parent_is_known_base(child, parent) {
                     self.names.insert(child.clone());
                 }
             }
@@ -2416,6 +2422,28 @@ impl ModelBases {
                 break;
             }
         }
+    }
+
+    fn parent_is_known_base(&self, child: &str, parent: &str) -> bool {
+        if self.names.contains(parent) {
+            return true;
+        }
+        if parent.contains("::") {
+            return false;
+        }
+        let mut segs: Vec<&str> = child.split("::").collect();
+        if segs.len() < 2 {
+            return false;
+        }
+        segs.pop();
+        while !segs.is_empty() {
+            let candidate = format!("{}::{}", segs.join("::"), parent);
+            if self.names.contains(&candidate) {
+                return true;
+            }
+            segs.pop();
+        }
+        false
     }
 
 }

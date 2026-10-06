@@ -108,6 +108,60 @@ fn markdown_under_action_text_ingests_as_model() {
 }
 
 #[test]
+fn nested_abstract_chain_with_bare_parent_ingests_as_model() {
+    // `class LeafBase < MidBase` stores the parent as the bare spelling
+    // until close_over discovers `ActionText::MidBase`. Matching only
+    // the stored string would leave Markdown a library class.
+    let app = ingest(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        (
+            "lib/rails_ext/action_text_mid_base.rb",
+            r#"module ActionText
+  class MidBase < Record
+    self.abstract_class = true
+  end
+end
+"#,
+        ),
+        (
+            "lib/rails_ext/action_text_leaf_base.rb",
+            r#"module ActionText
+  class LeafBase < MidBase
+    self.abstract_class = true
+  end
+end
+"#,
+        ),
+        (
+            "lib/rails_ext/action_text_markdown.rb",
+            r#"module ActionText
+  class Markdown < LeafBase
+  end
+end
+"#,
+        ),
+    ]);
+    assert!(
+        app.models
+            .iter()
+            .any(|m| m.name.0.as_str() == "ActionText::Markdown"),
+        "Markdown through a nested abstract chain must be a model; models={:?} library={:?}",
+        app.models.iter().map(|m| m.name.0.as_str()).collect::<Vec<_>>(),
+        app.library_classes
+            .iter()
+            .map(|c| c.name.0.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        !app.library_classes
+            .iter()
+            .any(|c| c.name.0.as_str() == "ActionText::Markdown"),
+        "must not remain a library class"
+    );
+}
+
+#[test]
 fn optioned_mattr_on_a_model_does_not_fail_ingest() {
     // Writebook's ActionText::Markdown uses `mattr_accessor :renderer, default:`.
     // Expanding without the initializer would drop the default; erroring

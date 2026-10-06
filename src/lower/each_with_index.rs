@@ -18,7 +18,7 @@
 //! `map.with_index` is left alone — Spinel already accepts that shape.
 
 use crate::app::App;
-use crate::expr::{Expr, ExprNode, Literal, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::ty::Ty;
 
@@ -97,7 +97,11 @@ fn rewrite(expr: &mut Expr) {
             _ => return,
         };
 
-        (collection.clone(), offset, block.take().expect("checked above"))
+        (
+            collection.clone(),
+            offset,
+            block.take().expect("checked above"),
+        )
     };
 
     if let Some(offset) = offset {
@@ -124,7 +128,7 @@ fn inject_offset_binding(block: &mut Expr, offset: Expr, span: crate::span::Span
         return;
     }
     let index_name = params[1].clone();
-    let tmp = Symbol::from("__with_index_i");
+    let tmp = unique_index_temp(params, body);
     params[1] = tmp.clone();
 
     let mut tmp_var = Expr::new(
@@ -166,7 +170,12 @@ fn inject_offset_binding(block: &mut Expr, offset: Expr, span: crate::span::Span
         _ => {
             let old = std::mem::replace(
                 body,
-                Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Nil,
+                    },
+                ),
             );
             *body = Expr::new(
                 span,
@@ -178,13 +187,68 @@ fn inject_offset_binding(block: &mut Expr, offset: Expr, span: crate::span::Span
     }
 }
 
+/// Prefer `__with_index_i`. If the block already binds or reads that
+/// name, bump the suffix so the injected param does not shadow it.
+fn unique_index_temp(params: &[Symbol], body: &Expr) -> Symbol {
+    let mut n = 0usize;
+    loop {
+        let name = if n == 0 {
+            "__with_index_i".to_string()
+        } else {
+            format!("__with_index_i{n}")
+        };
+        let taken = params
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != 1 && p.as_str() == name)
+            || mentions_local(body, &name);
+        if !taken {
+            return Symbol::from(name);
+        }
+        n += 1;
+    }
+}
+
+fn mentions_local(expr: &Expr, name: &str) -> bool {
+    fn walk_lvalue(lv: &LValue, name: &str) -> bool {
+        match lv {
+            LValue::Var { name: n, .. } => n.as_str() == name,
+            LValue::Ivar { .. } | LValue::Const { .. } => false,
+            LValue::Attr { recv, .. } => mentions_local(recv, name),
+            LValue::Index { recv, index } => {
+                mentions_local(recv, name) || mentions_local(index, name)
+            }
+        }
+    }
+    match &*expr.node {
+        ExprNode::Var { name: n, .. } => n.as_str() == name,
+        ExprNode::Assign { target, value } => {
+            walk_lvalue(target, name) || mentions_local(value, name)
+        }
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |child| {
+                if !found && mentions_local(child, name) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::span::Span;
 
     fn lit_int(n: i64) -> Expr {
-        let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: n } });
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Int { value: n },
+            },
+        );
         e.ty = Some(Ty::Int);
         e
     }
@@ -235,7 +299,14 @@ mod tests {
             Some(lambda(&["item", "index"], lit_int(0))),
         );
         rewrite(&mut expr);
-        let ExprNode::Send { method, args, block, recv, .. } = &*expr.node else {
+        let ExprNode::Send {
+            method,
+            args,
+            block,
+            recv,
+            ..
+        } = &*expr.node
+        else {
             panic!("expected Send");
         };
         assert_eq!(method.as_str(), "each_with_index");
@@ -297,12 +368,7 @@ mod tests {
                 name: Symbol::from("touch"),
             },
         );
-        let mut expr = send(
-            Some(each),
-            "with_index",
-            vec![lit_int(1)],
-            Some(method_ref),
-        );
+        let mut expr = send(Some(each), "with_index", vec![lit_int(1)], Some(method_ref));
         rewrite(&mut expr);
         let ExprNode::Send { method, .. } = &*expr.node else {
             panic!("expected Send");
@@ -329,5 +395,25 @@ mod tests {
             panic!("expected Send");
         };
         assert_eq!(method.as_str(), "with_index");
+    }
+
+    #[test]
+    fn offset_temp_avoids_existing_local_name() {
+        let each = send(Some(var("items")), "each", vec![], None);
+        let mut expr = send(
+            Some(each),
+            "with_index",
+            vec![lit_int(1)],
+            Some(lambda(&["item", "index"], var("__with_index_i"))),
+        );
+        rewrite(&mut expr);
+        let ExprNode::Send { method, block, .. } = &*expr.node else {
+            panic!("expected Send");
+        };
+        assert_eq!(method.as_str(), "each_with_index");
+        let ExprNode::Lambda { params, .. } = &*block.as_ref().unwrap().node else {
+            panic!("expected Lambda");
+        };
+        assert_eq!(params[1].as_str(), "__with_index_i1");
     }
 }

@@ -64,6 +64,33 @@ end
 }
 
 #[test]
+fn each_with_index_offset_does_not_shadow_existing_temp_name() {
+    let src = emit_lib(
+        r#"class Mover
+  def self.reposition(items, __with_index_i)
+    items.each.with_index(1) do |item, index|
+      item.update!(score: before_plus(__with_index_i, index))
+    end
+  end
+
+  def self.before_plus(captured, index)
+    captured + index
+  end
+end
+"#,
+        "mover",
+    );
+    assert!(
+        src.contains("each_with_index"),
+        "still flatten each.with_index:\n{src}"
+    );
+    assert!(
+        src.contains("__with_index_i1") || !src.contains("|item, __with_index_i|"),
+        "injected index temp must not reuse the captured local name:\n{src}"
+    );
+}
+
+#[test]
 fn each_with_index_without_offset_needs_no_binding() {
     let src = emit_lib(
         r#"class Mover
