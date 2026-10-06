@@ -23,11 +23,11 @@ module ActiveRecord
         Array[String] groups,
         Array[String] havings,
         Array[String] ctes,
-        Array[Symbol] includes,
+        Array[Symbol | Hash[Symbol, Symbol]] includes,
         Hash[Symbol, untyped] attrs
       ) -> Relation
     def copy_string_list: (Array[String] xs) -> Array[String]
-    def copy_symbol_list: (Array[Symbol] xs) -> Array[Symbol]
+    def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol]] xs) -> Array[Symbol | Hash[Symbol, Symbol]]
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
     def where: (?(Hash[Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
@@ -39,6 +39,7 @@ module ActiveRecord
     @limit: Integer?
     @offset: Integer?
     @records: Array[Base]?
+    @includes: Array[Symbol | Hash[Symbol, Symbol]]
 
     @from: String?
     @ctes: Array[String]
@@ -110,9 +111,9 @@ module ActiveRecord
     # shape, so a strict target that needs it has a spelling.
     def select: (*(String | Symbol) specs) -> Relation
     def distinct: () -> Relation
-    def includes: (*Symbol names) -> Relation
-    def preload: (*Symbol names) -> Relation
-    def eager_load: (*Symbol names) -> Relation
+    def includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
     def skip_preloading!: () -> Relation
     def preload_associations: (Array[Base] records) -> Array[Base]
     def references: (*Symbol names) -> Relation

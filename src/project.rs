@@ -703,6 +703,28 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
 /// 2. Terminals (`first` / `find_by` / …) returning `Base` / `Base?` —
 ///    callers expect a concrete model (`User*`); Spinel will not convert
 ///    Base → User.
+/// Widen `Base` on def / ivar lines only. Comments stay. `Base?` before
+/// bare `Base` so `-> Base?` becomes `untyped`, not `untyped?`.
+fn widen_spinel_base_on_sigs(src: &str) -> String {
+    let mut widened = String::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("def ") || trimmed.starts_with('@') {
+            widened.push_str(
+                &line
+                    .replace("Array[Base]", "Array[untyped]")
+                    .replace("Set[Base]", "Set[untyped]")
+                    .replace("Base?", "untyped")
+                    .replace("Base", "untyped"),
+            );
+        } else {
+            widened.push_str(line);
+        }
+        widened.push('\n');
+    }
+    widened
+}
+
 fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), String> {
     let idx = files
         .iter()
@@ -738,25 +760,39 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
         }
         *relation = relation.replace(narrow, wide);
     }
-    // Remaining `Base` on def / ivar lines only — comments stay. `Base?`
-    // before bare `Base` so `-> Base?` becomes `untyped`, not `untyped?`.
-    let mut widened = String::new();
-    for line in relation.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("def ") || trimmed.starts_with('@') {
-            widened.push_str(
-                &line
-                    .replace("Array[Base]", "Array[untyped]")
-                    .replace("Set[Base]", "Set[untyped]")
-                    .replace("Base?", "untyped")
-                    .replace("Base", "untyped"),
-            );
-        } else {
-            widened.push_str(line);
+    *relation = widen_spinel_base_on_sigs(relation);
+
+    let conn_idx = files
+        .iter()
+        .position(|(p, _)| {
+            p == "sig/runtime/active_record/connection.rbs"
+                || p == "runtime/active_record/connection.rbs"
+        })
+        .ok_or_else(|| {
+            "spinel_relation_model_handle: active_record/connection.rbs not in the tree"
+                .to_string()
+        })?;
+    let conn = &mut files[conn_idx].1;
+    // Dynamic `Model.first` / `Model.take` live here, not on Relation.
+    let conn_pairs = [
+        (
+            "    def self.first: () -> Base?\n",
+            "    def self.first: () -> untyped\n",
+        ),
+        (
+            "    def self.take: () -> Base?\n",
+            "    def self.take: () -> untyped\n",
+        ),
+    ];
+    for (narrow, wide) in conn_pairs {
+        if !conn.contains(narrow) {
+            return Err(format!(
+                "spinel_relation_model_handle: connection.rbs no longer declares {narrow:?}"
+            ));
         }
-        widened.push('\n');
+        *conn = conn.replace(narrow, wide);
     }
-    *relation = widened;
+    *conn = widen_spinel_base_on_sigs(conn);
     Ok(())
 }
 
@@ -8225,6 +8261,27 @@ mod tests {
             relation.contains("def find_by: (untyped conditions) -> untyped"),
             "Spinel must not keep find_by:()->Base?: {relation}"
         );
+        let connection = files
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/connection.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("connection.rbs in spinel tree");
+        assert!(
+            connection.contains("def self.first: () -> untyped"),
+            "Spinel must not keep Base.first:()->Base?: {connection}"
+        );
+        assert!(
+            connection.contains("def self.take: () -> untyped"),
+            "Spinel must not keep Base.take:()->Base?: {connection}"
+        );
+        let conn_leftover: Vec<&str> = connection
+            .lines()
+            .filter(|l| l.trim_start().starts_with("def ") && l.contains("Base"))
+            .collect();
+        assert!(
+            conn_leftover.is_empty(),
+            "Spinel connection def lines still spell Base: {conn_leftover:?}"
+        );
         // Shared source still spells Base for Roundhouse Bar B.
         let shared = crate::runtime_files::read_to_string("runtime/ruby/active_record/relation.rbs")
             .expect("shared relation.rbs");
@@ -8246,6 +8303,15 @@ mod tests {
         assert!(
             ruby_relation.contains("def first: () -> Base?"),
             "CRuby relation.rbs must keep first:()->Base?: {ruby_relation}"
+        );
+        let ruby_connection = ruby
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/connection.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("connection.rbs in ruby tree");
+        assert!(
+            ruby_connection.contains("def self.first: () -> Base?"),
+            "CRuby connection.rbs must keep Base.first:()->Base?: {ruby_connection}"
         );
     }
 }
