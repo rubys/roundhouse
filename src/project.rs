@@ -748,6 +748,33 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
         }
         *relation = relation.replace(narrow, wide);
     }
+    // Bar B types loaded records as `Base` (Enumerable blocks, to_a).
+    // Spinel will not convert Base → User / Array[Base] → Array[User],
+    // so the sidecar widens those the same way as first/find_by.
+    *relation = relation.replace("Array[Base]", "Array[untyped]");
+    *relation = relation.replace("{ (Base)", "{ (untyped)");
+    *relation = relation.replace("{ (untyped, Base)", "{ (untyped, untyped)");
+    *relation = relation.replace("Hash[untyped, Base]", "Hash[untyped, untyped]");
+    // spawn copies `@records`; keep this param bare so a preloaded
+    // integer-seeded cache (see `preloaded`) is not an Array seed.
+    if !relation.contains("        Array[untyped]? records,\n") {
+        return Err(
+            "spinel_relation_model_handle: spawn records param missing after Array[Base] widen"
+                .to_string(),
+        );
+    }
+    *relation = relation.replace(
+        "        Array[untyped]? records,\n",
+        "        untyped records,\n",
+    );
+    let detect_narrow = "    def detect: () { (untyped) -> bool } -> Base?\n";
+    let detect_wide = "    def detect: () { (untyped) -> bool } -> untyped\n";
+    if !relation.contains(detect_narrow) {
+        return Err(format!(
+            "spinel_relation_model_handle: relation.rbs no longer declares {detect_narrow:?}"
+        ));
+    }
+    *relation = relation.replace(detect_narrow, detect_wide);
     Ok(())
 }
 
@@ -8183,6 +8210,14 @@ mod tests {
         assert!(
             relation.contains("def first: () -> untyped"),
             "Spinel must not keep first:()->Base?: {relation}"
+        );
+        assert!(
+            relation.contains("def to_a: () -> Array[untyped]"),
+            "Spinel must not keep to_a:()->Array[Base]: {relation}"
+        );
+        assert!(
+            relation.contains("def detect: () { (untyped) -> bool } -> untyped"),
+            "Spinel must not keep detect:()->Base?: {relation}"
         );
         assert!(
             relation.contains("def find_by: (untyped conditions) -> untyped"),

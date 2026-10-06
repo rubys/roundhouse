@@ -1,8 +1,9 @@
 module ActiveRecord
   # Lazy chainable query builder. Chain methods return `self` (typed as
-  # Relation); terminals execute and return rows / scalars. The element
-  # type is `untyped` in v1 — the lowered model methods carry the model
-  # identity; per-element typing is a later (generic-Relation) refinement.
+  # Relation); terminals execute and return rows / scalars. Loaded
+  # records are `Base` as an interim (same as first/take) — not
+  # per-model. `Relation[T]` is the later refinement. `preloaded` and
+  # set-operator operands stay `untyped` for Spinel integer-seed arrays.
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
@@ -37,7 +38,7 @@ module ActiveRecord
     # / loaded Enumerable terminals as Ty::Var.
     @limit: Integer?
     @offset: Integer?
-    @records: Array[untyped]?
+    @records: Array[Base]?
 
     @from: String?
     @ctes: Array[String]
@@ -59,31 +60,30 @@ module ActiveRecord
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
-    def order: (*untyped parts) -> Relation
-    # The in-memory sort `order` applies to a LOADED relation (see the
-    # .rb). Element type stays untyped until Relation[T]; the array
-    # representation is honest — only index/length/map appear here
-    # (unlike `preloaded`, which must stay bare for Spinel integer seeds).
-    def sort_in_place!: (Array[untyped] sorted, Array[String] terms) -> bool
+    def order: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
+    # In-memory sort of a LOADED relation. Records are `Base` (same
+    # interim as first/take); `preloaded` stays bare for Spinel integer
+    # seeds, but the loaded cache itself is a record array.
+    def sort_in_place!: (Array[Base] sorted, Array[String] terms) -> bool
     def order_column: (String term) -> String?
     def order_descending?: (String term) -> bool
     def reverse_order_term: (String term) -> String
     def reverse_one_order_term: (String term) -> String
-    def loaded_tail: (Array[untyped] loaded, Integer n) -> Array[untyped]
+    def loaded_tail: (Array[Base] loaded, Integer n) -> Array[Base]
     # The keys are whatever the ordered column holds, and `<=>` on two
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
     def order_key_of: (Base record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
-    def order!: (*untyped parts) -> Relation
-    def reorder: (*untyped parts) -> Relation
+    def order!: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
+    def reorder: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
     # Kaminari's pagination surface (see the .rb): `page` / `per` take
     # whatever the request handed over (a params String, an Integer or
     # nil) and read it through `to_s`.
-    def page: (?untyped num) -> Relation
-    def per: (untyped num) -> Relation
+    def page: (?(Integer | String | nil) num) -> Relation
+    def per: (Integer | String | nil num) -> Relation
     def limit_value: () -> Integer?
     def offset_value: () -> Integer?
     def current_page: () -> Integer
@@ -94,12 +94,12 @@ module ActiveRecord
     def out_of_range?: () -> bool
     def next_page: () -> Integer?
     def prev_page: () -> Integer?
-    def group: (*untyped parts) -> Relation
-    def having: (untyped condition, *untyped args) -> Relation
-    def joins: (untyped spec) -> Relation
-    def join_fragment: (untyped spec) -> String
-    def left_outer_joins: (untyped spec) -> Relation
-    def left_joins: (untyped spec) -> Relation
+    def group: (*(String | Symbol) parts) -> Relation
+    def having: (String condition, *untyped args) -> Relation
+    def joins: (String | Symbol spec) -> Relation
+    def join_fragment: (String | Symbol spec) -> String
+    def left_outer_joins: (String | Symbol spec) -> Relation
+    def left_joins: (String | Symbol spec) -> Relation
     # Two methods sharing a name: field args PROJECT columns and keep
     # the Relation; a block is Enumerable's filter over the loaded
     # records and answers an Array (zero args means the block form —
@@ -108,14 +108,14 @@ module ActiveRecord
     # call site in the corpus is the projection. `filter` below is the
     # same method under Ruby's other name and DOES declare the block
     # shape, so a strict target that needs it has a spelling.
-    def select: (*untyped specs) -> Relation
+    def select: (*(String | Symbol) specs) -> Relation
     def distinct: () -> Relation
-    def includes: (*untyped names) -> Relation
-    def preload: (*untyped names) -> Relation
-    def eager_load: (*untyped names) -> Relation
+    def includes: (*Symbol names) -> Relation
+    def preload: (*Symbol names) -> Relation
+    def eager_load: (*Symbol names) -> Relation
     def skip_preloading!: () -> Relation
-    def preload_associations: (Array[untyped] records) -> Array[untyped]
-    def references: (*untyped names) -> Relation
+    def preload_associations: (Array[Base] records) -> Array[Base]
+    def references: (*Symbol names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
     def arel: () -> Arel::SelectManager
@@ -134,15 +134,15 @@ module ActiveRecord
     def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
 
-    def to_a: () -> Array[untyped]
-    def load_records: () -> Array[untyped]
-    def loaded_records: () -> Array[untyped]
-    def to_set: () -> Set[untyped]
-    def to_ary: () -> Array[untyped]
+    def to_a: () -> Array[Base]
+    def load_records: () -> Array[Base]
+    def loaded_records: () -> Array[Base]
+    def to_set: () -> Set[Base]
+    def to_ary: () -> Array[Base]
     def ==: (untyped other) -> bool
-    def filter: () { (untyped) -> bool } -> Array[untyped]
-    def map: () { (untyped) -> untyped } -> untyped
-    def collect: () { (untyped) -> untyped } -> untyped
+    def filter: () { (Base) -> bool } -> Array[Base]
+    def map: () { (Base) -> untyped } -> untyped
+    def collect: () { (Base) -> untyped } -> untyped
     # `other` is `untyped`, NOT `Array[untyped]`, on all four set
     # operators: each body only hands the argument on to Array's own
     # operator (`to_a + other`), so it does not care about the array's
@@ -160,10 +160,10 @@ module ActiveRecord
     def ids_of: (Array[untyped] records) -> Array[untyped]
     def id_filter: (Array[untyped] records, Array[untyped] ids, bool keep) -> Array[untyped]
     def include?: (Base? record) -> bool
-    def each: () { (untyped) -> void } -> Relation
-    def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
-    def find_each: () { (untyped) -> void } -> Relation
-    def find_in_batches: () { (Array[untyped]) -> void } -> Relation
+    def each: () { (Base) -> void } -> Relation
+    def index_by: () { (Base) -> untyped } -> Hash[untyped, Base]
+    def find_each: () { (Base) -> void } -> Relation
+    def find_in_batches: () { (Array[Base]) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so
@@ -172,18 +172,18 @@ module ActiveRecord
     # stopped with no diagnostic naming the seed. The two agreed only for
     # as long as every id was boxed. Widen to `untyped` so the body
     # decides the shape; `Array[U]` waits on Relation[T].
-    def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]
-    def partition: () { (untyped) -> bool } -> Array[Array[untyped]]
-    def detect: () { (untyped) -> bool } -> untyped
-    def sort_by: () { (untyped) -> untyped } -> Array[untyped]
-    def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
-    def each_with_object: (untyped memo) { (untyped, untyped) -> untyped } -> untyped
+    def group_by: () { (Base) -> untyped } -> Hash[untyped, Array[Base]]
+    def partition: () { (Base) -> bool } -> Array[Array[Base]]
+    def detect: () { (Base) -> bool } -> Base?
+    def sort_by: () { (Base) -> untyped } -> Array[Base]
+    def inject: (untyped initial) { (untyped, Base) -> untyped } -> untyped
+    def each_with_object: (untyped memo) { (Base, untyped) -> untyped } -> untyped
     def first: () -> Base?
     def take: () -> Base?
     def first!: () -> Base
     def last: () -> Base?
-    def first_n: (Integer n) -> Array[untyped]
-    def last_n: (Integer n) -> Array[untyped]
+    def first_n: (Integer n) -> Array[Base]
+    def last_n: (Integer n) -> Array[Base]
     def count: () -> Integer
     def sum: (untyped expr) -> Float
     def group_count: () -> Hash[untyped, Integer]
@@ -195,15 +195,15 @@ module ActiveRecord
     def none?: () -> bool
     def one?: () -> bool
     def many?: () -> bool
-    def all?: () { (untyped) -> bool } -> bool
+    def all?: () { (Base) -> bool } -> bool
     def exists?: (?Integer? id) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer
     def size: () -> Integer
     def delete_all: () -> Integer
-    def destroy_all: () -> Array[untyped]
-    def destroy_by: (untyped conditions) -> Array[untyped]
+    def destroy_all: () -> Array[Base]
+    def destroy_by: (untyped conditions) -> Array[Base]
     def delete_by: (untyped conditions) -> Integer
     def update_all: (untyped updates) -> Integer
     def touch_all: (?Symbol? name) -> Integer
@@ -230,7 +230,7 @@ module ActiveRecord
     def pick: (untyped col) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | String | Array[Integer | String] id) -> untyped
-    def find_ids: (Array[Integer | String] ids) -> Array[untyped]
+    def find_ids: (Array[Integer | String] ids) -> Array[Base]
     def find_by: (untyped conditions) -> Base?
     def find_by!: (untyped conditions) -> Base
     def first_or_initialize: () -> Base
@@ -243,14 +243,14 @@ module ActiveRecord
     def append_group_having: (String sql) -> String
     def count_sql: () -> String
     def exists_sql: (Integer n) -> String
-    def hash_conditions: (untyped hash) -> String
+    def hash_conditions: (Hash[Symbol, untyped] hash) -> String
     def column_predicate: (String col, untyped val) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
-    def order_term: (Hash[Symbol, untyped] | String p) -> String
+    def order_term: (String | Symbol | Hash[Symbol, untyped] p) -> String
     def format_order_hash: (Hash[Symbol, untyped] h) -> String
   end
 end

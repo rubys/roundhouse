@@ -42,15 +42,15 @@ module ActiveRecord
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.all: () -> Relation
     def self.none: () -> Relation
-    def self.page: (?untyped num) -> Relation
+    def self.page: (?(Integer | String | nil) num) -> Relation
     def self.any?: () -> bool
     def self.none?: () -> bool
     def _note_hydrated: () -> void
     def _note_unloaded: (Hash[String, untyped] row) -> nil
     def has_attribute?: (Symbol name) -> bool
     def attribute_previously_was: (String name) -> untyped
-    def self.first: () -> untyped
-    def self.take: () -> untyped
+    def self.first: () -> Base?
+    def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def update_attribute: (Symbol name, untyped value) -> bool
