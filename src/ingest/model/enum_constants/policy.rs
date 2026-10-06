@@ -27,6 +27,13 @@ impl EnumConstants {
         // Relative qualified reopens search lexically: `module Wrapper;
         // class Catalog::Rating` may reopen ::Catalog::Rating, not a class
         // beneath Wrapper. Refuse any enum touched through that mismatch.
+        // Only enums can be refused, and reopens create none: scan them alone.
+        let enums: Vec<String> = self
+            .values
+            .iter()
+            .filter(|(_, v)| matches!(v, EnumConstant::Sorbet { .. }))
+            .map(|(name, _)| name.clone())
+            .collect();
         for fact in &facts {
             let SourceFact::Reopen { subject, collected } = fact else {
                 continue;
@@ -38,14 +45,12 @@ impl EnumConstants {
                 }
                 if resolved != *collected {
                     let prefixes = [format!("{resolved}::"), format!("{collected}::")];
-                    for (name, value) in &mut self.values {
-                        if matches!(value, EnumConstant::Sorbet { .. })
-                            && (name == &resolved
-                                || name == collected
-                                || prefixes.iter().any(|prefix| name.starts_with(prefix)))
-                        {
-                            *value = EnumConstant::Unsupported;
-                        }
+                    for name in enums.iter().filter(|name| {
+                        *name == &resolved
+                            || *name == collected
+                            || prefixes.iter().any(|prefix| name.starts_with(prefix))
+                    }) {
+                        self.values.insert(name.clone(), EnumConstant::Unsupported);
                     }
                 }
             }
@@ -59,6 +64,16 @@ impl EnumConstants {
                 .values()
                 .filter(|v| matches!(v, EnumConstant::Unsupported))
                 .count();
+            // A namespace alias invalidates the Sorbet enums beneath it. Scan
+            // only the enums (few), once per namespace per round: values gain
+            // no new enum during a round, so a repeat use changes nothing.
+            let enums: Vec<String> = self
+                .values
+                .iter()
+                .filter(|(_, v)| matches!(v, EnumConstant::Sorbet { .. }))
+                .map(|(name, _)| name.clone())
+                .collect();
+            let mut aliased = std::collections::HashSet::new();
             for fact in &facts {
                 let SourceFact::Use { subject, context } = fact else {
                     continue;
@@ -74,12 +89,11 @@ impl EnumConstants {
                     // A namespace alias exposes every enum beneath it, but must
                     // not change the existing literal-array mapping vocabulary.
                     if matches!(self.values.get(&name), Some(EnumConstant::Namespace)) {
-                        let prefix = format!("{name}::");
-                        for (name, value) in &mut self.values {
-                            if name.starts_with(&prefix)
-                                && matches!(value, EnumConstant::Sorbet { .. })
-                            {
-                                *value = EnumConstant::Unsupported;
+                        if aliased.insert(name.clone()) {
+                            let prefix = format!("{name}::");
+                            for enum_name in enums.iter().filter(|e| e.starts_with(&prefix)) {
+                                self.values
+                                    .insert(enum_name.clone(), EnumConstant::Unsupported);
                             }
                         }
                         continue;
