@@ -327,6 +327,63 @@ fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
     param_selector_dispatch_app().run_spinel(&script).assert_passes();
 }
 
+/// `class Page < Array` wrap: collection protocol runs; `is_a?(Array)` stays
+/// false (honesty ledger). Real Array-subclass identity is Spinel #7584.
+fn array_subclass_wrap_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("app/models/page.rb", r#"class Page < Array
+  def initialize(records)
+    super(records)
+  end
+end
+"#)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/pages\", to: \"pages#index\"\nend\n")
+        .write("app/controllers/pages_controller.rb", r##"class PagesController < ApplicationController
+  def index
+    page = Page.new(["a", "b", "c", "d"])
+    bits = [
+      page.first(2).join(","),
+      page.last,
+      page.map { |x| x }.join(","),
+      (page.any? { |x| x == "b" }).to_s,
+      page.count { |x| x.length == 1 }.to_s,
+      page[1],
+      page.include?("c").to_s,
+      page.is_a?(Array).to_s,
+    ]
+    render plain: bits.join("|")
+  end
+end
+"##)
+}
+
+fn array_subclass_wrap_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/pages_controller"
+controller = PagesController.new
+controller.process_action(:index)
+want = "a,b|d|a,b,c,d|true|4|b|true|false"
+raise "array wrap: #{controller.body}" unless controller.body == want
+puts "array subclass wrap passed"
+"##
+}
+
+#[test]
+fn array_subclass_wrap_collection_protocol_runs() {
+    array_subclass_wrap_app()
+        .run_ruby(array_subclass_wrap_assertions())
+        .assert_passes();
+}
+
 /// assert_select attribute operators (`$=`, `^=`, `*=`) and `:not([…])`,
 /// and assert_response's failure message. Rails 8.2-era tests write all
 /// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
