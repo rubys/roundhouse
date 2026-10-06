@@ -297,6 +297,7 @@ module ActiveRecord
     end
 
     def order!(*parts)
+      own_lists
       terms = parts.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
       loaded = @records

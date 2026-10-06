@@ -261,3 +261,43 @@ puts "ALL OK"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }
+
+#[test]
+fn last_hit_does_not_follow_a_mutated_source_string() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+
+n = 0
+orig = Zlib.method(:gzip)
+Zlib.define_singleton_method(:gzip) do |raw|
+  n += 1
+  orig.call(raw)
+end
+
+body = "x" * 128
+wrapped = GzipCache.wrap(lambda { |_env|
+  [200, { "content-type" => "text/html" }, [body]]
+})
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+first = wrapped.call(env)
+body.replace("y" * 128)
+second = wrapped.call(env)
+raise "gzipped #{n} times" unless n == 2
+raise "mutated source reused gzip" if first[2][0] == second[2][0]
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "last-hit snapshot failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}

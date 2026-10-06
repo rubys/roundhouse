@@ -81,7 +81,10 @@ module GzipCache
         @store.clear
       end
       @store[fp] = [sz, gz]
-      @last_raw = raw
+      # Snapshot: the Rack body string can be reused and mutated
+      # between requests. Sharing it would make last-hit `==` match
+      # the mutated bytes while `@last_gz` is still the old gzip.
+      @last_raw = raw.dup
       @last_gz = gz
     end
     gz

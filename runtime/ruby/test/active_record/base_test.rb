@@ -550,6 +550,12 @@ class BaseTest < Minitest::Test
     base.where(title: "C")
     assert_match(/title = 'B'/, fork.to_sql)
     refute_match(/title = 'C'/, fork.to_sql)
+    ordered = ActiveRecord::Relation.new(Item).where(title: "A")
+    prior_order = ordered.to_sql
+    fork_order = ordered.spawn
+    ordered.order!(:id)
+    assert_equal prior_order, fork_order.to_sql
+    assert_match(/ORDER BY/, ordered.to_sql)
   end
 
   def test_find_in_batches_yields_loaded_records_once

@@ -373,7 +373,7 @@ fn wrap_cached_collection(
                     expr: view_helpers_call("cache_scope", Vec::new()),
                 },
                 InterpPart::Text {
-                    value: format!("{}/", ctx.view_name),
+                    value: format!("{}/{}/", ctx.view_name, partial),
                 },
             ],
         },
@@ -388,6 +388,30 @@ fn wrap_cached_collection(
             value: prefix,
         },
     );
+    let slash_lit = || {
+        Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: "/".to_string(),
+                },
+            },
+        )
+    };
+    let mut local_key_parts: Vec<Expr> = Vec::new();
+    if let Some(entries) = locals {
+        for (_k, v) in entries {
+            let append_slash = send(
+                Some(var_ref(key_name.clone())),
+                "<<",
+                vec![slash_lit()],
+                None,
+                false,
+            );
+            let as_str = send(Some(v.clone()), "to_s", Vec::new(), None, false);
+            local_key_parts.push(send(Some(append_slash), "<<", vec![as_str], None, false));
+        }
+    }
     let rec_ref = var_ref(rec_name.clone());
     let version = send(
         Some(rec_ref),
@@ -396,18 +420,10 @@ fn wrap_cached_collection(
         None,
         false,
     );
-    let slash = Expr::new(
-        span,
-        ExprNode::Lit {
-            value: Literal::Str {
-                value: "/".to_string(),
-            },
-        },
-    );
     let append_slash = send(
         Some(var_ref(key_name.clone())),
         "<<",
-        vec![slash],
+        vec![slash_lit()],
         None,
         false,
     );
@@ -488,19 +504,19 @@ fn wrap_cached_collection(
             ctx,
         ),
     ];
-    Some(seq(vec![
-        assign_key,
-        build_key,
-        read,
-        Expr::new(
-            span,
-            ExprNode::If {
-                cond: send(Some(hit_ref()), "nil?", Vec::new(), None, false),
-                then_branch: seq(miss),
-                else_branch: seq(vec![accumulator_append_call(hit_ref(), ctx)]),
-            },
-        ),
-    ]))
+    let mut prelude = vec![assign_key];
+    prelude.extend(local_key_parts);
+    prelude.push(build_key);
+    prelude.push(read);
+    prelude.push(Expr::new(
+        span,
+        ExprNode::If {
+            cond: send(Some(hit_ref()), "nil?", Vec::new(), None, false),
+            then_branch: seq(miss),
+            else_branch: seq(vec![accumulator_append_call(hit_ref(), ctx)]),
+        },
+    ));
+    Some(seq(prelude))
 }
 
 /// Common shape for collection / association partial renders:
