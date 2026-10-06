@@ -551,25 +551,13 @@ pub(super) fn try_recv_typed_method(
             let repl_s = emit_expr(&args[1]);
             return Some(format!("{recv_s}.replace({needle_s}, {repl_s})"));
         }
-        // `arr.length` / `str.length` — Ruby returns Integer.
-        // Rust's `.len()` returns `usize`, but Ruby Integers lower
-        // to `i64` everywhere else (`while i < arr.length`, `if
-        // arr.length == 0`). Emit as `recv.len() as i64` on sized
-        // receivers so downstream i64 arithmetic / comparison
-        // compiles without a per-call-site widen. The `as` cast is
-        // non-primary; decide pass stamps `NEEDS_PARENS` for
-        // chained-recv use, so render wraps only where needed.
-        // Untyped receivers fall through to the generic `.length
-        // -> .len()` bridge (their value-shape may not even
-        // support `.len()`).
+        // Collection lengths count entries; strings use the character-aware
+        // dispatch below. Ruby Integers lower to i64.
         if method == "length"
             && args.is_empty()
             && matches!(
                 r.ty.as_ref(),
-                Some(crate::ty::Ty::Array { .. })
-                    | Some(crate::ty::Ty::Hash { .. })
-                    | Some(crate::ty::Ty::Str)
-                    | Some(crate::ty::Ty::Sym)
+                Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
             )
         {
             return Some(format!("{}.len() as i64", super::super::emit_send_recv(r)));

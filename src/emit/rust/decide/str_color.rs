@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::dialect::{LibraryClass, LibraryFunction, MethodDef};
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, OpAssignOp};
 use crate::ident::Symbol;
 use crate::ty::{ParamKind, Ty};
 
@@ -366,21 +366,7 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
     // `serde_json::Value` and similar untyped receivers, but the
     // method name alone tells us the result will emit as `String`.
     if is_str_ty(e.ty.as_ref()) || is_known_str_send(e) {
-        // Phase 2.6: ctx-aware producer color. A `Var` read whose name
-        // is in `ctx.owned_str_locals` (populated by the Seq walker
-        // when a `let x = …Owned-RHS` is seen) produces an owned
-        // `String` at emit time, not the Phase-1-hardcoded `Borrowed`.
-        // The override lives here (rather than inside `producer_color`)
-        // so the static helper keeps its ctx-free signature for other
-        // callers (the Seq walker itself reads `producer_color` to
-        // decide whether to insert a name into `owned_str_locals` —
-        // recursing through ctx-aware logic would be circular).
-        let producer = match e.node.as_ref() {
-            ExprNode::Var { name, .. } if ctx.owned_str_locals.contains(name) => {
-                Some(StrColor::Owned)
-            }
-            _ => producer_color(e),
-        };
+        let producer = producer_color_with_locals(e, &ctx.owned_str_locals);
         if let (Some(producer), ParentExpect::Color(consumer)) = (producer, expect) {
             if let Some(c) = coercion_for(producer, consumer) {
                 // Stage 2 of #22: stamp `STR_TO_OWNED` / `STR_BORROW`
@@ -406,27 +392,32 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
     count
 }
 
-/// Compute what color the EMIT of this expression will produce, before
-/// any coercion is applied. Returns `None` for non-string positions or
-/// shapes Phase 1 doesn't model yet (e.g. unification across branches).
-/// Recursively collect Var names that have at least one Owned-
-/// producing assignment anywhere in the subtree. Used by the Seq
-/// walker's multi-assign pre-pass: a Var reassigned to an Owned
-/// String inside a nested `if`-branch needs its outer-Seq init
-/// (`let mut ms = "000"`) coerced to Owned too, or the binding
-/// type pins as `&str` and the later assignment mismatches.
-///
-/// Walks the same shapes as `collect_var_send_receivers` in
-/// `src/emit/rust/expr.rs` — Seq, If, While, Send (incl. block),
-/// Assign, etc. — so a Var-assignment hidden behind any
-/// control-flow node still surfaces.
-fn collect_owned_var_assignments(
-    e: &Expr,
-    out: &mut std::collections::HashSet<Symbol>,
-) {
-    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+/// Find owned assignments and aliases so every initializer agrees with
+/// the storage required by later writes, including string `+=`.
+fn collect_owned_var_assignments(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
+    if let ExprNode::Assign {
+        target: LValue::Var { name, .. },
+        value,
+    }
+    | ExprNode::OpAssign {
+        target: LValue::Var { name, .. },
+        value,
+        ..
+    } = &*e.node
+    {
+        let concatenates = matches!(
+            e.node.as_ref(),
+            ExprNode::OpAssign {
+                op: OpAssignOp::Add,
+                ..
+            }
+        );
         if is_str_ty(value.ty.as_ref())
-            && matches!(producer_color(value), Some(StrColor::Owned))
+            && (concatenates
+                || matches!(
+                    producer_color_with_locals(value, out),
+                    Some(StrColor::Owned)
+                ))
         {
             out.insert(name.clone());
         }
@@ -472,6 +463,16 @@ fn collect_owned_var_assignments(
         ExprNode::Return { value } => collect_owned_var_assignments(value, out),
         ExprNode::Lambda { body, .. } => collect_owned_var_assignments(body, out),
         _ => {}
+    }
+}
+
+fn producer_color_with_locals(
+    e: &Expr,
+    owned_str_locals: &std::collections::HashSet<Symbol>,
+) -> Option<StrColor> {
+    match e.node.as_ref() {
+        ExprNode::Var { name, .. } if owned_str_locals.contains(name) => Some(StrColor::Owned),
+        _ => producer_color(e),
     }
 }
 
@@ -610,23 +611,15 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                 _ => ParentExpect::None,
             };
             count += walk(value, expect, ctx);
-            // After walking the RHS, record local Var bindings to owned
-            // String into the per-Seq tracking set. Reads of these names
-            // downstream emit as `Owned` (not the default `Borrowed`)
-            // so a `&str`-expecting callee triggers Borrow coercion.
-            //
-            // Gate on `producer_color(value) == Some(Owned)` rather
-            // than just `is_str_ty`: `let form_method = if c { "get" }
-            // else { "post" }` is `Ty::Str` but its Rust storage is
-            // `&'static str` (Rust infers `&str` from an If of two
-            // `&str` literals). Marking such locals as Owned would
-            // remove the `.to_string()` coercion that the surrounding
-            // HashMap-literal needs, and break inference downstream.
-            // Only Send/StringInterp/Ivar RHS reliably produce owned
-            // `String`; `producer_color` answers the question.
+            // Coerced initializers and owned aliases also bind a String.
             if let LValue::Var { name, .. } = target {
                 if is_str_ty(value.ty.as_ref())
-                    && matches!(producer_color(value), Some(StrColor::Owned))
+                    && (ctx.owned_init_vars.contains(name)
+                        || value.decisions & super::bits::STR_TO_OWNED != 0
+                        || matches!(
+                            producer_color_with_locals(value, &ctx.owned_str_locals),
+                            Some(StrColor::Owned)
+                        ))
                 {
                     ctx.owned_str_locals.insert(name.clone());
                 }
@@ -666,8 +659,15 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // `&str` from the init, then String later).
             let snapshot_locals = ctx.owned_str_locals.clone();
             let snapshot_init = ctx.owned_init_vars.clone();
-            for sub in exprs.iter() {
-                collect_owned_var_assignments(sub, &mut ctx.owned_init_vars);
+            // An alias can precede the write that makes its source owned.
+            loop {
+                let previous_len = ctx.owned_init_vars.len();
+                for sub in exprs.iter() {
+                    collect_owned_var_assignments(sub, &mut ctx.owned_init_vars);
+                }
+                if ctx.owned_init_vars.len() == previous_len {
+                    break;
+                }
             }
             if let Some((last, rest)) = exprs.split_last_mut() {
                 for sub in rest.iter_mut() {
@@ -923,11 +923,8 @@ fn branch_tail_color(
 ) -> Option<StrColor> {
     let tail = tail_expr(e);
     match tail.node.as_ref() {
-        ExprNode::Var { name, .. } if owned_str_locals.contains(name) => {
-            Some(StrColor::Owned)
-        }
         ExprNode::Lit { value: Literal::Sym { .. } } => Some(StrColor::Static),
-        _ => producer_color(tail),
+        _ => producer_color_with_locals(tail, owned_str_locals),
     }
 }
 
@@ -1330,6 +1327,171 @@ mod tests {
                 value,
             },
         )
+    }
+
+    fn append_local(name: &str, value: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::OpAssign {
+                target: LValue::Var {
+                    id: VarId(1),
+                    name: Symbol::from(name),
+                },
+                op: OpAssignOp::Add,
+                value,
+            },
+        )
+    }
+
+    fn seq(exprs: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+    }
+
+    #[test]
+    fn string_append_owns_initializer_and_borrows_later_argument() {
+        let body = seq(vec![
+            let_local("text", lit_str("")),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::While {
+                    cond: send("more", vec![]),
+                    body: append_local("text", var("suffix")),
+                    until_form: false,
+                },
+            ),
+            send("consume", vec![var("text")]),
+        ]);
+        let mut caller = method(
+            "append",
+            vec!["suffix"],
+            fn_sig(vec![("suffix", Ty::Str)], Ty::Nil),
+            body,
+        );
+        let callee = method(
+            "consume",
+            vec!["text"],
+            fn_sig(vec![("text", Ty::Str)], Ty::Nil),
+            lit_str(""),
+        );
+        let reg = build_registry(&[class("X", vec![callee, caller.clone()])], &[]);
+        color_method(&mut caller, &reg);
+
+        let ExprNode::Seq { exprs } = caller.body.node.as_ref() else {
+            panic!("expected Seq")
+        };
+        let ExprNode::Assign { value, .. } = exprs[0].node.as_ref() else {
+            panic!("expected init")
+        };
+        assert_ne!(value.decisions & super::super::bits::STR_TO_OWNED, 0);
+        let ExprNode::Send { args, .. } = exprs[2].node.as_ref() else {
+            panic!("expected call")
+        };
+        assert_ne!(args[0].decisions & super::super::bits::STR_BORROW, 0);
+        assert_eq!(args[0].decisions & super::super::bits::STR_TO_OWNED, 0);
+    }
+
+    #[test]
+    fn owned_alias_chain_coordinates_earlier_borrowed_initializers() {
+        let body = seq(vec![
+            let_local("source", var("input")),
+            let_local("middle", var("input")),
+            let_local("accumulator", lit_str("")),
+            if_expr(
+                seq(vec![
+                    let_local("source", var("middle")),
+                    let_local("middle", var("accumulator")),
+                    append_local("accumulator", lit_str("!")),
+                ]),
+                lit_str(""),
+            ),
+            send("consume", vec![var("source"), var("middle")]),
+        ]);
+        let mut caller = method(
+            "copy",
+            vec!["input"],
+            fn_sig(vec![("input", Ty::Str)], Ty::Nil),
+            body,
+        );
+        let callee = method(
+            "consume",
+            vec!["first", "second"],
+            fn_sig(vec![("first", Ty::Str), ("second", Ty::Str)], Ty::Nil),
+            lit_str(""),
+        );
+        let reg = build_registry(&[class("X", vec![callee, caller.clone()])], &[]);
+        color_method(&mut caller, &reg);
+
+        let ExprNode::Seq { exprs } = caller.body.node.as_ref() else {
+            panic!("expected Seq")
+        };
+        for init in &exprs[..3] {
+            let ExprNode::Assign { value, .. } = init.node.as_ref() else {
+                panic!("expected init")
+            };
+            assert_ne!(value.decisions & super::super::bits::STR_TO_OWNED, 0);
+        }
+        let ExprNode::If { then_branch, .. } = exprs[3].node.as_ref() else {
+            panic!("expected If")
+        };
+        let ExprNode::Seq { exprs: assignments } = then_branch.node.as_ref() else {
+            panic!("expected Seq")
+        };
+        let bits = super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW;
+        for assignment in &assignments[..2] {
+            let ExprNode::Assign { value, .. } = assignment.node.as_ref() else {
+                panic!("expected alias")
+            };
+            assert_eq!(value.decisions & bits, 0);
+        }
+        let ExprNode::Send { args, .. } = exprs[4].node.as_ref() else {
+            panic!("expected call")
+        };
+        for arg in args {
+            assert_ne!(arg.decisions & super::super::bits::STR_BORROW, 0);
+            assert_eq!(arg.decisions & super::super::bits::STR_TO_OWNED, 0);
+        }
+    }
+
+    #[test]
+    fn numeric_append_and_borrowed_short_circuit_assignment_stay_uncoerced() {
+        let mut number = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Int { value: 1 },
+            },
+        );
+        number.ty = Some(Ty::Int);
+        let body = seq(vec![
+            let_local("number", number.clone()),
+            append_local("number", number),
+            let_local("text", var("input")),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::OpAssign {
+                    target: LValue::Var {
+                        id: VarId(1),
+                        name: Symbol::from("text"),
+                    },
+                    op: OpAssignOp::OrOr,
+                    value: lit_str("fallback"),
+                },
+            ),
+            send("consume", vec![var("text")]),
+        ]);
+        let mut caller = method(
+            "copy",
+            vec!["input"],
+            fn_sig(vec![("input", Ty::Str)], Ty::Nil),
+            body,
+        );
+        let callee = method(
+            "consume",
+            vec!["text"],
+            fn_sig(vec![("text", Ty::Str)], Ty::Nil),
+            lit_str(""),
+        );
+        let reg = build_registry(&[class("X", vec![callee, caller.clone()])], &[]);
+        assert_eq!(color_method(&mut caller, &reg), 0);
     }
 
     fn if_expr(then_branch: Expr, else_branch: Expr) -> Expr {

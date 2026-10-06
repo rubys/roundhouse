@@ -81,7 +81,7 @@ fn string_bytes_preserves_values_and_block_effects_on_spinel() {
     let extractor = std::path::Path::new(&compiler).with_file_name("spinel_rbs_extract");
     let seeds = Command::new(extractor)
         .arg(".")
-        .current_dir(&emitted)
+        .current_dir(&*emitted)
         .output()
         .expect("extract emitted RBS seeds");
     assert!(
@@ -111,7 +111,7 @@ fn string_bytes_preserves_values_and_block_effects_on_spinel() {
     std::fs::write(emitted.join("rbs-seeds.txt"), &seeds.stdout).unwrap();
     let compiled = Command::new(&compiler)
         .args(["--rbs", ".", "contract.rb", "-o", "contract"])
-        .current_dir(&emitted)
+        .current_dir(&*emitted)
         .output()
         .expect("compile with generated RBS");
     std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).unwrap();
@@ -123,7 +123,7 @@ fn string_bytes_preserves_values_and_block_effects_on_spinel() {
     );
     assert!(!String::from_utf8_lossy(&compiled.stderr).contains("type seeds are unavailable"));
     let executed = Command::new(emitted.join("contract"))
-        .current_dir(&emitted)
+        .current_dir(&*emitted)
         .output()
         .expect("run native byte contract");
     assert!(

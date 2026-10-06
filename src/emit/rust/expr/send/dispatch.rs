@@ -251,7 +251,7 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // `as i64` cast — non-primary. Decide pass stamps
                 // `NEEDS_PARENS` on this Send for chained-recv use;
                 // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.len() as i64"))
+                Some(format!("{recv_s}.chars().count() as i64"))
             }
             // `str.to_i` → Ruby semantics: parse leading digits, 0 on
             // parse failure / non-numeric input. Rust's `parse::<i64>`

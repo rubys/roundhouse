@@ -69,7 +69,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
-        for m in ["sanitize_sql", "sanitize_sql_array"] {
+        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
     }

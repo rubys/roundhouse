@@ -6116,3 +6116,79 @@ puts "csrf passed"
         .assert_passes();
 }
 
+#[test]
+fn emitted_like_escaping_matches_rails_default_and_custom_markers() {
+    emit_and_run::real_blog()
+        .write("app/services/like_probe.rb", r#"class LikeProbe
+  def self.default(value)
+    ActiveRecord::Base.sanitize_sql_like(value)
+  end
+
+  def self.custom(value, escape)
+    ActiveRecord::Base.sanitize_sql_like(value, escape)
+  end
+
+  def self.inherited(value)
+    Article.sanitize_sql_like(value)
+  end
+end
+"#)
+        .run_ruby(r#"
+cases = [
+  ["", "\\", ""],
+  ["plain text", "\\", "plain text"],
+  ["100%_done", "\\", "100\\%\\_done"],
+  ["back\\slash%_", "\\", "back\\\\slash\\%\\_"],
+  ["100%_!", "!", "100!%!_!!"],
+  ["100%_", "%", "100%%%_"],
+  ["100%_", "_", "100_%__"],
+  ["ab%_ab", "ab", "ababab%ab_abab"],
+  ["100%_", "", "100%_"],
+  ["café_50%", "!", "café!_50!%"],
+  ["é%_é", "é", "ééé%é_éé"],
+  ["x%_", "\\\\", "x\\%\\_"],
+  ["x%_", '\0', "x%_"],
+  ["x%_", '\&', "x%_"],
+  ["x%_", '\1', "x%_"],
+  ["x%_", '\9', "x%_"],
+  ["x%_", '\+', "x%_"],
+  ["x%_", '\10', "x0%0_"],
+  ["x%_", '\`', "xx%x%_"],
+  ["x%_", "\\'", "x%_%__"],
+  ["x%_", '\q', 'x\q%\q_']
+]
+cases.each do |value, escape, expected|
+  actual = LikeProbe.custom(value, escape)
+  raise "custom #{value.inspect}/#{escape.inspect}: #{actual.inspect}, expected #{expected.inspect}" unless actual == expected
+  if escape == "\\"
+    raise "default marker differs" unless LikeProbe.default(value) == expected
+    raise "model inheritance differs" unless LikeProbe.inherited(value) == expected
+  end
+end
+[
+  ['\k<name>', IndexError, "undefined group name reference: name"],
+  ['\k<>', IndexError, "undefined group name reference: "],
+  ['\k<name', RuntimeError, "invalid group name reference format"]
+].each do |escape, error_class, message|
+  begin
+    LikeProbe.custom("x%_", escape)
+    raise "named capture accepted"
+  rescue error_class => error
+    raise "wrong named capture error: #{error.message.inspect}" unless error.message == message
+  end
+  raise "unused replacement raised" unless LikeProbe.custom("plain", escape) == "plain"
+end
+database = SQLite3::Database.new(":memory:")
+database.execute("CREATE TABLE like_values (title TEXT)")
+["100%_done", "100Xdone", "100XYdone", 'back\\slash%_'].each do |title|
+  database.execute("INSERT INTO like_values VALUES (?)", title)
+end
+["100%_done", 'back\\slash%_'].each do |value|
+  rows = database.execute("SELECT title FROM like_values WHERE title LIKE ? ESCAPE '\\'", LikeProbe.default(value))
+  raise "SQLite literal LIKE differs: #{rows.inspect}" unless rows == [[value]]
+end
+database.close
+puts "sanitize_sql_like: default, inherited, custom, replacement escapes, and SQLite ESCAPE passed"
+"#)
+        .assert_passes();
+}

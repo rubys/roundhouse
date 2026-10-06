@@ -3,11 +3,10 @@
 //!
 //! `raise(KIND, payload)` is the Ruby-shape `raise Klass, "..."`
 //! emitted by the transpile pipeline. Rust has no `raise` keyword and
-//! the trio of error classes (`NotImplementedError`, `RecordNotFound`,
-//! `RecordInvalid`) doesn't transpile cleanly yet — Display + Error
+//! the error classes do not transpile cleanly yet — Display + Error
 //! synthesis for `class < StandardError` is a separate emit feature.
 //!
-//! Phase 3 stub: a single `FrameworkError` enum, three module-level
+//! Phase 3 stub: a single `FrameworkError` enum, module-level
 //! consts the transpile's bare tokens map to (via the `imports` field
 //! in `RUST_RUNTIME`), and a `raise` function generic over the payload
 //! type. The function returns `!` so call sites in non-Unit-returning
@@ -26,6 +25,8 @@ pub enum FrameworkError {
     RecordNotFound,
     RecordInvalid,
     Argument,
+    Runtime,
+    Index,
 }
 
 #[allow(non_upper_case_globals)]
@@ -36,6 +37,10 @@ pub const RecordNotFound: FrameworkError = FrameworkError::RecordNotFound;
 pub const RecordInvalid: FrameworkError = FrameworkError::RecordInvalid;
 #[allow(non_upper_case_globals)]
 pub const ArgumentError: FrameworkError = FrameworkError::Argument;
+#[allow(non_upper_case_globals)]
+pub const RuntimeError: FrameworkError = FrameworkError::Runtime;
+#[allow(non_upper_case_globals)]
+pub const IndexError: FrameworkError = FrameworkError::Index;
 
 /// Ruby-shape `raise Klass, payload`. Panics with the framework
 /// error kind; payload is accepted but discarded.

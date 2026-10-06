@@ -1566,8 +1566,9 @@ fn emit_send(
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             // Not `ArgumentError(...)`: Kotlin has no such class, and its stdlib spelling is IllegalArgumentException.
             let cls = match joined.as_str() {
-                "" => "RuntimeException".to_string(),
+                "" | "RuntimeError" => "RuntimeException".to_string(),
                 "ArgumentError" => "IllegalArgumentException".to_string(),
+                "IndexError" => "IndexOutOfBoundsException".to_string(),
                 _ => type_name(&joined),
             };
             return format!("throw {cls}({})", args_s[1..].join(", "));
