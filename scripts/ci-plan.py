@@ -423,7 +423,8 @@ def project_change_scope(before, after):
     """Narrow only body-only edits in known builders; all other bytes must match.
 
     This is not a Rust parser. Only indented bodies without raw strings or
-    block comments qualify; unknown shapes/signatures/items retain full CI.
+    block comments qualify; unknown shapes/signatures/items do not narrow
+    and stay on the Ruby floor.
     """
     pattern = re.compile(
         r"(?P<header>^fn (?P<name>"

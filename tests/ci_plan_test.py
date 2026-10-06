@@ -966,7 +966,7 @@ class ProjectScope(unittest.TestCase):
                         with self.subTest(name=name, raw=raw, first=first):
                             self.assertIsNone(ci.project_change_scope(first, second))
 
-    def test_unknown_shared_signatures_and_ambiguous_shapes_stay_full(self):
+    def test_unknown_shared_signatures_and_ambiguous_shapes_do_not_narrow(self):
         for changed in [
             self.source.replace("shared();", "new_shared();"),
             self.source.replace("spinel_files()", "spinel_files(app: &App)"),
@@ -989,6 +989,10 @@ class ProjectScope(unittest.TestCase):
                     "shared();", "new_shared();"
                 ),
             )
+        )
+        self.assertEqual(
+            ci.select(["src/project.rs"], project_scope=None)["jobs"],
+            ci.BASE,
         )
 
     def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):
