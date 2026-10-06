@@ -1547,6 +1547,64 @@ puts "ok"
         .assert_passes();
 }
 
+/// `cached: true` on a collection render is one store read of the
+/// concatenated partials. A second render of the same records must not
+/// run the inner fragment bodies.
+#[test]
+fn cached_true_collection_skips_partial_bodies_on_hit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  def self.render_count
+    @render_count || 0
+  end
+  def self.reset_render_count
+    @render_count = 0
+  end
+  def self.bump_render
+    @render_count = render_count + 1
+  end
+  def bump_render
+    Article.bump_render
+    title
+  end
+"#,
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n\n  def probe\n    @articles = Article.order(:title)\n  end\n",
+        )
+        .write(
+            "app/views/articles/_probe_row.html.erb",
+            "<% probe_row.bump_render %><i><%= probe_row.title %></i>\n",
+        )
+        .write(
+            "app/views/articles/probe.html.erb",
+            "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true %>\n",
+        )
+        .run_ruby(
+            r#"
+Article.delete_all
+Article.create!(title: "one", body: "long enough body")
+Article.create!(title: "two", body: "long enough body")
+rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
+Article.reset_render_count
+a = Views::Articles.probe(rows)
+raise "first #{Article.render_count}: #{a}" unless Article.render_count == 2
+Article.reset_render_count
+b = Views::Articles.probe(rows)
+raise "second #{Article.render_count}: #{b}" unless Article.render_count == 0
+raise "html drifted #{a.inspect} vs #{b.inspect}" unless a == b
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
 /// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
 /// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.

@@ -142,3 +142,62 @@ fn a_literal_statement_files_no_residue() {
     let (_, diags) = emit("<% nil %>\n<p>x</p>\n");
     assert!(residues(&diags).is_empty(), "{diags:?}");
 }
+
+/// `cached: true` is Rails' collection cache. Campfire's room/messages
+/// pages write it; dropping the kwarg walked every partial on every GET.
+#[test]
+fn a_cached_true_collection_reads_the_store() {
+    let tree = tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "articles", force: :cascade do |t|
+    t.string "title", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/articles_controller.rb",
+            r#"class ArticlesController < ApplicationController
+  def index
+    @articles = Article.all
+  end
+end
+"#,
+        ),
+        (
+            "app/views/articles/_article.html.erb",
+            "<% cache article do %><p><%= article.title %></p><% end %>\n",
+        ),
+        (
+            "app/views/articles/index.html.erb",
+            "<%= render partial: \"articles/article\", collection: @articles, cached: true %>\n",
+        ),
+    ]);
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| ruby::emit_lowered_views(&app));
+    let body = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/views/articles/index.rb"))
+        .map(|f| f.content.clone())
+        .expect("index.rb");
+    assert!(
+        body.contains("views/coll/"),
+        "collection cache key:\n{body}"
+    );
+    assert!(
+        body.contains("read_str"),
+        "warm path is one store read:\n{body}"
+    );
+    assert!(
+        body.contains("cache_key_with_version"),
+        "key walks each record:\n{body}"
+    );
+    assert!(
+        residues(&diags).is_empty(),
+        "cached: true is not residue: {diags:?}"
+    );
+}

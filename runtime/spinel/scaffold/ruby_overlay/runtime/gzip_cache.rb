@@ -4,20 +4,19 @@
 #
 # Rack::Deflater compresses every response. A campfire room page is the
 # same ~420 KB HTML for every wrk GET that shares a session, so that is
-# the same deflate over and over. Key by the identity bytes: MRI's
-# string hash of a 420 KB body is cheaper than SHA-256 of the same
-# bytes (measured: digest-keyed cache dropped /rooms/1 from ~1725 to
-# ~1140 req/s). The Spinel twin keys by digest because its Hash hashes
-# the whole key under the lock and has no GVL.
+# the same deflate over and over.
 #
-# Gzip itself runs outside the lock. Holding Mutex across Zlib.gzip
-# serialized every miss onto one core. Two threads that miss the same
-# body both gzip and one write wins — a duplicate deflate, not a
-# wrong body.
+# Hit path, measured on 420 KB identity HTML:
+#   * `join_body` of Rack `[body]` must not `join` (that copied 420 KB).
+#   * Last-identity compare (`bytesize` then `==`) is ~7 µs; MRI string
+#     hash of a fresh 420 KB body is ~294 µs. wrk hammers one URL, so
+#     the last-hit wins.
+#   * The Hash fallback keys by CRC32+size, not the identity bytes —
+#     holding 64 × 420 KB strings as Hash keys was the other half of
+#     the copy. CRC32 collision plus size match is accepted; last-hit
+#     `==` is the wrk path.
 #
-# HTML only, same skips as tep: 1xx/204/304, HEAD, already-encoded,
-# small, listed binary types. Wraps run_rack only so /cable's hijack
-# tuple never enters here.
+# Gzip itself runs outside the lock. HTML only, same skips as tep.
 require "zlib"
 
 module GzipCache
@@ -25,6 +24,8 @@ module GzipCache
 
   @store = {}
   @mutex = Mutex.new
+  @last_raw = nil
+  @last_gz = nil
 
   def self.wrap(app)
     lambda { |env| call(app, env) }
@@ -58,20 +59,47 @@ module GzipCache
   end
 
   def self.compress(raw)
+    @mutex.synchronize do
+      lr = @last_raw
+      if !lr.nil? && lr.bytesize == raw.bytesize && lr == raw
+        return @last_gz
+      end
+    end
+    fp = Zlib.crc32(raw)
+    sz = raw.bytesize
     hit = nil
-    @mutex.synchronize { hit = @store[raw] }
+    @mutex.synchronize do
+      pair = @store[fp]
+      if pair && pair[0] == sz
+        hit = pair[1]
+      end
+    end
     return hit unless hit.nil?
     gz = Zlib.gzip(raw)
     @mutex.synchronize do
       if @store.size >= MAX_ENTRIES
         @store.clear
       end
-      @store[raw] = gz
+      @store[fp] = [sz, gz]
+      @last_raw = raw
+      @last_gz = gz
     end
     gz
   end
 
   def self.join_body(body)
+    if body.is_a?(Array)
+      n = body.length
+      if n == 0
+        body.close if body.respond_to?(:close)
+        return ""
+      end
+      if n == 1
+        s = body[0].to_s
+        body.close if body.respond_to?(:close)
+        return s
+      end
+    end
     parts = []
     body.each { |part| parts << part.to_s }
     body.close if body.respond_to?(:close)

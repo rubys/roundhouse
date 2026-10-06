@@ -997,7 +997,11 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     let key = with_ty(
         Expr::new(
             span,
-            ExprNode::If { cond: persisted, then_branch: key_body, else_branch: unsaved },
+            ExprNode::If {
+                cond: persisted.clone(),
+                then_branch: key_body,
+                else_branch: unsaved,
+            },
         ),
         Ty::Str,
     );
@@ -1013,33 +1017,72 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
         .find(|c| c.name.as_str() == "updated_at")
         .map(super::schema::col_storage_name);
 
-    let cache_key_call = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: None,
-            method: Symbol::from("cache_key"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        },
-    );
     let versioned = match version_ivar {
-        Some(ivar) => with_ty(
+        Some(ivar) => {
+            // One interpolation, not `"#{cache_key}-#{raw}"`. The warm
+            // collection-cache key walks every record; composing through
+            // `cache_key` allocated a prefix string that was thrown away.
+            let persisted_version = with_ty(
+                Expr::new(
+                    span,
+                    ExprNode::StringInterp {
+                        parts: vec![
+                            crate::expr::InterpPart::Text {
+                                value: format!("{table_name}/"),
+                            },
+                            crate::expr::InterpPart::Expr {
+                                expr: Expr::new(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                            },
+                            crate::expr::InterpPart::Text { value: "-".to_string() },
+                            crate::expr::InterpPart::Expr {
+                                expr: Expr::new(span, ExprNode::Ivar { name: ivar.clone() }),
+                            },
+                        ],
+                    },
+                ),
+                Ty::Str,
+            );
+            let unsaved_version = with_ty(
+                Expr::new(
+                    span,
+                    ExprNode::StringInterp {
+                        parts: vec![
+                            crate::expr::InterpPart::Text {
+                                value: format!("{table_name}/new-"),
+                            },
+                            crate::expr::InterpPart::Expr {
+                                expr: Expr::new(span, ExprNode::Ivar { name: ivar }),
+                            },
+                        ],
+                    },
+                ),
+                Ty::Str,
+            );
+            with_ty(
+                Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: persisted,
+                        then_branch: persisted_version,
+                        else_branch: unsaved_version,
+                    },
+                ),
+                Ty::Str,
+            )
+        }
+        None => with_ty(
             Expr::new(
                 span,
-                ExprNode::StringInterp {
-                    parts: vec![
-                        crate::expr::InterpPart::Expr { expr: cache_key_call },
-                        crate::expr::InterpPart::Text { value: "-".to_string() },
-                        crate::expr::InterpPart::Expr {
-                            expr: Expr::new(span, ExprNode::Ivar { name: ivar }),
-                        },
-                    ],
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("cache_key"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
                 },
             ),
             Ty::Str,
         ),
-        None => with_ty(cache_key_call, Ty::Str),
     };
     methods.push(str_method(model, "cache_key_with_version", versioned));
 }

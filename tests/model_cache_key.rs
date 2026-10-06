@@ -90,8 +90,8 @@ fn the_key_is_table_slash_id_and_the_version_is_the_stored_timestamp() {
         "version reads the STORED text, not a re-formatted Time:\n{versioned}",
     );
     assert!(
-        versioned.contains("cache_key"),
-        "the versioned key builds on the plain one:\n{versioned}",
+        versioned.contains("messages/#{@id}-"),
+        "one interpolation, not cache_key + concat:\n{versioned}",
     );
 }
 

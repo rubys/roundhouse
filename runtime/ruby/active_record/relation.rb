@@ -45,6 +45,7 @@ module ActiveRecord
       @scope_attributes = {}
       @from = nil
       @ctes = []
+      @shared_lists = false
     end
 
     # Rails' `Relation#spawn`: a new relation that shares this one's
@@ -52,23 +53,34 @@ module ActiveRecord
     # mutate in place; scopes call `spawn` on entry so a fork like
     # campfire's sidebar (`visible.with_direct_rooms` beside
     # `visible.with_ordered_room.without_direct_rooms`) does not let
-    # one branch's joins/orders/wheres pollute the other. Accumulators
+    # one branch's joins/orders/wheres pollute the other.
+    #
+    # Copy-on-write: `clone` already shares the list objects. Mark both
+    # sides shared and copy the lists on the first mutating chain method
+    # instead of copying eight arrays on every scope entry. Accumulators
     # are copied element-wise (no `Array#dup` — keep the element type
     # the typer already knows); `@records` is shared until a chain
     # method clears it, matching Rails' loaded-spawn contract.
     def spawn
-      copy = clone
-      copy.take_query_lists(
-        @wheres,
-        @joins,
-        @orders,
-        @groups,
-        @havings,
-        @ctes,
-        @includes,
-        @scope_attributes
-      )
-      copy
+      @shared_lists = true
+      clone
+    end
+
+    def own_lists
+      if @shared_lists
+        @shared_lists = false
+        take_query_lists(
+          @wheres,
+          @joins,
+          @orders,
+          @groups,
+          @havings,
+          @ctes,
+          @includes,
+          @scope_attributes
+        )
+      end
+      self
     end
 
     # List accumulators go through copy_* so inference types the
@@ -109,6 +121,7 @@ module ActiveRecord
     # from it. lobsters walks a comment's ancestors this way on the reply
     # page (`Comment#parents`).
     def with_recursive(ctes)
+      own_lists
       @records = nil
       ctes.each do |name, parts|
         # Build the UNION list with pushes rather than `map.join`: the
@@ -178,6 +191,7 @@ module ActiveRecord
     # and escape a Relation object into the SQL text.
     def excluding(*records)
       val = records.length == 1 ? records[0] : records
+      own_lists
       @records = nil
       pred = column_predicate(@model.primary_key.to_s, val)
       @wheres << "NOT (#{pred})" unless pred.empty?
@@ -211,6 +225,7 @@ module ActiveRecord
     # answer: it borrows a predicate and gives it back, so it has to
     # know whether there is one to pop. The chain methods ignore it.
     def add_condition(condition, args, negate)
+      own_lists
       @records = nil
       return false if condition.nil?
       sql = if condition.is_a?(Hash)
@@ -240,6 +255,7 @@ module ActiveRecord
     # order, the same order SQLite hands back for tied keys -- and a
     # page sorted here matches one sorted by the database byte for byte.
     def order(*parts)
+      own_lists
       terms = parts.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
       loaded = @records
@@ -557,6 +573,7 @@ module ActiveRecord
     end
 
     def group(*parts)
+      own_lists
       @records = nil
       # Symbols qualify against this relation's table (Rails renders
       # `GROUP BY "tags"."id"`), so a grouped column stays unambiguous
@@ -570,6 +587,7 @@ module ActiveRecord
     end
 
     def having(condition, *args)
+      own_lists
       @records = nil
       @havings << substitute_binds(condition.to_s, args)
       self
@@ -598,6 +616,7 @@ module ActiveRecord
     # where appending both made SQLite reject every column of the joined
     # table as ambiguous.
     def joins(spec)
+      own_lists
       @records = nil
       frag = join_fragment(spec)
       @joins << frag unless @joins.include?(frag)
@@ -605,6 +624,7 @@ module ActiveRecord
     end
 
     def left_outer_joins(spec)
+      own_lists
       @records = nil
       frag = join_fragment(spec)
       @joins << frag unless @joins.include?(frag)
@@ -676,12 +696,14 @@ module ActiveRecord
     # into the `_preload_<assoc>` caches). Models without a synthesized
     # override inherit Base's no-op and stay lazy (correct, just N+1).
     def includes(*names)
+      own_lists
       @records = nil
       names.each { |n| @includes << n }
       self
     end
 
     def preload(*names)
+      own_lists
       @records = nil
       names.each { |n| @includes << n }
       self
@@ -707,6 +729,7 @@ module ActiveRecord
     end
 
     def eager_load(*names)
+      own_lists
       @records = nil
       names.each { |n| @includes << n }
       self
@@ -725,6 +748,7 @@ module ActiveRecord
     # `merge(other)` — fold another relation's WHEREs in. v1 handles the
     # common case (merging a same-table scope's conditions).
     def merge(other)
+      own_lists
       @records = nil
       other.where_clauses.each { |w| @wheres << w }
       self
@@ -744,6 +768,7 @@ module ActiveRecord
     end
 
     def none
+      own_lists
       @records = nil
       @wheres << "(1 = 0)"
       self
@@ -1154,12 +1179,10 @@ module ActiveRecord
       unless loaded.nil?
         return loaded_tail(loaded, n)
       end
-      # Rails' `has_limit_or_offset?`: reversing ORDER BY under an
-      # existing LIMIT/OFFSET is a different window than the in-memory
-      # tail of that page.
       unless @limit.nil? && @offset.nil?
         return to_a.last(n)
       end
+      own_lists
       prior_limit = @limit
       prior_orders = []
       i = 0
@@ -1304,9 +1327,7 @@ module ActiveRecord
         return r.length > 0 unless r.nil?
         return probe_existence(1) > 0
       end
-      # Popped for the same reason `find` and `find_by` pop: a terminal
-      # that answered a question must not narrow the relation it was
-      # asked on.
+      own_lists
       @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
       found = probe_existence(1) > 0
       @wheres.pop
@@ -1526,6 +1547,7 @@ module ActiveRecord
       return find_ids(id) if id.is_a?(Array)
       key = @model._cast_primary_key(id)
       prior_limit = @limit
+      own_lists
       @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(key)}"
       begin
         @limit = 1
@@ -1563,6 +1585,7 @@ module ActiveRecord
       end
       keys = ids.map { |id| @model._cast_primary_key(id) }
       sql_ids = keys.map { |key| ActiveRecord.adapter.escape_value(key) }.join(", ")
+      own_lists
       @wheres << (keys.empty? ? "1=0" : "#{@table}.#{@model.primary_key} IN (#{sql_ids})")
       begin
         if @orders.empty?

@@ -546,6 +546,10 @@ class BaseTest < Minitest::Test
     fork = base.spawn.where(title: "B")
     assert_match(/title = 'B'/, fork.to_sql)
     assert_equal prior, base.to_sql
+    # Copy-on-write: mutating the parent after spawn must not rewrite the fork.
+    base.where(title: "C")
+    assert_match(/title = 'B'/, fork.to_sql)
+    refute_match(/title = 'C'/, fork.to_sql)
   end
 
   def test_find_in_batches_yields_loaded_records_once

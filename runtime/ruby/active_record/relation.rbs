@@ -16,6 +16,7 @@ module ActiveRecord
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
     def spawn: () -> Relation
+    def own_lists: () -> Relation
     def take_query_lists: (
         Array[String] wheres,
         Array[String] joins,
@@ -43,6 +44,7 @@ module ActiveRecord
 
     @from: String?
     @ctes: Array[String]
+    @shared_lists: bool
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
     def from: (String source) -> Relation
     def cte_prefix: () -> String
