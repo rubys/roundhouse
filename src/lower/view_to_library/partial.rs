@@ -348,6 +348,14 @@ fn emit_named_collection_each(
 /// Rails' collection cache: one `read_str` of the concatenated partials,
 /// keyed by each element's `cache_key_with_version`. A miss still walks
 /// the collection (inner `<% cache %>` fragments still apply).
+///
+/// Key shape (aligned with Rails' item key + template digest intent):
+/// `views/coll/<cache_scope><view>/<partial>/<name>=<stable>/…/<record versions>`.
+/// Explicit `locals:` and the partial's threaded closure ivars are named
+/// segments; records use `cache_key_with_version`, scalars use `inspect`
+/// (quoted, so `a/b`+`c` cannot collide with `a`+`b/c`). A local whose
+/// name is not a literal Symbol/String cannot be keyed safely — fall
+/// back to the uncached each path.
 fn wrap_cached_collection(
     collection: &Expr,
     partial: &str,
@@ -356,6 +364,30 @@ fn wrap_cached_collection(
     ctx: &ViewCtx,
 ) -> Option<Expr> {
     let span = collection.span;
+    let (module_dir, base_name) = match partial.rsplit_once('/') {
+        Some((dir, name)) => (dir.to_string(), name.to_string()),
+        None => (ctx.resource_dir.clone(), partial.to_string()),
+    };
+    if module_dir.is_empty() {
+        return emit_named_collection_each(collection, partial, as_name, locals, ctx);
+    }
+    let module_camel = camelize_path(&snake_case(&module_dir));
+    let method_sym = base_name.trim_start_matches('_').to_string();
+
+    let mut named_inputs: Vec<(String, Expr)> = Vec::new();
+    if let Some(entries) = locals {
+        for (k, v) in entries {
+            let Some(name) = local_key_name(k) else {
+                // Name is dynamic — cannot build a stable key segment.
+                return emit_named_collection_each(collection, partial, as_name, locals, ctx);
+            };
+            named_inputs.push((name, v.clone()));
+        }
+    }
+    for (name, expr) in partial_extra_named_args(ctx, &module_camel, &method_sym) {
+        named_inputs.push((name, expr));
+    }
+
     let uniq = span.start;
     let key_name = Symbol::from(format!("__cc_key_{uniq}"));
     let hit_name = Symbol::from(format!("__cc_hit_{uniq}"));
@@ -388,29 +420,32 @@ fn wrap_cached_collection(
             value: prefix,
         },
     );
-    let slash_lit = || {
+    let str_lit = |value: &str| {
         Expr::new(
             span,
             ExprNode::Lit {
                 value: Literal::Str {
-                    value: "/".to_string(),
+                    value: value.to_string(),
                 },
             },
         )
     };
     let mut local_key_parts: Vec<Expr> = Vec::new();
-    if let Some(entries) = locals {
-        for (_k, v) in entries {
-            let append_slash = send(
-                Some(var_ref(key_name.clone())),
-                "<<",
-                vec![slash_lit()],
-                None,
-                false,
-            );
-            let as_str = send(Some(v.clone()), "to_s", Vec::new(), None, false);
-            local_key_parts.push(send(Some(append_slash), "<<", vec![as_str], None, false));
-        }
+    for (name, v) in &named_inputs {
+        let append_name = send(
+            Some(var_ref(key_name.clone())),
+            "<<",
+            vec![str_lit(&format!("/{name}="))],
+            None,
+            false,
+        );
+        local_key_parts.push(send(
+            Some(append_name),
+            "<<",
+            vec![stable_cache_fragment(v.clone())],
+            None,
+            false,
+        ));
     }
     let rec_ref = var_ref(rec_name.clone());
     let version = send(
@@ -423,7 +458,7 @@ fn wrap_cached_collection(
     let append_slash = send(
         Some(var_ref(key_name.clone())),
         "<<",
-        vec![slash_lit()],
+        vec![str_lit("/")],
         None,
         false,
     );
@@ -517,6 +552,83 @@ fn wrap_cached_collection(
         },
     ));
     Some(seq(prelude))
+}
+
+/// Literal Symbol/String name of a `locals:` key, or None when dynamic.
+fn local_key_name(key: &Expr) -> Option<String> {
+    match &*key.node {
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => Some(value.as_str().to_string()),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// `v.respond_to?(:cache_key_with_version) ? v.cache_key_with_version : v.inspect`
+/// — records get a stable versioned key; scalars get a quoted `inspect`
+/// so slash-bearing values cannot fuse adjacent key segments.
+fn stable_cache_fragment(v: Expr) -> Expr {
+    let span = v.span;
+    let cond = send(
+        Some(v.clone()),
+        "respond_to?",
+        vec![lit_sym(Symbol::from("cache_key_with_version"))],
+        None,
+        false,
+    );
+    let then_branch = send(
+        Some(v.clone()),
+        "cache_key_with_version",
+        Vec::new(),
+        None,
+        false,
+    );
+    let else_branch = send(Some(v), "inspect", Vec::new(), None, false);
+    Expr::new(
+        span,
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        },
+    )
+}
+
+/// Threaded closure ivars the partial receives, with their names — the
+/// request/view context Rails would otherwise leave out of a bare
+/// collection key. Included so two renders of the same records with
+/// different closure values cannot share markup.
+fn partial_extra_named_args(
+    ctx: &ViewCtx,
+    module: &str,
+    method: &str,
+) -> Vec<(String, Expr)> {
+    let record_name = singularize(&snake_case(last_segment(module)));
+    let key = (module.to_string(), method.to_string());
+    let strict = ctx.strict_locals.get(&key);
+    let declared: std::collections::HashSet<&str> = strict
+        .map(|ps| ps.iter().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    let is_strict = strict.is_some();
+    ctx.partial_ivars
+        .get(&key)
+        .map(|ivars| {
+            ivars
+                .iter()
+                .filter(|n| {
+                    (is_strict || n.as_str() != record_name)
+                        && !declared.contains(n.as_str())
+                })
+                .map(|n| {
+                    let safe = crate::naming::safe_local(n.as_str());
+                    (safe.clone(), var_ref(Symbol::from(safe)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Common shape for collection / association partial renders:

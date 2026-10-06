@@ -247,11 +247,122 @@ end
         .map(|f| f.content.clone())
         .expect("index.rb");
     assert!(
-        body.contains("to_s"),
-        "locals belong in the collection cache key:\n{body}"
+        body.contains("mode="),
+        "local name belongs in the collection cache key:\n{body}"
+    );
+    assert!(
+        body.contains("cache_key_with_version") && body.contains("inspect"),
+        "locals use cache_key_with_version or inspect, not bare to_s:\n{body}"
+    );
+    assert!(
+        !body.contains(".to_s"),
+        "locals must not use bare to_s in the key:\n{body}"
     );
     assert!(
         residues(&diags).is_empty(),
         "cached: true locals is not residue: {diags:?}"
+    );
+}
+
+#[test]
+fn a_cached_true_collection_with_slash_locals_keeps_names_in_the_key() {
+    let tree = tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "articles", force: :cascade do |t|
+    t.string "title", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/articles_controller.rb",
+            r#"class ArticlesController < ApplicationController
+  def index
+    @articles = Article.all
+  end
+end
+"#,
+        ),
+        (
+            "app/views/articles/_article.html.erb",
+            "<p><%= article.title %>-<%= left %>-<%= right %></p>\n",
+        ),
+        (
+            "app/views/articles/index.html.erb",
+            "<%= render partial: \"articles/article\", collection: @articles, cached: true, locals: { left: \"a/b\", right: \"c\" } %>\n",
+        ),
+    ]);
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| ruby::emit_lowered_views(&app));
+    let body = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/views/articles/index.rb"))
+        .map(|f| f.content.clone())
+        .expect("index.rb");
+    assert!(
+        body.contains("left=") && body.contains("right="),
+        "both local names in the key:\n{body}"
+    );
+    assert!(
+        residues(&diags).is_empty(),
+        "slash locals is not residue: {diags:?}"
+    );
+}
+
+#[test]
+fn a_cached_true_collection_puts_threaded_ivar_context_in_the_key() {
+    let tree = tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "articles", force: :cascade do |t|
+    t.string "title", null: false
+    t.datetime "updated_at", null: false
+  end
+  create_table "users", force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/articles_controller.rb",
+            r#"class ArticlesController < ApplicationController
+  def index
+    @articles = Article.all
+    @viewer = User.first
+  end
+end
+"#,
+        ),
+        (
+            "app/views/articles/_article.html.erb",
+            "<p><%= article.title %>-<%= @viewer.name %></p>\n",
+        ),
+        (
+            "app/views/articles/index.html.erb",
+            "<%= render partial: \"articles/article\", collection: @articles, cached: true %>\n",
+        ),
+    ]);
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| ruby::emit_lowered_views(&app));
+    let body = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/views/articles/index.rb"))
+        .map(|f| f.content.clone())
+        .expect("index.rb");
+    assert!(
+        body.contains("viewer="),
+        "threaded closure ivar belongs in the collection cache key:\n{body}"
+    );
+    assert!(
+        residues(&diags).is_empty(),
+        "threaded-ivar cached: true is not residue: {diags:?}"
     );
 }

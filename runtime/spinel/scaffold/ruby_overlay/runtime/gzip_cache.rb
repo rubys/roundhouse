@@ -11,12 +11,14 @@
 #   * Last-identity compare (`bytesize` then `==`) is ~7 µs; MRI string
 #     hash of a fresh 420 KB body is ~294 µs. wrk hammers one URL, so
 #     the last-hit wins.
-#   * The Hash fallback keys by CRC32+size, not the identity bytes —
-#     holding 64 × 420 KB strings as Hash keys was the other half of
-#     the copy. CRC32 collision plus size match is accepted; last-hit
-#     `==` is the wrk path.
+#   * The Hash fallback keys by SHA-256 hex of the body (64 chars), not
+#     the identity bytes and not CRC32. Holding 64 × 420 KB strings as
+#     Hash keys was the RSS cost; CRC32+size could return another body's
+#     gzip on a collision. Digest keys keep the store small and refuse
+#     wrong-body hits. SHA-256 runs only when last-hit misses.
 #
 # Gzip itself runs outside the lock. HTML only, same skips as tep.
+require "digest"
 require "zlib"
 
 module GzipCache
@@ -65,14 +67,10 @@ module GzipCache
         return @last_gz
       end
     end
-    fp = Zlib.crc32(raw)
-    sz = raw.bytesize
+    dig = Digest::SHA256.hexdigest(raw)
     hit = nil
     @mutex.synchronize do
-      pair = @store[fp]
-      if pair && pair[0] == sz
-        hit = pair[1]
-      end
+      hit = @store[dig]
     end
     return hit unless hit.nil?
     gz = Zlib.gzip(raw)
@@ -80,7 +78,7 @@ module GzipCache
       if @store.size >= MAX_ENTRIES
         @store.clear
       end
-      @store[fp] = [sz, gz]
+      @store[dig] = gz
       # Snapshot: the Rack body string can be reused and mutated
       # between requests. Sharing it would make last-hit `==` match
       # the mutated bytes while `@last_gz` is still the old gzip.
