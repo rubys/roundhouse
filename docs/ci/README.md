@@ -14,6 +14,8 @@ labels and changed paths; draft and ready PRs use the same policy:
 | **Draft or ready**, no special label | Path-selected coverage on the Ruby floor |
 | **Draft or ready** + `ci:spinel` | Ruby floor plus the full Spinel suite; no other language SDKs |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Writebook, Spinel) |
+| **Push to canonical `main`** | Ruby floor plus the full Spinel suite; extra-language SDKs wait for the schedule |
+| **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
 tests, Store analysis, the CRuby comparison against Rails, and Campfire
@@ -24,10 +26,13 @@ standalone checks.
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
-Swift, Kotlin, C#, Elixir, Python, JRuby, Rust, TypeScript, WASM, Writebook,
-and Spinel do **not** start on that path unless the diff owns them or a
-maintainer applies `ci:full` / `ci:spinel`. Extra-language failures after merge
-are a main ledger, not a reason to block the next Ruby PR.
+Swift, Kotlin, C#, Elixir, Python, JRuby, Rust, TypeScript, WASM, and
+Writebook do **not** start on that path unless the diff owns them or a
+maintainer applies `ci:full`. JRuby stays with Ruby-family path ownership
+(`src/emit/ruby.rs`, interpreter-only runtime files, proven `src/project.rs`
+bodies). Spinel starts when the diff owns it, or via `ci:spinel` / `ci:full`.
+Extra-language failures after merge are a scheduled-ledger item, not a
+reason to block the next Ruby PR.
 
 Selected lanes start once their inputs are ready, without waiting for unit
 tests to pass. Campfire consumes an independently built same-run debug compiler.
@@ -35,15 +40,19 @@ Speculative work may therefore finish even when a unit shard fails; the final
 gate still requires all selected non-advisory checks, including the unit matrix.
 
 Additional checks are selected from the changed inputs. Target-specific
-changes select owning lanes; shared emit, build, packaging, and CI-policy
-implementation changes can select full coverage. Changes only to CI contract
-tests retain the Ruby floor rather than expanding to every target.
-Analyzer/lowerer changes do not automatically select every target: request
-full coverage when the risk warrants it. CLI help and other
-`src/bin/roundhouse.rs` edits stay on the Ruby floor.
+changes select owning lanes. Shared emit (`src/emit/shared/`), the compare
+harness, and the smoke harness still select every extra target they own.
+CI files, Cargo manifests, `src/project.rs`, and unknown changed inputs do
+**not** fan out extra-language SDKs — they stay on the Ruby floor (unknown
+inputs keep Spinel too). Apply `ci:full` when a workflow edit must prove
+`compare-extra` / `smoke` steps. Changes only to CI contract tests retain
+the Ruby floor. Analyzer/lowerer changes do not automatically select every
+target. CLI help and other `src/bin/roundhouse.rs` edits stay on the Ruby
+floor.
 The planner diffs the PR merge tree (or the PR head) against its base,
-includes both sides of a rename, and expands only when the trees cannot be
-identified. A newer main than the event's `base.sha` is not unknown input.
+includes both sides of a rename, and does not expand to extra SDKs when
+the trees cannot be identified. A newer main than the event's `base.sha`
+is not unknown input.
 See the run's **plan** job for its selected jobs and reasons.
 
 Changing draft status does not restart checks or change coverage. `ci:draft`
@@ -51,10 +60,13 @@ has no effect. Stacked labels prefer the broader lane: `ci:full` > `ci:spinel`.
 Documentation-only PRs still receive checks; changes to the rendered user guide
 also select site/browser coverage.
 
-Pushes to canonical `main` run full validation and cancel a superseded SHA
-on the same ref. Extra-target red on that run is follow-up work on main,
-not a merge gate for later Ruby PRs. The four-hour scheduled cycle remains
-the publication and floating-pin catch-up.
+Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
+and cancel a superseded SHA on the same ref. They do **not** run Crystal,
+Go, Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, Writebook,
+or the extra-language smoke matrix. Extra-target red is follow-up work on
+the four-hour scheduled Full validation cycle, not a merge gate for later
+Ruby PRs. That schedule remains the extra-language ledger, publication
+path, and floating-pin catch-up.
 
 ## Request full, Spinel, or fresh validation
 
@@ -75,8 +87,8 @@ the publication and floating-pin catch-up.
   Leave `publish` unchecked. This executes freshly on the chosen ref; a
   branch-head dispatch is not a substitute for a PR merge-tree check.
 
-Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
-SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
+Superseded PR runs cancel. Push-to-main Ruby+Spinel runs also cancel a
+superseded SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
 explicitly reused execution evidence. The compact and summary gates run only
 when `plan` succeeded and the workflow has not been cancelled. Their explicit
@@ -104,10 +116,10 @@ broaden comparison masks merely to turn CI green.
 
 ## Publication is separate
 
-PR checks never deploy Pages. Pushes to canonical `main` run full validation
+PR checks never deploy Pages. Pushes to canonical `main` run Ruby+Spinel
 without publication. The four-hour scheduled cycle on canonical
-`rubys/roundhouse` main is what requests publication. Manual publication is
-opt-in on canonical main.
+`rubys/roundhouse` main is what runs the extra-language matrix and requests
+publication. Manual publication is opt-in on canonical main.
 
 Pages requires the compact publication floor (Ruby plus any selected
 Rust/TypeScript lanes), verified same-run assembly, and a live-main SHA

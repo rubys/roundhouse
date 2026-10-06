@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Select coverage, not test results. Unknown inputs expand to full validation."""
+"""Select coverage, not test results.
+
+Extra-language SDKs need a path owner, `ci:full`, or scheduled full
+validation. Unknown inputs keep the Ruby floor plus Spinel.
+"""
 
 import argparse
 import json
@@ -33,8 +37,8 @@ BASE = [
     "campfire-compare",
 ]
 # Compact publication additionally waits on Rust/TS when those jobs were
-# selected (full/main, or a change that owns them). Unselected skips must
-# not fail the Ruby PR floor.
+# selected (scheduled full, or a change that owns them). Unselected skips
+# must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
 SPINEL_TESTS = [
@@ -246,19 +250,6 @@ def select(
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
-        if path.startswith((".github/", ".cargo/")) or path in {
-            "scripts/ci-plan.py",
-            "scripts/ci-reuse.py",
-            "scripts/ci-archive-evidence.py",
-            "src/project.rs",
-            "Cargo.toml",
-            "Cargo.lock",
-            "build.rs",
-            "rust-toolchain.toml",
-            ".cargo/config.toml",
-        }:
-            full = True
-            reasons.append(f"{path}: validation/packaging policy")
         match = re.match(r"(?:src/emit/|runtime/)([^/.]+)(?:[/.]|$)", path)
         test = re.match(
             r"tests/(?:framework_tests_)?([a-z]+)_toolchain\.rs$|tests/framework_tests_([a-z]+)\.rs$",
@@ -304,15 +295,6 @@ def select(
         elif target == "shared":
             full = True
             reasons.append(f"{path}: shared code generation")
-        elif target and target not in {
-            "ruby",
-            "ruby_family",
-            "roda",
-            "mod",
-            "rails",
-        }:
-            full = True
-            reasons.append(f"{path}: unknown target ownership")
         if path.startswith("wasm/"):
             wasm = True
             reasons.append(f"{path}: WASM/browser compiler")
@@ -628,8 +610,10 @@ def main():
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
         and not pr
+        and not full
     ):
-        full = True
+        # Extra-language SDKs are the scheduled full-ci ledger, not every merge.
+        spinel_lane = True
     reason = None
     try:
         # project_scope only narrows path selection; spinel/full short-circuit
@@ -641,12 +625,15 @@ def main():
             need_project_scope=not full and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
-        paths, project_scope, full, reason = (
-            [],
-            None,
-            True,
-            f"Unknown changed inputs: {e}; running full validation",
-        )
+        paths, project_scope = [], None
+        if full:
+            reason = f"Unknown changed inputs: {e}; running full validation"
+        else:
+            spinel_lane = True
+            reason = (
+                f"Unknown changed inputs: {e}; "
+                "Ruby+Spinel only (extra-language SDKs not selected)"
+            )
     publish = os.environ.get("CI_PUBLISH") == "true"
     if publish and (
         os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"

@@ -60,8 +60,9 @@ oracle: the same URL fetched from Rails and from each target must
 produce the same response — emitted tests, a differential compare
 against live Rails (DOM node for DOM node, JSON value for value), and
 browser end-to-end tests for what a static diff can't reach — and
-the full target matrix runs after merge to `main` and in scheduled
-validation, with a Ruby floor and targeted additions on pull requests. →
+the full target matrix runs in scheduled validation, with a Ruby floor
+and targeted additions on pull requests (canonical `main` keeps Ruby
+plus Spinel). →
 [`--target`](docs/guide/transpile.md) · [targets](docs/guide/targets.md)
 · [what of Rails comes through](docs/guide/rails-coverage.md) ·
 [verifying](docs/guide/verifying.md)

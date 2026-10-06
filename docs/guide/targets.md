@@ -36,10 +36,11 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 
 ## How far each is tested
 
-The lanes below run across targets in full validation: after merge to
-canonical `main`, on the four-hour schedule, or when requested with `ci:full`.
-Ordinary PRs use a Ruby floor plus targeted additions for the files they
-change; maintainers can request full PR coverage with `ci:full`.
+The lanes below run across targets in scheduled full validation, or when
+requested with `ci:full`. Ordinary PRs use a Ruby floor plus targeted
+additions for the files they change. Pushes to canonical `main` run that
+Ruby floor plus the full Spinel suite; extra-language SDKs wait for the
+four-hour schedule. Maintainers can request full PR coverage with `ci:full`.
 See [CI coverage](../ci/README.md). The lanes use the blog fixture
 (`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
