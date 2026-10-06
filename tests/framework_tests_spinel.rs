@@ -49,6 +49,25 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
+/// Same Base→untyped rewrite the shipped Spinel tree applies. This
+/// harness copies `runtime/ruby` verbatim, so without it
+/// `Relation.new(self)` keeps `initialize:(Base)` and Spinel refuses.
+fn apply_spinel_relation_model_handle(scratch: &Path) {
+    let rel = scratch.join("runtime/active_record/relation.rbs");
+    let conn = scratch.join("runtime/active_record/connection.rbs");
+    let rel_src = std::fs::read_to_string(&rel).expect("read relation.rbs");
+    let conn_src = std::fs::read_to_string(&conn).expect("read connection.rbs");
+    let mut files = vec![
+        ("runtime/active_record/relation.rbs".to_string(), rel_src),
+        ("runtime/active_record/connection.rbs".to_string(), conn_src),
+    ];
+    roundhouse::project::spinel_relation_model_handle(&mut files)
+        .expect("spinel relation Base rewrite");
+    for (path, content) in files {
+        std::fs::write(scratch.join(path), content).expect("write rewritten rbs");
+    }
+}
+
 /// Move every `<scratch>/{runtime,test}/**/*.rbs` to
 /// `<scratch>/sig/{runtime,test}/<rel>.rbs` to match the shipped
 /// project's sidecar layout.
@@ -133,6 +152,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
                 .unwrap_or_else(|_| panic!("copy sidecar for {entry}"));
         }
     }
+    apply_spinel_relation_model_handle(&scratch);
 
     // Spinel-specific shims that the framework runtime calls into but
     // doesn't itself define: Base64 (used by ActionView::ViewHelpers

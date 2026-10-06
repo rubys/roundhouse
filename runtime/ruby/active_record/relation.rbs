@@ -244,7 +244,7 @@ module ActiveRecord
     def append_group_having: (String sql) -> String
     def count_sql: () -> String
     def exists_sql: (Integer n) -> String
-    def hash_conditions: (Hash[Symbol, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil | Hash[Symbol, untyped]] hash) -> String
+    def hash_conditions: (Hash[Symbol, untyped] hash) -> String
     def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String

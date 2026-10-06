@@ -177,11 +177,11 @@ module ActiveRecord
     # branch, and wrapped in an array it would reach the IN-list branch
     # and escape a Relation object into the SQL text.
     def excluding(*records)
-      if records.length == 1
-        self.not(@model.primary_key => records[0])
-      else
-        self.not(@model.primary_key => records)
-      end
+      val = records.length == 1 ? records[0] : records
+      @records = nil
+      pred = column_predicate(@model.primary_key.to_s, val)
+      @wheres << "NOT (#{pred})" unless pred.empty?
+      self
     end
 
     # `without` — Rails' own alias for `excluding`, on both Relation and
@@ -862,13 +862,7 @@ module ActiveRecord
       theirs = other.is_a?(ActiveRecord::Relation) ? other.to_a : other
       return false if !theirs.is_a?(Array)
       return false if mine.length != theirs.length
-      i = 0
-      same = true
-      while i < mine.length
-        same = false if mine[i].id != theirs[i].id
-        i += 1
-      end
-      same
+      ids_of(mine) == ids_of(theirs)
     end
 
     # `filter { |r| … }` — Enumerable's filter over the loaded records.

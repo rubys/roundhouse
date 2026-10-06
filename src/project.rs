@@ -725,7 +725,7 @@ fn widen_spinel_base_on_sigs(src: &str) -> String {
     widened
 }
 
-fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), String> {
+pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), String> {
     let idx = files
         .iter()
         .position(|(p, _)| {
