@@ -113,9 +113,12 @@ fn build_and_run(test_files: &[&str], tag: &str) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
-    // `swift test` builds main + tests and runs XCTest.
+    // `swift test` builds main + tests and runs XCTest. Skip the index
+    // store and full debuginfo: CI only needs the XCTest result.
     let output = Command::new("swift")
         .arg("test")
+        .arg("--disable-index-store")
+        .args(["-Xswiftc", "-gline-tables-only"])
         .current_dir(&scratch)
         .output()
         .expect("run swift test");

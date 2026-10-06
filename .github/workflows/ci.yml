@@ -2022,6 +2022,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+        with:
+          # scripts/compare builds this standalone crate; the root target/
+          # cache does not cover tools/compare/target.
+          cache-directories: tools/compare/target
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
@@ -2055,6 +2059,19 @@ jobs:
         if: matrix.target == 'swift'
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+      - &swiftpm-cache
+        name: Cache SwiftPM checkouts
+        if: matrix.target == 'swift'
+        uses: actions/cache@v6
+        with:
+          # Cloned Hummingbird/NIO trees. Object files stay per-package in
+          # .build/; sharing those across emit dirs is not reliable.
+          path: |
+            ~/.cache/org.swift.swiftpm
+            ~/.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-${{ hashFiles('src/emit/swift/package.rs') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v6
@@ -2120,7 +2137,11 @@ jobs:
         run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --test framework_tests_swift -- --ignored --nocapture
+        run: |
+          # scripts/compare then runs emit_preview; compiling it here reuses
+          # the libroundhouse just built for the test harness.
+          cargo build --bin emit_preview --quiet
+          cargo test --test framework_tests_swift -- --ignored --nocapture
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
@@ -2405,6 +2426,7 @@ jobs:
         if: matrix.target == 'swift'
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
+      - *swiftpm-cache
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v6

@@ -238,9 +238,8 @@ case "$TARGET" in
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;
     swift)
-        # SPM release build -> a single binary at .build/release/App.
-        # Mirrors `scripts/compare swift`.
-        (cd "$APP_DIR" && swift build -c release) \
+        # Debug SPM build -> .build/debug/App. Mirrors `scripts/compare swift`.
+        (cd "$APP_DIR" && swift build --disable-index-store -Xswiftc -gnone) \
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;
@@ -347,9 +346,9 @@ case "$TARGET" in
         TARGET_PID=$!
         ;;
     swift)
-        # The release binary reads BLOG_DB + PORT (main.swift).
+        # The debug binary reads BLOG_DB + PORT (main.swift).
         (cd "$APP_DIR" && BLOG_DB="$DB_REL" PORT="$PORT" \
-            ./.build/release/App >"$TARGET_LOG" 2>&1) &
+            ./.build/debug/App >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
 esac

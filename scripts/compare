@@ -161,7 +161,10 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
-COMPARE_BIN="$REPO_ROOT/tools/compare/target/release/roundhouse-compare"
+# Debug is enough: this binary diffs HTTP bodies. A release rebuild of
+# the standalone crate was ~30s on hosted compare jobs and sat outside
+# the root rust-cache.
+COMPARE_BIN="$REPO_ROOT/tools/compare/target/debug/roundhouse-compare"
 LOG_DIR="$(mktemp -d -t roundhouse-compare-logs.XXXXXX)"
 RAILS_LOG="$LOG_DIR/rails.log"
 TARGET_LOG="$LOG_DIR/target.log"
@@ -313,7 +316,7 @@ ok "fixture ready ($FIXTURE)"
 
 if [[ ! -x "$COMPARE_BIN" ]]; then
     step "building roundhouse-compare"
-    (cd "$REPO_ROOT/tools/compare" && cargo build --release --quiet)
+    (cd "$REPO_ROOT/tools/compare" && cargo build --quiet)
 fi
 ok "compare tool ready"
 
@@ -345,7 +348,13 @@ if (( SKIP_EMIT == 0 )); then
             # per-target /tmp/rh-*-pass2 dir. For go that includes the
             # v2 overlay (always on); the build step below builds the
             # v2 binary from cmd/v2/.
-            (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
+            # Prefer a prebuilt debug binary (Swift CI compiles it next to
+            # framework_tests_swift so this is a no-op compile).
+            emit_preview="$REPO_ROOT/target/debug/emit_preview"
+            if [[ ! -x "$emit_preview" ]]; then
+                (cd "$REPO_ROOT" && cargo build --quiet --bin emit_preview)
+            fi
+            (cd "$REPO_ROOT" && "$emit_preview" --target "$TARGET" "$FIXTURE" >/dev/null)
             ;;
     esac
 fi
@@ -394,9 +403,11 @@ case "$TARGET" in
         (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" PATH="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}/bin:$PATH" gradle installDist --console=plain -q)
         ;;
     swift)
-        # SPM release build → a single binary at .build/release/App.
-        step "building swift target (swift build -c release)"
-        (cd "$BUILD_DIR" && swift build -c release 2>&1 | tail -2)
+        # Debug is the same check as tests/swift_toolchain.rs and the
+        # published README (`swift build`): type-check, link, boot. Release
+        # WMO was ~150s of compare-extra (swift) with no extra verification.
+        step "building swift target (swift build)"
+        (cd "$BUILD_DIR" && swift build --disable-index-store -Xswiftc -gnone 2>&1 | tail -2)
         ;;
     csharp)
         # `dotnet build -c Release` → bin/Release/net10.0/roundhouse-app.dll,
@@ -495,8 +506,8 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         swift)
-            # The release binary reads BLOG_DB + PORT (main.swift).
-            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./.build/release/App >"$TARGET_LOG" 2>&1) &
+            # The debug binary reads BLOG_DB + PORT (main.swift).
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./.build/debug/App >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         csharp)
