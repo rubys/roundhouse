@@ -74,6 +74,14 @@ require "action_dispatch/router"
 # describes.
 require "action_dispatch/request"
 require "action_controller/base"
+# The keyed digest before anything that calls `MessageDigest.secure_compare`.
+begin
+  require "message_digest"
+rescue LoadError
+  require "spinel/message_digest_cruby"
+end
+require "action_controller/current"
+require "action_controller/authenticity_token"
 # The CookieJar reopen (cookies_test.rb). Safe to load here even though
 # base_test.rb is also run by the strict-target lanes: those ingest only
 # the `*_test.rb` files and supply their own per-target helper, so this
@@ -93,19 +101,6 @@ require "rails"
 # `rate_limit`'s counter (rate_limiter_test.rb): over `Rails.cache`,
 # required from here for the same reason cookies is.
 require "action_controller/rate_limiter"
-# The keyed digest the verifier signs with. `message_digest` has no
-# `runtime/ruby` half at all: it is a two-implementation split (spinel
-# intrinsics vs OpenSSL) that the emit resolves by RENAMING the CRuby
-# half into the shared path. So the name to require depends on which
-# layout this helper is running under — the emitted/scratch tree, where
-# the swap has already happened, or the source tree, where only the
-# pre-swap file exists. Try the post-swap name first; both define the
-# same `MessageDigest`.
-begin
-  require "message_digest"
-rescue LoadError
-  require "spinel/message_digest_cruby"
-end
 require "inflector"
 # Action Text's value layer (`Content`, `Attachment`). Same reason as
 # cookies above: required from the helper, not inline in the test,

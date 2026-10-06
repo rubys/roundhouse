@@ -1,11 +1,15 @@
 # Typing for runtime/spinel/request_forgery_protection.rb.
 module ActionController
   class Base
-    def self.allow_forgery_protection: () -> bool?
-    def self.allow_forgery_protection=: (bool? value) -> bool?
-    def verify_authenticity_token: () -> void
     def verified_request?: () -> bool
   end
+
+  module RequestForgeryProtection
+    def self.valid_origin?: (String origin, String host) -> bool
+    def self.cable_origin_allowed?: (String origin, String host, bool development) -> bool
+    def self.token_matches?: (String given, String expected) -> bool
+  end
+end
 
   module RequestForgeryProtection
     def self.valid_origin?: (String origin, String host) -> bool

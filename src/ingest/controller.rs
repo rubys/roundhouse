@@ -568,14 +568,14 @@ pub const VERIFY_AUTHENTICITY_TOKEN: &str = "verify_authenticity_token";
 /// `protect_from_forgery with: :exception, unless: -> { … }` /
 /// `skip_forgery_protection only: […]` → the filter Rails registers.
 ///
-/// Only the `:exception` strategy is modeled. Rails' bare
-/// `protect_from_forgery` defaults to `:null_session` (the request runs
-/// with an empty session), and `:reset_session` clears it; neither is a
-/// 422, and lowering them as one would turn a request Rails lets through
-/// into a failure. Those forms, a `prepend:` (which moves the callback
-/// to the head of the chain) and a custom `store:` return `None`, so the
-/// call stays a controller-body macro and the unrecognized-macro survey
-/// names it.
+/// `protect_from_forgery` / `skip_forgery_protection` → the filter Rails
+/// registers on `verify_authenticity_token`.
+///
+/// Rails' handler for an unverified request depends on `with:`
+/// (`:exception` 422, `:null_session` empty session, `:reset_session`
+/// wipe). This runtime has one handler — 422 — so every known strategy
+/// registers the same before/skip filter. A `prepend:` or custom
+/// `store:` still returns `None` (unrecognized-macro survey).
 fn parse_forgery_macro(
     call: &ruby_prism::CallNode<'_>,
     protect: bool,
@@ -591,7 +591,7 @@ fn parse_forgery_macro(
     let mut unless_cond: Option<Symbol> = None;
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
-    let mut exception_strategy = false;
+    let mut known_with = true;
 
     for arg in call.arguments().iter().flat_map(|a| a.arguments().iter()) {
         let kh = arg.as_keyword_hash_node()?;
@@ -601,7 +601,10 @@ fn parse_forgery_macro(
             let value = assoc.value();
             match key.as_str() {
                 "with" if protect => {
-                    exception_strategy = symbol_value(&value).as_deref() == Some("exception");
+                    known_with = matches!(
+                        symbol_value(&value).as_deref(),
+                        Some("exception" | "null_session" | "reset_session")
+                    );
                 }
                 "only" => {
                     only = symbol_list_value(&value);
@@ -631,7 +634,7 @@ fn parse_forgery_macro(
             }
         }
     }
-    if protect && !exception_strategy {
+    if protect && !known_with {
         return None;
     }
 

@@ -580,7 +580,7 @@ module ActionView
     # session. Empty when no controller is parked (unit helpers, or a
     # target whose dispatcher does not assign Current.controller).
     def self.form_authenticity_token
-      ""
+      ActionController.masked_authenticity_token
     end
   
     # Empty in dev mode without a CSP nonce configured, mirroring Rails'

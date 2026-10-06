@@ -17,8 +17,10 @@
 #                  `load_defaults 7.0` set key_generator_hash_digest_class.
 #
 # Both digests are needed because Rails genuinely uses both; see the
-# comment in message_verifier.rb for the full table.
+# comment in message_verifier.rb for the full table. CSRF adds raw
+# HMAC-SHA256, `secure_random_bytes`, and constant-time compare.
 require "openssl"
+require "securerandom"
 
 module MessageDigest
   # HMAC-SHA1(key, msg) as 40-char lowercase hex.
@@ -29,6 +31,26 @@ module MessageDigest
   # HMAC-SHA256(key, msg) as 64-char lowercase hex.
   def self.hmac_sha256_hex(key, msg)
     OpenSSL::HMAC.hexdigest("SHA256", key, msg)
+  end
+
+  # Raw HMAC-SHA256 bytes (CSRF global token, not the hex cookies use).
+  def self.hmac_sha256(key, msg)
+    OpenSSL::HMAC.digest("SHA256", key, msg)
+  end
+
+  def self.secure_random_bytes(n)
+    SecureRandom.random_bytes(n)
+  end
+
+  def self.secure_compare(a, b)
+    return false if a.bytesize != b.bytesize
+    diff = 0
+    i = 0
+    while i < a.bytesize
+      diff = diff | (a.getbyte(i) ^ b.getbyte(i))
+      i += 1
+    end
+    diff == 0
   end
 
   # PBKDF2-HMAC-SHA256 as RAW BYTES (not hex, not base64): the derived

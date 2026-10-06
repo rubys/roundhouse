@@ -1588,13 +1588,15 @@ fn build_filter_preamble(
     // bot_key?` sees who signed in); the default then yields to it.
     // ActionController::API does not include the module.
     //
-    // OFF: a bare `protect_from_forgery` is `:null_session` (lobsters)
-    // and is not modeled as 422. Implicit `:exception` would turn those
-    // requests into failures. Apps that write `with: :exception`
-    // (campfire) get the filter; `verify_authenticity_token` now lives
-    // on shared Base. Residual vs Rails: an app that relies on the
-    // implicit default is still CSRF-open until it writes the macro.
-    const IMPLICIT_DEFAULT: bool = false;
+    // ON, matching Rails `load_defaults` 5.2+ (`default_protect_from_forgery`
+    // → `protect_from_forgery with: :exception` on ActionController::Base).
+    // `verify_authenticity_token` lives on the shared Base. An
+    // ActionController::API parent is still skipped. Emitted tests keep
+    // `allow_forgery_protection = false`, as Rails' test.rb does.
+    // Residual: `:null_session` / `:reset_session` still run this same
+    // 422 handler — those strategies are not modeled as empty-session
+    // pass-throughs.
+    const IMPLICIT_DEFAULT: bool = true;
     let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
     let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {
         c.filters().any(|f| {

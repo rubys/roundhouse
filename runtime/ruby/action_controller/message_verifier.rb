@@ -311,14 +311,7 @@ module ActionController
     # characters of a forged digest were right. The length is not
     # secret — every digest of one kind has the same one.
     def self.secure_compare(a, b)
-      return false if a.bytesize != b.bytesize
-      diff = 0
-      i = 0
-      while i < a.bytesize
-        diff = diff | (a.getbyte(i) ^ b.getbyte(i))
-        i += 1
-      end
-      diff == 0
+      MessageDigest.secure_compare(a, b)
     end
 
     def self.digest_for(secret, salt, payload, sha1)

@@ -1,27 +1,9 @@
-# CRuby-only session persistence + CSRF token generation.
-#
-# Follows the CookieJar precedent (action_controller_cookies.rb): the
-# session is a CRuby-target feature until other targets take on
-# lobsters, so everything here lives in the Ruby overlay rather than
-# the shared runtime/ (which transpiles to every target). The shared
-# runtime contributes only the ActionDispatch::Session data object,
-# Base#reset_session, and the empty-string form_authenticity_token
-# default this file overrides.
+# CRuby overlay session codec (`from_cookie` / `to_cookie`). CSRF
+# minting lives in `runtime/ruby/action_controller/authenticity_token.rb`.
 #
 # Storage model: cookie-carried, stateless — the whole session rides
-# in a `_session` cookie as url-encoded `k=v&k2=v2` pairs (values are
-# strings; lobsters keeps only string tokens in the session: `u`,
-# `twofa_u`, `redirect_to`, and our `_csrf_token`). Stateless matters
-# here twice over: the one-shot CGI probe path spawns a fresh process
-# per request, and the benchmark's Puma path must not depend on
-# in-process state either. No signing/encryption — the benchmark
-# harness is the only client, and it replays cookies verbatim; parity
-# with Rails' encrypted CookieStore is a wire format, not behavior,
-# difference. The dispatch layer (main.rb) owns the restore/persist
-# call sites.
-
-require "securerandom"
-
+# in a `_session` cookie as url-encoded `k=v&k2=v2` pairs. HMAC signing
+# of that cookie is `runtime/signed_cookies.rb` on the dispatch path.
 module ActionDispatch
   class Session
     # Decode a `_session` cookie value into a Session. Tolerates a
@@ -45,29 +27,6 @@ module ActionDispatch
     # whether a Set-Cookie is needed at all.
     def to_cookie
       to_h.map { |k, v| "#{CgiIo.url_encode(k)}=#{CgiIo.url_encode(v.to_s)}" }.join("&")
-    end
-  end
-end
-
-module ActionView
-  module ViewHelpers
-    # Session-backed lazy CSRF token, overriding the shared runtime's
-    # empty-string default. Lazy generation keeps token creation (and
-    # therefore session-cookie emission) scoped to requests that
-    # actually render a csrf-consuming helper — pages without forms or
-    # csrf_meta_tags don't grow a session. Reaches the session through
-    # ActionController::Current because view helpers are module
-    # functions with no controller context (same pattern as
-    # Current.request).
-    def self.form_authenticity_token
-      session = ActionController::Current.session
-      return "" if session.nil?
-      token = session[:_csrf_token]
-      if token.nil?
-        token = SecureRandom.urlsafe_base64(32)
-        session[:_csrf_token] = token
-      end
-      token.to_s
     end
   end
 end

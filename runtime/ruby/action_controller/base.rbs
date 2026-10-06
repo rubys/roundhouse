@@ -8,6 +8,8 @@ module ActionController
   def self.find_last: (String hay, String needle) -> Integer
   def self.forgery_flag: () -> bool
   def self.set_forgery_flag: (bool value) -> void
+  def self.masked_authenticity_token: () -> String
+  def self.csrf_token_valid?: (String given, String expected) -> bool
 
   class HeaderStore
     @keys: Array[String]

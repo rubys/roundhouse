@@ -10,5 +10,8 @@
 module MessageDigest
   def self.hmac_sha1_hex: (String key, String msg) -> String
   def self.hmac_sha256_hex: (String key, String msg) -> String
+  def self.hmac_sha256: (String key, String msg) -> String
   def self.pbkdf2_sha256: (String secret, String salt, Integer iters, Integer dklen) -> String
+  def self.secure_random_bytes: (Integer n) -> String
+  def self.secure_compare: (String a, String b) -> bool
 end

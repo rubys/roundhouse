@@ -1060,7 +1060,7 @@ pub fn insert_db_stub(
     // BYTES (an HMAC key is bytes), which is why it types Str and not
     // some digest-shaped wrapper.
     let mut digest_info = crate::analyze::ClassInfo::default();
-    for name in ["hmac_sha1_hex", "hmac_sha256_hex"] {
+    for name in ["hmac_sha1_hex", "hmac_sha256_hex", "hmac_sha256"] {
         digest_info.class_methods.insert(
             Symbol::from(name),
             fn_sig(
@@ -1069,6 +1069,17 @@ pub fn insert_db_stub(
             ),
         );
     }
+    digest_info.class_methods.insert(
+        Symbol::from("secure_random_bytes"),
+        fn_sig(vec![(Symbol::from("n"), Ty::Int)], Ty::Str),
+    );
+    digest_info.class_methods.insert(
+        Symbol::from("secure_compare"),
+        fn_sig(
+            vec![(Symbol::from("a"), Ty::Str), (Symbol::from("b"), Ty::Str)],
+            Ty::Bool,
+        ),
+    );
     digest_info.class_methods.insert(
         Symbol::from("pbkdf2_sha256"),
         fn_sig(

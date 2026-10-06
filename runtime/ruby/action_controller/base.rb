@@ -15,6 +15,17 @@ module ActionController
     FORGERY_SLOT[0] = value
   end
 
+  # Empty until `authenticity_token.rb` reopens these: strict-target
+  # emit of this file must not call `Current.session` or XOR bytes.
+  def self.masked_authenticity_token
+    ""
+  end
+
+  def self.csrf_token_valid?(given, expected)
+    return false if expected.empty?
+    given.length > 0 && given == expected
+  end
+
   # WHATWG URL-parser preprocessing: drop tab/CR/LF/NUL anywhere, then
   # strip leading and trailing C0 controls and spaces. A tab in the
   # middle (`/\t/evil`) becomes `//evil` so host classification sees it.
@@ -554,9 +565,10 @@ module ActionController
     end
 
     # Rails' `verify_authenticity_token`: GET/HEAD pass; anything else
-    # must carry the session token as `authenticity_token` or
-    # `X-CSRF-Token`. An empty session token matches nothing (fail
-    # closed). Tests set `allow_forgery_protection = false`.
+    # must carry a token that unmasks to the session secret, as
+    # `authenticity_token` or `X-CSRF-Token`. An empty session token
+    # matches nothing (fail closed). Tests set
+    # `allow_forgery_protection = false`.
     def verify_authenticity_token
       unless verified_request?
         render "<h1>422 Unprocessable Content</h1>", status: :unprocessable_content
@@ -569,11 +581,8 @@ module ActionController
       verb = @request_method.to_s
       return true if verb == "" || verb == "GET" || verb == "HEAD"
       expected = session[:_csrf_token].to_s
-      return false if expected.empty?
-      given = params["authenticity_token"].to_s
-      return true if given.length > 0 && given == expected
-      header = csrf_header_token
-      header.length > 0 && header == expected
+      return true if ActionController.csrf_token_valid?(params["authenticity_token"].to_s, expected)
+      ActionController.csrf_token_valid?(csrf_header_token, expected)
     end
 
     def csrf_header_token

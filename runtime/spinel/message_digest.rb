@@ -23,6 +23,7 @@ module SpCrypto
   ffi_func :sp_crypto_hmac_sha1_hex,            [:str, :str],             :str
   ffi_func :sp_crypto_hmac_sha256_hex,          [:str, :str],             :str
   ffi_func :sp_crypto_pbkdf2_sha256_b64url_len, [:str, :str, :int, :int], :str
+  ffi_func :sp_crypto_random_b64url,            [:int],                   :str
 end
 
 module MessageDigest
@@ -32,6 +33,33 @@ module MessageDigest
 
   def self.hmac_sha256_hex(key, msg)
     SpCrypto.sp_crypto_hmac_sha256_hex(key, msg) + ""
+  end
+
+  def self.hmac_sha256(key, msg)
+    hex = hmac_sha256_hex(key, msg)
+    out = ""
+    i = 0
+    n = hex.length
+    while i + 2 <= n
+      out = out + hex[i, 2].to_s.to_i(16).chr
+      i += 2
+    end
+    out
+  end
+
+  def self.secure_random_bytes(n)
+    Base64.urlsafe_decode64(SpCrypto.sp_crypto_random_b64url(n) + "")
+  end
+
+  def self.secure_compare(a, b)
+    return false if a.bytesize != b.bytesize
+    diff = 0
+    i = 0
+    while i < a.bytesize
+      diff = diff | (a.getbyte(i) ^ b.getbyte(i))
+      i += 1
+    end
+    diff == 0
   end
 
   # sp_crypto returns the derived key base64url-encoded; the callers want

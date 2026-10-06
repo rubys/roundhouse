@@ -1,0 +1,18 @@
+# Typing contract for authenticity_token.rb beside this file.
+module ActionController
+  module AuthenticityToken
+    LENGTH: Integer
+    GLOBAL_SCOPE: String
+    def self.masked: () -> String
+    def self.valid?: (String given, String expected_b64) -> bool
+    def self.ensure_session_token: () -> String
+    def self.mint: () -> String
+    def self.unmask: (String encoded) -> String
+    def self.decode: (String encoded) -> String
+    def self.xor: (String a, String b) -> String
+    def self.hmac_global: (String raw) -> String
+  end
+
+  def self.masked_authenticity_token: () -> String
+  def self.csrf_token_valid?: (String given, String expected) -> bool
+end
