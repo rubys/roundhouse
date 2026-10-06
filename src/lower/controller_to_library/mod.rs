@@ -2118,6 +2118,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         .entry(Symbol::from("performed?"))
         .or_insert_with(|| fn_sig(vec![], Ty::Bool));
 
+    // Rails' implicit `protect_from_forgery` heads every chain; the
+    // preamble emits a bare `verify_authenticity_token` send that must
+    // resolve on Self (otherwise lowered_real_blog_typing_residual
+    // trips on TyVar). Lives on the shared Base; return is Nil.
+    info.instance_methods
+        .entry(Symbol::from("verify_authenticity_token"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Nil));
+    info.instance_methods
+        .entry(Symbol::from("verified_request?"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Bool));
+
     // Implicit-`params` — actions read `@params` (the lowerer rewrote
     // bare `params` → `@params`) which the typer should treat as a
     // Hash-shaped object. The instance-method version is for cases

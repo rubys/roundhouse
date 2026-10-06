@@ -10,7 +10,19 @@ module ActionController
     def verified_request?
       return true unless ActionController.forgery_flag
       req = ActionController::Current.request
-      return false if req.nil?
+      # No parked Request (unit-style `controller.process_action`): fall
+      # back to Base's `@request_method` rule. Empty/GET/HEAD pass; a
+      # mutating verb still needs a valid token. Origin cannot be
+      # checked without a Request — that is not a weaken of the
+      # parked-request path below.
+      if req.nil?
+        verb = @request_method.to_s
+        return true if verb == "" || verb == "GET" || verb == "HEAD"
+        expected = session[:_csrf_token].to_s
+        return true if AuthenticityToken.valid?(
+          Params.str(params, "authenticity_token", ""), expected)
+        return AuthenticityToken.valid?(csrf_header_token, expected)
+      end
       verb = req.request_method
       return true if verb == "GET" || verb == "HEAD"
       return false unless RequestForgeryProtection.valid_origin?(

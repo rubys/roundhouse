@@ -54,6 +54,11 @@ pub(in crate::analyze) fn register(
     app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+    // Rails' implicit forgery check — also a known filter target so
+    // `filter_targets::framework_methods` keeps it (and analyzer
+    // dispatch on a bare call resolves).
+    app_ctrl.class_methods.insert(Symbol::from("verify_authenticity_token"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("verified_request?"), Ty::Bool);
     // HTTP cache-control declarations (`expires_in 3.minutes,
     // public: true`) — side-effecting header writes.
     app_ctrl.class_methods.insert(Symbol::from("expires_in"), Ty::Nil);

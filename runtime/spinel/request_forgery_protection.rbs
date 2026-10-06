@@ -10,10 +10,3 @@ module ActionController
     def self.token_matches?: (String given, String expected) -> bool
   end
 end
-
-  module RequestForgeryProtection
-    def self.valid_origin?: (String origin, String host) -> bool
-    def self.cable_origin_allowed?: (String origin, String host, bool development) -> bool
-    def self.token_matches?: (String given, String expected) -> bool
-  end
-end
