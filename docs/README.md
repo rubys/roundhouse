@@ -49,6 +49,7 @@ references explain design, while working plans are point-in-time proposals.
 ## Reference
 
 - [`writebook.md`](writebook.md) — pinned external-corpus inventory and its limits.
+- [`private-inertia-sorbet-corpus.md`](private-inertia-sorbet-corpus.md) — private Rails 8.1 + Inertia + Sorbet forcing corpus (themes only; not a support claim).
 
 ## Working plans
 

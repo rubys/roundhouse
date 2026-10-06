@@ -293,6 +293,7 @@ fn known_bad_constructor_arguments_remain_errors() {
         "Date.iso8601(2024)",
         "Date.strptime(\"2024-01-31\", 17)",
         "Date.today(\"bad\")",
+        "Date.current(\"bad\")",
     ] {
         let mut app = app_with(
             "",
@@ -310,6 +311,9 @@ fn known_bad_constructor_arguments_remain_errors() {
         "Date.strptime(\"2024-01-31\", \"%Y-%m-%d\")",
         "Date.iso8601(\"2024-01-31\")",
         "Date.today",
+        // Rails ActiveSupport: zone-aware, still a Date.
+        "Date.current",
+        "::Date.current",
     ] {
         let mut app = app_with(
             "",

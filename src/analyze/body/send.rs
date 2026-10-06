@@ -1783,7 +1783,10 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         "parse" => vec![Ty::Str, Ty::Bool, numeric],
         "strptime" => vec![Ty::Str, Ty::Str, numeric],
         "iso8601" => vec![Ty::Str, numeric],
-        "today" => vec![numeric],
+        // `Date.today` is Ruby stdlib (system local). Rails'
+        // `Date.current` respects `Time.zone` but still returns a Date;
+        // both constructors share the same optional start-day argument.
+        "today" | "current" => vec![numeric],
         _ => return None,
     };
     let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
