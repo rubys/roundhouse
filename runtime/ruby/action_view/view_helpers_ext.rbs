@@ -2,7 +2,7 @@
 module ActionView
   module ViewHelpers
     def self.content_security_policy_nonce: () -> String
-    def self.class_names: (*untyped args) -> String
+    def self.class_names: (*(String | Symbol | Hash[Symbol, untyped] | Array[untyped] | nil) args) -> String
     def self.number_with_delimiter: (Integer value) -> String
     def self.sanitize_to_id: (String name) -> String
     def self.capture: () { () -> untyped } -> String

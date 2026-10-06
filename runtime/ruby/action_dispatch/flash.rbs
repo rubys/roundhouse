@@ -1,8 +1,7 @@
 module ActionDispatch
   # Per-app flash store with typed `notice`/`alert` fields plus HWIA-
   # shape shim methods. Field-set is closed (mirrors the lowerer's
-  # `is_flash_name`); shim signatures take `untyped` keys to accept
-  # Symbol|String.
+  # `is_flash_name`); shim keys are String | Symbol.
   class Flash
     @notice: String?
     @alert: String?
@@ -23,14 +22,14 @@ module ActionDispatch
     def initialize: (?Hash[String, String]? other) -> void
 
     def now: () -> FlashNow
-    def mark_shown: (untyped key) -> void
-    def []: (untyped key) -> String?
-    def []=: (untyped key, String? value) -> String?
-    def fetch: (untyped key, ?String? default) -> String?
-    def key?: (untyped key) -> bool
-    def has_key?: (untyped key) -> bool
-    def include?: (untyped key) -> bool
-    def delete: (untyped key) -> String?
+    def mark_shown: (String | Symbol key) -> void
+    def []: (String | Symbol key) -> String?
+    def []=: (String | Symbol key, String? value) -> String?
+    def fetch: (String | Symbol key, ?String? default) -> String?
+    def key?: (String | Symbol key) -> bool
+    def has_key?: (String | Symbol key) -> bool
+    def include?: (String | Symbol key) -> bool
+    def delete: (String | Symbol key) -> String?
     def length: () -> Integer
     def size: () -> Integer
     def empty?: () -> bool
@@ -48,7 +47,7 @@ module ActionDispatch
     @flash: Flash
 
     def initialize: (Flash flash) -> void
-    def []=: (untyped key, String? value) -> String?
-    def []: (untyped key) -> String?
+    def []=: (String | Symbol key, String? value) -> String?
+    def []: (String | Symbol key) -> String?
   end
 end

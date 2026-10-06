@@ -60,7 +60,7 @@ module ActiveRecord
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
-    def order: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
+    def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
     # interim as first/take); `preloaded` stays bare for Spinel integer
     # seeds, but the loaded cache itself is a record array.
@@ -75,8 +75,8 @@ module ActiveRecord
     def compare_order_keys: (untyped a, untyped b) -> Integer?
     def order_key_of: (Base record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
-    def order!: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
-    def reorder: (*(String | Symbol | Hash[Symbol, untyped]) parts) -> Relation
+    def order!: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
     # Kaminari's pagination surface (see the .rb): `page` / `per` take
@@ -203,9 +203,9 @@ module ActiveRecord
     def size: () -> Integer
     def delete_all: () -> Integer
     def destroy_all: () -> Array[Base]
-    def destroy_by: (untyped conditions) -> Array[Base]
-    def delete_by: (untyped conditions) -> Integer
-    def update_all: (untyped updates) -> Integer
+    def destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
+    def delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
+    def update_all: (Hash[Symbol, untyped] | String updates) -> Integer
     def touch_all: (?Symbol? name) -> Integer
     # The WHERE a bulk write takes — a plain clause, or an
     # `IN (SELECT …)` subquery when the scope carries a join.
@@ -226,13 +226,13 @@ module ActiveRecord
     # lowerer monomorphizing per call site from the schema.
     # `ids` is Array[Integer] for integer-key apps; string/uuid apps
     # widen it via `project::widen_key_contract` (#310).
-    def pluck: (untyped col) -> Array[untyped]
-    def pick: (untyped col) -> untyped
+    def pluck: (String | Symbol col) -> Array[untyped]
+    def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | String | Array[Integer | String] id) -> untyped
     def find_ids: (Array[Integer | String] ids) -> Array[Base]
-    def find_by: (untyped conditions) -> Base?
-    def find_by!: (untyped conditions) -> Base
+    def find_by: (Hash[Symbol, untyped] | String conditions) -> Base?
+    def find_by!: (Hash[Symbol, untyped] | String conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
 
@@ -250,7 +250,7 @@ module ActiveRecord
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
-    def order_term: (String | Symbol | Hash[Symbol, untyped] p) -> String
+    def order_term: (String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]] p) -> String
     def format_order_hash: (Hash[Symbol, untyped] h) -> String
   end
 end

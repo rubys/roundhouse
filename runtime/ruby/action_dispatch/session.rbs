@@ -9,13 +9,13 @@ module ActionDispatch
 
     def initialize: (?Hash[String, untyped]? other) -> void
 
-    def []: (untyped key) -> untyped
-    def []=: (untyped key, untyped value) -> untyped
-    def fetch: (untyped key, ?untyped default) -> untyped
-    def key?: (untyped key) -> bool
-    def has_key?: (untyped key) -> bool
-    def include?: (untyped key) -> bool
-    def delete: (untyped key) -> untyped
+    def []: (String | Symbol key) -> untyped
+    def []=: (String | Symbol key, untyped value) -> untyped
+    def fetch: (String | Symbol key, ?untyped default) -> untyped
+    def key?: (String | Symbol key) -> bool
+    def has_key?: (String | Symbol key) -> bool
+    def include?: (String | Symbol key) -> bool
+    def delete: (String | Symbol key) -> untyped
     def length: () -> Integer
     def size: () -> Integer
     def empty?: () -> bool
