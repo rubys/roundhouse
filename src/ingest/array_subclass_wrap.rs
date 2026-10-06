@@ -67,7 +67,7 @@ const PROTOCOL: &[(&str, Forward)] = &[
     ("map", Forward::Enumerable),
     ("select", Forward::Enumerable),
     ("include?", Forward::One("item")),
-    ("[]", Forward::One("index")),
+    ("[]", Forward::Splat),
 ];
 
 fn protocol_names() -> HashSet<&'static str> {
@@ -105,7 +105,31 @@ fn try_wrap_array_subclass(
     }
     for method in &mut methods {
         if method.receiver == MethodReceiver::Instance && method.name.as_str() == "initialize" {
+            let had_super = body_contains_super(&method.body);
             rewrite_array_super_to_elements(&mut method.body, &method.params);
+            // Custom initialize that never calls super: MRI still gets an
+            // empty Array from the parent. Seed `@elements = []` so
+            // protocol methods do not call through nil.
+            if !had_super {
+                let span = method.body.span;
+                let seed = Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: LValue::Ivar {
+                            name: Symbol::from("elements"),
+                        },
+                        value: Expr::new(
+                            span,
+                            ExprNode::Array {
+                                elements: vec![],
+                                style: crate::expr::ArrayStyle::default(),
+                            },
+                        ),
+                    },
+                );
+                let old = std::mem::replace(&mut method.body, seed.clone());
+                method.body = Expr::new(span, ExprNode::Seq { exprs: vec![seed, old] });
+            }
         }
     }
     // Pure-`super` overrides of synthesized names would leave a dead

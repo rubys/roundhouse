@@ -305,6 +305,49 @@ fn empty_array_subclass_seeds_elements() {
 }
 
 #[test]
+fn initialize_without_super_seeds_elements() {
+    let app = library_app(
+        "app/models/bag.rb",
+        r#"class Bag < Array
+  def initialize(x)
+    @x = x
+  end
+end
+"#,
+    );
+    let bag = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Bag")
+        .expect("Bag");
+    assert!(bag.parent.is_none(), "got {:?}", bag.parent);
+    let src = library_rb(&app, "class Bag");
+    assert!(
+        src.contains("@elements = []") || src.contains("@elements=[]"),
+        "initialize without super must seed @elements = []:\n{src}"
+    );
+}
+
+#[test]
+fn index_forward_uses_splat() {
+    let app = library_app(
+        "app/models/bag.rb",
+        r#"class Bag < Array
+  def initialize(records)
+    super(records)
+  end
+end
+"#,
+    );
+    let src = library_rb(&app, "@elements");
+    assert!(
+        src.contains("def [](*args)")
+            && (src.contains("@elements[*args]") || src.contains("@elements.[](*args)")),
+        "[] must splat-forward for page[0, 2]:\n{src}"
+    );
+}
+
+#[test]
 fn decorated_super_on_protocol_keeps_array_parent() {
     let app = library_app(
         "app/models/bag.rb",
