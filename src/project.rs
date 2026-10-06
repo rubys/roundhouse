@@ -714,15 +714,13 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
             "spinel_relation_model_handle: active_record/relation.rbs not in the tree".to_string()
         })?;
     let relation = &mut files[idx].1;
+    // Exact pairs first: spawn must not become `Array[untyped]?` (Spinel
+    // integer-seed cache), and find_by conditions widen past `Base`.
     let replacements = [
         (
-            "    def initialize: (Base model) -> void\n",
-            "    def initialize: (untyped model) -> void\n",
+            "        Array[Base]? records,\n",
+            "        untyped records,\n",
         ),
-        ("    def first: () -> Base?\n", "    def first: () -> untyped\n"),
-        ("    def take: () -> Base?\n", "    def take: () -> untyped\n"),
-        ("    def first!: () -> Base\n", "    def first!: () -> untyped\n"),
-        ("    def last: () -> Base?\n", "    def last: () -> untyped\n"),
         (
             "    def find_by: (Hash[Symbol, untyped] | String conditions) -> Base?\n",
             "    def find_by: (untyped conditions) -> untyped\n",
@@ -730,14 +728,6 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
         (
             "    def find_by!: (Hash[Symbol, untyped] | String conditions) -> Base\n",
             "    def find_by!: (untyped conditions) -> untyped\n",
-        ),
-        (
-            "    def first_or_initialize: () -> Base\n",
-            "    def first_or_initialize: () -> untyped\n",
-        ),
-        (
-            "    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base\n",
-            "    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped\n",
         ),
     ];
     for (narrow, wide) in replacements {
@@ -748,33 +738,25 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
         }
         *relation = relation.replace(narrow, wide);
     }
-    // Bar B types loaded records as `Base` (Enumerable blocks, to_a).
-    // Spinel will not convert Base → User / Array[Base] → Array[User],
-    // so the sidecar widens those the same way as first/find_by.
-    *relation = relation.replace("Array[Base]", "Array[untyped]");
-    *relation = relation.replace("{ (Base)", "{ (untyped)");
-    *relation = relation.replace("{ (untyped, Base)", "{ (untyped, untyped)");
-    *relation = relation.replace("Hash[untyped, Base]", "Hash[untyped, untyped]");
-    // spawn copies `@records`; keep this param bare so a preloaded
-    // integer-seeded cache (see `preloaded`) is not an Array seed.
-    if !relation.contains("        Array[untyped]? records,\n") {
-        return Err(
-            "spinel_relation_model_handle: spawn records param missing after Array[Base] widen"
-                .to_string(),
-        );
+    // Remaining `Base` on def / ivar lines only — comments stay. `Base?`
+    // before bare `Base` so `-> Base?` becomes `untyped`, not `untyped?`.
+    let mut widened = String::new();
+    for line in relation.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("def ") || trimmed.starts_with('@') {
+            widened.push_str(
+                &line
+                    .replace("Array[Base]", "Array[untyped]")
+                    .replace("Set[Base]", "Set[untyped]")
+                    .replace("Base?", "untyped")
+                    .replace("Base", "untyped"),
+            );
+        } else {
+            widened.push_str(line);
+        }
+        widened.push('\n');
     }
-    *relation = relation.replace(
-        "        Array[untyped]? records,\n",
-        "        untyped records,\n",
-    );
-    let detect_narrow = "    def detect: () { (untyped) -> bool } -> Base?\n";
-    let detect_wide = "    def detect: () { (untyped) -> bool } -> untyped\n";
-    if !relation.contains(detect_narrow) {
-        return Err(format!(
-            "spinel_relation_model_handle: relation.rbs no longer declares {detect_narrow:?}"
-        ));
-    }
-    *relation = relation.replace(detect_narrow, detect_wide);
+    *relation = widened;
     Ok(())
 }
 
@@ -8218,6 +8200,26 @@ mod tests {
         assert!(
             relation.contains("def detect: () { (untyped) -> bool } -> untyped"),
             "Spinel must not keep detect:()->Base?: {relation}"
+        );
+        assert!(
+            relation.contains("def to_set: () -> Set[untyped]"),
+            "Spinel must not keep to_set:()->Set[Base]: {relation}"
+        );
+        assert!(
+            relation.contains("def each_with_object: (untyped memo) { (untyped, untyped) -> untyped }"),
+            "Spinel must not keep each_with_object Base block: {relation}"
+        );
+        assert!(
+            relation.contains("        untyped records,\n"),
+            "Spinel spawn records must stay bare untyped: {relation}"
+        );
+        let leftover: Vec<&str> = relation
+            .lines()
+            .filter(|l| l.trim_start().starts_with("def ") && l.contains("Base"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "Spinel def lines still spell Base: {leftover:?}"
         );
         assert!(
             relation.contains("def find_by: (untyped conditions) -> untyped"),
