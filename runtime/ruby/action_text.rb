@@ -1178,8 +1178,20 @@ module ActionText
         c = html[i, 1].to_s
         unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f"
           # Entity-decoded plain text (`&nbsp;` → " ") is blank when
-          # whitespace-only — match ActiveSupport, not only `""`.
-          return ActiveSupport.blank?(to_plain_text)
+          # whitespace-only. Scan here: ActionText::Content must not
+          # resolve `ActiveSupport` through this class (emitted tests
+          # do not load the ActiveSupport module in this namespace).
+          text = to_plain_text
+          j = 0
+          m = text.length
+          while j < m
+            d = text[j, 1].to_s
+            unless d == " " || d == "\t" || d == "\n" || d == "\r" || d == "\f"
+              return false
+            end
+            j = j + 1
+          end
+          return true
         end
         i = i + 1
       end

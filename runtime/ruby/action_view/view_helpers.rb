@@ -1034,7 +1034,9 @@ module ActionView
     # a `next unless` — the same kotlin gap sits latent there.)
     def self.render_attrs(attrs)
       return "" if attrs.empty?
-      out = +""
+      # Concat, not `<<`: `out << s` lowers as `.add` / write-into-`&str`
+      # on Kotlin/C#/Rust/Python/Elixir. Same shape as `sanitize_to_id`.
+      out = ""
       attrs.each do |k, v|
         # The name bindings sit ABOVE the nil guards on purpose: the
         # TypeScript emitter declares a local where it is FIRST
@@ -1053,7 +1055,7 @@ module ActionView
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                out << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out = out + " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1071,9 +1073,9 @@ module ActionView
             # Rails (truthy) and is omitted here — no corpus site
             # writes one, and literal sites lower through the
             # compile-time loops, not this method.
-            out << " #{name}=\"#{name}\"" unless v.to_s == "false"
+            out = out + " #{name}=\"#{name}\"" unless v.to_s == "false"
           else
-            out << " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
+            out = out + " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
           end
         end
       end

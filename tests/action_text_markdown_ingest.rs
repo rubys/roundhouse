@@ -108,19 +108,47 @@ fn markdown_under_action_text_ingests_as_model() {
 }
 
 #[test]
-fn bare_record_outside_action_text_stays_library() {
+fn optioned_mattr_on_a_model_does_not_fail_ingest() {
+    // Writebook's ActionText::Markdown uses `mattr_accessor :renderer, default:`.
+    // Expanding without the initializer would drop the default; erroring
+    // turns existing unresolved sends into ingest-gap Infos. Leave unknown.
     let app = ingest(&[
         ("db/schema.rb", SCHEMA),
         ("app/models/application_record.rb", APPLICATION_RECORD),
         (
-            "lib/other.rb",
-            "class Markdown < Record\nend\n",
+            "lib/rails_ext/action_text_markdown.rb",
+            r#"module ActionText
+  class Markdown < Record
+    mattr_accessor :renderer, default: Object.new
+  end
+end
+"#,
         ),
     ]);
+    let md = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "ActionText::Markdown")
+        .expect("still a model");
     assert!(
-        app.models
-            .iter()
-            .all(|m| m.name.0.as_str() != "Markdown"),
+        !md.body.iter().any(|item| matches!(
+            item,
+            roundhouse::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "renderer"
+        )),
+        "optioned mattr must not synthesize a reader that drops default:"
+    );
+}
+
+#[test]
+fn bare_record_outside_action_text_stays_library() {
+    let app = ingest(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("lib/other.rb", "class Markdown < Record\nend\n"),
+    ]);
+    assert!(
+        app.models.iter().all(|m| m.name.0.as_str() != "Markdown"),
         "top-level Record must not become a model"
     );
     assert!(
