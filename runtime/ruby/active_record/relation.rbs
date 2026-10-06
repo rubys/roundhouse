@@ -232,8 +232,8 @@ module ActiveRecord
     def ids: () -> Array[Integer]
     def find: (Integer | String | Array[Integer | String] id) -> untyped
     def find_ids: (Array[Integer | String] ids) -> Array[Base]
-    def find_by: (Hash[Symbol, untyped] | String conditions) -> Base?
-    def find_by!: (Hash[Symbol, untyped] | String conditions) -> Base
+    def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
+    def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
 

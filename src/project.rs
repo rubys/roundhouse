@@ -740,11 +740,11 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
     // takes a records param (`take_query_lists` + clone).
     let replacements = [
         (
-            "    def find_by: (Hash[Symbol, untyped] | String conditions) -> Base?\n",
+            "    def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?\n",
             "    def find_by: (untyped conditions) -> untyped\n",
         ),
         (
-            "    def find_by!: (Hash[Symbol, untyped] | String conditions) -> Base\n",
+            "    def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base\n",
             "    def find_by!: (untyped conditions) -> untyped\n",
         ),
     ];
