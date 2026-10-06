@@ -1509,7 +1509,7 @@ enum EnumStored {
 /// may name: the mapping itself (`enum :status, STATUSES`), a label
 /// (`NAME => NAME`, `"#{PENDING}": 1`) or a stored value
 /// (`active: ACTIVE`). Collected in source order so an alias
-/// (`ASSOCIATE = POS_USER`) resolves through the constant it names.
+/// (`ROLE_B = ROLE_A`) resolves through the constant it names.
 #[derive(Default)]
 pub(super) struct ClassConsts {
     /// `NAME = "x"`, `NAME = :x`, `NAME = 3`, `NAME = OTHER`.

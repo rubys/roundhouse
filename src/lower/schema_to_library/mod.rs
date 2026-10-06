@@ -37,6 +37,15 @@ pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction
     if schema.tables.is_empty() {
         return Vec::new();
     }
+    lower_schema_module_functions(schema)
+}
+
+/// The same `Schema` module, defined even when `schema.tables` is empty
+/// (`statements` returns `[]`). The Ruby harness loads `Schema.statements`
+/// unconditionally, so an app without a database (a library and its
+/// tests) must still define it; other targets keep the empty-skip of
+/// [`lower_schema_to_library_functions`].
+pub fn lower_schema_module_functions(schema: &Schema) -> Vec<LibraryFunction> {
     let module_path = vec![Symbol::from("Schema")];
     let stmts = crate::emit::shared::schema_sql::render_schema_statements(schema);
     let elements: Vec<Expr> = stmts.into_iter().map(lit_str).collect();

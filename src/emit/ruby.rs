@@ -389,10 +389,11 @@ fn emit_model_classes(
 /// with `def self.statements` returning the DDL list. Per-statement
 /// (rather than one joined string) so adapters that don't support
 /// multi-statement execution work too. Consumes the universal
-/// `lower_schema_to_library_functions` output, sharing shape across
-/// every target.
+/// `lower_schema_module_functions` output, sharing shape across
+/// every target. An app without tables still gets the module, with an
+/// empty statement list.
 pub fn emit_lowered_schema(app: &App) -> EmittedFile {
-    let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+    let funcs = crate::lower::lower_schema_module_functions(&app.schema);
     library::emit_module_file(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
@@ -400,7 +401,7 @@ pub fn emit_lowered_schema(app: &App) -> EmittedFile {
 /// `.rbs`. Replaces `emit_lowered_schema` at call sites that want
 /// the typed sidecar emitted alongside.
 pub fn emit_lowered_schema_pair(app: &App) -> Vec<EmittedFile> {
-    let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+    let funcs = crate::lower::lower_schema_module_functions(&app.schema);
     library::emit_module_file_pair(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
