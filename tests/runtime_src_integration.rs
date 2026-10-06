@@ -793,6 +793,7 @@ fn every_runtime_method_body_concretely_typed() {
         eprintln!("  {stem}.rb: {count}");
     }
 
+<<<<<<< HEAD
     // Soft Bar B ratchet: count of exact `Ty::Untyped` sites across
     // `runtime/ruby`. Fails only when the residual rises. Tighten the
     // ceiling after a measured drop — never raise without a ledgered
@@ -801,6 +802,12 @@ fn every_runtime_method_body_concretely_typed() {
     // where / sum / Arel column+subquery / exec name / update_column
     // (352→322). Residual still dominated by polymorphic SQL and
     // helper-opt hashes; `Relation[T]` is the longer-term fix.
+=======
+    // Soft Bar B ratchet: fails when residual rises. Tighten after a
+    // measured drop; never raise without a ledgered feature. Residual
+    // still dominated by polymorphic SQL / helper-opt hashes;
+    // `Relation[T]` is the longer-term fix.
+>>>>>>> afdce1c3 (Shorten Soft Bar B ceiling comment)
     const CEILING: usize = 322;
     assert!(
         total_gradual <= CEILING,
