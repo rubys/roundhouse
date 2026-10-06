@@ -113,9 +113,7 @@ jobs:
         env:
           WRITEBOOK_ROOT: /tmp/writebook
           WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
-        run: |
-          cargo build --locked --release --bin roundhouse
-          cargo test --locked --test writebook --release -- --ignored --nocapture
+        run: cargo test --locked --release --bin roundhouse --test writebook -- --ignored --nocapture
       - name: Save complete check report
         id: report
         if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
@@ -310,16 +308,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-reuse.py probe --job store-check --input fixtures/store
+      # Debug, not release: the analyzer claim is the same IR. On PR
+      # 37439350975 this job spent 95s of 113s compiling a release
+      # binary for a check that finishes in seconds.
       - name: cargo build
         id: build
         if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
-        run: cargo build --locked --release --bin roundhouse
+        run: cargo build --locked --bin roundhouse
       - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
         id: check
         if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: |
           set -euo pipefail
-          target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
+          target/debug/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
       - name: Record actual successful execution
         id: execution
@@ -431,6 +432,7 @@ jobs:
       # Preprocess each time: Spinel uses conditional __has_include headers.
       SCCACHE_DIRECT: "false"
       SCCACHE_IDLE_TIMEOUT: "0"
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -551,6 +553,10 @@ jobs:
       # shared library/bin sidecars stay. Code stays unoptimized.
       # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
+      # Hosted linux: lld links hundreds of integration binaries much
+      # faster than bfd. Code stays unoptimized; assertions unchanged.
+      CARGO_PROFILE_TEST_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      CARGO_PROFILE_DEV_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -579,33 +585,43 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
-      - name: Install the gem the overlay escape surface uses
-        run: gem install rails-html-sanitizer --no-document
-      # The native Date reference uses ActiveRecord against in-memory
-      # SQLite. Fixture generation ships source, not its installed gems.
-      - name: Install ActiveRecord for the native Date reference
-        run: gem install activerecord -v '~> 8.1.0' --no-document
-      # `tests/emit_and_run.rs` and `tests/relation_runtime_cruby.rs`
-      # run the emitted Ruby tree, whose database layer is the sqlite3
-      # gem. The second skipped without it and passed: before this step
-      # the unit job ran it as a no-op. The first refuses to skip.
-      #
-      # Campfire launcher regressions (`tests/ci_campfire_optimization_test.py`,
-      # invoked from `tests/ci_policy_workflow.rs`) preload
-      # `scripts/campfire-test-bcrypt.rb`, which `require "bcrypt"`. A
-      # runner without the gem fails those tests; a dev box that has it
-      # hides the gap.
-      #
-      # `tests/vips_loader_policy.rs` boots an emitted variant app and
-      # asks `Vips.vips_foreign_find_load` after the app's loader policy.
-      # That require is ruby-vips over the system libvips: without both,
-      # the test dies on `cannot load such file -- vips` while a machine
-      # that already has the gem hides the gap. CRuby binds through FFI,
-      # so libvips42 is enough; headers are the compiled Spinel job.
+      # libvips42: `tests/vips_loader_policy.rs` boots an emitted variant
+      # app and asks `Vips.vips_foreign_find_load` after the app's loader
+      # policy. CRuby binds through FFI, so the library is enough; headers
+      # are the compiled Spinel job. lld: unit links many test binaries.
       - name: System libvips for the emitted ruby-vips processor
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips42
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 lld
+      # One gem process: three sequential `gem install` steps were paying
+      # RubyGems startup separately for the same default gem path.
+      #
+      # rails-html-sanitizer — `tests/overlay_sanitize_autolink.rs` shells
+      # out to ruby and loads the CRuby overlay's escape surface. Without
+      # the gem the overlay falls back to the shared scanner (which refuses
+      # markup by design) and the test fails naming this step.
+      # setup-ruby, not the runner's system ruby: `gem install` against
+      # system ruby is a Gem::FilePermissionError, and the test asserts
+      # EXACT sanitizer output, so the ruby it runs on is part of the
+      # assertion. 3.4 is the version campfire-conformance pins.
+      #
+      # activerecord — the native Date reference uses ActiveRecord against
+      # in-memory SQLite. Fixture generation ships source, not its gems.
+      #
+      # sqlite3 — `tests/emit_and_run.rs` and `tests/relation_runtime_cruby.rs`
+      # run the emitted Ruby tree. The second skipped without the gem and
+      # passed: before this install the unit job ran it as a no-op.
+      #
+      # bcrypt — Campfire launcher regressions
+      # (`tests/ci_campfire_optimization_test.py`) preload
+      # `scripts/campfire-test-bcrypt.rb`. A runner without the gem fails
+      # those tests; a dev box that has it hides the gap.
+      #
+      # ruby-vips — pairs with libvips42 above; without the gem the vips
+      # loader test dies on `cannot load such file -- vips`.
       - name: Install gems used by emitted Ruby and Campfire harness tests
-        run: gem install sqlite3 bcrypt ruby-vips --no-document
+        run: |
+          gem install --no-document rails-html-sanitizer sqlite3 bcrypt ruby-vips
+          gem install --no-document activerecord -v '~> 8.1.0'
       # Bounded build → run → free waves: every --all-targets identity still
       # goes through Cargo (lib, bins, each integration target). Finished
       # integration executables and their own split-DWARF sidecars are freed
@@ -636,8 +652,9 @@ jobs:
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/bench" -- \
             bash -euo pipefail -c '
+              test -x target/debug/emit_preview
               for target in typescript crystal rust python elixir go kotlin swift csharp; do
-                cargo run --quiet --bin emit_preview -- --target "$target" fixtures/real-blog >/dev/null
+                target/debug/emit_preview --target "$target" fixtures/real-blog >/dev/null
               done
             '
       - name: Upload unit resource samples
@@ -961,6 +978,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -1084,7 +1103,8 @@ jobs:
       # app's own hardening line.
       # CRuby binds libvips through FFI; only compiled Spinel needs headers.
       - name: System libvips
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips42 sqlite3
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v6
@@ -1149,6 +1169,8 @@ jobs:
     outputs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
       execution: ${{ steps.result.outputs.status }}
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -1162,7 +1184,8 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1301,6 +1324,7 @@ jobs:
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -1329,7 +1353,8 @@ jobs:
         # this program's allocator and `spin build` links `-ljemalloc`.
         # The DEV package, not libjemalloc2: the runtime library LD_PRELOAD
         # uses cannot be linked against.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1371,6 +1396,7 @@ jobs:
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -1387,7 +1413,8 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1881,6 +1908,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2513,6 +2542,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -2597,6 +2628,8 @@ jobs:
     # 26 of its 30 minutes on 2026-09-12 (run 34725916085). A publish
     # that times out four minutes short is a flake waiting to happen.
     timeout-minutes: 60
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2780,6 +2813,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
+    env:
+      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

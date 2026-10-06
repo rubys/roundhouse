@@ -19,8 +19,8 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         "no racing matrix artifact output"
     );
     assert_eq!(
-        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
-        Some("unpacked")
+        unit["env"]["CARGO_PROFILE_TEST_RUSTFLAGS"].as_str(),
+        Some("-C link-arg=-fuse-ld=lld")
     );
     assert!(
         ci["env"]
@@ -37,9 +37,11 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         .expect("install sqlite3, bcrypt and ruby-vips before the unit batches");
     let install = steps[gems]["run"].as_str().unwrap();
     assert!(
-        install.contains("gem install sqlite3")
+        install.contains("sqlite3")
             && install.contains("bcrypt")
-            && install.contains("ruby-vips"),
+            && install.contains("ruby-vips")
+            && install.contains("rails-html-sanitizer")
+            && install.contains("activerecord"),
         "{install}"
     );
     let vips = steps
@@ -48,6 +50,11 @@ fn unit_batches_all_targets_without_reducing_coverage() {
             step["name"].as_str() == Some("System libvips for the emitted ruby-vips processor")
         })
         .expect("install libvips42 before ruby-vips");
+    let vips_run = steps[vips]["run"].as_str().unwrap();
+    assert!(
+        vips_run.contains("ci-apt-install") && vips_run.contains("libvips42"),
+        "{vips_run}"
+    );
     assert!(
         vips < gems,
         "ruby-vips binds the system libvips; the package must be on the box first"
@@ -95,7 +102,11 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     let body = bench["run"].as_str().unwrap();
     assert!(body.contains("bash -euo pipefail -c"));
     assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
-    assert!(body.contains("cargo run --quiet --bin emit_preview -- --target"));
+    assert!(body.contains("target/debug/emit_preview --target"));
+    assert!(
+        !body.contains("cargo run"),
+        "shard 0 already built bins; do not pay cargo startup per lane"
+    );
     let resources = steps
         .iter()
         .find(|step| step["with"]["name"].as_str() == Some("unit-resources-${{ matrix.shard }}"))
@@ -372,6 +383,7 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
     for test in [
         "tests/ci_resources_test.py",
         "tests/ci_unit_tests_test.py",
+        "tests/ci_apt_install_test.py",
         "tests/ci_campfire_optimization_test.py",
         "tests/ci_smoke_test.py",
     ] {

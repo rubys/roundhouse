@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `apt-get update` + `apt-get install`, BOUNDED ON THE NETWORK.
+# `apt-get install`, BOUNDED ON THE NETWORK, without a mandatory update.
 #
 # Usage: scripts/ci-apt-install libsqlite3-dev [more packages...]
 #
@@ -21,16 +21,50 @@
 # the wasted minutes: run 32207123547 reported "cancelled" while
 # campfire's floor and every toolchain in it were green. A run
 # conclusion that says nothing is worse than one that says no.
+#
+# Hosted Ubuntu images already carry an apt index. `apt-get update` was
+# 13–50s of several jobs (and the hang surface above) before any
+# package work. Skip packages that dpkg already has, try the image
+# index first, and only refresh when that install cannot find a package.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
-    echo "usage: $0 <package> [package...]" >&2
-    exit 2
+  echo "usage: $0 <package> [package...]" >&2
+  exit 2
+fi
+
+installed() {
+  local status
+  status="$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null || true)"
+  [ "$status" = installed ]
+}
+
+need=()
+for pkg in "$@"; do
+  if installed "$pkg"; then
+    echo "ci-apt-install: $pkg already installed"
+  else
+    need+=("$pkg")
+  fi
+done
+
+if [ "${#need[@]}" -eq 0 ]; then
+  echo "ci-apt-install: nothing to install"
+  exit 0
 fi
 
 # The bounds live in an apt.conf.d drop-in rather than on this command
 # line, so the apt calls we do NOT make (playwright's) get them too.
 "$(dirname "$0")/ci-apt-bound"
 
+install_pkgs() {
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@"
+}
+
+if install_pkgs "${need[@]}"; then
+  exit 0
+fi
+
+echo "ci-apt-install: image index missed packages; apt-get update and retry" >&2
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"
+install_pkgs "${need[@]}"

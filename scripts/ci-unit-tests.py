@@ -174,15 +174,13 @@ def selectors(names: list[str]) -> list[str]:
 
 
 def build_and_run_lib_bins(*, timings: bool) -> int:
-    build = ["test", "--locked", "--lib", "--bins", "--no-run"]
+    # One cargo invocation: a split --no-run + run pair re-fingerprints
+    # the same artifacts and was paying a second process on every shard 0.
+    command = ["test", "--locked", "--lib", "--bins"]
     if timings:
-        build.append("--timings")
-    print("== unit batch: build library + binaries ==", flush=True)
-    status = run_cargo(build)
-    if status != 0:
-        return status
-    print("== unit batch: run library + binaries ==", flush=True)
-    return run_cargo(["test", "--locked", "--lib", "--bins"])
+        command.append("--timings")
+    print("== unit batch: library + binaries ==", flush=True)
+    return run_cargo(command)
 
 
 def build_and_run_integration_batch(
@@ -196,16 +194,17 @@ def build_and_run_integration_batch(
     label = f"{batch_index}/{batch_count}"
     flags = selectors(names)
     print(
-        f"== unit batch {label}: build {len(names)} integration target(s) ==",
+        f"== unit batch {label}: {len(names)} integration target(s) ==",
         flush=True,
     )
-    build = ["test", "--locked", *flags, "--no-run"]
+    command = ["test", "--locked", *flags]
     if timings and batch_index == 1:
         # One timings report for the first integration wave; later waves would
         # overwrite cargo-timing.html and add little signal for disk work.
-        build.append("--timings")
-    status = run_cargo(build)
+        command.append("--timings")
+    status = run_cargo(command)
     if status != 0:
+        # Keep failing artifacts for local inspection; do not free on failure.
         return status
     missing = [name for name in names if not integration_executables(deps, name)]
     if missing:
@@ -214,14 +213,6 @@ def build_and_run_integration_batch(
             file=sys.stderr,
         )
         return 1
-    print(
-        f"== unit batch {label}: run {len(names)} integration target(s) ==",
-        flush=True,
-    )
-    status = run_cargo(["test", "--locked", *flags])
-    if status != 0:
-        # Keep failing artifacts for local inspection; do not free on failure.
-        return status
     freed = free_integration_targets(deps, names)
     print(
         f"== unit batch {label}: freed {freed} bytes of finished integration artifacts ==",

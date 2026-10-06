@@ -1247,7 +1247,7 @@ fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
 fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receipts() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for (name, expected_cargo_commands) in [("store-check", 1), ("writebook-inventory", 2)] {
+    for (name, expected_cargo_commands) in [("store-check", 1), ("writebook-inventory", 1)] {
         let steps = ci["jobs"][name]["steps"].as_sequence().unwrap();
         let commands: Vec<_> = steps
             .iter()

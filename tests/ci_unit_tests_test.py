@@ -240,11 +240,11 @@ class UnitBatchTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             self.assertFalse(any("--lib" in call or "--bins" in call for call in calls))
+            self.assertTrue(all("--no-run" not in call for call in calls))
             tested = [
                 call[call.index("--test") + 1] for call in calls if "--test" in call
             ]
-            self.assertTrue(tested)
-            self.assertTrue(all(name == "beta" for name in tested))
+            self.assertEqual(tested, ["beta"])
             self.assertTrue(all("--locked" in call for call in calls))
             self.assertFalse(beta.exists())
             self.assertTrue(alpha.exists())
