@@ -29,6 +29,14 @@ module Rails
     def production?: () -> bool
     def test?: () -> bool
     def staging?: () -> bool
+    def local?: () -> bool
+    def to_s: () -> String
+    def to_str: () -> String
+    def to_sym: () -> Symbol
+    def inspect: () -> String
+    def ==: (Object other) -> bool
+    def eql?: (Object other) -> bool
+    def hash: () -> Integer
   end
 
   class Cache

@@ -130,9 +130,54 @@ module Rails
 
   # `Rails.env.production?` etc. — a plain object answering the known
   # environment predicates (no `method_missing`, no `String` subclass).
+  # Rails' is ActiveSupport::EnvironmentInquirer (activesupport 8.1.4
+  # environment_inquirer.rb), a StringInquirer: it IS the name, so it
+  # compares, interpolates and converts as that String, `local?` is
+  # development or test, and "local" is refused as a name.
   class Env
     def initialize(name)
+      raise ArgumentError, "'local' is a reserved environment name" if name == "local"
       @name = name
+    end
+
+    # `LOCAL_ENVIRONMENTS = %w[ development test ]`.
+    def local?
+      @name == "development" || @name == "test"
+    end
+
+    def to_s
+      @name
+    end
+
+    def to_str
+      @name
+    end
+
+    def to_sym
+      @name.to_sym
+    end
+
+    def inspect
+      @name.inspect
+    end
+
+    # String equality, as the String it is in Rails: `Rails.env ==
+    # "test"`, and through `to_str`, `"test" == Rails.env` and `when
+    # "test"`. A Symbol is not equal (`Rails.env == :test` is false).
+    def ==(other)
+      if other.is_a?(Env)
+        @name == other.to_s
+      else
+        other.is_a?(String) && @name == other
+      end
+    end
+
+    def eql?(other)
+      self == other
+    end
+
+    def hash
+      @name.hash
     end
 
     def development?
