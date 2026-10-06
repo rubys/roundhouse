@@ -119,11 +119,7 @@ module ActionView
     def self.path_to_javascript: (String source, ?skip_pipeline: bool) -> String
     def self.javascript_path: (String source, ?skip_pipeline: bool) -> String
 
-    # Generic element helper: `content_tag :span, text, title: "..."`.
-    # `content` is untyped — call sites pass strings, but Rails accepts
-    # anything stringifiable and the body goes through `.to_s` (nil
-    # default renders "").
-    def self.content_tag: (Symbol name, ?untyped? content, ?Hash[Symbol, untyped] opts) -> String
+    def self.content_tag: (Symbol name, ?(String | Integer | nil) content, ?Hash[Symbol, untyped] opts) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,
@@ -137,11 +133,9 @@ module ActionView
       ?String entry
     ) -> String
   
-    # `stream` is genuinely polymorphic — Rails' turbo_stream_from
-    # accepts a String channel name OR an Array (composed channel).
-    # JSON.generate handles either, so untyped here.
-    def self.turbo_stream_from: (untyped stream, String channel) -> String
-    def self.signed_stream_name: (untyped stream) -> String
+    # String channel name or composed Array; JSON.generate handles either.
+    def self.turbo_stream_from: (String | Array[untyped] stream, String channel) -> String
+    def self.signed_stream_name: (String | Array[untyped] stream) -> String
   
     # ── form_with primitives ───────────────────────────────────────
     # Small typed-scalar helpers callable from macro-inlined form_with
@@ -151,23 +145,15 @@ module ActionView
     def self.cache_scope: () -> String
     def self.begin_broadcast_render: () -> String
     def self.broadcast_render: (String _armed, String html) -> String
-    # `untyped`, not `Symbol`: the body's whole use of it is `to_s` and
-    # two string comparisons, and `form_with` below reads the method out
-    # of an untyped options hash. Declaring `Symbol` made the honest
-    # caller the illegal one.
-    def self.method_override_input: (untyped method) -> String
+    # HTML method name; `form_with` may hand a Symbol from opts.
+    def self.method_override_input: (String | Symbol method) -> String
     # Blockless `form_with` — the runtime fallback for a `form_with`
     # written in a HELPER body, where the options are a runtime value.
     # See the .rb for what it deliberately does not do.
     def self.form_with: (?Hash[Symbol, untyped] opts) -> String
-    # `value` accepts the abstract Base#[] return type (the union of
-    # all schema column types — Int64/String/Float/Bool plus Nil).
-    # Both helper bodies already nil-check and stringify uniformly,
-    # so widening to `untyped` keeps the call-site shape simple
-    # (`optional_value_attr(record[:field])`) without per-column
-    # casts.
-    def self.optional_value_attr: (untyped value) -> String
-    def self.escape_or_empty: (untyped value) -> String
+    # Schema column union (plus nil). Bodies nil-check and stringify.
+    def self.optional_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.escape_or_empty: (String | Integer | Float | bool | nil value) -> String
 
     # ── attribute rendering ────────────────────────────────────────
     # `attrs` is a Symbol-keyed Hash — the shape every caller already

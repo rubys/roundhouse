@@ -20,9 +20,9 @@ module ActiveRecord
     def select_rows: (String sql) -> Array[Array[untyped]]
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
-    def exec_update: (String sql, ?String? name, ?Array[untyped] binds) -> Integer
-    def exec_delete: (String sql, ?String? name, ?Array[untyped] binds) -> Integer
-    def exec_insert: (String sql, ?String? name, ?Array[untyped] binds) -> Result
+    def exec_update: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Integer
+    def exec_delete: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Integer
+    def exec_insert: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Result
   end
 
   class Base

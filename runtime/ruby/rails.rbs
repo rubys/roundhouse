@@ -35,7 +35,7 @@ module Rails
     @entries: Hash[String, String]
     @expires_at: Hash[String, Integer]
     def initialize: () -> void
-    def fetch: (untyped key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
+    def fetch: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
     def fetch_str: (String key, Integer ttl) { () -> String } -> String
     # `String?` because nil is the MISS. An empty String is a HIT — a
     # fragment can legitimately render to nothing, and reading that back
@@ -45,10 +45,10 @@ module Rails
     def increment_str: (String key, Integer ttl) -> Integer
     def forget: (String k) -> void
     def clear: () -> void
-    def read: (untyped key) -> untyped
-    def write: (untyped key, untyped value) -> untyped
-    def delete: (untyped key) -> untyped
-    def exist?: (untyped key) -> bool
+    def read: (String | Symbol | Array[untyped] key) -> untyped
+    def write: (String | Symbol | Array[untyped] key, untyped value) -> untyped
+    def delete: (String | Symbol | Array[untyped] key) -> untyped
+    def exist?: (String | Symbol | Array[untyped] key) -> bool
   end
 
   class Logger

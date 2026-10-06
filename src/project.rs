@@ -736,13 +736,9 @@ fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), St
             "spinel_relation_model_handle: active_record/relation.rbs not in the tree".to_string()
         })?;
     let relation = &mut files[idx].1;
-    // Exact pairs first: spawn must not become `Array[untyped]?` (Spinel
-    // integer-seed cache), and find_by conditions widen past `Base`.
+    // Exact pairs: find_by conditions widen past `Base`. Spawn no longer
+    // takes a records param (`take_query_lists` + clone).
     let replacements = [
-        (
-            "        Array[Base]? records,\n",
-            "        untyped records,\n",
-        ),
         (
             "    def find_by: (Hash[Symbol, untyped] | String conditions) -> Base?\n",
             "    def find_by: (untyped conditions) -> untyped\n",

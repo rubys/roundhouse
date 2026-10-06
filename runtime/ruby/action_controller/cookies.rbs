@@ -46,7 +46,7 @@ module ActionController
     def []=: (String | Symbol key, untyped value) -> untyped
     def permanent: () -> ActionController::SignedCookieJar
     def delete: (String | Symbol key) -> String
-    def self.value_of: (untyped value) -> String
+    def self.value_of: (Hash[Symbol, untyped] | String | Integer | Symbol | bool value) -> String
   end
 
   class Base
@@ -60,7 +60,7 @@ end
 module ActionDispatch
   module Cookies
     class CookieJar
-      def self.build: (untyped request, Hash[String, String] cookies) -> ActionController::CookieJar
+      def self.build: (ActionDispatch::Request request, Hash[String, String] cookies) -> ActionController::CookieJar
     end
   end
 end

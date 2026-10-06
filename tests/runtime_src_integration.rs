@@ -793,22 +793,11 @@ fn every_runtime_method_body_concretely_typed() {
         eprintln!("  {stem}.rb: {count}");
     }
 
-<<<<<<< HEAD
-    // Soft Bar B ratchet: count of exact `Ty::Untyped` sites across
-    // `runtime/ruby`. Fails only when the residual rises. Tighten the
-    // ceiling after a measured drop — never raise without a ledgered
-    // feature. 2026-10-06: Relation records as `Base` (443→393);
-    // cookie/session/flash keys + query unions (393→352); quote /
-    // where / sum / Arel column+subquery / exec name / update_column
-    // (352→322). Residual still dominated by polymorphic SQL and
-    // helper-opt hashes; `Relation[T]` is the longer-term fix.
-=======
     // Soft Bar B ratchet: fails when residual rises. Tighten after a
     // measured drop; never raise without a ledgered feature. Residual
     // still dominated by polymorphic SQL / helper-opt hashes;
     // `Relation[T]` is the longer-term fix.
->>>>>>> afdce1c3 (Shorten Soft Bar B ceiling comment)
-    const CEILING: usize = 322;
+    const CEILING: usize = 303;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
