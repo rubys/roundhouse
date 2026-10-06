@@ -863,6 +863,8 @@
     "Error|send_dispatch_failed|app/views/pages/edits/show.html.erb:65:26|no known method `body` on Relation[Leaf]": 1,
     "Error|unsupported|app/controllers/action_text/markdown/uploads_controller.rb:48:21|constant not supported (all targets): ActiveStorage::Attachment": 1,
     "Error|unsupported|app/models/leafable.rb:27:26|constant not supported (all targets): ActiveModel::Name": 1,
+    "Info|unresolved_type|lib/rails_ext/action_text_markdown.rb:30:31|method call `renderer` has unresolved type — likely roundhouse coverage, not an app error (ingest gap in lib/rails_ext/action_text_markdown.rb: `ActiveSupport.on_load)": 1,
+    "Info|unresolved_type|lib/rails_ext/action_text_markdown.rb:30:8|method call `renderer` has unresolved type — likely roundhouse coverage, not an app error (ingest gap in lib/rails_ext/action_text_markdown.rb: `ActiveSupport.on_load)": 1,
     "Warning|gradual_untyped|app/controllers/action_text/markdown/uploads_controller.rb:22:8|expression resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/controllers/action_text/markdown/uploads_controller.rb:22:8|ivar read resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/controllers/action_text/markdown/uploads_controller.rb:22:8|method call resolves to RBS `untyped` (gradual escape)": 1,
@@ -888,7 +890,6 @@
     "Warning|gradual_untyped|app/models/page.rb:21:5|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/models/page.rb:30:19|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/models/page.rb:31:31|local read resolves to RBS `untyped` (gradual escape)": 1,
-    "Warning|gradual_untyped|app/models/page.rb:35:7|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/models/session.rb:15:31|constant read resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/models/session.rb:15:31|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/views/accounts/custom_styles/edit.html.erb:23:38|method call resolves to RBS `untyped` (gradual escape)": 1,
@@ -942,7 +943,6 @@
     "Warning|gradual_untyped|app/views/users/profiles/edit.html.erb:41:11|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|lib/rails_ext/action_text_markdown.rb:30:7|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|lib/rails_ext/action_text_markdown.rb:30:8|method call resolves to RBS `untyped` (gradual escape)": 1,
-    "Warning|unresolved_type|<synthetic>|local read `value` has unresolved type": 1,
     "Warning|unresolved_type|app/controllers/books/leaves/moves_controller.rb:8:50|local read `followed_by` has unresolved type": 1,
     "Warning|unresolved_type|app/controllers/books/leaves/moves_controller.rb:8:5|local read `leaf` has unresolved type": 1,
     "Warning|unresolved_type|app/controllers/books/publications_controller.rb:14:17|method call `book_slug_url` has unresolved type": 1,
@@ -965,6 +965,7 @@
     "Warning|unresolved_type|app/models/edit.rb:25:7|method call `leafable` has unresolved type": 1,
     "Warning|unresolved_type|app/models/leaf/searchable.rb:25:40|local read `terms` has unresolved type": 1,
     "Warning|unresolved_type|app/models/page.rb:25:5|method call `body` has unresolved type": 1,
+    "Warning|unresolved_type|app/models/page.rb:35:7|method call `preview_renderer` has unresolved type": 1,
     "Warning|unresolved_type|app/models/page.rb:39:7|method call `body` has unresolved type": 1,
     "Warning|unresolved_type|app/models/session.rb:11:25|local read `user_agent` has unresolved type": 1,
     "Warning|unresolved_type|app/models/session.rb:11:49|local read `ip_address` has unresolved type": 1,
@@ -1231,7 +1232,9 @@
       "Warning|unsupported|app/models/edit.rb:3:3|delegated_type not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:5:3|delegated_type not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
+      "Warning|unsupported|app/models/page.rb:4:3|cattr_accessor not supported (all targets): model DSL call on `Page` not lowered": 1,
+      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1,
+      "Warning|unsupported|lib/rails_ext/action_text_markdown.rb:24:5|mattr_accessor not supported (all targets): model DSL call on `ActionText::Markdown` not lowered": 1
     },
     "spinel": {
       "Error|unsupported|app/helpers/arrangement_helper.rb:2:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
@@ -1295,7 +1298,9 @@
       "Warning|unsupported|app/models/edit.rb:3:3|delegated_type not supported (all targets): model DSL call on `Edit` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:5:3|delegated_type not supported (all targets): model DSL call on `Leaf` not lowered": 1,
       "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
+      "Warning|unsupported|app/models/page.rb:4:3|cattr_accessor not supported (all targets): model DSL call on `Page` not lowered": 1,
+      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1,
+      "Warning|unsupported|lib/rails_ext/action_text_markdown.rb:24:5|mattr_accessor not supported (all targets): model DSL call on `ActionText::Markdown` not lowered": 1
     }
   }
 }
