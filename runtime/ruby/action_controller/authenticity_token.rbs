@@ -1,6 +1,8 @@
 # Typing contract for authenticity_token.rb beside this file.
 module ActionController
   module AuthenticityToken
+    # AUTHENTICITY_TOKEN_LENGTH in actionpack. Integer literals in
+    # bodies: a module constant types as a class id here, not Integer.
     LENGTH: Integer
     GLOBAL_SCOPE: String
     def self.masked: () -> String

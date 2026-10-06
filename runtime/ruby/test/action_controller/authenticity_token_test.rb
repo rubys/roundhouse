@@ -38,8 +38,11 @@ class AuthenticityTokenTest < Minitest::Test
     secret = ActionController::Current.session[:_csrf_token].to_s
     assert ActionController::AuthenticityToken.valid?(token, secret)
     tags = ActionView::ViewHelpers.csrf_meta_tags
-    assert_includes tags, token
+    assert_includes tags, %(name="csrf-token")
     hidden = ActionView::ViewHelpers.csrf_token_hidden_input
-    assert_includes hidden, token
+    assert_includes hidden, %(name="authenticity_token")
+    hidden_token = hidden[/value="([^"]+)"/, 1]
+    refute_equal secret, hidden_token
+    assert ActionController::AuthenticityToken.valid?(hidden_token, secret)
   end
 end

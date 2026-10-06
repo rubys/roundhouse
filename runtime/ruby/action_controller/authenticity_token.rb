@@ -10,7 +10,7 @@
 # primitives below are `MessageDigest.secure_random_bytes`,
 # `hmac_sha256`, and `secure_compare`.
 module ActionController
-  module AuthenticityToken
+    module AuthenticityToken
     LENGTH = 32
     GLOBAL_SCOPE = "!real_csrf_token"
 
@@ -18,9 +18,9 @@ module ActionController
       raw_b64 = ensure_session_token
       return "" if raw_b64.empty?
       raw = decode(raw_b64)
-      return "" if raw.length != LENGTH
-      pad = MessageDigest.secure_random_bytes(LENGTH)
-      return "" if pad.length != LENGTH
+      return "" if raw.length != 32
+      pad = MessageDigest.secure_random_bytes(32)
+      return "" if pad.length != 32
       Base64.urlsafe_encode64_nopad(pad + xor(pad, raw))
     end
 
@@ -28,9 +28,9 @@ module ActionController
       return false if expected_b64.empty?
       return false if given.empty?
       expected = decode(expected_b64)
-      return false if expected.length != LENGTH
+      return false if expected.length != 32
       actual = unmask(given)
-      return false if actual.length != LENGTH
+      return false if actual.length != 32
       return true if MessageDigest.secure_compare(actual, expected)
       MessageDigest.secure_compare(actual, hmac_global(expected))
     end
@@ -47,15 +47,15 @@ module ActionController
     end
 
     def self.mint
-      Base64.urlsafe_encode64_nopad(MessageDigest.secure_random_bytes(LENGTH))
+      Base64.urlsafe_encode64_nopad(MessageDigest.secure_random_bytes(32))
     end
 
     def self.unmask(encoded)
       decoded = decode(encoded)
       n = decoded.length
-      return decoded if n == LENGTH
-      return "" if n != LENGTH + LENGTH
-      xor(decoded[0, LENGTH].to_s, decoded[LENGTH, LENGTH].to_s)
+      return decoded if n == 32
+      return "" if n != 64
+      xor(decoded[0, 32].to_s, decoded[32, 32].to_s)
     end
 
     def self.decode(encoded)
@@ -65,7 +65,7 @@ module ActionController
     def self.xor(a, b)
       out = ""
       i = 0
-      while i < LENGTH
+      while i < 32
         out = out + (a.getbyte(i) ^ b.getbyte(i)).chr
         i += 1
       end
