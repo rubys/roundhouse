@@ -19,8 +19,8 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         "no racing matrix artifact output"
     );
     assert_eq!(
-        unit["env"]["CARGO_PROFILE_TEST_RUSTFLAGS"].as_str(),
-        Some("-C link-arg=-fuse-ld=lld")
+        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
+        Some("unpacked")
     );
     assert!(
         ci["env"]

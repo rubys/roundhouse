@@ -553,10 +553,6 @@ jobs:
       # shared library/bin sidecars stay. Code stays unoptimized.
       # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
-      # Hosted linux: lld links hundreds of integration binaries much
-      # faster than bfd. Code stays unoptimized; assertions unchanged.
-      CARGO_PROFILE_TEST_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
-      CARGO_PROFILE_DEV_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -588,10 +584,10 @@ jobs:
       # libvips42: `tests/vips_loader_policy.rs` boots an emitted variant
       # app and asks `Vips.vips_foreign_find_load` after the app's loader
       # policy. CRuby binds through FFI, so the library is enough; headers
-      # are the compiled Spinel job. lld: unit links many test binaries.
+      # are the compiled Spinel job.
       - name: System libvips for the emitted ruby-vips processor
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 lld
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       # One gem process: three sequential `gem install` steps were paying
       # RubyGems startup separately for the same default gem path.
       #
