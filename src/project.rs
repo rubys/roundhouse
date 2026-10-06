@@ -8242,8 +8242,8 @@ mod tests {
             "Spinel must not keep each_with_object Base block: {relation}"
         );
         assert!(
-            relation.contains("        untyped records,\n"),
-            "Spinel spawn records must stay bare untyped: {relation}"
+            relation.contains("def take_query_lists:"),
+            "Spinel must keep #462 take_query_lists: {relation}"
         );
         let leftover: Vec<&str> = relation
             .lines()
