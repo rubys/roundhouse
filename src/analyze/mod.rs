@@ -3488,6 +3488,7 @@ impl Analyzer {
         true
     }
 
+
     /// Walk every model + library_class method body and write its
     /// inferred body type into `self.classes[class].instance_methods`
     /// (or `class_methods` for `def self.x`). Conservative on widening:
@@ -4068,17 +4069,36 @@ impl Analyzer {
         }
     }
 
+    /// Conservative insertion into the harvested-return table.
+    ///
+    /// RBS-sourced `Ty::Fn` stays authoritative. Otherwise the new body
+    /// type replaces the old one, except when the two differ only by
+    /// top-level `Untyped`/`Var` arms — then the concrete core is kept
+    /// so a circular `config`/`load!` pair cannot thrash
+    /// `Configuration ↔ Configuration|Untyped` across fixpoint rounds.
+    /// (A full lattice join was tried and rejected: `Untyped` then `Nil`
+    /// collapsed Campfire URI helpers to bare `Nil`.)
     fn insert_inferred_return(
         table: &mut HashMap<Symbol, Ty>,
         method: &Symbol,
         ty: Ty,
     ) {
         match table.get(method) {
-            Some(Ty::Fn { .. }) => return,
-            Some(existing) if !matches!(existing, Ty::Var { .. }) && existing == &ty => return,
-            _ => {}
+            Some(Ty::Fn { .. }) => {}
+            Some(existing) if existing == &ty => {}
+            Some(existing) => {
+                if let Some(stable) = stabilize_untyped_return_oscillation(existing, &ty) {
+                    if existing != &stable {
+                        table.insert(method.clone(), stable);
+                    }
+                } else {
+                    table.insert(method.clone(), ty);
+                }
+            }
+            None => {
+                table.insert(method.clone(), ty);
+            }
         }
-        table.insert(method.clone(), ty);
     }
 
     /// Walk every Send across the app, look up each call's target
@@ -5795,6 +5815,115 @@ fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
         }
     }
     crate::analyze::body::union_of(stored, observed)
+}
+
+/// Drop top-level `Untyped`/`Var` arms, leaving the concrete core.
+/// Empty-of-concrete collapses to `Untyped` (caller decides whether
+/// that core is comparable to another).
+fn return_ty_concrete_core(ty: Ty) -> Ty {
+    match ty {
+        Ty::Union { variants } => {
+            let kept: Vec<Ty> = variants
+                .into_iter()
+                .filter(|v| !matches!(v, Ty::Untyped | Ty::Var { .. }))
+                .collect();
+            match kept.len() {
+                0 => Ty::Untyped,
+                1 => kept.into_iter().next().unwrap(),
+                _ => crate::analyze::body::union_many(kept),
+            }
+        }
+        Ty::Var { .. } => Ty::Untyped,
+        other => other,
+    }
+}
+
+fn return_ty_is_nil_only(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nil => true,
+        Ty::Union { variants } => variants.iter().all(|v| matches!(v, Ty::Nil)),
+        _ => false,
+    }
+}
+
+fn return_ty_has_untyped_or_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Union { variants } => variants
+            .iter()
+            .any(|v| matches!(v, Ty::Untyped | Ty::Var { .. })),
+        _ => false,
+    }
+}
+
+/// If two harvested returns differ only by top-level `Untyped`/`Var`
+/// arms, return the stable form to store. Non-Nil concrete cores keep
+/// the stripped type (`Configuration|Untyped` → `Configuration`).
+/// Nil-only cores keep `Nil|Untyped` when either side was gradual —
+/// collapsing to bare `Nil` turns Campfire URI helpers into
+/// "no known method on nil" errors.
+fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
+    let core_e = return_ty_concrete_core(existing.clone());
+    let core_n = return_ty_concrete_core(new.clone());
+    if core_e != core_n {
+        return None;
+    }
+    if return_ty_is_nil_only(&core_e) {
+        if return_ty_has_untyped_or_var(existing) || return_ty_has_untyped_or_var(new) {
+            return Some(crate::analyze::body::union_of(Ty::Nil, Ty::Untyped));
+        }
+        return Some(core_e);
+    }
+    Some(core_e)
+}
+
+#[cfg(test)]
+mod harvest_return_stability_tests {
+    use super::*;
+    use crate::ident::TyVar;
+
+    fn cfg() -> Ty {
+        Ty::Class {
+            id: ClassId(Symbol::from("Probe::Configuration")),
+            args: vec![],
+        }
+    }
+
+    #[test]
+    fn configuration_versus_configuration_or_untyped_stabilizes_to_configuration() {
+        let concrete = cfg();
+        let noisy = crate::analyze::body::union_of(cfg(), Ty::Untyped);
+        let stable = stabilize_untyped_return_oscillation(&concrete, &noisy)
+            .expect("same concrete core");
+        assert_eq!(stable, concrete);
+        let stable_rev = stabilize_untyped_return_oscillation(&noisy, &concrete)
+            .expect("order-independent");
+        assert_eq!(stable_rev, concrete);
+    }
+
+    #[test]
+    fn nil_versus_nil_or_untyped_keeps_gradual_nil() {
+        let nil = Ty::Nil;
+        let gradual = crate::analyze::body::union_of(Ty::Nil, Ty::Untyped);
+        let stable = stabilize_untyped_return_oscillation(&nil, &gradual)
+            .expect("nil-only cores match");
+        assert_eq!(stable, gradual);
+    }
+
+    #[test]
+    fn distinct_concrete_cores_do_not_stabilize() {
+        let a = Ty::Str;
+        let b = Ty::Int;
+        assert!(stabilize_untyped_return_oscillation(&a, &b).is_none());
+    }
+
+    #[test]
+    fn var_nil_versus_untyped_nil_keeps_gradual_nil() {
+        let a = crate::analyze::body::union_of(Ty::Var { var: TyVar(0) }, Ty::Nil);
+        let b = crate::analyze::body::union_of(Ty::Untyped, Ty::Nil);
+        let stable = stabilize_untyped_return_oscillation(&a, &b).expect("same nil core");
+        assert_eq!(stable, crate::analyze::body::union_of(Ty::Nil, Ty::Untyped));
+    }
 }
 
 
