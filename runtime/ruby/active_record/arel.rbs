@@ -22,9 +22,9 @@ module Arel
 
     def initialize: (String name) -> void
 
-    def attribute: (untyped column) -> Arel::Attribute
+    def attribute: (String | Symbol column) -> Arel::Attribute
 
-    def project: (untyped column) -> String
+    def project: (String | Symbol column) -> String
   end
 
   class Attribute
@@ -34,9 +34,9 @@ module Arel
 
     def to_s: () -> String
 
-    def in: (untyped subquery) -> String
+    def in: (ActiveRecord::Relation | SelectManager subquery) -> String
 
-    def not_in: (untyped subquery) -> String
+    def not_in: (ActiveRecord::Relation | SelectManager subquery) -> String
   end
 end
 

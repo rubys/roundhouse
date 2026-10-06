@@ -30,7 +30,7 @@ module ActiveRecord
     def copy_symbol_list: (Array[Symbol] xs) -> Array[Symbol]
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
-    def where: (?untyped condition, *untyped args) -> Relation
+    def where: (?(Hash[Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
 
     # Query ivars the body reads after builders write them. Declared so
     # probes / RBS-seeded typing do not freeze on `initialize`'s `nil`
@@ -55,11 +55,11 @@ module ActiveRecord
     @scope_attributes: Hash[Symbol, untyped]
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
-    def not: (?untyped condition, *untyped args) -> Relation
+    def not: (?(Hash[Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
     def excluding: (*untyped records) -> Relation
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
-    def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
+    def add_condition: (Hash[Symbol, untyped] | String | nil condition, Array[untyped] args, bool negate) -> bool
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
     # interim as first/take); `preloaded` stays bare for Spinel integer
@@ -74,7 +74,7 @@ module ActiveRecord
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
     def order_key_of: (Base record, String col) -> untyped
-    def where!: (?untyped condition, *untyped args) -> Relation
+    def where!: (?(Hash[Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
     def order!: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def limit: (Integer n) -> Relation
@@ -185,7 +185,7 @@ module ActiveRecord
     def first_n: (Integer n) -> Array[Base]
     def last_n: (Integer n) -> Array[Base]
     def count: () -> Integer
-    def sum: (untyped expr) -> Float
+    def sum: (String | Symbol expr) -> Float
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool

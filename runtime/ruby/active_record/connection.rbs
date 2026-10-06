@@ -14,15 +14,15 @@ module ActiveRecord
 
   class Connection
     def adapter_name: () -> String
-    def quote: (untyped value) -> String
+    def quote: (String | Integer | Float | bool | nil value) -> String
     def quote_string: (String str) -> String
     def execute: (String sql) -> Result
     def select_rows: (String sql) -> Array[Array[untyped]]
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
-    def exec_update: (String sql, ?untyped name, ?Array[untyped] binds) -> Integer
-    def exec_delete: (String sql, ?untyped name, ?Array[untyped] binds) -> Integer
-    def exec_insert: (String sql, ?untyped name, ?Array[untyped] binds) -> Result
+    def exec_update: (String sql, ?String? name, ?Array[untyped] binds) -> Integer
+    def exec_delete: (String sql, ?String? name, ?Array[untyped] binds) -> Integer
+    def exec_insert: (String sql, ?String? name, ?Array[untyped] binds) -> Result
   end
 
   class Base
@@ -30,13 +30,13 @@ module ActiveRecord
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
     def self.transaction: () { () -> untyped } -> untyped
-    def self.update_counters: (untyped id, Hash[Symbol, untyped] counters) -> Integer
-    def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
+    def self.update_counters: (Integer | String id, Hash[Symbol, untyped] counters) -> Integer
+    def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: (String | Symbol | Array[Symbol]), ?on_duplicate: String?, ?returning: untyped) -> Integer
     def self._conflict_predicate: (String columns) -> String
-    def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer
-    def self.record_timestamps=: (untyped value) -> untyped
+    def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: (String | Symbol | Array[Symbol]), ?on_duplicate: String?, ?returning: untyped) -> Integer
+    def self.record_timestamps=: (bool value) -> bool
     def self.record_timestamps: () -> bool
-    def update_column: (untyped name, untyped value) -> bool
+    def update_column: (String | Symbol name, untyped value) -> bool
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
