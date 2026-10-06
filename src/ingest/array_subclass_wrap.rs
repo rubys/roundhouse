@@ -76,8 +76,14 @@ fn protocol_names() -> HashSet<&'static str> {
 
 /// Rewrite `class X < Array` into an Object that holds `@elements`.
 ///
-/// Returns `Err(methods)` when `initialize` uses a form the wrapper
-/// cannot represent — the caller keeps the Array parent.
+/// Returns `Err(methods)` when the wrapper cannot represent the class
+/// honestly — the caller keeps the Array parent.
+///
+/// Known ledger gap: `super(n)` where `n` is a variable size (not an
+/// integer literal) is treated as a collection wrap (`@elements = n`).
+/// Literal `super(3)` / `super(3, fill)` correctly keep the Array
+/// parent. Distinguishing variable size from `super(records)` needs
+/// types; until Spinel #7584, collection-shaped idents are the corpus.
 fn try_wrap_array_subclass(
     owner: &ClassId,
     mut methods: Vec<MethodDef>,
@@ -85,12 +91,23 @@ fn try_wrap_array_subclass(
     if !initialize_super_is_wrappable(&methods) {
         return Err(methods);
     }
+    let synth_names = protocol_names();
+    // Decorated/`return super` bodies on protocol names are not
+    // rewritable; wrapping would clear Array and leave dead `super`.
+    // Fail closed — keep the Array parent.
+    if methods.iter().any(|m| {
+        m.receiver == MethodReceiver::Instance
+            && synth_names.contains(m.name.as_str())
+            && !is_pure_super_body(&m.body)
+            && body_contains_super(&m.body)
+    }) {
+        return Err(methods);
+    }
     for method in &mut methods {
         if method.receiver == MethodReceiver::Instance && method.name.as_str() == "initialize" {
             rewrite_array_super_to_elements(&mut method.body, &method.params);
         }
     }
-    let synth_names = protocol_names();
     // Pure-`super` overrides of synthesized names would leave a dead
     // `super` after the Array parent is cleared. Drop them so the
     // splat/block forward wins.
@@ -178,6 +195,19 @@ fn is_pure_super_body(expr: &Expr) -> bool {
         ExprNode::Seq { exprs } if exprs.len() == 1 => is_pure_super_body(&exprs[0]),
         _ => false,
     }
+}
+
+fn body_contains_super(expr: &Expr) -> bool {
+    let mut found = false;
+    fn walk(expr: &Expr, found: &mut bool) {
+        if matches!(&*expr.node, ExprNode::Super { .. }) {
+            *found = true;
+            return;
+        }
+        expr.node.for_each_child(&mut |c| walk(c, found));
+    }
+    walk(expr, &mut found);
+    found
 }
 
 /// `super(records)` → `@elements = records`.

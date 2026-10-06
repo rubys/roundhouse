@@ -305,6 +305,36 @@ fn empty_array_subclass_seeds_elements() {
 }
 
 #[test]
+fn decorated_super_on_protocol_keeps_array_parent() {
+    let app = library_app(
+        "app/models/bag.rb",
+        r#"class Bag < Array
+  def initialize(records)
+    super(records)
+  end
+
+  def first
+    r = super
+    r
+  end
+end
+"#,
+    );
+    let bag = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Bag")
+        .expect("Bag");
+    assert!(
+        bag.parent
+            .as_ref()
+            .is_some_and(|p| p.0.as_str() == "Array"),
+        "decorated super on protocol name must keep Array parent, got {:?}",
+        bag.parent
+    );
+}
+
+#[test]
 fn pure_super_first_n_yields_splat_forward() {
     let app = library_app(
         "app/models/bag.rb",
