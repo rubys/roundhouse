@@ -239,7 +239,7 @@ case "$TARGET" in
         ;;
     swift)
         # Debug SPM build -> .build/debug/App. Mirrors `scripts/compare swift`.
-        (cd "$APP_DIR" && swift build --disable-index-store -Xswiftc -gnone) \
+        (cd "$APP_DIR" && swift build -Xswiftc -gnone) \
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;

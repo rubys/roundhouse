@@ -155,8 +155,12 @@ fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
 fn compare_script_builds_swift_debug_not_release() {
     let script = fs::read_to_string("scripts/compare").unwrap();
     assert!(
-        script.contains("swift build --disable-index-store -Xswiftc -gnone"),
+        script.contains("swift build -Xswiftc -gnone"),
         "compare must use a debug SPM build for the Swift server"
+    );
+    assert!(
+        !script.contains("--disable-index-store"),
+        "Linux `swift test`/`swift build` fatalError if the index store path is missing"
     );
     assert!(
         !script.contains("swift build -c release"),
@@ -171,7 +175,30 @@ fn compare_script_builds_swift_debug_not_release() {
         "compare must boot the debug binary it just built"
     );
     assert!(
-        script.contains("tools/compare/target/debug/roundhouse-compare"),
-        "the comparator itself is debug; its crate is outside the root rust-cache"
+        script.contains("tools/compare/target/release/roundhouse-compare"),
+        "non-Swift compare jobs keep the previous release comparator"
     );
+}
+
+#[test]
+fn compare_rust_cache_does_not_add_extra_directories() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for job in ["compare", "compare-extra"] {
+        let rust_cache = workflow["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("Swatinem/rust-cache@")
+            })
+            .unwrap_or_else(|| panic!("{job} rust-cache"));
+        assert!(
+            rust_cache.get("with").is_none(),
+            "{job} rust-cache must stay the default workspace cache; extra directories change the key for every compare target"
+        );
+    }
 }

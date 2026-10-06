@@ -113,11 +113,12 @@ fn build_and_run(test_files: &[&str], tag: &str) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
-    // `swift test` builds main + tests and runs XCTest. Skip the index
-    // store and full debuginfo: CI only needs the XCTest result.
+    // `swift test` builds main + tests and runs XCTest. Skip full
+    // debuginfo: CI only needs the XCTest result. Do not pass
+    // `--disable-index-store`: SPM still looks up the index store
+    // path and `swift test` then fatalErrors on Linux.
     let output = Command::new("swift")
         .arg("test")
-        .arg("--disable-index-store")
         .args(["-Xswiftc", "-gline-tables-only"])
         .current_dir(&scratch)
         .output()
