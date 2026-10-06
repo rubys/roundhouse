@@ -10886,3 +10886,42 @@ fn a_plain_class_in_the_helper_is_not_read_as_a_test_case() {
     assert!(emitted_tests.iter().any(|f| f == "fragments_test.rb"), "got {emitted_tests:?}");
     assert!(emitted_tests.iter().all(|f| !f.contains("recording_logger")), "got {emitted_tests:?}");
 }
+
+/// `teardown do … end` in a test class fell to the drop for unrecognized
+/// class-body statements: check stayed clean and the cleanup never ran
+/// (a common Rails idiom). ActiveSupport runs the class's
+/// `def teardown` first, then the blocks newest first, after every test;
+/// the order asserted here is what ActiveSupport 8.1.4 produces natively.
+#[test]
+fn teardown_blocks_run_after_each_test_in_rails_order() {
+    bare_test_app()
+        .write("app/.keep", "")
+        .write("test/models/teardown_order_test.rb", r#"require "test_helper"
+
+class TeardownOrderTest < ActiveSupport::TestCase
+  LOG = []
+
+  teardown do
+    LOG << "one"
+  end
+
+  def teardown
+    LOG << "def"
+  end
+
+  teardown do
+    LOG << "two"
+  end
+
+  test "a first" do
+    LOG << "a"
+  end
+
+  test "b second" do
+    assert_equal ["a", "def", "two", "one"], LOG
+  end
+end
+"#)
+        .run_test("test/models/teardown_order_test.rb")
+        .assert_passes();
+}
