@@ -10838,3 +10838,51 @@ end
         .run_test("test/models/widget_test.rb")
         .assert_passes();
 }
+
+/// An app with nothing in it but what the emitted test boot needs: an
+/// application controller, an empty route table and a schema.
+fn bare_test_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :things do |t|\n    t.string :name\n  end\nend\n")
+}
+
+/// A gem keeps its tests at `test/` root over a base its helper
+/// defines (`class GemCompat::TestCase < ActiveSupport::TestCase`
+/// in test/test_helper.rb). With `test_paths: [test]` the helper was
+/// read a second time as a test file, and the emitted subclass never
+/// loaded its base: NameError on `GemCompat` before any test ran.
+#[test]
+fn a_test_case_base_defined_in_the_helper_is_loaded_by_its_subclasses() {
+    bare_test_app()
+        .write("app/.keep", "")
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("lib/fragments.rb", "module Fragments\n  def self.random\n    \"RANDOM()\"\n  end\nend\n")
+        .write("test/test_helper.rb", "require \"active_support\"\n\nmodule GemCompat\n  class TestCase < ActiveSupport::TestCase\n  end\nend\n")
+        .write("test/fragments_test.rb", "require \"test_helper\"\n\nclass FragmentsTest < GemCompat::TestCase\n  test \"random\" do\n    assert_equal \"RANDOM()\", Fragments.random\n  end\nend\n")
+        .run_test("test/models/fragments_test.rb")
+        .assert_passes();
+}
+
+/// A helper that defines only a plain class with a superclass (a logger
+/// subclass the tests share) is not a test-case base: no test file, no
+/// autorun driver for zero tests.
+#[test]
+fn a_plain_class_in_the_helper_is_not_read_as_a_test_case() {
+    let (emitted, errors) = bare_test_app()
+        .write("app/.keep", "")
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("lib/fragments.rb", "module Fragments\n  def self.random\n    \"RANDOM()\"\n  end\nend\n")
+        .write("test/test_helper.rb", "require \"active_support\"\nrequire \"logger\"\n\nclass RecordingLogger < Logger\nend\n")
+        .write("test/fragments_test.rb", "require \"test_helper\"\n\nclass FragmentsTest < ActiveSupport::TestCase\n  test \"random\" do\n    assert_equal \"RANDOM()\", Fragments.random\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "got {errors:?}");
+    let emitted_tests: Vec<String> = ["test", "test/models"]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(emitted.join(d)).ok())
+        .flat_map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(emitted_tests.iter().any(|f| f == "fragments_test.rb"), "got {emitted_tests:?}");
+    assert!(emitted_tests.iter().all(|f| !f.contains("recording_logger")), "got {emitted_tests:?}");
+}

@@ -56,6 +56,21 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 /// two suites. Non-test top-level classes are shared by every module
 /// as helpers, the way they were for the one.
 pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, true)
+}
+
+/// The test classes a support file (`test/test_helper.rb`) defines: only
+/// classes that read as test classes, with no single-class fallback, so a
+/// helper's plain `class RecordingLogger < Logger` is never mistaken for one.
+pub fn ingest_test_bases(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, false)
+}
+
+fn ingest_test_classes(
+    source: &[u8],
+    file: &str,
+    single_class_fallback: bool,
+) -> IngestResult<Vec<TestModule>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -71,6 +86,9 @@ pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModu
     // class inside a module is not a candidate here: a support file
     // in a test directory often declares one, and it has no tests.
     if test_nodes.is_empty() {
+        if !single_class_fallback {
+            return Ok(Vec::new());
+        }
         let mut helper_nodes = helper_nodes;
         let Some(first) = helper_nodes.iter().position(|(scope, _)| scope.is_empty()) else {
             return Ok(Vec::new());

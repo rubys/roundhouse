@@ -1122,8 +1122,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 *m.entry(s).or_insert(0) += 1;
                 m
             });
-        for lowered in &test_lowered {
-            let lc = &lowered.test_class;
+        let out_path_of = |lc: &LibraryClass| {
             let class_name = lc.name.0.as_str();
             let mut stem = test_file_stem(class_name);
             if stem_counts.get(&stem).copied().unwrap_or(0) > 1 && class_name.contains("::") {
@@ -1135,7 +1134,23 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                     .collect::<Vec<_>>()
                     .join("__");
             }
-            let out_path = PathBuf::from(format!("test/{}/{stem}_test.rb", test_subdir(lc)));
+            PathBuf::from(format!("test/{}/{stem}_test.rb", test_subdir(lc)))
+        };
+        // A test class may subclass another the app defines (a base in
+        // test_helper.rb: `class QueryHelperTest <
+        // GemCompat::TestCase`). Its file has to be loaded first.
+        let test_paths: std::collections::HashMap<&str, PathBuf> = test_lowered
+            .iter()
+            .map(|l| (l.test_class.name.0.as_str(), out_path_of(&l.test_class)))
+            .collect();
+        let test_parents: std::collections::HashSet<&str> = test_lowered
+            .iter()
+            .filter_map(|l| l.test_class.parent.as_ref().map(|p| p.0.as_str()))
+            .collect();
+        for lowered in &test_lowered {
+            let lc = &lowered.test_class;
+            let class_name = lc.name.0.as_str();
+            let out_path = test_paths[class_name].clone();
             // Map both `ActiveSupport::TestCase` (Rails app tests) and
             // `Minitest::Test` (framework's own tests) to roundhouse-
             // owned `TestBase` (defined in test_helper.rb). Insulates
@@ -1238,6 +1253,10 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             // every test file guarantees coverage regardless of which
             // fixtures the body itself names.
             let mut preamble = String::from("require_relative \"../test_helper\"\n");
+            if let Some(parent_path) = lc.parent.as_ref().and_then(|p| test_paths.get(p.0.as_str())) {
+                let rel = parent_path.strip_prefix("test").unwrap_or(parent_path).with_extension("");
+                writeln!(preamble, "require_relative \"../{}\"", rel.display()).unwrap();
+            }
             for (_, anchor) in &fixture_siblings {
                 // Test files live at `test/{models,controllers}/…`,
                 // fixture anchors at `test/fixtures/<stem>`, so the
@@ -1249,7 +1268,13 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 writeln!(preamble, "require_relative \"../fixtures/{stem}\"").unwrap();
             }
             emitted.content = format!("{preamble}{}", emitted.content);
-            emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
+            // A base with no tests of its own is loaded by its subclasses'
+            // files; a driver there would report on it once per require.
+            let is_bare_base = test_parents.contains(class_name)
+                && lowered.test_class.methods.iter().all(|m| !m.name.as_str().starts_with("test_"));
+            if !is_bare_base {
+                emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
+            }
             let rbs_path = emitted.path.clone();
             files.push(emitted);
             // RBS sidecar for the test class — describes the test
