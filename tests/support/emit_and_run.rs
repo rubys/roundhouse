@@ -302,6 +302,14 @@ impl std::ops::Deref for Emitted {
     }
 }
 
+// So `Command::current_dir(&emitted)` and the other `AsRef<Path>` APIs
+// take it as they took the PathBuf it replaced.
+impl AsRef<Path> for Emitted {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
 impl Drop for Emitted {
     fn drop(&mut self) {
         remove_scratch(&self.0);
