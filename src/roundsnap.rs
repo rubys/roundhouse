@@ -167,11 +167,15 @@ pub fn finalize(dest: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(dest.join("iseq"));
 
     let exe = compiler_exe()?;
+    // Prefer compiling under YJIT when the host can — campfire's ruby /
+    // roundsnap lanes set RUBY_YJIT_ENABLE=1, and a matching description
+    // avoids an unnecessary rebuild. The loader also normalizes +YJIT.
     let output = Command::new(&exe)
         .arg("--out")
         .arg(dest)
         .arg("--units")
         .arg(&units)
+        .env("RUBY_YJIT_ENABLE", "1")
         .output()
         .map_err(|e| format!("roundsnap::finalize: spawn {}: {e}", exe.display()))?;
     if !output.status.success() {

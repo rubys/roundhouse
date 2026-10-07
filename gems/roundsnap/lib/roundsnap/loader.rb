@@ -108,7 +108,10 @@ module Roundsnap
       if built.nil? || built.to_s.empty?
         raise LoadError, "roundsnap: manifest missing ruby_description (rebuild required)"
       end
-      if built != RUBY_DESCRIPTION
+      # YJIT is a runtime JIT flag; it does not change ISeq binary layout, but
+      # it does change RUBY_DESCRIPTION ("+YJIT"). Normalize so compile-without-
+      # YJIT / run-with-YJIT (the campfire bench shape) still loads.
+      if normalize_ruby_description(built) != normalize_ruby_description(RUBY_DESCRIPTION)
         raise LoadError,
               "roundsnap: ISeq built for #{built.inspect}, " \
               "running #{RUBY_DESCRIPTION.inspect}"
@@ -185,6 +188,14 @@ module Roundsnap
             !path.end_with?("roundsnap.rb")
         end
       end
+    end
+
+    def self.normalize_ruby_description(desc)
+      desc.to_s.gsub(/ \+YJIT\b/, "")
+    end
+
+    def normalize_ruby_description(desc)
+      self.class.normalize_ruby_description(desc)
     end
 
     private

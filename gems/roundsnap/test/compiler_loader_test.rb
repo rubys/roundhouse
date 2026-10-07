@@ -193,3 +193,23 @@ class CompilerLoaderTest < Minitest::Test
     assert_equal 1, CIRC_B
   end
 end
+
+  def test_yjit_description_mismatch_is_tolerated
+    units = [
+      {
+        "key" => "ok",
+        "source" => "OK = true\n",
+        "file" => "ok.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    path = File.join(@dir, "manifest.json")
+    man = JSON.parse(File.read(path))
+    # Simulate compile without YJIT, run with +YJIT in the description string.
+    bare = Roundsnap::Loader.normalize_ruby_description(RUBY_DESCRIPTION)
+    man["ruby_description"] = bare
+    File.write(path, JSON.pretty_generate(man) + "\n")
+    Roundsnap::Loader.install!(root: @dir).require("ok")
+    assert OK
+  end
