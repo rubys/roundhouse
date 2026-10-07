@@ -128,9 +128,15 @@
 # one-process rows are what separate "their runtime is slower" from "we
 # gave them fewer cores". Publish the pair.
 #
-# NO no-JIT LANES. `rails-int` and `ruby-int` measured within a percent of
-# their YJIT siblings on these two pages (40 vs 40 req/s, 22 vs 23) and
-# cost a seventh of the run to say nothing.
+# YJIT ± MATRIX (one-process). The six named lanes
+#   rails-1p · rails-1p-noyjit ·
+#   ruby-1p · ruby-1p-noyjit ·
+#   roundsnap-1p · roundsnap-1p-noyjit
+# separate delivery (stock Rails / classic .rb emit / Roundsnap ISeq)
+# from the JIT. Suffix `-noyjit` turns YJIT off; unsuffixed MRI 1p
+# lanes keep it on. Wrapper: `scripts/bench-campfire-roundsnap`.
+# The older `rails-int` / `ruby-int` pair is retired for this matrix —
+# lane names carry the switch now.
 #
 # ONE RAILS LANE NOW, AND THAT IS THE WHOLE POINT OF THE LAST YEAR.
 # campfire renders its message list as `render partial: …, collection:
