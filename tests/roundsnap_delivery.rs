@@ -63,14 +63,24 @@ fn tiny_blog_roundsnap_artifact_shape() {
     );
 
     let scratch = scratch_dir("tiny-shape");
-    project::write_to_dir(&files, &scratch).expect("write_to_dir + finalize");
+    project::write_to_dir(&files, &scratch).expect("write_to_dir");
+    project::finalize_roundsnap(&scratch).expect("finalize_roundsnap");
 
     assert!(scratch.join("manifest.json").is_file());
     assert!(scratch.join("iseq").is_dir());
     assert!(!scratch.join("app/models.rb").is_file());
     assert!(!scratch.join("units.json").is_file());
+    assert!(
+        !scratch.join("iseq/boot.iseq").is_file(),
+        "classic boot must not be compiled as a unit beside thin boot.rb"
+    );
 
     let manifest = std::fs::read_to_string(scratch.join("manifest.json")).unwrap();
+    assert!(
+        !manifest.contains("\"boot\":"),
+        "manifest must not include dual-boot unit `boot`: {}",
+        &manifest[..manifest.len().min(400)]
+    );
     assert!(
         manifest.contains("\"file\": \"tiny-blog/") || manifest.contains("app/models"),
         "manifest should carry original or emit file paths: {}",
@@ -88,7 +98,8 @@ fn real_blog_roundsnap_boots_without_app_rb() {
     Analyzer::new(&app).analyze(&mut app);
     let files = project::target_files(&app, fixture, BuildTarget::Ruby).expect("target_files");
     let scratch = scratch_dir("real-blog");
-    project::write_to_dir(&files, &scratch).expect("write + finalize");
+    project::write_to_dir(&files, &scratch).expect("write");
+    project::finalize_roundsnap(&scratch).expect("finalize_roundsnap");
 
     assert!(scratch.join("manifest.json").is_file());
     assert!(!scratch.join("app/models/article.rb").is_file());

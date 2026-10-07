@@ -81,3 +81,7 @@ standard smoke for this gem — not a one-off manual trial.
 - MRI only (`RUBY_ENGINE == "ruby"`).
 - One ISeq has one `file`; mixed-origin bodies need split units or CRuby `#line`.
 - ISeq binaries are tied to `RUBY_DESCRIPTION`; rebuild after Ruby upgrades.
+- The loader still uses `Kernel.prepend` require hooks so `require_relative`
+  against original ISeq `file` paths can resolve emit keys. Longer-term
+  (Thermos code-judo): rewrite requires at emit time to
+  `Roundsnap.load!("key")` and drop the global hook.

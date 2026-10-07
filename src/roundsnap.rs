@@ -8,7 +8,8 @@
 //! - thin `boot.rb` / patched `config.ru` / Gemfile path gem
 //! - app/runtime `.rb` bodies removed (unless `ROUNDSNAP_KEEP_SOURCE=1`)
 //!
-//! After [`crate::project::write_to_dir`], call [`finalize`] so the host
+//! After [`crate::project::write_to_dir`], the CRuby emit path calls
+//! [`crate::project::finalize_roundsnap`] / [`finalize`] so the host
 //! Ruby runs `roundsnap-compile` and writes binary `iseq/**`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,6 +80,14 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
         }
     }
     let ordered_keys = transitive_rb_closure(&seeds, &by_path);
+    // Never compile classic boot.rb as a unit: on-disk boot.rb becomes
+    // THIN_BOOT (Loader.boot!). Including the classic chain as unit
+    // `boot` made main.rb's `require_relative "boot"` re-enter the full
+    // boot ISeq beside the thin file (Thermos dual-boot finding).
+    let ordered_keys: Vec<String> = ordered_keys
+        .into_iter()
+        .filter(|k| k != "boot.rb" && k != "boot")
+        .collect();
 
     let mut units = Vec::new();
     for key in &ordered_keys {
@@ -86,6 +95,8 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
             .get(key)
             .ok_or_else(|| format!("roundsnap::prepare: missing source for {key}"))?
             .clone();
+        // Drop require_relative "boot" — thin boot already owns startup.
+        let source = strip_boot_require(&source);
         let (file, first_lineno) = original_location(app, &label, key);
         units.push(serde_json::json!({
             "key": key_for_manifest(key),
@@ -308,6 +319,28 @@ fn normalize_rel_path(path: &str) -> String {
 }
 
 /// Emit-path keys (`runtime/foo.rb`) in boot.rb `require_relative` order.
+/// Remove `require_relative "boot"` lines so compiled units do not pull
+/// a classic boot ISeq (or miss a deleted unit) after thin boot owns startup.
+fn strip_boot_require(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let t = line.trim();
+        let is_boot = matches!(
+            t,
+            "require_relative \"boot\""
+                | "require_relative 'boot'"
+                | "require_relative \"boot.rb\""
+                | "require_relative 'boot.rb'"
+        );
+        if is_boot {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn boot_require_keys(boot: &str) -> Vec<String> {
     let mut keys = Vec::new();
     for line in boot.lines() {
@@ -424,6 +457,15 @@ require_relative 'app/views'
     fn key_for_manifest_strips_rb() {
         assert_eq!(key_for_manifest("app/models/article.rb"), "app/models/article");
         assert_eq!(key_for_manifest("main"), "main");
+    }
+
+    #[test]
+    fn strip_boot_require_drops_boot_lines() {
+        let src = "require_relative \"runtime/x\"\nrequire_relative \"boot\"\nX = 1\n";
+        assert_eq!(
+            strip_boot_require(src),
+            "require_relative \"runtime/x\"\nX = 1\n"
+        );
     }
 
     #[test]

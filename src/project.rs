@@ -1626,10 +1626,15 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
     for (path, content) in files {
         write_if_changed(&dest.join(path), content.as_bytes())?;
     }
-    // Roundsnap ISeq delivery: compile units.json → iseq/** + manifest.json.
-    // No-op unless ROUNDSNAP=1 left a units.json in the tree.
-    crate::roundsnap::finalize(dest)?;
     Ok(())
+}
+
+/// CRuby Roundsnap post-write: compile `units.json` → `iseq/**` +
+/// `manifest.json`. No-op unless `ROUNDSNAP=1` left a `units.json`.
+/// Kept off [`write_to_dir`] so Spinel/JRuby/test sinks do not own
+/// CRuby ISeq delivery policy (Thermos boundary finding).
+pub fn finalize_roundsnap(dest: &Path) -> Result<(), String> {
+    crate::roundsnap::finalize(dest)
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -2552,8 +2557,8 @@ fn ruby_family_runtime_files(
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
     // CRuby straight-to-ISeq via roundsnap: rewrite the file set to
     // units.json + vendored gems/roundsnap. Binaries are materialized
-    // after write_to_dir via `roundsnap::finalize`. Opt-in: ROUNDSNAP=1
-    // (alias ROUNDHOUSE_RUBY_ISEQ=1).
+    // by `finalize_roundsnap` after write (CLI / test harness). Opt-in:
+    // ROUNDSNAP=1 (alias ROUNDHOUSE_RUBY_ISEQ=1).
     if flavor == RubyFlavor::CRuby {
         crate::roundsnap::prepare(app, &mut files)?;
     }
