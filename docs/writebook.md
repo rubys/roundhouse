@@ -76,14 +76,18 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    helpers against an emitted Ruby database, including parent/filter selection,
    ordering, self-exclusion and private dispatch. This proves those helpers,
    not Positionable's complete locking/rebalancing behavior or native Writebook.
-3. **Markdown declarations and runtime.** `has_markdown` remains unsupported.
-   Its statically known `class_eval` template could be parsed without executing
-   application Ruby, but allowing that would amend the boundary in
-   [issue #30](https://github.com/rubys/roundhouse/issues/30). First establish
-   association scoping by owner/name, build/assign/save/reload behavior,
-   inverse/autosave/destruction semantics and load-hook installation. Expanding
-   only its methods would not make the declaration work. Markdown rendering,
-   attachments and unmodeled gems remain separate obligations.
+3. **Markdown declarations and runtime.** Bare `has_markdown :name` is claimed
+   as a first-class named plain-text association (`lower::plain_text_attr`),
+   the same shape as `has_rich_text`: scoped `markdown_<name>` storage on
+   `ActionText::Markdown`, reader/predicate/writer through `.content`, ordinary
+   autosave (including blanks), dependent destroy, and preload scopes.
+   Assign/save/reload (including blank autosave) is pinned by abstract
+   `emit_and_run`; destroy/preload synthesis by lowering unit tests — not by
+   expanding the concern's interpolatable `class_eval` / leftover `has_one`
+   template (generic string eval stays unsupported per
+   [issue #30](https://github.com/rubys/roundhouse/issues/30)). Option-carrying
+   forms (`strict_loading:`), Markdown rendering, attachments and unmodeled
+   gems remain separate obligations.
 4. **Original tests.** Run Writebook's own tests against the Ruby output,
    starting with positioning and Page behavior. Record total tests and named
    failures; ratchet passing tests upward. Add negative authorization tests
@@ -94,43 +98,27 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    Keep upstream-master toolchain tracking advisory, separate from reproducible
    gates. Broaden to other emitters only after executable behavior is proven.
 
-## Markdown prerequisite: visible load-hook installation gaps
+## Markdown / named plain-text association
 
-At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, the installer in
-`lib/rails_ext/action_text_has_markdown.rb` is a direct
-`include ActionText::HasMarkdown` inside `ActiveSupport.on_load :active_record`.
-The survey now reports that dropped installation with its hook and source file.
-This is a reporting milestone, **not Markdown support**: no mixin instance
-methods are installed. Interpolatable `class_eval` heredocs can expand at
-ingest when every leftover statement is ingestible; interpolated association
-or scope names abort the whole expansion (including the rewritten methods).
-`has_markdown` remains unclaimed because of that abort. The inventory records
-it as an ingest gap on `app/models/page.rb`.
-Coverage is bounded to direct receiverless includes in the top-level hooks
-already scanned; conditional/nested includes and other hook execution remain
-unsupported. `tests/on_load_includes.rs` proves unchanged IR/emission and executes
-the negative boundary against emitted Ruby; `tests/attachable_locate.rs` proves
-that a recognized reopen in the same hook does not hide the include gap.
+At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, bare `has_markdown :body` on
+`Page` is claimed by `lower::plain_text_attr` (ingest skips concern `class_eval`
+expansion for that form so leftover interpolated `has_one`/scopes do not
+fail-close). Association scoping by owner/name, build/assign/save/reload, and
+ordinary autosave including blanks are pinned by
+`tests/emit_and_run.rs::named_plain_text_attr_assign_save_reload`. Dependent
+destroy and preload-scope synthesis are pinned by
+`tests/plain_text_attr_lowering.rs` (not yet by a runtime destroy/preload
+overlay). Storage for `ActionText::Markdown` (table `action_text_markdowns`,
+attr `content`) was the prior prerequisite and remains covered by
+`tests/action_text_markdown_ingest.rs` plus the storage-only emit overlay.
+`delegated_type` singular readers composing with the plain-text attr
+(`entry.page.body`) are pinned by
+`tests/relation_delegated_reader_typing.rs` and
+`tests/emit_and_run.rs::delegated_type_singular_reader_plain_text_body_runs`.
 
-The next record-storage prerequisite is ordinary model ingestion for
-`ActionText::Markdown < Record` under `module ActionText` in `lib/rails_ext`,
-including lexical superclass resolution and the framework's `action_text_`
-table prefix. Its table is `action_text_markdowns` and its raw attribute is
-`content`; neither is the RichText table/body coder. Preserve lexical shadowing,
-explicit table names and the abstract-base/STI distinction. Recognition alone
-must not count as storage support: prove construction, save and reload through
-an emitted database test before claiming it.
-
-Declaration support still requires owner-type/id/name isolation, inverse identity
-on unsaved owners, owner-id propagation, autosave/failure/touch behavior,
-reload/cache invalidation, scoped destruction and both preload scopes. Do not
-inherit RichText's intentional suppression of new blank rows: Writebook declares
-ordinary autosave, including empty content and read-materialized children.
-Renderer/Redcarpet, `safe_markdown_attribute`, embeds/uploads (including
-authorization), strict loading and load-hook notifications remain separate gaps.
-A named semantic replacement for this macro needs an explicit clarification of
-[issue #30](https://github.com/rubys/roundhouse/issues/30); generic string eval
-must stay unsupported.
+Still separate: `delegate :title, to: :leafable` through Leafable,
+renderer/Redcarpet, embeds/uploads, option-carrying `strict_loading:`, and
+load-hook notifications. Generic string eval stays unsupported.
 
 The original Page tests were emitted with `--target ruby --survey
 --allow-unsupported` and attempted with `ruby -Itest -I. test/models/page_test.rb`.

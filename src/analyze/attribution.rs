@@ -15,29 +15,35 @@
 //! in hand (roundhouse-check --continue, the LSP, the MCP server) and
 //! downgrades the shadowed diagnostics to [`Severity::Info`] with the
 //! root cause appended, leaving genuine findings at their original
-//! severity. Three attribution rules, cheapest first:
+//! severity. Four attribution rules, cheapest first:
 //!
 //! 1. **Same file** — the diagnostic sits in a file that recorded a
 //!    gap. Whatever the analyzer failed to resolve there, the skipped
 //!    construct is the prime suspect.
 //! 2. **Receiver class** — a `SendDispatchFailed` whose receiver class
-//!    is defined in a gap file: the method likely exists but its
-//!    definition (or the DSL declaring it) didn't ingest.
+//!    is defined in a gap file (registered, or declared there and dropped
+//!    by survey mode): the method likely exists but its definition (or the
+//!    DSL declaring it) didn't ingest.
 //! 3. **View feeders** — a diagnostic in a view any of whose feeding
 //!    controllers (per [`App::view_feeders`], ancestors included) is
 //!    tainted: the ivar channel that seeds the view runs through the
 //!    gap. A Rails-convention path fallback covers views whose feeder
 //!    didn't ingest at all (a wholly-skipped controller file never
 //!    registers, so no feeder edge exists to consult).
+//! 4. **Gap-declared constant** — an unsupported constant whose class or
+//!    module a gap file declares: survey mode may drop such a class whole,
+//!    and every reference to it then reports the constant. The reads of an
+//!    ivar a controller assigns from that constant follow, in the
+//!    controller and the views it feeds, as for an unknown gem.
 //!
 //! Deliberately over-broad in the safe direction: a genuine app error
 //! inside a gap-touched blast radius renders as a coverage note until
 //! the gap is fixed — cheap compared to the trust cost of a false
 //! accusation. Only unresolved-shaped kinds (`IvarUnresolved`,
 //! `SendDispatchFailed`, `IncompatibleBinop`, `UnresolvedType`,
-//! `UndefinedFilterTarget`) are eligible; `Parse` (a real syntax
-//! error), `Unsupported` (already a tool statement), and
-//! `GradualUntyped` (author-signed) never move.
+//! `UndefinedFilterTarget`) are eligible, plus rule 4's constant;
+//! `Parse` (a real syntax error), any other `Unsupported` (already a tool
+//! statement), and `GradualUntyped` (author-signed) never move.
 
 use std::collections::{HashMap, HashSet};
 
@@ -102,16 +108,80 @@ pub fn attribute_ingest_gaps(diags: &mut [Diagnostic], app: &App, gaps: &[Ingest
         return;
     }
     let ctx = AttributionCtx::build(app, gaps);
-    for d in diags {
+    // Sites of constants whose declaring file recorded a gap, for the ivar pass below.
+    let mut constant_sites: Vec<(FileId, u32, String)> = Vec::new();
+    for d in diags.iter_mut() {
+        if let Some(cause) = ctx.constant_cause(d) {
+            constant_sites.push((d.span.file, d.span.start, cause.clone()));
+            mark_gap(d, cause, None);
+            continue;
+        }
         if !eligible(&d.kind) {
             continue;
         }
         if let Some(cause) = ctx.cause_for(d) {
-            d.severity = Severity::Info;
-            d.message.push_str(&format!(
-                " — likely roundhouse coverage, not an app error (ingest gap in {})",
-                cause
-            ));
+            mark_gap(d, cause, None);
+        }
+    }
+    attribute_gap_ivars(diags, app, &constant_sites);
+}
+
+fn mark_gap(d: &mut Diagnostic, cause: &str, via_ivar: Option<&str>) {
+    d.severity = Severity::Info;
+    match via_ivar {
+        Some(ivar) => d.message.push_str(&format!(
+            " — likely roundhouse coverage, not an app error (@{ivar} is assigned from a class whose source did not ingest: ingest gap in {cause})"
+        )),
+        None => d.message.push_str(&format!(
+            " — likely roundhouse coverage, not an app error (ingest gap in {cause})"
+        )),
+    }
+}
+
+/// An ivar assigned from a gap-declared constant, in a controller's actions
+/// and filters, is unresolved for the same reason: its reads in that
+/// controller and the views it feeds are the gap's shadow, as for a gem.
+fn attribute_gap_ivars(diags: &mut [Diagnostic], app: &App, sites: &[(FileId, u32, String)]) {
+    if sites.is_empty() {
+        return;
+    }
+    let mut ivar_cause: HashMap<(ClassId, crate::ident::Symbol), String> = HashMap::new();
+    for c in &app.controllers {
+        for a in c.actions() {
+            collect_gem_ivars(&a.body, sites, |name, cause| {
+                ivar_cause.entry((c.name.clone(), name)).or_insert_with(|| cause.to_string());
+            });
+        }
+    }
+    if ivar_cause.is_empty() {
+        return;
+    }
+    let mut view_by_file: HashMap<FileId, &crate::ident::Symbol> = HashMap::new();
+    for v in &app.views {
+        if let Some(f) = first_real_file(&[&v.body]) {
+            view_by_file.entry(f).or_insert(&v.name);
+        }
+    }
+    let mut controller_file: HashMap<FileId, &ClassId> = HashMap::new();
+    for c in &app.controllers {
+        let bodies: Vec<&Expr> = c.actions().map(|a| &a.body).collect();
+        if let Some(f) = first_real_file(&bodies) {
+            controller_file.entry(f).or_insert(&c.name);
+        }
+    }
+    for d in diags.iter_mut() {
+        let DiagnosticKind::IvarUnresolved { name } = &d.kind else { continue };
+        if d.severity == Severity::Info {
+            continue;
+        }
+        let feeders: Vec<&ClassId> = match view_by_file.get(&d.span.file) {
+            Some(view) => app.view_feeders.get(*view).into_iter().flatten().collect(),
+            None => controller_file.get(&d.span.file).into_iter().copied().collect(),
+        };
+        if let Some(cause) = feeders.iter().find_map(|c| ivar_cause.get(&((*c).clone(), name.clone()))) {
+            let ivar = name.as_str().to_string();
+            let cause = cause.clone();
+            mark_gap(d, &cause, Some(&ivar));
         }
     }
 }
@@ -150,6 +220,15 @@ struct AttributionCtx<'a> {
     /// Whether any controller at all is tainted — the layout rule
     /// (layouts are fed by every controller).
     any_controller_tainted: Option<&'a str>,
+    /// Namespace (fully qualified) → gap path, for every `class` / `module`
+    /// a gap file declares. Survey mode may drop such a class wholesale, and
+    /// each reference to it then reports an unsupported constant.
+    gap_namespaces: HashMap<String, &'a str>,
+    /// `gap_namespaces` less aliases, for a dispatch receiver: a gap file's
+    /// `Alias = Bar` does not make a `class Alias` reopened elsewhere a gap.
+    gap_receivers: HashMap<String, &'a str>,
+    /// Rubydex's answers, to name the declaration a constant reference means.
+    resolver: Option<std::sync::Arc<super::body::ConstResolver>>,
 }
 
 impl<'a> AttributionCtx<'a> {
@@ -248,6 +327,36 @@ impl<'a> AttributionCtx<'a> {
             .find_map(|c| tainted_classes.get(&c.name))
             .copied();
 
+        let mut gap_namespaces: HashMap<String, &str> = HashMap::new();
+        let mut gap_receivers: HashMap<String, &str> = HashMap::new();
+        let resolver = (!tainted_files.is_empty()).then(|| app.const_resolver.for_sources(&app.sources));
+        if let Some(resolver) = &resolver {
+            // A namespace several gap files reopen (`module Discourse` in
+            // `config/application.rb` and `lib/discourse.rb`) names one
+            // cause, the same on every run: the file Rails would autoload
+            // it from, else the first path.
+            let rank = |name: &str, path: &str| {
+                let conventional = format!("/{}.rb", crate::naming::underscore(name.trim_start_matches("::")));
+                (!path.ends_with(&conventional), path.to_string())
+            };
+            let mut files: Vec<(&FileId, &&str)> = tainted_files.iter().collect();
+            files.sort_by_key(|(_, path)| **path);
+            for (file, path) in files {
+                for name in resolver.namespaces_declared_in(*file) {
+                    let slot = gap_namespaces.entry(name.to_string()).or_insert(path);
+                    if rank(name, path) < rank(name, slot) {
+                        *slot = path;
+                    }
+                }
+                for name in resolver.receivers_declared_in(*file) {
+                    let slot = gap_receivers.entry(name.to_string()).or_insert(path);
+                    if rank(name, path) < rank(name, slot) {
+                        *slot = path;
+                    }
+                }
+            }
+        }
+
         AttributionCtx {
             app,
             gap_by_path,
@@ -255,7 +364,29 @@ impl<'a> AttributionCtx<'a> {
             tainted_classes,
             view_by_file,
             any_controller_tainted,
+            gap_namespaces,
+            gap_receivers,
+            resolver,
         }
+    }
+
+    /// The rendered cause for an unsupported constant a gap file declares.
+    /// The name is the declaration Rubydex resolved the reference to (a
+    /// relative `Slack` inside `module Util` is `Util::Slack`), never the
+    /// path as written: `::Article` is not `Admin::Article`, and an
+    /// unresolved `LIMIT` is not a gap file's top-level `LIMIT`.
+    fn constant_cause(&self, d: &Diagnostic) -> Option<&String> {
+        let DiagnosticKind::Unsupported { construct, detail, .. } = &d.kind else {
+            return None;
+        };
+        if construct.as_str() != "constant" || d.severity == Severity::Info {
+            return None;
+        }
+        let segments: Vec<crate::ident::Symbol> =
+            detail.trim_start_matches("::").split("::").map(crate::ident::Symbol::from).collect();
+        let resolved = self.resolver.as_ref()?.declaration_name(d.span, &segments)?;
+        let path = self.gap_namespaces.get(resolved.trim_start_matches("::"))?;
+        self.gap_by_path.get(*path)
     }
 
     /// The rendered cause when `d` is attributable to a gap, else `None`.
@@ -299,10 +430,14 @@ impl<'a> AttributionCtx<'a> {
     }
 
     /// Taint for a dispatch receiver: the root class of `ty` (unions:
-    /// any arm) defined in a gap file.
+    /// any arm) defined in a gap file, including a class survey mode
+    /// dropped and so never registered.
     fn recv_taint(&self, ty: &Ty) -> Option<&&str> {
         match ty {
-            Ty::Class { id, .. } => self.tainted_classes.get(id),
+            Ty::Class { id, .. } => self
+                .tainted_classes
+                .get(id)
+                .or_else(|| self.gap_receivers.get(id.0.as_str().trim_start_matches("::"))),
             Ty::Union { variants } => variants.iter().find_map(|v| self.recv_taint(v)),
             _ => None,
         }

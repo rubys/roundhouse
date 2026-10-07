@@ -200,6 +200,15 @@ end
         body.contains("cache_key_with_version"),
         "key walks each record:\n{body}"
     );
+    let gate = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH;
+    assert!(
+        body.contains(&format!(".length > {gate}")),
+        "small collections skip the store (cost gate):\n{body}"
+    );
+    assert!(
+        body.contains("__cc_collection_"),
+        "collection expression is bound once before the gate:\n{body}"
+    );
     assert!(
         residues(&diags).is_empty(),
         "cached: true is not residue: {diags:?}"

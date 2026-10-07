@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCHEMA = 1
 SHA = re.compile(r"[0-9a-f]{40}\Z")
-GROUPS = {"browse": "build-site", "campfire": "build-campfire-archive"}
+GROUPS = {"browse": "build-site", "campfire": "campfire-archive-build"}
 CHECKS = {
     **{
         f"smoke-{target}": f"browse/{target}.tgz"
@@ -29,13 +29,13 @@ CHECKS = {
             "jruby",
         )
     },
-    "smoke-spinel": "browse/spinel.tgz",
-    "smoke-campfire": "campfire/spinel.tgz",
-    "smoke-campfire-docker": "campfire/docker.tgz",
+    "spinel-smoke": "browse/spinel.tgz",
+    "campfire-smoke": "campfire/spinel.tgz",
+    "campfire-smoke-docker": "campfire/docker.tgz",
 }
 CHECK_JOBS = {
     check: (
-        "smoke" if path.startswith("browse/") and check != "smoke-spinel" else check
+        "smoke" if path.startswith("browse/") and check != "spinel-smoke" else check
     )
     for check, path in CHECKS.items()
 }
@@ -232,7 +232,7 @@ def expected_paths(plan):
     smoke = plan.get("smoke", [])
     if not isinstance(jobs, list) or not isinstance(smoke, list):
         raise TypeError("CI_PLAN jobs and smoke must be lists")
-    if "build-campfire-archive" in jobs:
+    if "campfire-archive-build" in jobs:
         result.update(("campfire/spinel.tgz", "campfire/docker.tgz"))
     return result
 

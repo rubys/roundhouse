@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use roundhouse::dialect::{MethodReceiver, ModelBodyItem};
 use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::project::BuildTarget;
 use roundhouse::Symbol;
 
 #[path = "support/emit_and_run.rs"]
@@ -108,6 +109,49 @@ fn cattr_block_default_and_mattr_const_default_expand() {
     assert!(
         !names.contains(&"only_write".to_string()),
         "mattr_writer must not add a reader"
+    );
+}
+
+#[test]
+fn model_mattr_defaults_keep_partitioned_emit() {
+    // Source-ordered class bodies interleave by span.start. Synthetic
+    // mattr seeds sit at span 0; if models took that path, `Probe.new`
+    // would emit before `Probe = Object`. Keep models on the partitioned
+    // constants-then-seeds path.
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  Probe = Object\n  mattr_accessor :factory, default: Probe.new\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "emit errors: {errors:?}");
+    let article = std::fs::read_to_string(emitted.join("app/models/article.rb"))
+        .expect("read emitted article");
+    let probe = article
+        .find("Probe = Object")
+        .expect("Probe constant missing from emit");
+    let factory = article
+        .find("@@factory")
+        .expect("@@factory seed missing from emit");
+    assert!(
+        probe < factory,
+        "Probe constant must precede @@factory seed:\n{article}"
     );
 }
 

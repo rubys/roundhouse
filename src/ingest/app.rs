@@ -823,21 +823,35 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
-        // `config.active_storage.variable_content_types -= %w[…]` — an
-        // initializer trimming the image types a variant may be made
-        // from (campfire drops bmp/ico/psd: loaders it does not trust).
-        // The runtime answers `variable?` from Rails' default list
-        // minus this one, so a bmp avatar falls back to initials here
-        // exactly as it does there. Synthesized as
-        // `active_storage_excluded_content_types` on the reopen, over
-        // the framework default (`[]`) in runtime/ruby/rails.rb.
+        // Active Storage initializer lifts — one walk of
+        // `config/initializers` for the cluster that shares that
+        // directory: variable_content_types trim, video_preview_arguments,
+        // and previewers VideoPreviewer → replacement Const map.
         {
             let init_dir = dir.join("config/initializers");
             let mut excluded: Vec<String> = Vec::new();
+            let mut video_args: Option<String> = None;
+            let mut previewer_replacement: Option<String> = None;
             if vfs.is_dir(&init_dir) {
                 for entry in read_rb_files(vfs, &init_dir)? {
                     if let Ok(bytes) = vfs.read(&entry) {
                         excluded.extend(extract_variable_content_type_exclusions(&bytes));
+                        match extract_video_preview_arguments(&bytes) {
+                            VideoPreviewArgsExtract::Value(a) => video_args = Some(a),
+                            VideoPreviewArgsExtract::Unsupported => {
+                                // A later computed assignment must not leave an
+                                // earlier literal override in effect.
+                                video_args = None;
+                                survey::record(&IngestError::Unsupported {
+                                    file: entry.display().to_string(),
+                                    message: "config.active_storage.video_preview_arguments is not a string-literal concatenation; the emitted app keeps the framework default".to_string(),
+                                });
+                            }
+                            VideoPreviewArgsExtract::Absent => {}
+                        }
+                        if let Some(name) = extract_video_previewer_replacement(&bytes) {
+                            previewer_replacement = Some(name);
+                        }
                     }
                 }
             }
@@ -850,6 +864,28 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                     "def active_storage_excluded_content_types
   [{literal}]
+end
+"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+            // One Rails knob → one Application override. The vf filter
+            // is peeled at `ActiveStorage.video_preview_vf_filter`.
+            if let Some(arguments) = video_args {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def active_storage_video_preview_arguments
+  {arguments:?}
+end
+"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+            if let Some(replacement) = previewer_replacement {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def active_storage_previewers
+  [{replacement}]
 end
 "
                 )) {
@@ -1054,6 +1090,7 @@ end
                 name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
                 is_module: false,
                 parent: None,
+                parent_span: Default::default(),
                 includes: Vec::new(),
                 methods,
                 nullable_columns: Vec::new(),
@@ -1176,12 +1213,13 @@ end
                         app.library_classes.extend(nested_under(&outer, classes));
                     }
                 } else {
-                    // No class in the file — a module: a concern under
-                    // app/controllers/concerns/ (`AccountOwnedConcern`)
-                    // or a mixin like `Authorization`. Ingest as a
-                    // library class so its methods register and
+                    // Not a controller file: a module-only concern under
+                    // app/controllers/concerns/, a mixin like
+                    // `Authorization`, or a concern whose only classes
+                    // are Sorbet value objects (nested `T::Struct`).
+                    // Ingest as library classes so methods register and
                     // `include X` dispatch (ClassInfo.includes) can
-                    // resolve into it, and capture its `included do`
+                    // resolve into them, and capture `included do`
                     // filter declarations for every includer's chain.
                     if let Some(classes) =
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
@@ -1715,6 +1753,7 @@ end
     // later pass reads methods.
     super::channel_callbacks::lower_channel_callbacks(&mut app);
     super::channel_callbacks::lower_channel_names(&mut app);
+    super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
@@ -1729,6 +1768,8 @@ end
     // the controller that called it directly.
     super::allow_browser::lower_allow_browser(&mut app);
     super::rate_limit::lower_rate_limit(&mut app);
+    super::invisible_captcha::lower_invisible_captcha(&mut app);
+    super::impersonates::lower_impersonates(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so
@@ -1744,6 +1785,7 @@ end
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
+    super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app);
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
@@ -1769,11 +1811,23 @@ end
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
-    // Last of all: `has_rich_text` can arrive through a concern's
-    // `included do`, so the declaration scan has to run after the
-    // splices — and `ActionText::RichText` has to be in `app.models`
-    // before anything downstream enumerates models.
+    // Last of all: `has_rich_text` / `has_markdown` can arrive through a
+    // concern's `included do`, so the declaration scan has to run after
+    // the splices — and the ActionText record models have to be in
+    // `app.models` before anything downstream enumerates models.
     crate::lower::rich_text::synthesize_record_model(&mut app);
+    crate::lower::plain_text_attr::synthesize_record_model(&mut app);
+    crate::lower::attachment_model::synthesize_attachment_model(&mut app);
+    // Second chance for `on_load(:active_storage_attachment)` includes
+    // whose target was only synthesized above; then splice ONLY those
+    // models so `has_many_attached` from the concern lands — a full
+    // re-splice would duplicate every concern already expanded at the
+    // first pass (doubled scopes, unique-constraint failures at run).
+    let late_on_load = super::on_load_reopen::apply_pending(&mut app);
+    if !late_on_load.is_empty() {
+        splice_concerns_into_models_named(&mut app, &late_on_load);
+    }
+    super::on_load_reopen::drain_pending(&mut app);
     app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -1859,10 +1913,24 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
 /// Strict targets get the DSL items the same way; module
 /// methods-via-include remain their separate, ledger-visible gap.
 fn splice_concerns_into_models(app: &mut App) {
+    splice_concerns_into_models_named(app, &[]);
+}
+
+/// Splice concern `included do` bodies into models.
+///
+/// When `only` is empty, every model is visited (the first pass). When
+/// non-empty, only models whose [`ClassId`] name is listed — the late
+/// `on_load(:active_storage_attachment)` path after Attachment /
+/// Markdown synthesis, which must not re-expand includes already
+/// spliced on the first pass.
+fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol]) {
     use crate::dialect::ModelBodyItem;
     use crate::expr::ExprNode;
 
     for model in &mut app.models {
+        if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
+            continue;
+        }
         // Concerns already spliced into this model. A spliced item may
         // itself be an `include` (a concern's `included do include
         // Other end`), whose own items are spliced in turn; a concern
@@ -2853,12 +2921,34 @@ fn report_unrecognized_controller_macros(app: &App) {
         return;
     }
     for controller in &app.controllers {
+        // `sources::drain` already ran; use the App snapshot via the
+        // canonical FileId helper (thread-local `sources::path_of` misses).
+        let file_of = |file_id: crate::span::FileId| {
+            crate::ide::source(app, file_id)
+                .map(|s| s.path.clone())
+                .unwrap_or_else(|| controller.name.0.as_str().to_string())
+        };
         for item in &controller.body {
             let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
             let ExprNode::Send { recv: None, method, block: None, .. } = &*expr.node else {
                 continue;
             };
             if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
+                continue;
+            }
+            // `const` / `prop` belong to a lowered `T::Struct` (or a
+            // gem base the sidecar expands). On a real controller they
+            // are leftover Sorbet props with no runtime in the emitted
+            // tree — name that, rather than the generic "macro not
+            // recognized" bucket that also covers unmodeled app DSL.
+            if matches!(method.as_str(), "const" | "prop") {
+                survey::record(&IngestError::Unsupported {
+                    file: file_of(expr.span.file),
+                    message: format!(
+                        "Sorbet `{}` outside a lowered T::Struct (its effect is dropped from the output)",
+                        method.as_str()
+                    ),
+                });
                 continue;
             }
             // `before_action -> { … }, only: […]` (233 controllers) and
@@ -2873,8 +2963,7 @@ fn report_unrecognized_controller_macros(app: &App) {
             if super::controller::lambda_filter_target(expr).is_some() {
                 continue;
             }
-            let file = super::sources::path_of(expr.span.file)
-                .unwrap_or_else(|| controller.name.0.as_str().to_string());
+            let file = file_of(expr.span.file);
             if REFINEMENT_MACROS.contains(&method.as_str()) {
                 // `using SomeRefinement` — name the refinement in the
                 // ledger so the gap is actionable, rather than folding
@@ -4942,13 +5031,11 @@ fn synthesize_rails_health_controller(app: &mut crate::App) {
 
 /// The controller the `to: redirect(...)` routes dispatch to: one
 /// action per redirect, each answering the location Rails' routing
-/// redirect would.
-///
-/// One deliberate divergence, and it is the reason the routing form
-/// exists at all: Rails' `redirect("/x")` carries the request's query
-/// string over to the target. A `redirect_to "/x"` does not, and
-/// nothing in the synthesized action can see the query string to pass
-/// on.
+/// redirect would. The options form (`redirect(path: "/x")`) also
+/// carries the request's query over, read off the action's `request`;
+/// the positional `redirect("/x")` does not, in Rails either. How the
+/// query is joined to the path is the one deliberate divergence; see
+/// the comment in the body.
 fn synthesize_redirect_controller(
     redirects: &[crate::dialect::RedirectRoute],
 ) -> crate::dialect::Controller {
@@ -4965,26 +5052,48 @@ fn synthesize_redirect_controller(
                 expression.to_string()
             } else if redirect.location_is_expression {
                 redirect.location.clone()
+            } else if redirect.keep_query {
+                // The options form keeps the request query, read off the
+                // action's own `query_string` (set by every target's
+                // dispatcher from the raw request query). An empty query
+                // leaves the location unchanged; a path that already has a
+                // `?` is joined with `&`; the query goes ahead of a
+                // fragment, so `/login#step` plus `x=1` is `/login?x=1#step`.
+                //
+                // A deliberate divergence from Rails, which appends
+                // `"?" + query` and nothing else (MEASURED, 8.1.4 and
+                // main): `/a?b=1` plus `x=1` is `/a?b=1?x=1`, where `b` reads
+                // as "1?x=1", and `/a#top` plus `x=1` is `/a#top?x=1`, where
+                // the query sits inside the fragment and never reaches the
+                // server. Neither is a URL the route's author could have
+                // meant. Rails also re-encodes the query from the parsed
+                // params (keys sorted, a space as `+`); this passes it
+                // through as received.
+                //
+                // Only `path:` keeps the query, and its location is a
+                // string literal, so the separator and the fragment are
+                // decided here. A `%{name}` cannot bring a `?` or `#` of
+                // its own: `redirect_location_source` path-escapes it.
+                // Uses the controller attribute rather than
+                // `request.query_string` so C# and Elixir (which do not
+                // yet wire a full Request receiver) still preserve the
+                // query.
+                let (path, fragment) = redirect.location.split_once('#').unwrap_or((&redirect.location, ""));
+                let separator = if path.contains('?') { '&' } else { '?' };
+                let fragment = if fragment.is_empty() {
+                    String::new()
+                } else {
+                    format!(" + {}", redirect_location_source(&format!("#{fragment}")))
+                };
+                format!(
+                    "q = query_string\n    q == \"\" ? {} : {} + q{fragment}",
+                    redirect_location_source(&redirect.location),
+                    redirect_location_source(&format!("{path}{separator}")),
+                )
             } else {
                 redirect_location_source(&redirect.location)
             };
-            let (location, multiline) = if redirect.keep_query {
-                // Rails' options form keeps the request query. The
-                // dispatcher stores it on the request object. An empty
-                // query leaves the path unchanged; a path that already
-                // has `?` is joined with `&`. A fragment stays after the
-                // query: `/login#step` plus `x=1` is `/login?x=1#step`,
-                // not `/login#step?x=1`.
-                (
-                    format!(
-                        "q = ActionController::Current.request.query_string.to_s\n    parts = {location}.split(\"#\", 2)\n    base = parts[0]\n    joined = q == \"\" ? base : base + (base.include?(\"?\") ? \"&\" : \"?\") + q\n    parts.length == 1 ? joined : joined + \"#\" + parts[1]"
-                    ),
-                    true,
-                )
-            } else {
-                (location, false)
-            };
-            let src = if multiline || location.contains('\n') || location.contains(';') {
+            let src = if location.contains('\n') || location.contains(';') {
                 format!(
                     "def __redirect\n  location = begin\n    {location}\n  end\n  redirect_to(location, status: :{})\nend\n",
                     redirect_status_symbol(redirect.status),
@@ -5038,6 +5147,7 @@ fn synthesize_redirect_controller(
         // otherwise start challenging a redirect Rails answers
         // unconditionally.
         parent: Some(crate::ident::ClassId(Symbol::from("ActionController::Base"))),
+        parent_span: Default::default(),
         body,
         layout: crate::dialect::LayoutDecl::default(),
         sibling_classes: Vec::new(),
@@ -5046,8 +5156,11 @@ fn synthesize_redirect_controller(
 
 /// A routing redirect's target as a Ruby string literal. Rails'
 /// `redirect("/~%{username}")` fills each `%{name}` from the matched
-/// path parameters, so the placeholder becomes `#{params[:name]}`.
-/// (Rails also URI-escapes the value; the emitted action does not.)
+/// path parameters, path-escaped as Rails does
+/// (`Journey::Router::Utils.escape_path`), so the placeholder becomes
+/// `#{ActionDispatch::Router.escape_path(params[:name].to_s)}`. The
+/// router decodes a capture (`Router.decode_capture`), so a `#` or `?`
+/// in it is escaped back and stays in the path.
 fn redirect_location_source(location: &str) -> String {
     let mut out = String::from("\"");
     let mut rest = location;
@@ -5056,7 +5169,7 @@ fn redirect_location_source(location: &str) -> String {
             if let Some(close) = after.find('}') {
                 let name = &after[..close];
                 if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    out.push_str(&format!("#{{params[:{name}]}}"));
+                    out.push_str(&format!("#{{ActionDispatch::Router.escape_path(params[:{name}].to_s)}}"));
                     rest = &after[close + 1..];
                     continue;
                 }
@@ -5884,6 +5997,203 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
     let inner = &rest[1..];
     let end = inner.find(quote)?;
     Some(inner[..end].to_string())
+}
+
+/// Result of scanning an initializer for `video_preview_arguments`.
+enum VideoPreviewArgsExtract {
+    Absent,
+    Value(String),
+    /// Assignment present but not a pure string-literal concatenation.
+    Unsupported,
+}
+
+/// `config.active_storage.video_preview_arguments = "…" \ "…"` —
+/// concatenated quoted string literals after the `=` (double or single),
+/// the way campfire tip writes the `-vf … -frames:v 1 -f image2` argv.
+/// Returns the joined runtime string. Computed RHS forms (`+ ENV…`) are
+/// `Unsupported` rather than a wrong joined literal.
+fn extract_video_preview_arguments(source: &[u8]) -> VideoPreviewArgsExtract {
+    let source = String::from_utf8_lossy(source);
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("active_storage.video_preview_arguments") else {
+            continue;
+        };
+        let rest = t[idx + "active_storage.video_preview_arguments".len()..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let mut text = rest.to_string();
+        // Line continuations (`\`), RHS starting on the next line, and
+        // further quoted pieces until a blank / next config assignment.
+        while text.trim_end().ends_with('\\')
+            || ruby_string_literals_unclosed(&text)
+            || (!text.contains('"') && !text.contains('\'') && lines.peek().is_some())
+        {
+            let Some(next) = lines.next() else { break };
+            let n = next.trim();
+            if n.is_empty() || n.starts_with("config.") {
+                break;
+            }
+            text.push(' ');
+            text.push_str(n);
+        }
+        if !rhs_is_only_string_literals_and_continuations(&text) {
+            return VideoPreviewArgsExtract::Unsupported;
+        }
+        let out = join_ruby_string_literals(&text);
+        if !out.is_empty() {
+            return VideoPreviewArgsExtract::Value(out);
+        }
+        // Recognized the assignment but found no quoted pieces.
+        return VideoPreviewArgsExtract::Unsupported;
+    }
+    VideoPreviewArgsExtract::Absent
+}
+
+/// True when `text` is only `'…'` / `"…"` literals, whitespace, and `\`.
+fn rhs_is_only_string_literals_and_continuations(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut saw_literal = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() || b == b'\\' {
+            i += 1;
+            continue;
+        }
+        if b != b'"' && b != b'\'' {
+            return false;
+        }
+        saw_literal = true;
+        let q = b;
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+    }
+    saw_literal
+}
+
+/// True when `text` ends inside an unclosed `'…'` or `"…"` literal.
+fn ruby_string_literals_unclosed(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut open: Option<u8> = None;
+    while i < bytes.len() {
+        if let Some(q) = open {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                open = None;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            open = Some(bytes[i]);
+        }
+        i += 1;
+    }
+    open.is_some()
+}
+
+/// Join adjacent `'…'` / `"…"` literals in an RHS.
+/// Double-quoted: `\\X` → `X`. Single-quoted: only `\\` → `\` and
+/// `\'` → `'`; other backslashes (e.g. `\,` in ffmpeg filters) stay.
+fn join_ruby_string_literals(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let q = bytes[i];
+        if q != b'"' && q != b'\'' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                let next = bytes[i + 1];
+                if q == b'\'' {
+                    if next == b'\\' || next == b'\'' {
+                        out.push(next as char);
+                        i += 2;
+                        continue;
+                    }
+                    out.push('\\');
+                    out.push(next as char);
+                    i += 2;
+                    continue;
+                }
+                out.push(next as char);
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                i += 1;
+                break;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Replacement Const from
+/// `config.active_storage.previewers = ….map` that swaps
+/// `ActiveStorage::Previewer::VideoPreviewer` for another class
+/// (`previewer == …VideoPreviewer ? Replacement : previewer`).
+/// Returns the replacement's written name (e.g. `TimeLimitedVideoPreviewer`).
+/// Full-line comments are stripped so a commented-out swap cannot match;
+/// the assignment + `.map` form is required (not a bare class mention).
+fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(source);
+    let active: String = source
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some(assign_at) = active.find("active_storage.previewers") else {
+        return None;
+    };
+    let after_name = active[assign_at + "active_storage.previewers".len()..].trim_start();
+    let Some(after_eq) = after_name.strip_prefix('=') else {
+        return None;
+    };
+    if !after_eq.contains(".map") {
+        return None;
+    }
+    let marker = "ActiveStorage::Previewer::VideoPreviewer";
+    let Some(idx) = after_eq.find(marker) else {
+        return None;
+    };
+    let after = after_eq[idx + marker.len()..].trim_start();
+    let after = after.strip_prefix('?')?.trim_start();
+    // `? TimeLimitedVideoPreviewer : previewer` or multiline.
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '_')
+        .collect();
+    if name.is_empty() || name == "previewer" {
+        return None;
+    }
+    Some(name)
 }
 
 /// The MIME types a `config.active_storage.variable_content_types -=

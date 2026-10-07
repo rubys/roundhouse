@@ -35,6 +35,11 @@ pub(crate) mod turbo_drive;
 pub(crate) mod turbo_frames;
 pub(crate) mod attr_parts;
 
+/// Largest `cached: true` collection that skips the store (`length > N`
+/// takes the concat-cache path). Named for the exclusive bound: length
+/// 8 is uncached, 9 is the first cached size.
+pub const MAX_UNCACHED_COLLECTION_LENGTH: i64 = 8;
+
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
@@ -43,7 +48,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::collect_extra_params;
+use self::extra_params::{collect_extra_params, drop_closure_names};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -480,21 +485,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
 
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
-    // render_locals_keys). Names the signature already carries (record,
-    // closure ivars, flash/defined? extras) are skipped.
+    // render_locals_keys). Names already on the signature as the record
+    // or flash/defined? extras are skipped here; closure ivars are
+    // dropped after append by `drop_closure_names` (raw key vs
+    // `safe_local` name).
     let mut extra_params = extra_params;
     if is_partial {
         let keys_map = &lx.locals_keys;
         if let Some(keys) = view_key_of(view).and_then(|k| keys_map.get(&k).cloned()) {
             for k in keys {
-                if k != arg_name
-                    && !closure_ivars.contains(&k)
-                    && !extra_params.contains(&k)
-                {
+                if k != arg_name && !extra_params.contains(&k) {
                     extra_params.push(k);
                 }
             }
         }
+        drop_closure_names(&mut extra_params, &closure_ivars);
     }
 
     // A bound form local is NOT interface (see `partial_form_bindings`):
@@ -827,6 +832,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         name: module_id,
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
@@ -2427,11 +2433,12 @@ pub(crate) fn partial_call_contracts(
             .unwrap_or_default();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &record && !closure.contains(k) && !extras.contains(k) {
+                if k != &record && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }
         }
+        drop_closure_names(&mut extras, &closure);
         out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false });
     }
     out
@@ -2601,11 +2608,12 @@ pub(super) fn partial_extras_map(
             .unwrap_or_default();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &arg_name && !closure.contains(k) && !extras.contains(k) {
+                if k != &arg_name && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }
         }
+        drop_closure_names(&mut extras, &closure);
         out.insert(key, extras);
     }
     // Mirror the def site's bound-form-local drop (the defined?-extras

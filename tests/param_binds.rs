@@ -41,10 +41,17 @@ ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "parents", force: :cascade do |t|
     t.string "name", null: false
     t.integer "other_id", null: false
+    t.integer "number"
+    t.string "optional_name"
+    t.boolean "flag"
   end
   create_table "items", force: :cascade do |t|
     t.integer "parent_id", null: false
     t.string "name", null: false
+    t.integer "number"
+    t.string "optional_name"
+    t.boolean "flag"
+    t.boolean "required_flag", null: false
   end
 end
 "#,
@@ -97,6 +104,36 @@ class Parent < ApplicationRecord
     row = Item.find_by(name: @name)
     row.nil? ? -1 : row.id
   end
+  def nullable_pair(id, number, name, flag, parent)
+    @id = id.to_i
+    @number = number.nil? ? nil : number.to_i
+    @optional_name = name.nil? ? nil : name.to_s
+    @flag = flag.nil? ? nil : flag == true
+    @other_id = parent.to_i
+    Item.where(id: @id, number: @number, optional_name: @optional_name, flag: @flag, parent_id: @other_id).count
+  end
+  def nullable_key(number)
+    @number = number.nil? ? nil : number.to_i
+    Item.where(id: @number).count
+  end
+  def not_null_number(number)
+    @number = number.nil? ? nil : number.to_i
+    Item.where(parent_id: @number).count
+  end
+  def not_null_name(name)
+    @optional_name = name.nil? ? nil : name.to_s
+    Item.where(name: @optional_name).count
+  end
+  def not_null_flag(flag)
+    @flag = flag.nil? ? nil : flag == true
+    Item.where(required_flag: @flag).count
+  end
+  def nil_key_exists
+    Item.exists?(nil)
+  end
+  def nil_key_find
+    Item.find(nil)
+  end
 end
 "#,
         )
@@ -143,11 +180,35 @@ fn emitted(test: &str, target: BuildTarget) {
         "rows(value)",
         "count_id(value)",
         "pair(value, parent)",
+        "nullable_pair(id, number, name, flag, parent)",
         "items",
     ] {
         assert_bound(&probe, method, "bind_int", binds_on);
     }
     assert_bound(&probe, "named(value)", "bind_text", binds_on);
+    let nullable = probe.split("  def nullable_pair(").nth(1).unwrap();
+    let nullable = nullable.split("\n  end").next().unwrap();
+    for (column, escape) in [
+        ("number", "escape_int_opt"),
+        ("optional_name", "escape_string_opt"),
+        ("flag", "escape_bool_opt"),
+    ] {
+        assert!(nullable.contains(&format!("{column} IS NULL")), "{nullable}");
+        assert!(!nullable.contains(&format!("{column} IS ?")), "{nullable}");
+        if !binds_on {
+            assert!(nullable.contains(&format!("Db.{escape}(")), "{nullable}");
+        }
+    }
+    if binds_on {
+        assert_eq!(nullable.matches("Db.bind_").count(), 5, "{nullable}");
+        assert!(nullable.contains("Db.bind_int("), "{nullable}");
+        assert!(nullable.contains("Db.bind_int_opt("), "{nullable}");
+        assert!(nullable.contains("Db.bind_text_opt("), "{nullable}");
+        assert!(nullable.contains("Db.bind_bool_opt("), "{nullable}");
+        let key = probe.split("  def nullable_key(").nth(1).unwrap().split("\n  end").next().unwrap();
+        assert!(key.contains("WHERE id = ?"), "{key}");
+        assert!(key.contains("Db.bind_int_opt(stmt, 1, @number)"), "{key}");
+    }
     let item = std::fs::read_to_string(dir.join("app/models/item.rb")).unwrap();
     for method in [
         "self._adapter_find_by_id(id)",
@@ -246,6 +307,13 @@ fn run_script(dir: &std::path::Path, script: &str, native: bool) {
     }
 }
 
+struct ScratchDir(PathBuf);
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn runtime(native: bool) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let base = option_env!("CARGO_TARGET_TMPDIR")
@@ -256,6 +324,7 @@ fn runtime(native: bool) {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let _cleanup = ScratchDir(dir.clone());
     let prelude = if native {
         for name in ["db.rb", "active_support_time_parsing.rb"] {
             std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
@@ -268,10 +337,8 @@ fn runtime(native: bool) {
             root.join("runtime/spinel/db_cruby.rb")
         )
     };
-    let lifecycle = if native {
-        r#"
-# Spinel promises clear_bindings at release; CRuby instead promises complete
-# rebinding and deliberately retains old values. Probe the native contract
+    let clear = r#"
+# Both shims clear bindings on release. Probe a missing bind on idle reuse
 # directly, since a generated reader overwrites every slot and cannot see it.
 stmt = Db.prepare("SELECT COALESCE(?, -99)")
 Db.bind_int(stmt, 1, 73)
@@ -283,7 +350,9 @@ raise "missing clear probe" if !Db.step?(stmt)
 expect_int("finalize clears bindings", -99, Db.column_int(stmt, 0))
 Db.finalize(stmt)
 puts "runtime: finalize clears bindings passed"
-"#
+"#;
+    let lifecycle = if native {
+        ""
     } else {
         r#"
 # Finalize must release a partially consumed reader's lock before this
@@ -307,9 +376,8 @@ Db.with_connection do
 end
 puts "runtime: CRuby finalize releases partial reader before another connection writes"
 
-# A reader that raises before finalize leaves its cached statement stepped.
-# Rebind on the same connection before cleaning up the abandoned handle:
-# finalize's reset must not mask removal of the prepare-time reset.
+# An interrupted reader still owns its cached statement. A nested read uses
+# a transient sibling; it must neither reset nor rebind the live owner.
 Db.with_connection do
   interrupted = nil
   begin
@@ -327,7 +395,7 @@ Db.with_connection do
     Db.finalize(interrupted)
   end
 end
-puts "runtime: CRuby prepare recovers an interrupted reader with a different id"
+puts "runtime: CRuby interrupted reader keeps ownership across a different id"
 "#
     };
     // Run CRuby's lifecycle probes before any other reader can hold a lock.
@@ -343,9 +411,39 @@ puts "runtime: CRuby prepare recovers an interrupted reader with a different id"
         1,
         "missing or ambiguous lifecycle probe marker"
     );
-    let body = body.replace(marker, &format!("{lifecycle}\n{marker}"));
+    let nil_contract = include_str!("param_binds_nil.rb");
+    let body = body.replace(marker, &format!("{nil_contract}\n{lifecycle}\n{marker}"));
+    let body = body.replace(
+        "# Observe bytes as a BLOB",
+        &format!("{clear}\n# Observe bytes as a BLOB"),
+    );
+    let cache_cases = include_str!("../runtime/spinel/test/statement_cache_cases.rb");
+    let ownership = if native {
+        include_str!("param_binds_spinel_cache.rb")
+    } else {
+        include_str!("param_binds_cruby_cache.rb")
+    };
+    // Spinel's existing inline writer cannot put NUL in SQL text. Its
+    // bind-byte contract above still covers NUL; the gem/JDBC writers use
+    // BLOB literals, so the gem path also checks writer/reader parity.
+    let nul_writer = if native {
+        ""
+    } else {
+        r#"
+inline_bound_string("NUL UTF-8", "a\0b")
+inline_bound_string("NUL binary", "a\0b".b)
+inline_bound_string("invalid UTF-8 tag", "\xFFa".force_encoding(Encoding::UTF_8))
+inline_bound_string("gem BLOB wrapper", SQLite3::Blob.new("plain-ascii"))
+puts "runtime: NUL inline writes and bound reads agree"
+"#
+    };
     let script = format!(
-        "{prelude}\nDb.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n{body}\nDb.close\n"
+        "{prelude}\nENV[\"DATABASE_POOL_SIZE\"] = \"1\"\n\
+         Db.configure(\"file:cache_cases?mode=memory&cache=shared\", pool_size: 1)\n\
+         {cache_cases}\nStatementCacheTest.new.run\n\
+         puts \"runtime: 12 statement cache ownership and error tests passed\"\nDb.close\n\
+         ENV[\"DATABASE_POOL_SIZE\"] = \"4\"\n\
+         Db.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n{body}\n{nul_writer}\n{ownership}\nDb.close\n"
     );
     run_script(&dir, &script, native);
     std::fs::remove_dir_all(dir).expect("remove successful runtime probe");
@@ -371,6 +469,267 @@ fn varying_binds_spinel() {
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn bind_runtime_spinel() {
     runtime(true);
+}
+
+// A String-only override exposes the inherited Integer adapter seed that
+// SQLite's escape helpers otherwise hide. Compile the actual emitted RBS;
+// an unseeded native compile does not exercise this boundary.
+fn string_key_adapter(test: &str, target: BuildTarget) {
+    if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
+        for mode in ["0", "1"] {
+            println!("{test}: ROUNDHOUSE_PARAM_BINDS={mode}");
+            success(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test, "--include-ignored", "--nocapture"])
+                    .env("ROUNDHOUSE_BINDS_CHILD", "1")
+                    .env("ROUNDHOUSE_PARAM_BINDS", mode),
+            );
+        }
+        return;
+    }
+    let (dir, errors) = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  self.primary_key = \"identifier\"\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", primary_key: \"identifier\", id: :string do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .emit(target);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let _cleanup = ScratchDir(dir.parent().unwrap().to_path_buf());
+    let script = r#"require_relative "boot"
+class Widget
+  def self._adapter_find_by_id(id)
+    record = Widget.new
+    record.name = id.upcase
+    record
+  end
+  def self._adapter_exists_by_id?(id)
+    id.upcase == "LITERAL_KEY"
+  end
+end
+raise "String adapter input" unless Widget.find("literal_key").name == "LITERAL_KEY"
+raise "empty String key" unless Widget.find("").name == ""
+raise "zero String key" unless Widget.find("0").name == "0"
+raise "String exists adapter" unless Widget.exists?("literal_key")
+raise "missing String exists adapter" if Widget.exists?("other")
+raise "nil exists guard" if Widget.exists?(nil)
+begin
+  Widget.find(nil)
+  raise "nil reached adapter"
+rescue ActiveRecord::RecordNotFound
+end
+puts "PASS seeded String-only find/exists adapter boundary and nil guards"
+"#;
+    if target == BuildTarget::Spinel {
+        std::fs::write(dir.join("strict_adapter.rb"), script).unwrap();
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let mut command = Command::new(compiler);
+        command
+            .args(["--rbs", ".", "strict_adapter.rb", "-o", "strict_adapter"])
+            .current_dir(&dir);
+        let output = command.output().expect("compile seeded String adapter");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("type seeds are unavailable"),
+            "RBS extractor is required: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        check_success(&command, &output);
+        success(Command::new(dir.join("strict_adapter")).current_dir(&dir));
+    } else {
+        run_script(&dir, script, false);
+    }
+}
+
+#[test]
+fn string_key_adapter_ruby() {
+    string_key_adapter("string_key_adapter_ruby", BuildTarget::Ruby);
+}
+
+#[test]
+#[ignore = "requires Spinel and its RBS extractor"]
+fn string_key_adapter_spinel() {
+    string_key_adapter("string_key_adapter_spinel", BuildTarget::Spinel);
+}
+
+fn nullable_associations(test: &str, target: BuildTarget) {
+    if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
+        for mode in ["0", "1"] {
+            println!("{test}: ROUNDHOUSE_PARAM_BINDS={mode}");
+            success(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test, "--include-ignored", "--nocapture"])
+                    .env("ROUNDHOUSE_BINDS_CHILD", "1")
+                    .env("ROUNDHOUSE_PARAM_BINDS", mode),
+            );
+        }
+        return;
+    }
+    let app = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .write(
+            "app/models/account.rb",
+            "class Account < ApplicationRecord\n  has_many :links\n  has_many :taggings, as: :taggable\nend\n",
+        )
+        .write(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :links\nend\n",
+        )
+        .write(
+            "app/models/link.rb",
+            "class Link < ApplicationRecord\n  belongs_to :account, optional: true\n  belongs_to :article, optional: true\nend\n",
+        )
+        .write(
+            "app/models/tagging.rb",
+            "class Tagging < ApplicationRecord\n  belongs_to :taggable, polymorphic: true, optional: true\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"
+ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "accounts", force: :cascade do |t|
+    t.string "name", null: false
+  end
+  create_table "articles", id: :uuid, force: :cascade do |t|
+    t.string "title", null: false
+  end
+  create_table "links", force: :cascade do |t|
+    t.integer "account_id"
+    t.uuid "article_id"
+  end
+  create_table "taggings", force: :cascade do |t|
+    t.integer "taggable_id"
+    t.string "taggable_type"
+  end
+end
+"#,
+        );
+    let (dir, errors) = app.emit(target);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let binds_on = std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1";
+    let link = std::fs::read_to_string(dir.join("app/models/link.rb")).unwrap();
+    assert_bound(&link, "account", "bind_int", binds_on);
+    assert_bound(&link, "article", "bind_text", binds_on);
+    let tagging = std::fs::read_to_string(dir.join("app/models/tagging.rb")).unwrap();
+    assert_bound(&tagging, "taggable", "bind_int", binds_on);
+    // Spinel currently boxes column_int_opt's nil sentinel as an Integer
+    // when passing it to a generated setter. That separate hydration gap
+    // makes .nil? false before this reader runs. Exercise native integer
+    // nil inputs through the post-emission assignments in the shared
+    // script, and retain native SQL-NULL hydration coverage for UUIDs.
+    let integer_hydration = if target == BuildTarget::Spinel {
+        ""
+    } else {
+        r#"
+raise "nil integer FK from SQL resolved an association" unless from_sql.account.nil?
+raise "nil polymorphic FK from SQL resolved an association" unless Tagging.find(1).taggable.nil?
+raise "nil polymorphic type from SQL resolved an association" unless Tagging.find(3).taggable.nil?
+puts "emit: SQL-NULL integer and polymorphic association readers passed"
+"#
+    };
+    let script = format!(
+        r#"require_relative "boot"
+require_relative "app/models/account"
+require_relative "app/models/article"
+require_relative "app/models/link"
+require_relative "app/models/tagging"
+SqliteAdapter.configure("file:nil_associations?mode=memory&cache=shared")
+ActiveRecord.adapter = SqliteAdapter
+Schema.statements.each {{ |sql| Db.exec(sql) }}
+{}
+{}
+from_sql = Link.find(1)
+raise "nil UUID FK from SQL resolved an association" unless from_sql.article.nil?
+puts "emit: SQL-NULL UUID association reader passed"
+{integer_hydration}
+Db.close
+"#,
+        cache_probe(target == BuildTarget::Spinel),
+        include_str!("param_binds_associations.rb")
+    );
+    run_script(&dir, &script, target == BuildTarget::Spinel);
+}
+
+#[test]
+fn nullable_associations_ruby() {
+    nullable_associations("nullable_associations_ruby", BuildTarget::Ruby);
+}
+
+#[test]
+#[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
+fn nullable_associations_spinel() {
+    nullable_associations("nullable_associations_spinel", BuildTarget::Spinel);
+}
+
+fn cache_probe(native: bool) -> &'static str {
+    if native {
+        r#"
+module SQL
+  ffi_func :sqlite3_next_stmt, [:ptr, :ptr], :ptr
+end
+class DbConn
+  def gate_cache_size
+    @entries.length
+  end
+  def gate_live_statements
+    n = 0
+    ptr = SQL.sqlite3_next_stmt(dbh, nil)
+    while !ptr.nil?
+      n += 1
+      ptr = SQL.sqlite3_next_stmt(dbh, ptr)
+    end
+    n
+  end
+end
+module Db
+  def self.gate_cache_size
+    current_conn.gate_cache_size
+  end
+  def self.gate_live_statements
+    current_conn.gate_live_statements
+  end
+  def self.gate_released(stmt)
+    nil
+  end
+end
+"#
+    } else {
+        r#"
+module Db
+  def self.gate_cache_size
+    (current_dbh.instance_variable_get(:@rh_stmt_cache) || {}).size
+  end
+  def self.gate_live_statements
+    0
+  end
+  def self.gate_released(stmt)
+    raise "transient statement was not closed" if stmt[:stmt] && !stmt[:stmt].closed?
+  end
+end
+"#
+    }
 }
 
 fn raw_where_substitution(target: BuildTarget) {

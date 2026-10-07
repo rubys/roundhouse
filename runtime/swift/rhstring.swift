@@ -39,4 +39,17 @@ enum RhString {
             withTemplate: replacement
         )
     }
+
+    // Ruby `String#match?(re)` / `Regexp#match?(str)` — true when the
+    // pattern finds a match. NSRegularExpression has no instance
+    // predicate that takes just a String, so the emit bridges both
+    // orientations through this helper.
+    static func matchPred(_ s: String, _ pattern: NSRegularExpression) -> Bool {
+        let ns = s as NSString
+        return pattern.firstMatch(
+            in: s,
+            options: [],
+            range: NSRange(location: 0, length: ns.length)
+        ) != nil
+    }
 }

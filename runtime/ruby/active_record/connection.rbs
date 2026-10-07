@@ -2,6 +2,19 @@
 # Hash[String, untyped] by design — raw SQL's row shape (aliased
 # aggregates, computed columns) is genuinely dynamic; see connection.rb.
 module ActiveRecord
+  class IntegerKeyCast
+    @valid: bool
+    @value: Integer
+    def valid: () -> bool
+    def value: () -> Integer
+    def initialize: (bool valid, Integer value) -> void
+    def self.input_text: (Integer | Float | String | nil id) -> String
+    def self.parse: (Integer | Float | String | nil id) -> ::ActiveRecord::IntegerKeyCast
+    def self.number_start: (String text) -> Integer
+    def self.digit_value: (String char) -> Integer
+    def self.exceeds_limit: (String digits, String limit) -> bool
+  end
+
   class Result
     @rows: Array[Hash[String, untyped]]
 
@@ -26,6 +39,13 @@ module ActiveRecord
   end
 
   class Base
+    @__pending_preload: PendingPreload?
+    def _pend_preload: (PendingPreload pending) -> nil
+    def _await_preload: () -> nil
+    # Request values stay intact until the schema-selected scalar adapter.
+    def self.find: (Integer | Float | String | nil id) -> Base
+    def self._find_primary_key_input: (Integer | Float | String | nil id) -> Base?
+    def self._cast_primary_key: (Integer | Float | String | nil id) -> (Integer | String | nil)
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
@@ -38,8 +58,12 @@ module ActiveRecord
     def self.record_timestamps: () -> bool
     def update_column: (String | Symbol name, untyped value) -> bool
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
+    # Nil and uncastable request keys reject before the scalar adapter.
+    def self.exists?: (Integer | Float | String | nil id) -> bool
+    def self._exists_primary_key_input: (Integer | Float | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
+    def self.find_by: (Hash[String | Symbol, untyped] conditions) -> Base?
     def self.all: () -> Relation
     def self.none: () -> Relation
     def self.page: (?(Integer | String | nil) num) -> Relation
@@ -53,7 +77,6 @@ module ActiveRecord
     def self.first: () -> Base?
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
-    def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void

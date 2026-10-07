@@ -2,8 +2,8 @@
 # never become the input to a later placeholder or replacement expansion.
 Db.with_connection do
   backslashes = %q{path\1\&\`\'} + "雪"
-  Db.exec("INSERT INTO items (id, parent_id, name) VALUES (1, 1, 'a'), (2, 1, 'what?')")
-  Db.exec("INSERT INTO items (id, parent_id, name) VALUES (3, 2, " + Db.escape_string(backslashes) + ")")
+  Db.exec("INSERT INTO items (id, parent_id, name, required_flag) VALUES (1, 1, 'a', 0), (2, 1, 'what?', 0)")
+  Db.exec("INSERT INTO items (id, parent_id, name, required_flag) VALUES (3, 2, " + Db.escape_string(backslashes) + ", 0)")
 
   scalar = ActiveRecord::Relation.new(Item).where("items.name = ? OR items.id = ?", "what?", 1)
   raise "scalar value consumed later placeholder" unless scalar.count == 2

@@ -1,0 +1,6 @@
+module ActionController
+  module InvisibleCaptcha
+    HONEYPOTS: Array[String]
+    def self.spam?: (Hash[String, untyped] params) -> bool
+  end
+end

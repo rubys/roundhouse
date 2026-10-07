@@ -155,6 +155,19 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[],
         instance_methods: &[("value", GemTy::Untyped), ("pending?", GemTy::Bool)],
     },
+    // Thin surface for `Model.reflect_on_association(:name)` — enough
+    // for ActionText / attachment helpers that compare `.klass` or
+    // ask presence. Full reflection stays unmodeled (Untyped on the
+    // deeper readers).
+    GemClass {
+        name: "ActiveRecord::Reflection::AssociationReflection",
+        class_methods: &[],
+        instance_methods: &[
+            ("klass", GemTy::Untyped),
+            ("name", GemTy::Sym),
+            ("macro", GemTy::Sym),
+        ],
+    },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
     // raw fragment, `star` is the `*` projection node; both produce
     // opaque AST consumed by where/order/select, so gradual.

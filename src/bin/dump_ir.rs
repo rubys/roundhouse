@@ -97,8 +97,8 @@ fn dump() {
     };
 
     // Honor ROUNDHOUSE_INGEST_SURVEY the same way `roundhouse check` does,
-    // so dump_ir can profile apps that are not yet zero-error (Jumpstart,
-    // Mastodon, etc.) without aborting at the first unsupported construct.
+    // so dump_ir can profile apps that are not yet zero-error (Mastodon,
+    // etc.) without aborting at the first unsupported construct.
     if std::env::var("ROUNDHOUSE_INGEST_SURVEY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)

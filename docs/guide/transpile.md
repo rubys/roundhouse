@@ -76,16 +76,22 @@ normalizes Date or ISO date text writes, and preserves SQL NULL as nil.
 Date JSON is an ISO date without a clock or zone. DateTime/time columns
 retain their timestamp type and runtime.
 
-Date-only emission is currently supported and executed only on `ruby`.
-`jruby`, `spinel`, `roda` and the non-Ruby targets (including
+Date-only emission is currently supported and executed on `ruby` and
+`spinel` (Spinel with its own bounded `Date`; see
+[the runtime notes](../pipeline/runtime.md)).
+`jruby`, `roda` and the non-Ruby targets (including
 `typescript-worker`) reject Date at the project boundary before emitting
 files, even with `--allow-unsupported`. This is an observable support
 boundary, replacing silent timestamp treatment, not evidence that these
 languages cannot represent dates. JRuby's date-only adapter path remains
 unverified. The `blog` source archive is not a transpilation target.
 
-This is a bounded Date surface, not all of ActiveSupport's Date extensions:
-unmodeled methods still diagnose, and nonliteral strict-local defaults
+Of ActiveSupport's Date extensions, `Date.current` (today in the app's
+zone, under `travel` too), `beginning_of_month` / `end_of_month` (Date)
+and `beginning_of_day` / `end_of_day` / `midnight` (a zone-local Time),
+with their `at_*` aliases, are lowered to runtime functions. This is a
+bounded Date surface, not all of the extensions: unmodeled methods still
+diagnose, and nonliteral strict-local defaults
 remain an existing ingestion gap.
 
 ### Forwarding a computed Proc

@@ -56,6 +56,32 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 // against the rust path. Until then, `real_blog_cargo_test_passes`
 // + `scripts/compare rust` carry the authoritative coverage.
 
+/// The emitted Rust must retain the Rails instance-method shape for both
+/// ActionController::Base defaults and a concrete real-blog controller.
+#[test]
+fn real_blog_controller_identity_methods_emit_as_instance_methods() {
+    let fixture = roundhouse::fixtures::real_blog();
+    let scratch = scratch_dir("real-blog-controller-identity-emission");
+    generate_project(fixture, &scratch);
+
+    for (path, class_name) in [
+        (scratch.join("src/action_controller_base.rs"), "ActionController::Base"),
+        (scratch.join("src/controllers/articles_controller.rs"), "ArticlesController"),
+    ] {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for method in ["controller_name", "controller_path"] {
+            let signature = format!("pub fn {method}(&self) -> String");
+            assert!(
+                source.contains(&signature),
+                "{class_name} should emit instance method `{signature}`:\n{source}"
+            );
+        }
+    }
+}
+
+/// Compile the complete generated application and execute its model/runtime
+/// contracts with the actual Cargo dependency graph and packaged imports.
 #[test]
 #[ignore]
 fn real_blog_cargo_test_passes() {
@@ -107,9 +133,55 @@ fn enum_label_walks_past_the_first_label() {
     )
     .unwrap();
 
+    // Exercise complete runtime packaging and typed byte reads through the
+    // generated Cargo project, including the real shared error implementation.
+    std::fs::write(
+        scratch.join("tests/route_path_captures.rs"),
+        r#"
+use app::router::Router;
+#[test]
+fn routed_captures_and_checked_bytes() {
+    for (input, expected) in [("abc", "abc"), ("+%2B", "++"), ("%00", "\0"), ("%2500", "%00"), ("%C3%A9", "é")] {
+        let path = format!("/echo/{input}");
+        let hit = Router::match_pattern("/echo/:value", &path, "").expect("route");
+        assert_eq!(hit["value"], expected);
+    }
+    assert_eq!(Router::capture_byte(vec![0, 255], 0), 0);
+    assert_eq!(Router::capture_byte(vec![0, 255], 1), 255);
+    for index in [-1, 1] {
+        let error = std::panic::catch_unwind(|| Router::capture_byte(vec![0], index)).expect_err("invalid offset must reject");
+        assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+    }
+    let error = std::panic::catch_unwind(|| Router::decode_capture("%FF")).expect_err("invalid UTF-8 must reject");
+    assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+}
+"#,
+    ).unwrap();
+
+    // Exercise the normal Ruby instance-call shape on generated Base and app types.
+    std::fs::write(
+        scratch.join("tests/controller_identity.rs"),
+        r#"
+use app::action_controller_base::Base;
+use app::controllers::ArticlesController;
+
+/// Verifies both generated controller types expose their concrete identities.
+#[test]
+fn controller_identity_methods_are_instance_methods() {
+    let base = Base::default();
+    assert_eq!(base.controller_name(), "base");
+    assert_eq!(base.controller_path(), "action_controller/base");
+
+    let controller = ArticlesController::default();
+    assert_eq!(controller.controller_name(), "articles");
+    assert_eq!(controller.controller_path(), "articles");
+}
+"#,
+    )
+    .unwrap();
+
     let output = Command::new("cargo")
         .arg("test")
-        .arg("--quiet")
         .current_dir(&scratch)
         .output()
         .expect("run cargo test");
@@ -122,6 +194,11 @@ fn enum_label_walks_past_the_first_label() {
         scratch.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test controller_identity_methods_are_instance_methods ... ok"),
+        "the emitted controller identity test did not run:\n{stdout}"
     );
 }
 
@@ -232,6 +309,53 @@ async fn articles_index_is_two_queries_not_n_plus_one() {
          \n=== stderr ===\n{}",
         scratch.display(),
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// A block filter and a lambda filter read `action_name`. The dispatcher
+/// then calls `assign_action_name`, and the emitted Rust controller must
+/// have that method and the `action_name` reader.
+#[test]
+#[ignore]
+fn filters_that_read_action_name_compile() {
+    let app_dir = scratch_dir("action-name-app");
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
+    }
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let controller = app_dir.join("app/controllers/articles_controller.rb");
+    let source = std::fs::read_to_string(&controller).expect("read controller");
+    let edited = source.replacen(
+        "  before_action :set_article,",
+        "  before_action { @bare = action_name }\n  \
+           before_action -> { @own = self.action_name }\n  \
+           before_action :set_article,",
+        1,
+    );
+    assert_ne!(source, edited, "the filter edit applies");
+    std::fs::write(&controller, edited).expect("write controller");
+
+    let scratch = scratch_dir("action-name");
+    generate_project(&app_dir, &scratch);
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
         String::from_utf8_lossy(&output.stderr),
     );
 }

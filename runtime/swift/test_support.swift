@@ -44,9 +44,25 @@ class RoundhouseTestCase: XCTestCase {
         performRequest("DELETE", path, (opts["params"] as? [String: Any?]) ?? [:])
     }
 
+    /// Exercise the production routing rejection contract through XCTest's
+    /// nonthrowing request helpers, preserving later requests after a 400.
     private func performRequest(_ method: String, _ path: String, _ params: [String: Any?]) {
         ViewHelpers.resetSlotsBang()
-        guard let match = Router.match(method, path, RoundhouseTestSetup.routes) else {
+        // Match the production request boundary without making every XCTest
+        // request helper throw or turning malformed captures into a process trap.
+        let routed: MatchResult?
+        do {
+            routed = try Router.match(method, path, RoundhouseTestSetup.routes)
+        } catch is RoutePathEncodingError {
+            __status = 400
+            __body = "Bad Request"
+            __location = ""
+            return
+        } catch {
+            XCTFail("Router.match threw: \(error)")
+            return
+        }
+        guard let match = routed else {
             XCTFail("no route for \(method) \(path)")
             return
         }

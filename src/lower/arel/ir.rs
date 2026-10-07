@@ -212,6 +212,9 @@ pub enum ColumnSpec {
 #[derive(Clone, Debug)]
 pub enum Predicate {
     Eq(ColRef, Value),
+    /// Ruby-family runtime equality: select `= value` or `IS NULL` from
+    /// the value, preserving SQLite partial-index and join optimizations.
+    NullableEq(ColRef, Value),
     And(Box<Predicate>, Box<Predicate>),
     Or(Box<Predicate>, Box<Predicate>),
 }
@@ -268,9 +271,8 @@ pub enum ValueType {
 }
 
 impl ValueType {
-    /// True for the nullable variants. Callers that cannot express
-    /// NULL (the placeholder-bind path has no `bind_null`) route these
-    /// through inline escaping instead.
+    /// True for the nullable variants. Optional binds and inline escapes
+    /// both preserve nil as SQL NULL.
     pub fn is_nullable(self) -> bool {
         matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt)
     }

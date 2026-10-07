@@ -192,6 +192,7 @@ fn optional_belongs_to_emits_ternary_guard() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -292,6 +293,7 @@ fn length_validation_emits_with_options_object() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -404,6 +406,7 @@ fn controller_new_action_is_reserved_word_escaped() {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("WidgetsController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from("new"),
@@ -472,6 +475,7 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![
             ControllerBodyItem::Action {
                 action: Action {
@@ -508,6 +512,7 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -601,6 +606,7 @@ fn walker_passes_last_bound_local_to_view_fn() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -609,6 +615,7 @@ fn walker_passes_last_bound_local_to_view_fn() {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from("pinned"),
@@ -710,6 +717,7 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -718,6 +726,7 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from("archive_all"),
@@ -770,6 +779,7 @@ fn custom_action_without_terminal_gets_implicit_render() {
     app.models.push(Model {
         name: ClassId(Symbol::from("Article")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("articles")),
         primary_key: None,
         attributes: Row::closed(),
@@ -778,6 +788,7 @@ fn custom_action_without_terminal_gets_implicit_render() {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from("headline"),

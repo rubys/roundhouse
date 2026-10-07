@@ -22,7 +22,9 @@
 #
 # What arrives here is already specific to the model: the purpose and
 # the expiry are compile-time facts the lowering writes at the call site
-# (src/lower/secure_password.rs), like signed_id.rb's combined purpose.
+# (src/lower/secure_password.rs for the reset token,
+# src/lower/generates_token_for.rs for an app's own declarations), like
+# signed_id.rb's combined purpose.
 # The purpose arrives JSON-ESCAPED (`User\npassword_reset\n900` with a
 # literal backslash-n), because the envelope is written and read as text.
 #
@@ -33,11 +35,18 @@ module ActiveRecord
     SALT = "active_record/token_for"
 
     # The signed token for `data_json` under `purpose`, expiring
-    # `expires_in` seconds from now.
+    # `expires_in` seconds from now, or never for 0. An unexpiring token
+    # has no `exp` key at all — Rails' metadata envelope omits a nil
+    # expiry, as it does for a signed id. A negative lifetime still
+    # encodes an already-past `exp`, so a direct caller cannot mint a
+    # reusable token by accident.
     def self.generate(data_json, purpose, expires_in)
-      exp = "\"" +
-            ActionController::MessageVerifier.iso8601_ms(Time.now + expires_in) +
-            "\""
+      exp = ""
+      if expires_in != 0
+        exp = "\"" +
+              ActionController::MessageVerifier.iso8601_ms(Time.now + expires_in) +
+              "\""
+      end
       ActionController::MessageVerifier.gid_envelope(
         Rails.application.secret_key_base, SALT, data_json, purpose, exp
       )
@@ -55,11 +64,39 @@ module ActiveRecord
     # JSON. A bcrypt digest is `$2a$12$` + 22 salt characters + the hash,
     # so the salt's last ten are characters 19..28 of the digest.
     def self.secure_password_data(id, digest)
-      tail = "null"
-      if !digest.nil? && digest.length >= 29
-        tail = ActionController::MessageVerifier.json_string(digest[19, 10])
-      end
-      "[" + id.to_s + "," + tail + "]"
+      tail = nil
+      tail = digest[19, 10] if !digest.nil? && digest.length >= 29
+      value_data(id, tail)
+    end
+
+    # A `generates_token_for` block's payload: `[id, value]` as JSON,
+    # nil being `null`, for a String value. The lowering picks this or
+    # one of the two below by the block's type, and hands any other
+    # value over as its String form (src/lower/generates_token_for.rs).
+    def self.value_data(id, value)
+      json = "null"
+      json = ActionController::MessageVerifier.json_string(value) unless value.nil?
+      "[" + id.to_s + "," + json + "]"
+    end
+
+    # The same for a block whose value is an Integer: a JSON number,
+    # `[id, 5]`, which is what Rails' `as_json` writes.
+    def self.int_value_data(id, value)
+      json = "null"
+      json = value.to_s unless value.nil?
+      "[" + id.to_s + "," + json + "]"
+    end
+
+    # And for a true/false value: `[id, true]`.
+    def self.bool_value_data(id, value)
+      json = "null"
+      json = value ? "true" : "false" unless value.nil?
+      "[" + id.to_s + "," + json + "]"
+    end
+
+    # A declaration without a block signs the id alone: `[id]`.
+    def self.id_data(id)
+      "[" + id.to_s + "]"
     end
 
     # The record id at the head of a `[id, …]` payload, or 0 (no row)

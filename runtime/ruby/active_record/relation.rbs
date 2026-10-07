@@ -1,4 +1,15 @@
 module ActiveRecord
+  # Same model handle and include list types as Relation (the Spinel
+  # tree widens `Base` here as it does there).
+  class PendingPreload
+    @model: Base
+    @records: Array[Base]
+    @specs: Array[Symbol | Hash[Symbol, Symbol]]
+    @done: bool
+    def initialize: (Base model, Array[Base] records, Array[Symbol | Hash[Symbol, Symbol]] specs) -> void
+    def run: () -> nil
+  end
+
   # Lazy chainable query builder. Chain methods return `self` (typed as
   # Relation); terminals execute and return rows / scalars. Loaded
   # records are `Base` as an interim (same as first/take) — not
@@ -235,8 +246,8 @@ module ActiveRecord
     def pluck: (String | Symbol col) -> Array[untyped]
     def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
-    def find: (Integer | String | Array[Integer | String] id) -> untyped
-    def find_ids: (Array[Integer | String] ids) -> Array[Base]
+    def find: (Integer | Float | String | Array[Integer | Float | String] id) -> untyped
+    def find_ids: (Array[Integer | Float | String] ids) -> Array[Base]
     def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
     def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base

@@ -216,6 +216,7 @@ fn synthesize_module_lc(
         name: module_id,
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
@@ -498,6 +499,7 @@ fn collect_imports_for_function(
         )),
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {

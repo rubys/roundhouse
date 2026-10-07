@@ -35,3 +35,6 @@ require_relative "action_controller/browser_blocker"
 # `rate_limit`'s counter — the window's count against its cap. Called
 # from the filter method the lowering synthesizes.
 require_relative "action_controller/rate_limiter"
+# `invisible_captcha`'s honeypot gate — called from the filter method
+# the lowering synthesizes.
+require_relative "action_controller/invisible_captcha"

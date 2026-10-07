@@ -51,7 +51,10 @@ func Router() http.Handler {
 		// .json suffix on the path is routed under the bare path
 		// (e.g. `/articles.json` matches `/articles`), then the
 		// dispatcher inspects the suffix to set RequestFormat.
-		matchPath := strings.TrimSuffix(r.URL.Path, ".json")
+		// EscapedPath, not URL.Path: net/http has already decoded
+		// URL.Path, and the shared router decodes each capture itself
+		// (`Router.decode_segment`), so `%2541` must arrive encoded.
+		matchPath := strings.TrimSuffix(r.URL.EscapedPath(), ".json")
 		// Rack::MethodOverride: Rails' `button_to ..., method: :delete`
 		// (and `form_with method: :patch`) render a POST form carrying a
 		// `_method` hidden field, since browsers only natively issue

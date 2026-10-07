@@ -126,12 +126,12 @@ impl Analyzer {
                     // Re-seed after typing this default: a dependent default
                     // must see the fresh binding, not last round's default.
                     let name = param.name.clone();
-                    let seeded = self.seed_method_params(&ctx, &module.name, method);
+                    let seeded = self.seed_method_params(&ctx, &module.name, method, false);
                     if let Some(ty) = seeded.local_bindings.get(&name) {
                         default_ctx.local_bindings.insert(name, ty.clone());
                     }
                 }
-                let method_ctx = self.seed_method_params(&ctx, &module.name, method);
+                let method_ctx = self.seed_method_params(&ctx, &module.name, method, false);
                 self.body_typer()
                     .analyze_expr(&mut method.body, &method_ctx);
             }

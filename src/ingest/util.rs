@@ -27,6 +27,16 @@ pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate:
     }
 }
 
+/// Span of an arbitrary Prism node in `file`.
+pub(super) fn node_span(node: &Node<'_>, file: &str) -> crate::span::Span {
+    let loc = node.location();
+    crate::span::Span {
+        file: super::sources::file_id(file),
+        start: loc.start_offset() as u32,
+        end: loc.end_offset() as u32,
+    }
+}
+
 pub(super) fn constant_id_str<'a>(id: &ruby_prism::ConstantId<'a>) -> &'a str {
     std::str::from_utf8(id.as_slice()).expect("prism constant id is UTF-8")
 }

@@ -169,6 +169,22 @@ mod tests {
                 "runtime/spinel/fragment_cache.rb does not shard `{m}`"
             );
         }
+        // CRuby MemoryStore and Spinel's Cache both fan out 32 ways with
+        // the same `shard_of` mix — drift here puts room-page keys on
+        // different contention shapes per lane for no reason. Pin the
+        // formula body, not just the method name.
+        let overlay =
+            read("runtime/spinel/scaffold/ruby_overlay/runtime/rails_cache.rb").unwrap();
+        assert!(
+            overlay.contains("SHARD_COUNT = 32") && twin.contains("SHARD_COUNT = 32"),
+            "CRuby overlay and Spinel fragment cache must both use 32 shards"
+        );
+        const SHARD_MIX: &str =
+            "((k.getbyte(n - 1) * 31) + k.getbyte(n / 2)) % SHARD_COUNT";
+        assert!(
+            overlay.contains(SHARD_MIX) && twin.contains(SHARD_MIX),
+            "overlay and Spinel shard_of must share the tail-byte mix"
+        );
     }
 
     #[test]

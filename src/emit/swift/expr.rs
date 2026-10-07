@@ -1196,6 +1196,9 @@ fn children(e: &Expr) -> Vec<&Expr> {
 
 /// Render a Swift value expression after shared primitive and string-builder selection.
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Swift, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Swift, emit_expr) {
         return s;
     }
@@ -1599,7 +1602,7 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 
 fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
-    let r = emit_expr(right);
+    let r = group_try_rhs(&emit_expr(right));
     match op {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
@@ -2500,6 +2503,19 @@ fn forces_parens(method: &str) -> bool {
     )
 }
 
+/// Swift forbids a bare `try` / `try!` / `try?` as the RHS of a
+/// non-assignment operator (`!=`, `&&`, `??`, …). Wrap so
+/// `expected != (try f())` is legal. A leading try on the whole infix
+/// expression stays unwrapped at the call site.
+fn group_try_rhs(rhs: &str) -> String {
+    if rhs.starts_with("try ") || rhs.starts_with("try!") || rhs.starts_with("try?") {
+        format!("({rhs})")
+    } else {
+        rhs.to_string()
+    }
+}
+
+/// Render a Ruby send as a Swift call, property access, or primitive operation.
 fn emit_send(
     recv: Option<&Expr>,
     method: &str,
@@ -2695,7 +2711,8 @@ fn emit_send(
         }
         match crate::emit::shared::ops::classify_binop(method) {
             crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
-                return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+                let rhs = group_try_rhs(&args_s[0]);
+                return format!("{} {} {rhs}", emit_expr(r), op);
             }
             // `<<` / `push` → Array.append.
             crate::emit::shared::ops::BinopCase::Append => {
@@ -2742,6 +2759,27 @@ fn emit_send(
         }
         if method == "include?" {
             return format!("{}.contains({})", emit_expr(r), args_s[0]);
+        }
+        // `String#match?(re)` / `Regexp#match?(str)` → RhString helper.
+        // NSRegularExpression has no compact String predicate; the
+        // primitive mirrors the TypeScript `re.test(s)` flip.
+        if method == "match?" {
+            // Require Regexp ty or a regex literal — not bare Const
+            // shape (a String-valued PATTERN must not flip).
+            let arg_is_regexp = matches!(
+                args[0].ty.as_ref(),
+                Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+            ) || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Regex { .. } });
+            let recv_is_regexp = matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+            );
+            if arg_is_regexp && !recv_is_regexp {
+                return format!("RhString.matchPred({}, {})", emit_expr(r), args_s[0]);
+            }
+            if recv_is_regexp {
+                return format!("RhString.matchPred({}, {})", args_s[0], emit_expr(r));
+            }
         }
         if method == "join" {
             return format!("{}.joined(separator: {})", emit_expr(r), args_s[0]);

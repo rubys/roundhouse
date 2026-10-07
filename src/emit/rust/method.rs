@@ -1038,6 +1038,7 @@ mod tests {
             name: ClassId(Symbol::from("Holder")),
             is_module: false,
             parent: None,
+            parent_span: Default::default(),
             includes: vec![],
             methods: vec![callee, forwarder],
             nullable_columns: Vec::new(),

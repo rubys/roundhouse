@@ -353,10 +353,10 @@ fn run_transpile(
     // walker-found errors would otherwise pass through into target code
     // that fails later in tsc/cargo/runtime with a worse message, so
     // they print and gate here alongside the emit-gap inventory.
-    // (Same Roda exception: analyze never ran, so its diagnostics
-    // would be all noise.)
+    // Roda still reports recovered structural route errors. Its type
+    // analysis never ran, so analyzer-only diagnostics would be noise.
     let mut analyze_diags =
-        if target == BuildTarget::Roda { Vec::new() } else { diagnose(&app) };
+        if target == BuildTarget::Roda { app.routes.diagnostics.clone() } else { diagnose(&app) };
     analyze_diags.extend(lower_diags);
 
     // A residue whose own text says the construct is "unsupported at

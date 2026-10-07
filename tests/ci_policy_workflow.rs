@@ -130,7 +130,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     for name in [
         "build-roundhouse",
         "build-wasm",
-        "build-spinel",
+        "spinel-build",
         "writebook-inventory",
     ] {
         assert_eq!(jobs[name]["needs"].as_str(), Some("plan"), "{name}");
@@ -152,7 +152,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     for name in [
         "build-roundhouse",
         "build-wasm",
-        "build-spinel",
+        "spinel-build",
         "writebook-inventory",
         "store-check",
         "browser-smoke-typescript",
@@ -402,7 +402,11 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
 
 #[test]
 fn routing_and_required_results_reject_false_green() {
-    for test in ["tests/ci_plan_test.py", "tests/ci_archive_evidence_test.py"] {
+    for test in [
+        "tests/ci_plan_test.py",
+        "tests/ci_plan_focus_test.py",
+        "tests/ci_archive_evidence_test.py",
+    ] {
         let result = std::process::Command::new("python3")
             .args(["-B", test, "-v"])
             .output()
@@ -422,15 +426,45 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
     assert_eq!(
-        jobs["compare"]["strategy"]["matrix"]["target"],
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[rust, typescript]").unwrap()
+        jobs["compare"]["strategy"]["matrix"]["target"].as_str(),
+        Some("${{ fromJSON(needs.plan.outputs.compare) }}")
     );
     assert_eq!(jobs["compare"]["steps"], jobs["compare-extra"]["steps"]);
     assert_eq!(
         jobs["compare-extra"]["strategy"]["max-parallel"].as_u64(),
         Some(7)
     );
+    assert_eq!(
+        jobs["compare-extra"]["continue-on-error"].as_str(),
+        Some("${{ needs.plan.outputs.extras-advisory == 'true' }}")
+    );
     assert_eq!(jobs["smoke"]["strategy"]["max-parallel"].as_u64(), Some(6));
+    assert_eq!(
+        jobs["smoke-extra"]["strategy"]["matrix"]["target"].as_str(),
+        Some("${{ fromJSON(needs.plan.outputs.smoke-extra) }}")
+    );
+    assert_eq!(
+        jobs["smoke-extra"]["continue-on-error"].as_str(),
+        Some("${{ needs.plan.outputs.extras-advisory == 'true' }}")
+    );
+    assert_eq!(jobs["smoke"]["steps"], jobs["smoke-extra"]["steps"]);
+    let spinel_coe = "${{ needs.plan.outputs.spinel-advisory == 'true' }}";
+    for name in [
+        "spinel-build",
+        "spinel-toolchain",
+        "spinel-compare",
+        "spinel-framework",
+    ] {
+        assert_eq!(
+            jobs[name]["continue-on-error"].as_str(),
+            Some(spinel_coe),
+            "{name} CoE must follow plan spinel-advisory"
+        );
+    }
+    assert_eq!(
+        ci["jobs"]["plan"]["outputs"]["spinel-advisory"].as_str(),
+        Some("${{ steps.plan.outputs.spinel-advisory }}")
+    );
     let smoke_guard = jobs["smoke"]["if"].as_str().unwrap();
     for condition in [
         "!cancelled()",
@@ -442,32 +476,68 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
             "selected smoke must run after its skipped WASM ancestor: {condition}"
         );
     }
-    assert_eq!(
-        jobs["campfire-compare-spinel"]["strategy"]["max-parallel"].as_u64(),
-        Some(3)
+    let gc = &jobs["campfire-spinel-compare"];
+    assert!(
+        gc.get("strategy").is_none(),
+        "GC modes run sequentially in one job, not a matrix"
     );
-    let gc = &jobs["campfire-compare-spinel"];
-    assert_eq!(gc["strategy"]["fail-fast"].as_bool(), Some(false));
+    assert_eq!(gc["timeout-minutes"].as_u64(), Some(75));
     for mode in ["default", "minor-gc", "verify-gen"] {
         assert_eq!(
             gc["outputs"][mode].as_str(),
             Some(format!("${{{{ steps.result.outputs.{mode} }}}}").as_str()),
-            "concurrent GC legs must report distinct mode keys"
+            "sequential GC walks must report distinct mode keys"
         );
     }
-    let report = gc["steps"]
-        .as_sequence()
-        .unwrap()
+    let steps = gc["steps"].as_sequence().unwrap();
+    for (id, flag) in [
+        ("walk-default", "--spinel /tmp/campfire"),
+        ("walk-minor-gc", "--spinel --minor-gc /tmp/campfire"),
+        ("walk-verify-gen", "--spinel --verify-gen /tmp/campfire"),
+    ] {
+        let walk = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("missing {id} step"));
+        assert_eq!(walk["continue-on-error"].as_bool(), Some(true));
+        assert_eq!(walk["timeout-minutes"].as_u64(), Some(20));
+        let run = walk["run"].as_str().unwrap();
+        assert!(
+            run.contains("--reuse") && run.contains(flag),
+            "{id} must reuse the binary with {flag}: {run}"
+        );
+    }
+    assert!(
+        steps.iter().all(|step| {
+            step["uses"].as_str() != Some("./.github/actions/setup-rust")
+                && !step["uses"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("Swatinem/rust-cache@")
+        }),
+        "--reuse walks must not pay setup-rust / rust-cache"
+    );
+    let report = steps
         .iter()
         .find(|step| step["id"].as_str() == Some("result"))
         .unwrap();
     assert_eq!(report["if"].as_str(), Some("always()"));
-    assert_eq!(report["env"]["MODE"].as_str(), Some("${{ matrix.gc }}"));
-    assert_eq!(report["env"]["STATUS"].as_str(), Some("${{ job.status }}"));
     assert_eq!(
-        report["run"].as_str(),
-        Some("echo \"$MODE=$STATUS\" >> \"$GITHUB_OUTPUT\"")
+        report["env"]["DEFAULT"].as_str(),
+        Some("${{ steps.walk-default.outcome }}")
     );
+    assert_eq!(
+        report["env"]["MINOR_GC"].as_str(),
+        Some("${{ steps.walk-minor-gc.outcome }}")
+    );
+    assert_eq!(
+        report["env"]["VERIFY_GEN"].as_str(),
+        Some("${{ steps.walk-verify-gen.outcome }}")
+    );
+    assert!(report["run"]
+        .as_str()
+        .unwrap()
+        .contains("echo \"default=$DEFAULT\""));
     assert!(
         ci["on"]["pull_request"].get("paths-ignore").is_none(),
         "summary must run even for documentation-only PRs"
@@ -642,7 +712,7 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
 
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let step = ci["jobs"]["framework-tests-spinel"]["steps"]
+    let step = ci["jobs"]["spinel-framework"]["steps"]
         .as_sequence()
         .unwrap()
         .iter()
@@ -698,12 +768,12 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
     for name in [
-        "framework-tests-spinel",
-        "campfire-db-differential-spinel",
-        "toolchain-spinel",
-        "compare-spinel",
-        "smoke-spinel",
-        "smoke-campfire",
+        "spinel-framework",
+        "campfire-spinel-db",
+        "spinel-toolchain",
+        "spinel-compare",
+        "spinel-smoke",
+        "campfire-smoke",
     ] {
         let job = &jobs[name];
         let needs = job["needs"]
@@ -723,7 +793,7 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
 
     for (job_name, artifact_name) in [
         ("build-site", "browse-archives"),
-        ("build-campfire-archive", "campfire-archive"),
+        ("campfire-archive-build", "campfire-archive"),
     ] {
         let upload = jobs[job_name]["steps"]
             .as_sequence()
@@ -737,11 +807,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
     let report = &jobs["archive-results"];
     for dependency in [
         "build-site",
-        "build-campfire-archive",
+        "campfire-archive-build",
         "smoke",
-        "smoke-spinel",
-        "smoke-campfire",
-        "smoke-campfire-docker",
+        "spinel-smoke",
+        "campfire-smoke",
+        "campfire-smoke-docker",
     ] {
         assert!(
             report["needs"]
@@ -855,11 +925,18 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
-        deploy["steps"][0]["run"]
-            .as_str()
-            .unwrap()
-            .contains("$VALIDATED_SHA")
+        !deploy_text.contains("VALIDATED_SHA"),
+        "tip-equality must not abort Pages after a successful assemble"
+    );
+    assert!(
+        !deploy_text.contains("Refuse to publish a superseded main snapshot"),
+        "main advancing mid-run must not starve github-pages"
+    );
+    assert_eq!(
+        deploy["steps"][0]["uses"].as_str(),
+        Some("actions/deploy-pages@v5")
     );
 }
 

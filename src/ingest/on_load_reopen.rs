@@ -137,6 +137,26 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
                     continue;
                 }
             }
+            // `on_load(:active_storage_attachment) { class Markdown;
+            // include Uploads; end }` — a reopen that only `include`s
+            // literal modules. Queue (or push) so the concern splice
+            // applies `has_many_attached`. File order can visit this
+            // hook before the model exists; [`apply_pending`] runs
+            // before the splice. Other on_load reopens stay surveyed.
+            if hook == "active_storage_attachment" {
+                if let Some(includes) = includes_only_reopen(&class) {
+                    let mods: Vec<Symbol> = includes.iter().map(|p| Symbol::from(p.as_str())).collect();
+                    if let Some(model) = app.models.iter_mut().find(|m| m.name.0.as_str() == name) {
+                        for path in &includes {
+                            push_model_include(model, path);
+                        }
+                    } else {
+                        app.pending_attachment_on_load
+                            .push((Symbol::from(name.as_str()), mods));
+                    }
+                    continue;
+                }
+            }
             not_carried(file, &hook, &name);
         }
         for (scope, module) in find_all_modules_with_scope(&body) {
@@ -204,6 +224,104 @@ fn not_carried(file: &str, hook: &str, name: &str) {
              of a framework class inside a load hook is dropped (the tolerant-sgid \
              `ActionText::Attachment.from_node` shape is the one read)"
         ),
+    });
+}
+
+/// When `class` body's only statements are receiverless `include Mod`
+/// calls with literal module constant paths, return those paths.
+/// Anything else (methods, constants, nested classes, non-literal
+/// includes) means this is not the carried shape.
+fn includes_only_reopen(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<String>> {
+    let body = class.body()?;
+    let stmts = flatten_statements(body);
+    if stmts.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for stmt in stmts {
+        let call = stmt.as_call_node()?;
+        if call.receiver().is_some() || constant_id_str(&call.name()) != "include" {
+            return None;
+        }
+        let args = call.arguments()?;
+        let mut any = false;
+        for arg in args.arguments().iter() {
+            let path = constant_path_of(&arg)?;
+            paths.push(path.join("::"));
+            any = true;
+        }
+        if !any {
+            return None;
+        }
+    }
+    Some(paths)
+}
+
+/// Apply queued `active_storage_attachment` includes onto models that
+/// were not yet in `app.models` when the load hook was scanned.
+/// Leftovers (no matching model) are surveyed like other uncarried
+/// reopens.
+///
+/// Returns the names of models that received a fresh `include`, so a
+/// later concern splice can target only those — a full re-splice would
+/// duplicate every previously expanded concern body.
+pub(super) fn apply_pending(app: &mut App) -> Vec<Symbol> {
+    let pending = std::mem::take(&mut app.pending_attachment_on_load);
+    let mut still = Vec::new();
+    let mut touched = Vec::new();
+    for (model_name, mods) in pending {
+        if let Some(model) = app.models.iter_mut().find(|m| m.name.0 == model_name) {
+            for path in &mods {
+                push_model_include(model, path.as_str());
+            }
+            touched.push(model_name);
+        } else {
+            // Model may appear later via synthesis (`has_markdown` /
+            // Attachment table). Keep the queue for a second apply
+            // after synthesize; [`drain_pending`] surveys leftovers.
+            still.push((model_name, mods));
+        }
+    }
+    app.pending_attachment_on_load = still;
+    touched
+}
+
+/// Survey any `on_load(:active_storage_attachment)` includes that
+/// never found a model — call after the last synthesize pass.
+pub(super) fn drain_pending(app: &mut App) {
+    let pending = std::mem::take(&mut app.pending_attachment_on_load);
+    for (model_name, _) in pending {
+        not_carried(
+            "<on_load>",
+            "active_storage_attachment",
+            model_name.as_str(),
+        );
+    }
+}
+
+/// Push `include Mod` as a model-body Unknown so
+/// `splice_concerns_into_models` can expand the concern's
+/// `included do` macros onto the model.
+fn push_model_include(model: &mut crate::dialect::Model, module_path: &str) {
+    use crate::dialect::ModelBodyItem;
+    use crate::expr::{Expr, ExprNode};
+    use crate::span::Span;
+
+    let path: Vec<Symbol> = module_path.split("::").map(Symbol::from).collect();
+    let expr = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("include"),
+            args: vec![Expr::new(Span::synthetic(), ExprNode::Const { path })],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    model.body.push(ModelBodyItem::Unknown {
+        expr,
+        leading_comments: Vec::new(),
+        leading_blank_line: false,
     });
 }
 

@@ -80,11 +80,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Refuse to publish a superseded main snapshot
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VALIDATED_SHA: ${{ github.sha }}
-        run: test "$(gh api repos/rubys/roundhouse/git/ref/heads/main --jq .object.sha)" = "$VALIDATED_SHA"
+      # Publish this run's assembled Pages artifact even if main advanced
+      # mid-cycle. High merge velocity used to starve github-pages whenever
+      # the tip-equality check raced a later commit; the site describes the
+      # validated snapshot that assembled it, not whatever HEAD is now.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

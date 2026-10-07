@@ -161,6 +161,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
             let ExprNode::BoolOp { left, right, .. } = node else { unreachable!() };
             let (entries, finish) = inline_parts(&right).expect("recognized above");
             let ExprNode::Send { recv: Some(r), .. } = *right.node else { unreachable!() };
+            let recv_ty = r.ty.clone();
             let local = Symbol::from("__update_rcv");
             let bind = Expr::new(
                 span,
@@ -190,7 +191,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                 ExprNode::Send {
                     recv: Some(Expr::new(
                         span,
-                        ExprNode::Var { id: VarId(0), name: local },
+                        ExprNode::Var { id: VarId(0), name: local.clone() },
                     )),
                     method: Symbol::from(finish),
                     args: vec![],
@@ -200,12 +201,29 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
             );
             save_call.ty = Some(Ty::Bool);
             stmts.push(save_call);
+            if finish == "save!" {
+                let mut read = Expr::new(
+                    span,
+                    ExprNode::Var { id: VarId(0), name: local },
+                );
+                read.ty = recv_ty.clone();
+                stmts.push(read);
+            }
             *expr.node = ExprNode::If {
                 cond: left,
                 then_branch: Expr::new(span, ExprNode::Seq { exprs: stmts }),
                 else_branch: Expr::new(span, ExprNode::Seq { exprs: vec![] }),
             };
-            expr.ty = Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil] });
+            expr.ty = if finish == "save!" {
+                Some(Ty::Union {
+                    variants: vec![
+                        recv_ty.unwrap_or(Ty::Bool),
+                        Ty::Nil,
+                    ],
+                })
+            } else {
+                Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil] })
+            };
         }
     }
     expr.node.for_each_child_mut(&mut |c| rewrite(c, models, diags));
@@ -253,24 +271,36 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
             },
         ));
     }
+    let recv_ty = r.ty.clone();
     let mut save_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(r),
+            recv: Some(r.clone()),
             method: Symbol::from(finish),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
-    // The synthesized nodes are walked by the residual-diagnostics
-    // audit (unlike the emit-time pass this replaces, which ran after
-    // it) — stamp what the lowerer knows: save/save! return Bool, and
-    // the Seq's value is that save result, matching `update`'s Bool.
+    // `save` / `save!` return Bool. Plain `update` keeps that as the
+    // Seq value. Bang `update!` must answer the RECEIVER (SelfType) —
+    // Rails' `update!` returns the record, and a method whose last
+    // expression is the inlined bang was otherwise typed Bool / Base,
+    // which widens Spinel AOT returns off the concrete model.
     save_call.ty = Some(Ty::Bool);
     exprs.push(save_call);
-    *expr.node = ExprNode::Seq { exprs };
-    expr.ty = Some(Ty::Bool);
+    if finish == "save!" {
+        let mut read = r;
+        if read.ty.is_none() {
+            read.ty = recv_ty.clone();
+        }
+        exprs.push(read);
+        *expr.node = ExprNode::Seq { exprs };
+        expr.ty = recv_ty.or(Some(Ty::Bool));
+    } else {
+        *expr.node = ExprNode::Seq { exprs };
+        expr.ty = Some(Ty::Bool);
+    }
 }
 
 /// The three per-site gates, read off a recognized update send:

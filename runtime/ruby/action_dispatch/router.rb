@@ -257,6 +257,11 @@ module ActionDispatch
       elsif pattern_parts.length != path_parts.length
         return nil
       end
+      # Literal segments first, allocating nothing: `/up` is the last of
+      # campfire's ~180 routes, and every same-length GET route before it
+      # built a params Hash (and a `:name` substring per segment) only to
+      # fail on its first literal — 37% of that request's allocations.
+      return nil unless literals_match(pattern_parts, path_parts)
       params = {}
       params["format"] = format unless format.empty?
       i = 0
@@ -290,7 +295,250 @@ module ActionDispatch
         end
         i += 1
       end
-      params
+      decode_captures(params)
+    end
+
+    # Route matching and constraints operate on the encoded path. Decode only
+    # after the entire pattern matches, so an escaped slash or dot cannot
+    # change segmentation and a rejected route cannot raise while decoding.
+    def self.decode_captures(params)
+      decoded = {}
+      # Snapshot name/value pairs before decoding. Every capture is a String,
+      # and the input is immutable, so the even-length pair array is stable.
+      # Encoding errors stay outside the nonthrowing collection callback.
+      pairs = capture_pairs(params)
+      i = 0
+      while i < pairs.length
+        name = capture_part(pairs, i)
+        value = capture_part(pairs, i + 1)
+        decoded[name] = decode_capture(value)
+        i += 2
+      end
+      decoded
+    end
+
+    # Retain Hash iteration order as adjacent String name/value pairs. This
+    # callback only snapshots data and cannot raise an encoding error.
+    def self.capture_pairs(params)
+      pairs = []
+      params.each do |name, value|
+        pairs << name.to_s
+        pairs << value
+      end
+      pairs
+    end
+
+    # Internal String-only pair access. The caller visits an even-length
+    # snapshot two entries at a time, proving both nonnegative indexes exist.
+    def self.capture_part(pairs, index)
+      pairs[index]
+    end
+
+    # Decode bytes before interpreting UTF-8: one character may mix raw and
+    # percent-escaped bytes. A literal '+' is preserved, unlike form decoding.
+    # String#bytes materializes once, including for Unicode-native targets.
+    def self.decode_capture(value)
+      bytes = percent_bytes(value.bytes)
+      out = +""
+      i = 0
+      while i < bytes.length
+        byte = capture_byte(bytes, i)
+        width = utf8_width(byte)
+        character = utf8_character(bytes, i, byte, width)
+        out = out + character
+        i += width
+      end
+      out
+    end
+
+    # Classify one lead byte without carrying branch-mutated state between
+    # sequences. Continuation bytes and invalid leads cannot start a character.
+    def self.utf8_width(byte)
+      return 4 if byte >= 0xF0 && byte <= 0xF4
+      return 3 if byte >= 0xE0 && byte <= 0xEF
+      return 2 if byte >= 0xC2 && byte <= 0xDF
+      raise ArgumentError, "Invalid encoding for path parameter" if byte >= 0x80
+      1
+    end
+
+    # Validate one decoded UTF-8 sequence before constructing its scalar.
+    # Bounds reject truncated, overlong, surrogate and out-of-range sequences.
+    # Byte-array indices stay within the checked Integer-only sequence.
+    def self.utf8_character(bytes, from, first, width)
+      raise ArgumentError, "Invalid encoding for path parameter" if from + width > bytes.length
+      cp = first
+      if width == 2
+        cp = first - 0xC0
+      elsif width == 3
+        cp = first - 0xE0
+      elsif width == 4
+        cp = first - 0xF0
+      end
+      j = 1
+      while j < width
+        byte = capture_byte(bytes, from + j)
+        if byte < 0x80
+          raise ArgumentError, "Invalid encoding for path parameter"
+        end
+        if byte > 0xBF
+          raise ArgumentError, "Invalid encoding for path parameter"
+        end
+        cp = cp * 64 + byte - 0x80
+        j += 1
+      end
+      if (width == 2 && cp < 0x80) || (width == 3 && cp < 0x800) ||
+         (width == 4 && cp < 0x10000) || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF
+        raise ArgumentError, "Invalid encoding for path parameter"
+      end
+      cp.chr(Encoding::UTF_8)
+    end
+
+    # Invalid/incomplete escapes stay literal, as in Rails' path decoder.
+    # Advance over the original input only: %25FF becomes literal %FF.
+    def self.percent_bytes(bytes)
+      decoded = []
+      i = 0
+      while i < bytes.length
+        byte = percent_byte(bytes, i)
+        advance = percent_advance(byte)
+        if byte < 0
+          decoded << capture_byte(bytes, i)
+        else
+          decoded << byte
+        end
+        # One trailing counter step also permits functional targets to lower
+        # the scan into recursion without changing single-decoding semantics.
+        i += advance
+      end
+      decoded
+    end
+
+    # The escape parser's negative sentinel consumes one literal byte;
+    # a decoded escape consumes its three original bytes exactly once.
+    def self.percent_advance(byte)
+      return 1 if byte < 0
+      3
+    end
+
+    # A valid %HH escape at this byte offset, or -1 to retain literal bytes.
+    def self.percent_byte(bytes, at)
+      return -1 if at + 2 >= bytes.length
+      return -1 if capture_byte(bytes, at) != 37
+      hi = hex_digit(capture_byte(bytes, at + 1))
+      lo = hex_digit(capture_byte(bytes, at + 2))
+      return -1 if hi < 0
+      return -1 if lo < 0
+      hi * 16 + lo
+    end
+
+    # Check the offset before indexing an Integer-only byte array. The method
+    # contract carries the guaranteed Integer result to callers on every target.
+    def self.capture_byte(bytes, index)
+      raise ArgumentError, "Invalid encoding for path parameter" if index < 0
+      raise ArgumentError, "Invalid encoding for path parameter" if index >= bytes.length
+      bytes[index]
+    end
+
+    # ASCII hexadecimal classification without Unicode case folding.
+    def self.hex_digit(byte)
+      return byte - 48 if byte >= 48 && byte <= 57
+      return byte - 65 + 10 if byte >= 65 && byte <= 70
+      return byte - 97 + 10 if byte >= 97 && byte <= 102
+      -1
+    end
+
+    # A decoded capture path-escaped again, for a routing redirect's
+    # `%{name}`: Rails fills it with `Journey::Router::Utils.escape_path`
+    # of the decoded value, so a `#` or `?` in it stays part of the path.
+    # Walks bytes (not characters): after `decode_capture`, a multibyte
+    # scalar is real UTF-8 in the string, and each byte of it must become
+    # `%XX` the way Rails re-encodes `/articles/josé` as `/articles/jos%C3%A9`.
+    # PATH-safe printable ASCII (unreserved, sub-delims, `:`, `@`, `/`)
+    # passes; every other byte is `%` + two hex digits.
+    def self.escape_path(s)
+      out = ""
+      bytes = s.bytes
+      i = 0
+      while i < bytes.length
+        b = capture_byte(bytes, i)
+        if path_byte_ok(b)
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + percent_escape_byte(b)
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Printable ASCII, 0x20 to 0x7E in order: the character for byte
+    # `code` is `printable[code - 32, 1]`.
+    def self.printable
+      " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    end
+
+    # Whether byte `b` may appear unescaped in a PATH (Rails' escape_path set).
+    def self.path_byte_ok(b)
+      return false if b < 32 || b > 126
+      c = printable[b - 32, 1].to_s
+      return false if c == " "
+      return false if c == "\""
+      return false if c == "#"
+      return false if c == "%"
+      return false if c == "<"
+      return false if c == ">"
+      return false if c == "?"
+      return false if c == "["
+      return false if c == "\\"
+      return false if c == "]"
+      return false if c == "^"
+      return false if c == "`"
+      return false if c == "{"
+      return false if c == "|"
+      return false if c == "}"
+      true
+    end
+
+    # One byte as `%` + two uppercase hex digits (Rails' PATH escape).
+    # Quotient and remainder by repeated subtract — not `/`. Python and
+    # Elixir emit Int/Int `/` as true division, so `b / 16` became
+    # `2.1875` for `#` and broke every `%{name}` escape that needed a
+    # non-PATH byte (MEASURED on the #456 tip emit). One `while` so the
+    # Elixir lowering stays in shape.
+    def self.percent_escape_byte(b)
+      hi = 0
+      rem = b
+      while rem >= 16
+        rem = rem - 16
+        hi = hi + 1
+      end
+      "%" + hex_char(hi) + hex_char(rem)
+    end
+
+    def self.hex_char(n)
+      return n.to_s if n < 10
+      return "A" if n == 10
+      return "B" if n == 11
+      return "C" if n == 12
+      return "D" if n == 13
+      return "E" if n == 14
+      "F"
+    end
+
+    # Whether every plain literal segment of the pattern (no `:` or `*`)
+    # equals the path's segment at the same index. Its own method for the
+    # same reason as `glob_rest` below: one `while` per method.
+    def self.literals_match(pattern_parts, path_parts)
+      i = 0
+      while i < pattern_parts.length
+        pp = pattern_parts[i]
+        ap = path_parts[i].to_s
+        unless pp.include?(":") || pp.start_with?("*")
+          return false if pp != ap
+        end
+        i += 1
+      end
+      true
     end
 
     # The path from segment `from` on, slash-joined: a `*glob`'s value.

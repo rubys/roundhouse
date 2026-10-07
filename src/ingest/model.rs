@@ -14,7 +14,7 @@ use crate::span::Span;
 use crate::ty::{Row, Ty};
 use crate::{ClassId, Symbol, TableRef};
 
-use super::expr::ingest_expr;
+use super::expr::{ingest_expr, ingest_expr_strict};
 use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
@@ -420,6 +420,10 @@ pub(super) fn ingest_model_with_enum_constants(
         }
     }
 
+    let parent_span = class
+        .superclass()
+        .map(|n| super::util::node_span(&n, file))
+        .unwrap_or_default();
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| {
             let resolved = model_bases.resolve_superclass(&scope, &p);
@@ -431,6 +435,7 @@ pub(super) fn ingest_model_with_enum_constants(
     Ok(Some(Model {
         name: owner,
         parent,
+        parent_span,
         sti_subclass_names: Vec::new(),
         table: TableRef(Symbol::from(table_name)),
         primary_key,
@@ -584,9 +589,25 @@ fn expand_mattr_cattr(
                     };
                     match symbol_value(&assoc.key()).as_deref() {
                         Some("default") if default.is_none() => {
-                            match ingest_expr(&assoc.value(), file) {
-                                Ok(expr) => default = Some(expr),
-                                Err(_) => unsupported = true,
+                            // Strict top-level + nested survey recovery:
+                            // `ingest_expr_strict` still recurses through
+                            // `ingest_expr`, which can substitute nil under
+                            // survey — reject if the collector grew.
+                            let before = super::survey::recorded().len();
+                            match ingest_expr_strict(&assoc.value(), file) {
+                                Ok(expr)
+                                    if !super::survey::is_active()
+                                        || super::survey::recorded().len() == before =>
+                                {
+                                    default = Some(expr);
+                                }
+                                Ok(_) => unsupported = true,
+                                Err(err) => {
+                                    if super::survey::is_active() {
+                                        super::survey::record(&err);
+                                    }
+                                    unsupported = true;
+                                }
                             }
                         }
                         _ => unsupported = true,
@@ -607,20 +628,43 @@ fn expand_mattr_cattr(
         let Some(body) = block_node.body() else {
             return Ok(None);
         };
-        match ingest_expr(&body, file) {
-            Ok(expr) => default = Some(expr),
-            Err(_) => return Ok(None),
+        let before = super::survey::recorded().len();
+        match ingest_expr_strict(&body, file) {
+            Ok(expr)
+                if !super::survey::is_active()
+                    || super::survey::recorded().len() == before =>
+            {
+                default = Some(expr);
+            }
+            Ok(_) => return Ok(None),
+            Err(err) => {
+                if super::survey::is_active() {
+                    super::survey::record(&err);
+                }
+                return Ok(None);
+            }
         }
     }
     if unsupported || names.is_empty() {
         return Ok(None);
     }
-    // A default needs a home on the model; concern collectors that cannot
-    // carry class-ivar seeds must leave the declaration unexpanded.
+    // A non-nil / block default needs a home on the model; concern
+    // collectors that cannot carry class-variable seeds leave the
+    // declaration unexpanded. Plain mattr/cattr still expand accessors.
     if default.is_some() && class_attr_defaults.is_none() {
         return Ok(None);
     }
-    if let (Some(defaults), Some(expr)) = (class_attr_defaults, default) {
+    if let Some(defaults) = class_attr_defaults {
+        // Rails `class_variable_set`: nil when no default, else the value.
+        // `@@` storage requires an explicit seed (unlike `@ivar`).
+        let expr = default.unwrap_or_else(|| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Nil,
+                },
+            )
+        });
         for attr in &names {
             defaults.insert(attr.clone(), expr.clone());
         }
@@ -634,9 +678,9 @@ fn expand_mattr_cattr(
         } else {
             Vec::new()
         };
-        // Class side owns `@attr` (and the default seed). Instance side
-        // delegates to `self.class`, as Rails' mattr/cattr copies do —
-        // a shared ivar on the instance would miss the class default.
+        // Class side owns `@@attr` (shared across the hierarchy). Instance
+        // side delegates to `self.class`, matching Rails' mattr/cattr
+        // copies without placing a per-instance ivar.
         let mut first_method = true;
         let mut push = |method: crate::dialect::MethodDef| {
             out.push(ModelBodyItem::Method {
@@ -651,7 +695,7 @@ fn expand_mattr_cattr(
             first_method = false;
         };
         if want_reader {
-            push(super::library_class::synth_attr_reader(
+            push(super::library_class::synth_mattr_reader(
                 owner,
                 attr,
                 crate::dialect::MethodReceiver::Class,
@@ -659,7 +703,7 @@ fn expand_mattr_cattr(
             push(synth_mattr_instance_reader(owner, attr));
         }
         if want_writer {
-            push(super::library_class::synth_attr_writer(
+            push(super::library_class::synth_mattr_writer(
                 owner,
                 attr,
                 crate::dialect::MethodReceiver::Class,
@@ -2496,13 +2540,14 @@ fn parse_association(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = assoc.value();
             match key.as_str() {
-                "class_name" => class_name = string_value(&value),
+                // `"::Portal"` names the top-level class `Portal`; kept as written it is a class no one defines.
+                "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
-                "source_type" => source_type = string_value(&value),
+                "source_type" => source_type = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }

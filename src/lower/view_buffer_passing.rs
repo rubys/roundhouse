@@ -2,10 +2,15 @@
 //!
 //! `view_to_library` gives every view the accumulator shape
 //! (`io = String.new; io << …; io`), which is the right way to BUILD a
-//! string on every target. What it costs is at the seam: a nested view
-//! returns its finished buffer as a string value and its caller appends
-//! that value into its own buffer, so a page pays one full copy of each
-//! fragment per nesting level it passes through.
+//! string on every target. The returning wrapper here upgrades the init
+//! to a capacity-hinted alloc (`ViewBufferCap.alloc(:cap_…)`, sized from
+//! the last render of that page — ports: `Ractor[:cap_<page>]`; CRuby
+//! overlay: thread variables so the memo survives fiber-per-request)
+//! and stores `io.bytesize` afterward. What the
+//! buffer-passing half costs is at the seam: a nested view returns its
+//! finished buffer as a string value and its caller appends that value
+//! into its own buffer, so a page pays one full copy of each fragment
+//! per nesting level it passes through.
 //!
 //! On spinel that copy is not a duplicate that a peephole could drop —
 //! the accumulator's storage is malloc'd and owned by the buffer handle
@@ -114,6 +119,45 @@ fn const_call(path: &[Symbol], method: &str, args: Vec<Expr>) -> Expr {
     )
 }
 
+/// Memo key for the last rendered byte size of this view method —
+/// `cap_Views_Articles_index`, matching the ports' `Ractor[:cap_<page>]`
+/// shape (underscores instead of nesting).
+fn cap_key(module_path: &[Symbol], method: &str) -> String {
+    let mut key = String::from("cap");
+    for part in module_path {
+        key.push('_');
+        key.push_str(part.as_str());
+    }
+    key.push('_');
+    key.push_str(method);
+    key
+}
+
+fn lit_sym(name: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } },
+    )
+}
+
+fn bytesize_of(acc: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var(acc)),
+            method: Symbol::from("bytesize"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+/// `ViewBufferCap.alloc(:cap_…)` / `.store(:cap_…, io.bytesize)`.
+fn view_buffer_cap_call(method: &str, args: Vec<Expr>) -> Expr {
+    const_call(&[Symbol::from("ViewBufferCap")], method, args)
+}
+
 /// The type the `_into` variant declares for a wrapper parameter: a
 /// model, or an Array of one, as declared; anything else `untyped` (the
 /// wrapper's `String?` is the view lowerer's guess for a partial local,
@@ -207,19 +251,30 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
     vbody.inherit_span(m.body.span);
     variant.body = vbody;
 
-    // The wrapper: the accumulator triple it always had, with one call
-    // in the middle. Keeps the hints, so the Crystal/Go/TS accumulator
-    // forms still apply to it if this pass is ever run for them.
-    let mut init = exprs[0].clone();
+    // The wrapper: capacity-hinted alloc, the `_into` call, memo store,
+    // then the trailing read. Keeps the StringBuilder hints on alloc /
+    // result so the Crystal/Go/TS accumulator forms still apply if this
+    // pass is ever run for them (today: Ruby-family only).
+    let key = lit_sym(&cap_key(module_path, m.name.as_str()));
+    let mut init = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from(acc) },
+            value: view_buffer_cap_call("alloc", vec![key.clone()]),
+        },
+    );
     init.hint = Some(IrHint::StringBuilderInit);
     let mut args = vec![var(acc)];
     args.extend(m.params.iter().map(|p| var(p.name.as_str())));
+    let store = view_buffer_cap_call("store", vec![key, bytesize_of(acc)]);
     let mut tail = var(acc);
     tail.hint = Some(IrHint::StringBuilderResult);
     let mut wrapper = m.clone();
     let mut wbody = Expr::new(
         Span::synthetic(),
-        ExprNode::Seq { exprs: vec![init, const_call(module_path, &into_name, args), tail] },
+        ExprNode::Seq {
+            exprs: vec![init, const_call(module_path, &into_name, args), store, tail],
+        },
     );
     wbody.inherit_span(m.body.span);
     wrapper.body = wbody;

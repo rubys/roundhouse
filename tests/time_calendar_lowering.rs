@@ -6,6 +6,7 @@ ActiveRecord::Schema[7.1].define(version: 1) do
   create_table "events", force: :cascade do |t|
     t.datetime "starts_at", null: false
     t.datetime "ends_at"
+    t.date "due_on"
     t.string "name"
   end
 end
@@ -168,6 +169,67 @@ fn use_zone_and_in_time_zone_ground_to_the_runtime() {
         "ActiveSupport.in_time_zone(starts_at, \"Asia/Tokyo\")"
     );
     assert_eq!(emit("starts_at.in_time_zone"), "ActiveSupport.present(starts_at)");
+}
+
+#[test]
+fn calendar_methods_on_a_date_ground_to_date_preserving_functions() {
+    assert_eq!(
+        emit("Date.current"),
+        "ActiveSupport.date_current(ActiveSupport.now)"
+    );
+    assert_eq!(
+        emit("Date.yesterday"),
+        "ActiveSupport.date_yesterday(ActiveSupport.date_current(ActiveSupport.now))"
+    );
+    assert_eq!(
+        emit("due_on.beginning_of_month"),
+        "ActiveSupport.date_beginning_of_month(due_on)"
+    );
+    assert_eq!(
+        emit("due_on.end_of_month"),
+        "ActiveSupport.date_end_of_month(due_on)"
+    );
+    assert_eq!(
+        emit("due_on.yesterday"),
+        "ActiveSupport.date_yesterday(due_on)"
+    );
+    assert_eq!(
+        emit("due_on.next_month"),
+        "ActiveSupport.date_months_since(due_on)"
+    );
+    assert_eq!(
+        emit("due_on.in_time_zone(\"UTC\")"),
+        "ActiveSupport.in_time_zone(ActiveSupport.date_at_midnight(due_on), \"UTC\")"
+    );
+    assert_eq!(
+        emit("due_on.beginning_of_day"),
+        "ActiveSupport.beginning_of_day(ActiveSupport.date_at_midnight(due_on))"
+    );
+    assert_eq!(
+        emit("due_on + 2"),
+        "ActiveSupport.date_days_since(due_on, 2)"
+    );
+    assert_eq!(
+        emit("due_on - 1"),
+        "ActiveSupport.date_days_ago(due_on, 1)"
+    );
+    assert_eq!(
+        emit("due_on.past?"),
+        "ActiveSupport.date_past?(due_on, ActiveSupport.date_current(ActiveSupport.now))"
+    );
+    assert_eq!(
+        emit("due_on.today?"),
+        "ActiveSupport.date_today?(due_on, ActiveSupport.date_current(ActiveSupport.now))"
+    );
+}
+
+#[test]
+fn integer_in_time_zone_grounds_through_epoch() {
+    // A bare integer literal in a model method is Ty::Int.
+    assert_eq!(
+        emit("1.in_time_zone(\"UTC\")"),
+        "ActiveSupport.in_time_zone(ActiveSupport.time_at_epoch(1), \"UTC\")"
+    );
 }
 
 #[test]

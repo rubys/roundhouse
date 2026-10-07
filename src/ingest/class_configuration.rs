@@ -305,13 +305,7 @@ fn expand_controller(
             }
             if method.as_str() == "include" {
                 for arg in args {
-                    if let ExprNode::Const { path } = &*arg.node {
-                        let id = ClassId(Symbol::from(
-                            path.iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join("::"),
-                        ));
+                    if let Some(id) = super::class_attribute::const_path_to_class_id(arg) {
                         available.extend(filter_registration_order(&[vec![id]], module_includes));
                     }
                 }

@@ -54,7 +54,25 @@ public static class Server
         ViewHelpers.ResetSlotsBang();
 
         var reqMethod = ctx.Request.Method;
-        var path = ctx.Request.Path.Value ?? "/";
+        // The raw request target, still percent-encoded, minus its query:
+        // the shared router decodes each capture (`Router.decode_captures`),
+        // as Rails' does. `Request.Path` is ASP.NET's decoded form (all but
+        // `%2F`), which the router would decode a second time. An
+        // absolute-form target (`GET http://host/articles`, as sent to a
+        // proxy) carries a scheme and host; `Uri.AbsolutePath` keeps just
+        // its path, still escaped.
+        var rawTarget = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()?.RawTarget;
+        string path;
+        if (!string.IsNullOrEmpty(rawTarget) && rawTarget.StartsWith('/'))
+            path = rawTarget.Split('?')[0];
+        else if (!string.IsNullOrEmpty(rawTarget) && Uri.TryCreate(rawTarget, UriKind.Absolute, out var targetUri))
+            path = targetUri.AbsolutePath;
+        else
+            // Last resort when Kestrel left RawTarget empty (not origin-
+            // or absolute-form). Request.Path is decoded; `%25XX` can
+            // then be decoded twice. Normal HTTP/1 and HTTP/2 :path
+            // traffic hits the RawTarget branches above.
+            path = ctx.Request.Path.Value ?? "/";
 
         // Action Cable WebSocket — upgrade /cable and hand the socket to the
         // Cable handler, negotiating the actioncable-v1-json subprotocol Turbo
@@ -125,6 +143,12 @@ public static class Server
         controller.RequestFormat = format;
         controller.RequestMethod = method;
         controller.RequestPath = path;
+        // Raw query without leading `?` — path-option redirects that keep
+        // the query read `QueryString` on the controller.
+        var qs = ctx.Request.QueryString.HasValue
+            ? ctx.Request.QueryString.Value!.TrimStart('?')
+            : "";
+        controller.QueryString = qs;
         // Reload the flash carried from the previous request so views render it;
         // the constructor snapshots it as *_was so ToPersisted can drop it
         // after one display.

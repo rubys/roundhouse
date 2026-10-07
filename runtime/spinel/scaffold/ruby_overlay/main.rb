@@ -200,6 +200,10 @@ module Main
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
     controller.request_format = request_format
+    # Raw query for path-option redirects that keep it (`query_string` on
+    # the controller — every target's dispatcher sets the same slot).
+    qs = (env["QUERY_STRING"] || request.fetch(:query_string, "")).to_s
+    controller.query_string = qs
     # Rails' "any format": a bare `*/*` Accept (see the spinel
     # dispatcher's `Main.accepts_any_format?`); a browser's list with a
     # comma is read as html.
@@ -220,7 +224,7 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 

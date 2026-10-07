@@ -177,6 +177,7 @@ pub fn synthesize_record_model(app: &mut App) {
         sti_subclass_names: Vec::new(),
         name: class,
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
+        parent_span: Default::default(),
         table: TableRef(Symbol::from(RECORD_TABLE)),
         primary_key: None,
         attributes,

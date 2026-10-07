@@ -63,7 +63,18 @@ defmodule Server do
 
   def dispatch(conn) do
     raw_method = conn.method |> String.upcase()
-    raw_path = "/" <> Enum.join(conn.path_info, "/")
+    # `request_path` is the request-line path as one string. `path_info`
+    # is split *and* URL-unescaped by Plug, so joining it would hand the
+    # shared router already-decoded segments (`decode_captures` is the
+    # one decode). Cowboy still unescapes `request_path` itself: a host
+    # `%2F` that became a slash cannot stay one segment — ledger that.
+    raw_path = case conn.request_path do
+      "" -> "/"
+      path -> path
+    end
+    # Raw query without leading `?` — path-option redirects that keep the
+    # query read `query_string` on the controller.
+    raw_query = conn.query_string || ""
 
     {conn, body_params} = read_form_body(conn)
 
@@ -97,7 +108,7 @@ defmodule Server do
       mr ->
         path_params = stringify_keys(mr.path_params)
         {body, status, content_type, location, flash} =
-          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, incoming_flash)
+          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, incoming_flash, raw_query)
 
         status = if status == 0, do: 200, else: status
         send_response(conn, status, body, content_type, location, flash)

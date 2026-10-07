@@ -86,6 +86,28 @@ fn a_computed_only_is_left_for_the_generic_locate() {
     );
 }
 
+/// `locate_signed(sgid, only: Room, for: :purpose)` specializes the
+/// same way — purpose stays as the second argument.
+#[test]
+fn a_literal_only_locate_signed_becomes_a_per_model_entry_point() {
+    let src = emit_lib(
+        "class Finder\n  def self.room_from(sgid)\n    GlobalID::Locator.locate_signed sgid, only: Room, for: :invite\n  end\nend\n",
+        "finder",
+    );
+    assert!(
+        src.contains("GlobalID::Locator.locate_signed_room"),
+        "the literal `only: Room` should have been specialized:\n{src}"
+    );
+    assert!(
+        src.contains(":invite") || src.contains("\"invite\""),
+        "purpose must remain an argument:\n{src}"
+    );
+    assert!(
+        !src.contains("only:"),
+        "the class object should no longer be passed at all:\n{src}"
+    );
+}
+
 // ── ActiveSupport's Array ordinals ───────────────────────────────────
 
 /// `Array#second` is activesupport's `array/access.rb`, whose whole

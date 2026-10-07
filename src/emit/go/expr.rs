@@ -177,6 +177,9 @@ impl EmitCtx {
 
 /// Render a Go expression in its declaration context, selecting whole-call primitives first.
 pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Go, |recv| emit_expr(ctx, recv)) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Go, |recv| emit_expr(ctx, recv)) {
         return s;
     }
@@ -1994,6 +1997,26 @@ pub(super) fn emit_send(
             }
         }
         if args.len() == 1 {
+            // `String#match?(re)` → `re.MatchString(s)`. Go's `regexp.Regexp`
+            // is the receiver; there is no `string.MatchPred`.
+            if method == "match?" {
+                // Require Regexp ty or a regex literal — not bare Const
+                // shape (a String-valued PATTERN must not flip).
+                let arg_is_regexp = matches!(
+                    args[0].ty.as_ref(),
+                    Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                ) || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Regex { .. } });
+                let recv_is_regexp = matches!(
+                    r.ty.as_ref(),
+                    Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                );
+                if arg_is_regexp && !recv_is_regexp {
+                    return format!("{}.MatchString({})", args_s[0], recv_s);
+                }
+                if recv_is_regexp {
+                    return format!("{recv_s}.MatchString({})", args_s[0]);
+                }
+            }
             if let Some(wrapped) = map_go_str_method_1arg(method, &recv_s, &args_s[0]) {
                 return wrapped;
             }

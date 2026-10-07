@@ -143,6 +143,7 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
         for name in crate::lower::attached::preload_scope_names(m)
             .into_iter()
             .chain(crate::lower::rich_text::preload_scope_names(m))
+            .chain(crate::lower::plain_text_attr::preload_scope_names(m))
         {
             map.entry(name).or_default();
         }

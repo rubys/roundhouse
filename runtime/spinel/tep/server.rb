@@ -13,7 +13,9 @@ module Tep
     if status == 401; return "Unauthorized"; end
     if status == 403; return "Forbidden"; end
     if status == 404; return "Not Found"; end
+    if status == 409; return "Conflict"; end
     if status == 413; return "Content Too Large"; end
+    if status == 422; return "Unprocessable Content"; end
     if status == 500; return "Internal Server Error"; end
     "OK"
   end

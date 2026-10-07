@@ -59,3 +59,54 @@ fn the_cruby_shim_writes_bytes_as_a_blob_literal() {
 fn the_jruby_shim_writes_bytes_as_a_blob_literal() {
     check("runtime/spinel/db_jruby.rb");
 }
+
+#[test]
+fn the_jruby_text_binder_selects_the_writers_storage_class() {
+    // Exercise the JDBC call boundary without requiring a JDK in the unit
+    // job. Actual JDBC execution belongs to the JRuby runtime lane.
+    let script = r##"
+src = File.read("runtime/spinel/db_jruby.rb")
+defn = src[/^  def self\.bind_text\(stmt, idx, value\)\n.*?^  end\n/m] or abort "no bind_text"
+module Db; end
+Db.module_eval(defn)
+class String
+  def to_java_bytes; bytes; end
+end
+class JdbcBindRecorder
+  attr_reader :call
+  def set_bytes(index, value); @call = [:blob, index, value]; end
+  def set_string(index, value); @call = [:text, index, value.bytes]; end
+end
+Handle = Struct.new(:pstmt)
+cases = [
+  ["a\0b", :blob],
+  ["a\0b".b, :blob],
+  [[255, 254, 39].pack("C*"), :blob],
+  ["café".b, :blob],
+  ["abc".b, :text],
+  ["".b, :text],
+  ["it's", :text],
+  ["雪 café", :text],
+]
+recorder = JdbcBindRecorder.new
+handle = Handle.new(recorder)
+cases.each do |value, storage|
+  Db.bind_text(handle, 3, value)
+  expected = [storage, 3, value.bytes]
+  abort "#{value.inspect}: #{recorder.call.inspect} != #{expected.inspect}" if recorder.call != expected
+end
+Db.bind_text(Handle.new(nil), 1, "unused")
+print "OK"
+"##;
+    let out = Command::new("ruby")
+        .args(["-e", script])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("ruby");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "OK");
+}

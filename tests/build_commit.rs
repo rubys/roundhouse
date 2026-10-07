@@ -18,9 +18,7 @@ impl Drop for Fixture {
     }
 }
 
-fn run(dir: &Path, program: &str, args: &[&str], commit: Option<&str>) -> String {
-    let mut cmd = Command::new(program);
-    cmd.current_dir(dir).args(args);
+fn scrub_git_env(cmd: &mut Command) {
     for key in [
         "GIT_DIR",
         "GIT_COMMON_DIR",
@@ -28,10 +26,16 @@ fn run(dir: &Path, program: &str, args: &[&str], commit: Option<&str>) -> String
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "ROUNDHOUSE_COMMIT",
     ] {
         cmd.env_remove(key);
     }
+}
+
+fn run(dir: &Path, program: &str, args: &[&str], commit: Option<&str>) -> String {
+    let mut cmd = Command::new(program);
+    cmd.current_dir(dir).args(args);
+    scrub_git_env(&mut cmd);
+    cmd.env_remove("ROUNDHOUSE_COMMIT");
     if let Some(commit) = commit {
         cmd.env("ROUNDHOUSE_COMMIT", commit);
     }
@@ -200,4 +204,84 @@ fn commit_stamp_tracks_loose_packed_and_detached_worktree_heads() {
     f.build(&f.linked, "override change", 1, Some("frozen456"));
     f.build(&f.linked, "override removed", 1, None);
     f.build(&f.linked, "override removed no-op", 0, None);
+}
+
+#[test]
+fn a_reused_build_script_reads_the_executing_manifest_directory() {
+    let f = Fixture::new();
+    fs::write(f.linked.join("runtime/ruby/probe.rb"), "# linked runtime\n").unwrap();
+    git(&f.linked, &["add", "runtime/ruby/probe.rb"]);
+    git(&f.linked, &["commit", "-m", "distinct linked runtime"]);
+    let binary = f.root.join("cached-build-script");
+    // Cargo can reuse a compiled build script across checkouts sharing a
+    // target directory. Compile it once in the first manifest, then give
+    // it the second manifest's execution environment, as Cargo does.
+    let compile = Command::new("rustc")
+        .args(["--edition=2021"])
+        .arg(f.repo.join("build.rs"))
+        .arg("-o")
+        .arg(&binary)
+        .env("CARGO_MANIFEST_DIR", &f.repo)
+        .output()
+        .unwrap();
+    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+    let out_dir = f.root.join("out");
+    fs::create_dir(&out_dir).unwrap();
+    let mut cmd = Command::new(&binary);
+    cmd.current_dir(&f.linked)
+        .env("CARGO_MANIFEST_DIR", &f.linked)
+        .env("OUT_DIR", &out_dir);
+    scrub_git_env(&mut cmd);
+    cmd.env_remove("ROUNDHOUSE_COMMIT");
+    let output = cmd.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let table = fs::read_to_string(out_dir.join("runtime_files.rs")).unwrap();
+    assert!(table.contains(f.linked.join("runtime/ruby/probe.rb").to_str().unwrap()),
+        "runtime must come from the executing checkout: {table}");
+    assert!(!table.contains(f.repo.to_str().unwrap()), "stale checkout in runtime table: {table}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = git(&f.linked, &["rev-parse", "--short=8", "HEAD"]);
+    assert!(stdout.contains(&format!("cargo:rustc-env=ROUNDHOUSE_COMMIT={expected}")),
+        "commit must identify the executing checkout: {stdout}");
+}
+
+#[test]
+fn shared_cargo_target_embeds_each_checkouts_runtime_and_tracks_edits() {
+    let f = Fixture::new();
+    let main = r#"static FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
+fn main() {
+    let runtime = FILES.iter().find(|(path, _)| *path == "runtime/ruby/probe.rb").unwrap().1;
+    println!("{}|{}", env!("ROUNDHOUSE_COMMIT"), runtime.trim());
+}
+"#;
+    for dir in [&f.repo, &f.linked] {
+        fs::write(dir.join("src/main.rs"), main).unwrap();
+    }
+    fs::write(f.linked.join("runtime/ruby/probe.rb"), "# linked runtime\n").unwrap();
+    git(&f.linked, &["add", "."]);
+    git(&f.linked, &["commit", "-m", "distinct runtime"]);
+    let shared = f.root.join("shared-target");
+    let build = |dir: &Path, text: &str| {
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.current_dir(dir)
+            .args(["run", "--quiet", "--offline"])
+            .env("CARGO_TARGET_DIR", &shared);
+        scrub_git_env(&mut cmd);
+        cmd.env_remove("ROUNDHOUSE_COMMIT");
+        let output = cmd.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let expected = format!("{}|{text}", git(dir, &["rev-parse", "--short=8", "HEAD"]));
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected,
+            "shared target must embed the executing checkout's stamp and runtime");
+    };
+    build(&f.repo, "# fixture");
+    build(&f.linked, "# linked runtime");
+    let runs = || fs::read_to_string(&f.counter).unwrap().lines().count();
+    let before = runs();
+    fs::write(f.linked.join("runtime/ruby/probe.rb"), "# edited linked runtime\n").unwrap();
+    build(&f.linked, "# edited linked runtime");
+    assert_eq!(runs(), before + 1, "runtime edits must regenerate the table");
+    let before = runs();
+    build(&f.linked, "# edited linked runtime");
+    assert_eq!(runs(), before, "a no-op build must stay cached");
 }

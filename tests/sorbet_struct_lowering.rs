@@ -260,3 +260,4 @@ end
     assert!(emitted.contains("def amount"), "got:\n{emitted}");
     assert!(!emitted.contains("const :amount"), "got:\n{emitted}");
 }
+

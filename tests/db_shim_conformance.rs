@@ -404,6 +404,17 @@ const RUBY_FAMILY_LIFECYCLE: &[&str] = &[
 ];
 
 #[test]
+fn ruby_family_shims_declare_optional_binds() {
+    let rbs = read_shim("runtime/ruby/db.rbs");
+    for method in ["bind_int_opt", "bind_text_opt", "bind_bool_opt"] {
+        assert!(defines_in_rbs(&rbs, method), "missing RBS: {method}");
+        for path in ["runtime/spinel/db.rb", "runtime/spinel/db_cruby.rb", "runtime/spinel/db_jruby.rb"] {
+            assert!(defines_with(&read_shim(path), method, &["def self."], false, false), "{path}: {method}");
+        }
+    }
+}
+
+#[test]
 fn every_ruby_family_shim_defines_the_request_lifecycle_hooks() {
     let mut missing: Vec<String> = Vec::new();
     for shim in SHIMS.iter().filter(|s| s.path.starts_with("runtime/spinel/")) {

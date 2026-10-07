@@ -331,6 +331,7 @@ fn controller(
     roundhouse::dialect::Controller {
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
+        parent_span: Default::default(),
         body: items,
         layout: Default::default(),
         sibling_classes: Vec::new(),

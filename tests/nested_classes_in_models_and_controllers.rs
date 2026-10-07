@@ -118,3 +118,119 @@ fn a_nested_module_is_not_a_body_item_either() {
         library_class_names(&app)
     );
 }
+
+/// A controller concern with a nested `T::Struct` is a module file, not
+/// a controller. The nested class does not end in `Controller`, and
+/// falling back to it invented a fake controller whose `const` calls
+/// became unrecognized class-body macros while the enclosing concern
+/// was skipped entirely.
+#[test]
+fn a_t_struct_nested_in_a_controller_concern_is_not_a_controller() {
+    use roundhouse::ingest::survey;
+
+    survey::activate();
+    let app = app_with(vec![
+        (
+            "app/controllers/concerns/window_settings.rb",
+            r#"module WindowSettings
+  extend ActiveSupport::Concern
+
+  class Span < T::Struct
+    const :from_date, Date
+    const :to_date, Date
+  end
+
+  class_methods do
+    def window_config(**opts)
+      @window_options = opts
+    end
+  end
+
+  def window
+    Span.new(from_date: Date.new(2026, 1, 1), to_date: Date.new(2026, 1, 31))
+  end
+end
+"#
+            .to_string(),
+        ),
+        (
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < ApplicationController\n  include WindowSettings\n  def show; end\nend\n"
+                .to_string(),
+        ),
+    ]);
+    let gaps = survey::drain();
+
+    assert!(
+        !app.controllers.iter().any(|c| c.name.0.as_str() == "WindowSettings::Span"),
+        "the nested T::Struct must not become a controller; controllers = {:?}",
+        app.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        library_class_names(&app).contains(&"WindowSettings".to_string()),
+        "the concern module registers; library classes = {:?}",
+        library_class_names(&app)
+    );
+    assert!(
+        library_class_names(&app).contains(&"WindowSettings::Span".to_string()),
+        "the nested struct registers under its qualified name; library classes = {:?}",
+        library_class_names(&app)
+    );
+    let span = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "WindowSettings::Span")
+        .expect("Span library class");
+    assert!(
+        span.methods.iter().any(|m| m.name.as_str() == "from_date"),
+        "const lowers to a reader; methods = {:?}",
+        span.methods.iter().map(|m| m.name.as_str().to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        span.methods.iter().any(|m| m.name.as_str() == "initialize"),
+        "const lowers to the keyword constructor; methods = {:?}",
+        span.methods.iter().map(|m| m.name.as_str().to_string()).collect::<Vec<_>>()
+    );
+    let messages: Vec<_> = gaps.iter().map(ToString::to_string).collect();
+    assert!(
+        !messages.iter().any(|g| g.contains("macro not recognized: `const`")
+            || g.contains("Sorbet `const`")),
+        "const must not be a survey gap once the struct is lowered; gaps = {messages:?}"
+    );
+    assert!(
+        app.controllers.iter().any(|c| c.name.0.as_str() == "ReportsController"),
+        "the real controller is still there"
+    );
+}
+
+/// A bare `const` on a real `*Controller` is leftover Sorbet props with
+/// no runtime in the emitted tree. The survey names that specifically,
+/// rather than folding it into the generic unrecognized-macro bucket.
+#[test]
+fn leftover_const_on_a_real_controller_earns_a_sorbet_survey_line() {
+    use roundhouse::ingest::survey;
+
+    survey::activate();
+    let app = app_with(vec![(
+        "app/controllers/reports_controller.rb",
+        "class ReportsController < ApplicationController\n  const :label, String\n  def show; end\nend\n"
+            .to_string(),
+    )]);
+    assert!(
+        app.controllers.iter().any(|c| c.name.0.as_str() == "ReportsController"),
+        "the controller still ingests"
+    );
+    let gaps = survey::drain();
+    let messages: Vec<_> = gaps.iter().map(ToString::to_string).collect();
+    assert!(
+        messages.iter().any(|m| {
+            m.contains("Sorbet `const` outside a lowered T::Struct")
+                && m.contains("app/controllers/reports_controller.rb")
+        }),
+        "leftover const must earn the Sorbet-specific line with the source path: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("controller class-body macro not recognized: `const`")),
+        "must not use the generic macro bucket: {messages:?}"
+    );
+}

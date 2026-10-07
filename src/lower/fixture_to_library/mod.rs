@@ -280,6 +280,7 @@ fn build_fixture_class(
         name: owner_id,
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),

@@ -837,6 +837,9 @@ fn children(e: &Expr) -> Vec<&Expr> {
 
 /// Render a C# value expression after shared primitive and string-builder selection.
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::CSharp, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::CSharp, emit_expr) {
         return s;
     }
@@ -1431,6 +1434,26 @@ fn emit_send(
             "start_with?" => return format!("{}.StartsWith({})", emit_expr(r), args_s[0]),
             "end_with?" => return format!("{}.EndsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.Contains({})", emit_expr(r), args_s[0]),
+            // `String#match?(re)` → `re.IsMatch(s)`. C# has no
+            // `string.MatchPred`; flip onto the `Regex` argument.
+            "match?" => {
+                // Require Regexp ty or a regex literal — not bare Const
+                // shape (a String-valued PATTERN must not flip).
+                let arg_is_regexp = matches!(
+                    args[0].ty.as_ref(),
+                    Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                ) || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Regex { .. } });
+                let recv_is_regexp = matches!(
+                    r.ty.as_ref(),
+                    Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                );
+                if arg_is_regexp && !recv_is_regexp {
+                    return format!("{}.IsMatch({})", args_s[0], emit_expr(r));
+                }
+                if recv_is_regexp {
+                    return format!("{}.IsMatch({})", emit_expr(r), args_s[0]);
+                }
+            }
             "join" => return format!("string.Join({}, {})", args_s[0], emit_expr(r)),
             // `str.split(sep)` → C# `Split` materialized to a `List<string>`
             // (Ruby `split` yields an Array; the runtime treats it as one).

@@ -53,6 +53,18 @@ pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
     out
 }
 
+/// Drop the extras a threaded closure ivar already names. After the
+/// ivar→local rewrite `@error` and `local_assigns[:error]` read the same
+/// local `error`, which the closure param supplies; a second `error`
+/// param is a duplicate argument name (#389). It runs after the `locals:`
+/// keys are appended, so a key that names a closure ivar is dropped the
+/// same way. The def site and both call-site contracts apply it to the
+/// same lists, so positions stay aligned. `closure` holds `safe_local`
+/// names; `extras` holds raw ones (`class` against `class_`).
+pub(super) fn drop_closure_names(extras: &mut Vec<String>, closure: &[String]) {
+    extras.retain(|k| !closure.contains(&crate::naming::safe_local(k)));
+}
+
 /// A partial local is bound by its own name, or by its `safe_local`
 /// form: the record arg of `as: :for` is `for_`.
 fn is_bound(bound: &[String], name: &str) -> bool {

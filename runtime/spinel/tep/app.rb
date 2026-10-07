@@ -112,6 +112,10 @@ module Tep
         ensure
           Db.read_snapshot_end if snapshot
         end
+        # A value, not whatever Main.dispatch answers: with_connection
+        # assigns the block's value (`result = yield`), and spinel cannot
+        # hold a void there.
+        true
       end
     end
   end

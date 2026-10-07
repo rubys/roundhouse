@@ -165,7 +165,7 @@ defmodule TestClient do
         # flash (`%{}`) and assert on the response, not the cookie, so drop
         # the carried flash and keep the legacy 4-tuple downstream.
         {body, status, ct, loc, _flash} =
-          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, %{})
+          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, %{}, "")
 
         TestResponse.from(normalize_status({body, status, ct, loc}))
     end

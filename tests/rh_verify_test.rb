@@ -116,7 +116,10 @@ class RhVerifyTest < Minitest::Test
     assert_equal 'planned', report['status']
     assert_equal ['docs/guide/verify.md', 'src/emit/go.rs', 'wasm/new file.txt'], report['changes']
     if python_available?
-      assert_includes report['hosted_coverage']['smoke'], 'go'
+      # Extra-language smokes ride smoke_extra after the focus-label ledger
+      # split; floor smoke stays for ruby-family cells (jruby, etc.).
+      assert_empty report['hosted_coverage']['smoke']
+      assert_includes report['hosted_coverage']['smoke_extra'], 'go'
       assert report['hosted_coverage']['wasm']
       assert_equal false, report['hosted_coverage']['publish']
     else

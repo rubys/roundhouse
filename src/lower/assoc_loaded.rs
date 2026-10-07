@@ -61,6 +61,11 @@ pub(crate) fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSe
         for (_, attr) in crate::lower::rich_text::rich_text_attrs(model) {
             entry.insert(Symbol::from(format!("rich_text_{}", attr.as_str())));
         }
+        if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+            for (_, attr) in crate::lower::plain_text_attr::plain_text_attrs(model) {
+                entry.insert(Symbol::from(format!("markdown_{}", attr.as_str())));
+            }
+        }
     }
     out
 }

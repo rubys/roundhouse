@@ -59,3 +59,9 @@ fn eviction_follows_access_order() {
 fn promotion_preserves_live_cursors_until_the_lease_ends() {
     probe("live");
 }
+
+#[test]
+#[ignore = "requires Spinel and SQLite"]
+fn a_miss_does_not_scan_the_cache() {
+    probe("misses");
+}

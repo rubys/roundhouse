@@ -80,6 +80,7 @@ module ActionDispatch
     # The same segment loop over already-split parts — what `Router.match`
     # calls with the route's precomputed `pattern_parts`, so a table walk
     # allocates no segment arrays per candidate.
+    def self.literals_match: (Array[String] pattern_parts, Array[String] path_parts) -> bool
     def self.glob_rest: (Array[String] path_parts, Integer from) -> String
     def self.param_prefix_length: (String segment) -> Integer
     def self.match_parts: (
@@ -88,6 +89,18 @@ module ActionDispatch
       ?String int_params,
       ?String format
     ) -> Hash[String, String]?
+
+    def self.decode_captures: (Hash[String, String] params) -> Hash[String, String]
+    def self.capture_pairs: (Hash[String, String] params) -> Array[String]
+    def self.capture_part: (Array[String] pairs, Integer index) -> String
+    def self.decode_capture: (String value) -> String
+    def self.utf8_width: (Integer byte) -> Integer
+    def self.utf8_character: (Array[Integer] bytes, Integer from, Integer first, Integer width) -> String
+    def self.percent_bytes: (Array[Integer] bytes) -> Array[Integer]
+    def self.percent_advance: (Integer byte) -> Integer
+    def self.percent_byte: (Array[Integer] bytes, Integer at) -> Integer
+    def self.capture_byte: (Array[Integer] bytes, Integer index) -> Integer
+    def self.hex_digit: (Integer byte) -> Integer
 
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param
     # enforcement — is `name` in the route's space-joined constraint
@@ -98,5 +111,13 @@ module ActionDispatch
     ) -> bool
 
     def self.digits_only: (String s) -> bool
+
+    # A decoded capture path-escaped again, as Rails fills a routing
+    # redirect's `%{name}`; see the .rb. Byte-oriented after UTF-8 decode.
+    def self.escape_path: (String s) -> String
+    def self.printable: () -> String
+    def self.path_byte_ok: (Integer b) -> bool
+    def self.percent_escape_byte: (Integer b) -> String
+    def self.hex_char: (Integer n) -> String
   end
 end

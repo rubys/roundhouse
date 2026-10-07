@@ -477,8 +477,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         // refuses to build one, #82); skipping it here keeps a
         // hand-built or deserialized table from emitting `:` as a
         // controller symbol.
-        RouteSpec::Root { target } if target.is_empty() => {}
-        RouteSpec::Root { target } => {
+        RouteSpec::Root { target, .. } if target.is_empty() => {}
+        RouteSpec::Root { target, as_name } => {
             let (controller_name, action_name) = target
                 .split_once('#')
                 .map(|(c, a)| (c.to_string(), a.to_string()))
@@ -500,12 +500,19 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             );
             let path =
                 if ctx.ns_path.is_empty() { "/".to_string() } else { ctx.ns_path.clone() };
+            // Rails applies the scope `as` prefix to an explicit root
+            // `as:` (`namespace :admin do root … as: :home end` →
+            // `admin_home`), matching Explicit's name_prefix handling.
+            let helper = as_name
+                .as_ref()
+                .map(|s| format!("{}{}", ctx.name_prefix, s.as_str()))
+                .unwrap_or_else(|| format!("{}root", ctx.name_prefix));
             out.push(FlatRoute {
                 method: HttpMethod::Get,
                 path,
                 controller: ClassId(Symbol::from(controller_class)),
                 action: Symbol::from(action_name),
-                as_name: format!("{}root", ctx.name_prefix),
+                as_name: helper,
                 path_params: vec![],
                 param_defaults: vec![],
                 named: true,

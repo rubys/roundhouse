@@ -11,7 +11,7 @@
 //!
 //!     PATH=$HOME/git/spinel:$PATH cargo test --test framework_tests_spinel -- --ignored --nocapture
 //!
-//! Status: CI job is `continue-on-error: true` while spinel-side
+//! Status: CI job follows plan `spinel-advisory` continue-on-error while spinel-side
 //! gaps close. The `view_helpers` false-positive previously listed
 //! here (Article+ViewHelpersTest dual-class shape silently dropped
 //! the test class) is closed by issue #4 — `ingest_test_file` now
@@ -52,15 +52,26 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// Same Base→untyped rewrite the shipped Spinel tree applies. This
 /// harness copies `runtime/ruby` verbatim, so without it
 /// `Relation.new(self)` keeps `initialize:(Base)` and Spinel refuses.
+///
+/// Every runtime `.rbs` goes in, not just relation/connection: the same
+/// step keeps one declaration per method across all of them
+/// (`resolve_runtime_sig_conflicts`), which spinel requires since it made
+/// two disagreeing declarations an error.
 fn apply_spinel_relation_model_handle(scratch: &Path) {
-    let rel = scratch.join("runtime/active_record/relation.rbs");
-    let conn = scratch.join("runtime/active_record/connection.rbs");
-    let rel_src = std::fs::read_to_string(&rel).expect("read relation.rbs");
-    let conn_src = std::fs::read_to_string(&conn).expect("read connection.rbs");
-    let mut files = vec![
-        ("runtime/active_record/relation.rbs".to_string(), rel_src),
-        ("runtime/active_record/connection.rbs".to_string(), conn_src),
-    ];
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, root, out);
+            } else if path.extension().is_some_and(|e| e == "rbs") {
+                let rel = path.strip_prefix(root).expect("under scratch").to_string_lossy().into_owned();
+                out.push((rel, std::fs::read_to_string(&path).expect("read rbs")));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(&scratch.join("runtime"), scratch, &mut files);
     roundhouse::project::spinel_relation_model_handle(&mut files)
         .expect("spinel relation Base rewrite");
     for (path, content) in files {

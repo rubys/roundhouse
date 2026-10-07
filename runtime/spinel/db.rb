@@ -108,6 +108,7 @@ module SQL
   # coercion for the -1 destructor is the spinel primitive validated in
   # spinel's test/ffi_ptr_int_literal.rb.
   ffi_func :sqlite3_bind_int64,        [:ptr, :int, :long],                   :int
+  ffi_func :sqlite3_bind_null,         [:ptr, :int],                          :int
   ffi_func :sqlite3_bind_text,         [:ptr, :int, :str, :int, :ptr],        :int
   # `sqlite3_column_type` reports the storage class of a column in the
   # current row; 5 is SQLITE_NULL. The nullable-column reads below need
@@ -175,28 +176,23 @@ end
 # /about. Only a MIX of routes overflows the cap, so the growth looked
 # like it tracked route variety rather than the cap it actually tracked.
 #
-# The fix is the CRuby shim's (db_cruby.rb): never hand back an uncached
-# stmt — bound the cache by EVICTING, and finalize what's evicted. The
-# one hazard is closing a stmt some open cursor still holds; lobsters'
-# comment tree nests cursors, and an outer one can stay open across many
-# inner queries. CRuby can check directly (it hands out an index into a
-# @rows table and can ask whether an entry still holds a stmt); this shim
-# hands back the raw ptr, so it has no such table to consult.
-#
-# So eviction runs at the REQUEST BOUNDARY instead, where no cursor is
-# open by construction — `with_connection` returns only after the whole
-# request body has run. Within a request the cache is a soft bound; at
-# every boundary it comes back down to CAP and the excess is finalized.
-# Bounded, and it can never close a live stmt.
-# One cache entry: the composed SQL and its prepared stmt ptr. A concrete
+# Cache new SQL until the request boundary, then evict back to CAP.
+# Reentrant prepares of an already checked-out statement are transient;
+# DbConn tracks their ownership too, so finalize really closes them.
+# The lease's ensure releases abandoned cursors before trimming, including
+# when hydration or a bind expression raised before Db.finalize.
+# One owned statement: the composed SQL and its prepared stmt ptr. A concrete
 # user class (not a raw ptr) so an Array of these types concretely the way
 # ConnectionPool's @free does — spinel infers the element type from the
 # first `push`, which lets `length`/`[]` resolve (a poly_array of bare ptrs
 # does not support them).
 class Stmt
-  def initialize(sql, ptr)
+  def initialize(sql, ptr, cached)
     @sql = sql
     @ptr = ptr
+    @cached = cached
+    @in_use = true
+    @closed = false
   end
 
   def sql
@@ -205,6 +201,39 @@ class Stmt
 
   def ptr
     @ptr
+  end
+
+  def in_use
+    @in_use
+  end
+
+  def closed
+    @closed
+  end
+
+  def checkout
+    @in_use = true
+    nil
+  end
+
+  def release
+    rc = SQL::OK
+    if @cached
+      reset_rc = SQL.sqlite3_reset(@ptr)
+      clear_rc = SQL.sqlite3_clear_bindings(@ptr)
+      rc = reset_rc == SQL::OK ? clear_rc : reset_rc
+      # A failed reset/clear cannot leave an idle, reusable cache entry.
+      @cached = false if rc != SQL::OK
+    end
+    if !@cached
+      close_rc = SQL.sqlite3_finalize(@ptr)
+      rc = close_rc if rc == SQL::OK
+      # sqlite3_finalize destroys the statement even when it reports the
+      # preceding execution error. No native resource remains owned.
+      @closed = true
+    end
+    @in_use = false
+    rc
   end
 end
 
@@ -313,11 +342,16 @@ end
 # before the first step), and the real stmt it promoted to when the
 # recorded prefix ran out (0 = still replaying).
 class QcCursor
-  def initialize(entry)
+  def initialize(entry, preparable)
     @entry = entry
+    @preparable = preparable
     @pos = -1
     @promoted = false
     @real_ptr = nil
+  end
+
+  def preparable
+    @preparable
   end
 
   def promoted
@@ -354,6 +388,18 @@ class DbConn
   def initialize(dbh)
     @dbh = dbh
     @entries = []
+    # The same cached statements keyed by SQL, so a miss is a Hash probe
+    # instead of a scan of @entries. SQL that inlines its values misses
+    # almost every time: campfire's sidebar for a user with 10,000 direct
+    # rooms prepares 30,011 distinct strings in one lease, and a scan per
+    # miss made that request quadratic in its own statements. Each SQL is
+    # in @entries at most once (a busy hit is a transient), so one key
+    # per entry; every place that drops an entry drops its key.
+    @entry_by_sql = {}
+    # Every checkout, including busy-hit transients and replay promotions.
+    # Entry flags protect ownership before step and after SQLITE_DONE;
+    # the usually short list avoids hash mutations on the query hot path.
+    @open = []
     # The per-request query cache (see `qc_begin`). Off until a request
     # leases this connection, so scripts and tests that call Db directly
     # see plain round trips unless they ask.
@@ -422,19 +468,26 @@ class DbConn
   def run_cached(sql)
     ptr = prepare_cached(sql)
     rc = SQL.sqlite3_step(ptr)
-    SQL.sqlite3_reset(ptr)
+    # Internal snapshot statements obey the same checkout contract as reads.
+    # A failed reset disposes the statement; callers retain their rollback path.
+    begin
+      release(ptr)
+    rescue StandardError
+      return false
+    end
     rc == SQL::DONE
   end
 
-  # Return a cached prepared stmt for `sql`, preparing+caching on miss.
+  # Return an idle cached statement, or a transient on a busy hit. A
+  # paused outer cursor must keep both its position and its bindings.
   # Search from the most-recent end of the concretely typed Stmt array.
   # Hits move to that end so repeated hot lookups stop at the first entry.
-  #
-  # EVERY prepared stmt goes into @entries, with no cap check. That is
-  # what makes `Db.finalize`'s reset-don't-close correct for all of them:
-  # a stmt this method hands back is always reachable for reuse, and
-  # always finalizable at `trim!`. Capping HERE is what leaked.
+  # A miss skips the search: @entry_by_sql says the SQL is not cached.
+  # New SQL is cached without a cap check; trim! bounds it at lease end.
   def prepare_cached(sql)
+    return prepare_owned(sql, true) if @entry_by_sql[sql].nil?
+
+    cached = true
     last = @entries.length - 1
     i = last
     while i >= 0
@@ -450,10 +503,42 @@ class DbConn
           end
           @entries[last] = e
         end
-        return e.ptr
+        if !e.in_use
+          # Only a successful release makes a statement idle; its cursor
+          # and bindings are already reset and cleared.
+          e.checkout
+          @open.push(e)
+          return e.ptr
+        end
+        cached = false
+        break
       end
       i -= 1
     end
+    prepare_owned(sql, cached)
+  end
+
+  # Reads with many SQL shapes share checkout and lease cleanup with
+  # busy-hit transient statements.
+  def prepare_uncached(sql)
+    prepare_owned(sql, false)
+  end
+
+  # Keep @entries and @entry_by_sql in lockstep: every cached insert and
+  # drop goes through these two so a later eviction path cannot update
+  # one structure without the other.
+  def index_cached(entry)
+    @entries.push(entry)
+    @entry_by_sql[entry.sql] = entry
+    nil
+  end
+
+  def unindex_cached(entry)
+    @entry_by_sql.delete(entry.sql)
+    nil
+  end
+
+  def prepare_owned(sql, cached)
     # `SQL.stmt_out` is ONE 8-byte out-buffer for the whole process (an
     # `ffi_buffer`, static C storage). Under parallel OS workers two
     # connections preparing at the same moment wrote their statement
@@ -475,14 +560,66 @@ class DbConn
     if rc != SQL::OK
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
     end
-    @entries.push(Stmt.new(sql, st))
+    entry = Stmt.new(sql, st, cached)
+    index_cached(entry) if cached
+    @open.push(entry)
     st
   end
 
-  # Bring the cache back to CAP, finalizing what's dropped. Called at the
-  # request boundary (`Db.with_connection`), never mid-request: a stmt an
-  # open cursor still holds must not be closed, and between requests there
-  # are none.
+  # Logical finalize. Unlike a cached statement, a busy-hit transient has
+  # no future owner and must be finalized, not just reset.
+  def release(ptr)
+    # Nested readers normally finish in reverse order, so the common
+    # case is the tail. Arbitrary finalize order is supported too.
+    i = @open.length - 1
+    while i >= 0
+      e = @open[i]
+      if e.ptr == ptr
+        rc = e.release
+        @open.delete_at(i)
+        if rc != SQL::OK
+          discard_closed
+          raise "Db.release failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh)
+        end
+        return nil
+      end
+      i -= 1
+    end
+    nil
+  end
+
+  # The lease boundary owns every remaining checkout. Do not publish
+  # partial query-cache captures from readers that failed to finalize.
+  def release_all
+    rc = SQL::OK
+    i = 0
+    while i < @open.length
+      release_rc = @open[i].release
+      rc = release_rc if rc == SQL::OK
+      i += 1
+    end
+    @open.clear
+    if rc != SQL::OK
+      discard_closed
+      raise "Db.release failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh)
+    end
+    nil
+  end
+
+  def discard_closed
+    i = @entries.length - 1
+    while i >= 0
+      if @entries[i].closed
+        unindex_cached(@entries[i])
+        @entries.delete_at(i)
+      end
+      i -= 1
+    end
+    nil
+  end
+
+  # Bring the cache back to CAP after lease cleanup. An explicit mid-lease
+  # trim retains live entries even if that leaves the cache above CAP.
   #
   # Keeps the CAP most-recent entries — the tail, since `prepare_cached`
   # appends misses and moves hits there. With per-value keys recency is the best
@@ -496,7 +633,8 @@ class DbConn
     drop_before = @entries.length - CAP
     i = 0
     while i < @entries.length
-      if i < drop_before
+      if i < drop_before && !@entries[i].in_use
+        unindex_cached(@entries[i])
         SQL.sqlite3_finalize(@entries[i].ptr)
       else
         keep.push(@entries[i])
@@ -559,17 +697,16 @@ class DbConn
   # The handle for `sql`: a replay handle on a hit, else the real stmt
   # (recording its rows as they are stepped, when the cache is on).
   # Returns 0 as "no replay" so `Db.prepare` can tell the two apart.
-  def qc_lookup(sql)
+  def qc_lookup(sql, preparable = true)
     return 0 if !@qc_on || sql.include?("?")
     e = @qc_by_sql[sql]
     return 0 if e.nil?
-    @qc_cursors.push(QcCursor.new(e))
+    @qc_cursors.push(QcCursor.new(e, preparable))
     @qc_cursors.length
   end
 
-  # Start recording a real stmt's rows for `sql`. A stmt already being
-  # recorded (the same SQL re-prepared while its first cursor is still
-  # open hands back the same pointer) is left alone.
+  # Start recording a real stmt's rows for `sql`. Nested identical SQL
+  # owns distinct pointers and therefore distinct captures.
   def qc_record(sql, ptr)
     return nil if !@qc_on || sql.include?("?")
     return nil if !@qc_recording[ptr].nil?
@@ -637,9 +774,35 @@ class DbConn
     c.real_ptr
   end
 
+  def step_checked(ptr)
+    rc = SQL.sqlite3_step(ptr)
+    return true if rc == SQL::ROW
+    return false if rc == SQL::DONE
+    step_failed(ptr, rc)
+  end
+
+  # Reset failed cursors to release locks and consume SQLite's last step
+  # error, but keep their checkout owned until finalize or lease cleanup.
+  # Releasing here would let an old ensure-finalizer reset a new reader
+  # using the same raw pointer. Only error paths pay for this extra reset.
+  def step_failed(ptr, rc)
+    msg = SQL.sqlite3_errmsg(@dbh)
+    @qc_recording.delete(ptr)
+    SQL.sqlite3_reset(ptr)
+    raise "Db.step failed (" + rc.to_s + "): " + msg
+  end
+
+  def bind_checked(ptr, idx, rc)
+    return nil if rc == SQL::OK
+    msg = SQL.sqlite3_errmsg(@dbh)
+    @qc_recording.delete(ptr)
+    SQL.sqlite3_reset(ptr)
+    raise "Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg
+  end
+
   def qc_step?(handle)
     c = qc_cursor(handle)
-    return SQL.sqlite3_step(c.real_ptr) == SQL::ROW if c.promoted
+    return step_checked(c.real_ptr) if c.promoted
     e = c.qc_entry
     if c.row_pos + 1 < e.nrows
       c.advance_row
@@ -648,21 +811,20 @@ class DbConn
     return false if e.eof
     # The first consumer stopped before the end and this one wants more:
     # re-run the real statement and fast-forward past what was replayed.
-    ptr = prepare_cached(e.qc_sql)
+    ptr = c.preparable ? prepare_cached(e.qc_sql) : prepare_uncached(e.qc_sql)
+    c.promote_to(ptr)
     n = 0
     while n < e.nrows
-      SQL.sqlite3_step(ptr)
+      step_checked(ptr)
       n += 1
     end
-    c.promote_to(ptr)
-    SQL.sqlite3_step(ptr) == SQL::ROW
+    step_checked(ptr)
   end
 
   def qc_finalize(handle)
     c = qc_cursor(handle)
     if c.promoted
-      SQL.sqlite3_reset(c.real_ptr)
-      SQL.sqlite3_clear_bindings(c.real_ptr)
+      release(c.real_ptr)
     end
     nil
   end
@@ -710,11 +872,19 @@ class DbConn
 
   # Real finalize of every cached stmt — pool-shutdown path only.
   def finalize_all
-    i = 0
-    while i < @entries.length
-      SQL.sqlite3_finalize(@entries[i].ptr)
-      i += 1
+    begin
+      release_all
+    ensure
+      i = 0
+      while i < @entries.length
+        SQL.sqlite3_finalize(@entries[i].ptr)
+        i += 1
+      end
+      @entries.clear
+      # Bulk wipe: no per-entry unindex; the map goes with the array.
+      @entry_by_sql = {}
     end
+    nil
   end
 end
 
@@ -777,10 +947,10 @@ class DbPool
     # compile-time default nobody had written down.
     #
     # Which is why this is SET rather than left to agree by accident.
-    # The sibling shims (db_cruby.rb, db_jruby.rb) still set nothing and
-    # happen to read NORMAL today; a gem rebuilt with a different
-    # default would move them silently, and that is the shape of bug
-    # this line exists to remove.
+    # The sibling shims (db_cruby.rb, db_jruby.rb) also state
+    # synchronous=NORMAL (and WAL) explicitly; leaving it to the gem's
+    # bundled default would move them silently on a rebuild, and that
+    # is the shape of bug this line exists to remove.
     #
     # The trade is the standard WAL one and worth stating: NORMAL is
     # safe across a process crash and risks only the most recent commits
@@ -856,13 +1026,20 @@ class DbPool
 
   # Finalize every cached stmt on every connection, then close the handles.
   def close_all
+    error = nil
     i = 0
     while i < @conns.length
       c = @conns[i]
-      c.finalize_all
-      SQL.sqlite3_close(c.dbh)
+      begin
+        c.finalize_all
+      rescue StandardError => e
+        error = e if error.nil?
+      ensure
+        SQL.sqlite3_close(c.dbh)
+      end
       i += 1
     end
+    raise error if !error.nil?
   end
 end
 
@@ -1074,43 +1251,62 @@ module Db
     prepare_for_checkpointer(conn) if @checkpoint_wanted
     # Rails wraps every request in the query cache; so does this lease.
     conn.qc_begin
-    finished = false
+    request_error = nil
     begin
       result = yield
-      finished = true
+    rescue Exception => e
+      request_error = e
     ensure
-      # A snapshot bracket left open is closed first, so the check after
-      # it sees only a transaction the request itself began; then an
-      # abandoned transaction is rolled back and its permit returned, or
-      # the next lease would inherit both. (db_cruby.rb's lease does the
-      # same, for the same reasons.)
-      if conn.snap_depth > 0
-        conn.snap_depth = 1
-        read_snapshot_end
+      cleanup_error = nil
+      # Close a leftover snapshot before rolling back an abandoned app
+      # transaction, then drain readers before eviction. Each stage runs
+      # even when an earlier cleanup failed, without replacing the request error.
+      begin
+        if conn.snap_depth > 0
+          conn.snap_depth = 1
+          read_snapshot_end
+        end
+      rescue StandardError => e
+        cleanup_error = e
       end
-      release_abandoned_write(conn)
-      conn.qc_end
-      # Every cursor this request opened is closed by now, so trimming the
-      # stmt cache here can't close a live one. This is the only place the
-      # cache is bounded — `prepare_cached` deliberately caps nothing, since
-      # a stmt it refused to cache is a stmt nothing can ever finalize.
-      # After a raise a cursor may still be open, so the trim waits for
-      # the next lease that finishes.
-      conn.trim! if finished
-      Thread.current[:db_conn] = nil
-      pool.release(idx)
+      begin
+        release_abandoned_write(conn)
+      rescue StandardError => e
+        cleanup_error = e if cleanup_error.nil?
+      end
+      begin
+        conn.qc_end
+        conn.release_all
+      rescue StandardError => e
+        cleanup_error = e if cleanup_error.nil?
+      ensure
+        conn.trim!
+        Thread.current[:db_conn] = nil
+        pool.release(idx)
+      end
+      raise cleanup_error if !cleanup_error.nil? && request_error.nil?
     end
+    raise request_error if !request_error.nil?
     result
   end
 
   def self.close
     return if @pools.nil?
-    i = 0
-    while i < @pools.length
-      @pools[i].close_all
-      i += 1
+    error = nil
+    begin
+      i = 0
+      while i < @pools.length
+        begin
+          @pools[i].close_all
+        rescue StandardError => e
+          error = e if error.nil?
+        end
+        i += 1
+      end
+    ensure
+      @pools = nil
     end
-    @pools = nil
+    raise error if !error.nil?
   end
 
   # DDL + INSERT/UPDATE/DELETE. `sqlite3_exec` doesn't return rows;
@@ -1232,9 +1428,12 @@ module Db
   # (scaffold/main.rb): starts one thread with its own connection that
   # runs PASSIVE every CHECKPOINT_INTERVAL and RESTART (under the permit)
   # past CHECKPOINT_RESTART_FRAMES; each pooled connection turns its own
-  # automatic checkpoint off at its next lease. No fork on this lane, so
-  # unlike the CRuby shim it can start at boot. Only a database file has
-  # a WAL to checkpoint.
+  # automatic checkpoint off at its next lease. The measured Spinel lane
+  # is one process (WORKERS=1); with `--workers N` the parent starts this
+  # thread before prefork and children inherit `@checkpoint_wanted`
+  # without their own loop — do not paper over that with a flock (second
+  # home); default does not hit it. Only a database file has a WAL to
+  # checkpoint.
   def self.checkpoint_in_background!
     return nil if @checkpoint_wanted
     path = @db_path
@@ -1265,7 +1464,13 @@ module Db
       if SQL.sqlite3_step(ptr) == SQL::ROW
         frames = SQL.sqlite3_column_int(ptr, 1)
       end
-      SQL.sqlite3_reset(ptr)
+      # The checkpointer also checks statements out of this cache. Release
+      # ownership every iteration, including a failed checkpoint step.
+      begin
+        conn.release(ptr)
+      rescue StandardError
+        nil
+      end
       if frames >= CHECKPOINT_RESTART_FRAMES && acquire_permit
         SQL.sqlite3_exec(conn.dbh, "PRAGMA wal_checkpoint(RESTART)", nil, nil, nil)
         release_permit
@@ -1376,6 +1581,28 @@ module Db
     ptr
   end
 
+  # Bypass statement reuse for nullable shape overflow, retaining the
+  # separate request result cache. A partial replay must promote uncached.
+  # Finalize releases the transient immediately; abandoned handles close
+  # at lease release. Outside with_connection they remain owned until
+  # Db.close, so scripts must finalize explicitly after use.
+  def self.prepare_uncached(sql)
+    # Keep shared cache keys string-typed even when the compiled program
+    # has no transient call site from which Spinel can infer this argument.
+    sql = sql.to_s
+    conn = current_conn
+    handle = conn.qc_lookup(sql, false)
+    if handle != 0
+      $stderr.puts "  CACHE " + sql if @sql_trace
+      return handle
+    end
+    record_query(sql)
+    begin_snapshot(conn)
+    ptr = conn.prepare_uncached(sql)
+    conn.qc_record(sql, ptr)
+    ptr
+  end
+
   # Query-log capture — see db_cruby.rb for the full rationale (the
   # test-side analog of Rails' `sql.active_record` SQLCounter; the one
   # instrument that can see the includes(:assoc) N+1 `compare` is blind
@@ -1409,8 +1636,9 @@ module Db
     if stmt.is_a?(Integer)
       return current_conn.qc_step?(stmt)
     end
-    has_row = SQL.sqlite3_step(stmt) == SQL::ROW
-    current_conn.qc_record_step(stmt, has_row)
+    conn = current_conn
+    has_row = conn.step_checked(stmt)
+    conn.qc_record_step(stmt, has_row)
     has_row
   end
 
@@ -1600,7 +1828,7 @@ module Db
 
   # roundhouse#12 Path A.1: with caching on, "finalize" means rewind the
   # cached stmt (reset cursor + clear any bound params) so the next call
-  # reuses it. Real sqlite3_finalize runs only at pool close.
+  # reuses it. Busy-hit and explicit uncached reads are finalized on release.
   def self.finalize(stmt)
     conn = current_conn
     if stmt.is_a?(Integer)
@@ -1608,8 +1836,7 @@ module Db
       return nil
     end
     conn.qc_install(stmt)
-    SQL.sqlite3_reset(stmt)
-    SQL.sqlite3_clear_bindings(stmt)
+    conn.release(stmt)
     nil
   end
 
@@ -1622,20 +1849,53 @@ module Db
   # reset + clear_bindings'd at its previous `finalize`, so re-binding
   # here starts clean.
   def self.bind_int(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_int64(stmt, idx, value)
+    # A nullable caller must not lose nil at the typed FFI integer boundary.
+    bind_int_opt(stmt, idx, value)
+  end
+
+  def self.bind_int_opt(stmt, idx, value)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    if value.nil?
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_null(stmt, idx))
+    else
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value))
+    end
+  end
+
+  def self.bind_text_opt(stmt, idx, value)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    if value.nil?
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_null(stmt, idx))
+    else
+      bind_text(stmt, idx, value)
+    end
+  end
+
+  def self.bind_bool_opt(stmt, idx, value)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    if value.nil?
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_null(stmt, idx))
+    else
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0))
+    end
   end
 
   def self.bind_text(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    # This shim's inline writer uses TEXT regardless of Ruby encoding.
+    # Preserve all bytes at the FFI boundary, including embedded NULs.
+    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline
   # form and the INTEGER affinity `t.boolean` columns get.
   def self.bind_bool(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    if value.nil?
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_null(stmt, idx))
+    else
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0))
+    end
   end
 
   def self.last_insert_rowid

@@ -23,6 +23,7 @@ use crate::expr::{ArrayStyle, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::naming::{pluralize_snake, underscore};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use super::util::{bool_value, constant_id_str, string_value, symbol_or_string_value, symbol_value};
 use super::IngestResult;
@@ -344,12 +345,24 @@ fn expand(decl: Declaration, leading_comments: &[Comment]) -> Vec<ModelBodyItem>
                 },
             ),
         ));
-        items.push(instance_method(
+        // `def page; leafable if page?; end` — at the call site the
+        // useful type is `Page | nil`, not the full polymorphic
+        // `leafable` union. Without that narrowing, `@leaf.page.body`
+        // fails on `Section | Picture` arms that do not declare `body`,
+        // and Relation/`page` collisions are harder to see honestly.
+        let singular_ty = Ty::Union {
+            variants: vec![
+                Ty::Class {
+                    id: ClassId(Symbol::from(type_name.as_str())),
+                    args: vec![],
+                },
+                Ty::Nil,
+            ],
+        };
+        items.push(instance_method_typed(
             singular.clone(),
-            if_then(
-                bare_send(&query),
-                bare_send(decl.role.as_str()),
-            ),
+            if_then(bare_send(&query), bare_send(decl.role.as_str())),
+            singular_ty,
         ));
         items.push(instance_method(
             format!("{singular}_{}", decl.primary_key.as_str()),
@@ -499,14 +512,33 @@ fn bare_send(method: &str) -> Expr {
 }
 
 fn instance_method(name: String, body: Expr) -> ModelBodyItem {
-    synth_method(name, MethodReceiver::Instance, body)
+    synth_method(name, MethodReceiver::Instance, body, None)
+}
+
+fn instance_method_typed(name: String, body: Expr, ret: Ty) -> ModelBodyItem {
+    synth_method(
+        name,
+        MethodReceiver::Instance,
+        body,
+        Some(Ty::Fn {
+            params: Vec::new(),
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::pure(),
+        }),
+    )
 }
 
 fn class_method(name: String, body: Expr) -> ModelBodyItem {
-    synth_method(name, MethodReceiver::Class, body)
+    synth_method(name, MethodReceiver::Class, body, None)
 }
 
-fn synth_method(name: String, receiver: MethodReceiver, body: Expr) -> ModelBodyItem {
+fn synth_method(
+    name: String,
+    receiver: MethodReceiver,
+    body: Expr,
+    signature: Option<Ty>,
+) -> ModelBodyItem {
     ModelBodyItem::Method {
         method: MethodDef {
             name: Symbol::from(name),
@@ -518,7 +550,7 @@ fn synth_method(name: String, receiver: MethodReceiver, body: Expr) -> ModelBody
             block_param: None,
             name_span: Span::synthetic(),
             body,
-            signature: None,
+            signature,
             effects: EffectSet::pure(),
             enclosing_class: None,
             kind: AccessorKind::Method,

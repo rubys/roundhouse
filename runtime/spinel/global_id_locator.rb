@@ -59,12 +59,36 @@ module GlobalID
       only.find(cast_id(parts[2]))
     end
 
+    # `GlobalID::Locator.locate_signed(sgid, only:, for:)` — Rails'
+    # signed GlobalID read. The sgid is MessageVerifier's
+    # `message--hmac` envelope under salt `signed_global_ids` (same
+    # envelope ActionText attachables use); `for:` is the purpose the
+    # mint signed under. Verifies, then finds on the caller's `only:`
+    # for the same reason unsigned `locate` does — the model name on
+    # the wire is checked, never constantized.
+    #
+    # `lower::global_id_locate` rewrites a literal `only:` to a
+    # generated `locate_signed_<model>(sgid, purpose)` entry point so
+    # a strict target never dispatches through a class object.
+    # `for` is a Ruby reserved word, so the keyword cannot be bound to
+    # a plain local via `for: purpose` (that form is a DEFAULT of
+    # `purpose`, not an alias). Pull it from `**opts` instead.
+    def self.locate_signed(sgid, only:, **opts)
+      purpose = opts[:for]
+      parts = parts_from_signed(sgid, purpose)
+      return nil if parts.nil?
+      return nil unless parts[1] == only.name
+
+      only.find(cast_id(parts[2]))
+    end
+
     # One entry point per model class an `only:` names, with the finder
     # spelled as a literal constant. GENERATED —
     # `project::apply_global_id_locate` rewrites the span between the
     # markers from `App::global_id_locate_models`, the same
     # eager-arm shape `apply_cable_connection` uses for the connection
-    # class. Empty for an app with no `locate` call site.
+    # class. Empty for an app with no `locate` / `locate_signed` call
+    # site. Unsigned and signed specializations share the marker span.
     # >>> generated: global-id-locate
     # <<< generated: global-id-locate
 
@@ -79,13 +103,39 @@ module GlobalID
     def self.parts_from(gid_param)
       uri = decode(gid_param)
       return nil if uri.nil?
+      parts_from_uri(uri)
+    end
 
-      # `gid://<app>/<Model>/<id>` — split on "/" after the scheme so an
-      # id containing no slash is the last segment. Anything with a
-      # different shape is not a name this app minted.
+    # Signed half of `parts_from`: verify the sgid under `purpose`,
+    # then split the URI it carries. Purpose is coerced with `to_s`
+    # so a Symbol mint (`for: :markdown_uploads`) and a String mint
+    # read the same way Rails does.
+    def self.parts_from_signed(sgid, purpose)
+      uri = verified_signed_uri(sgid, purpose)
+      return nil if uri.nil? || uri == ""
+      parts_from_uri(uri)
+    end
+
+    def self.verified_signed_uri(sgid, purpose)
+      return "" if sgid.nil?
+      json = ActionController::MessageVerifier.verified_data_json(
+        Rails.application.secret_key_base,
+        "signed_global_ids",
+        sgid.to_s,
+        purpose.to_s,
+        true
+      )
+      return "" if json == ""
+      ActionController::MessageVerifier.json_value(json)
+    end
+
+    # `gid://<app>/<Model>/<id>[?…]` — query stripped; anything with a
+    # different shape is not a name this app minted.
+    def self.parts_from_uri(uri)
       rest = uri.start_with?("gid://") ? uri[6..] : nil
       return nil if rest.nil?
-
+      q = rest.index("?")
+      rest = rest[0, q] unless q.nil?
       parts = rest.split("/")
       return nil unless parts.length == 3
       return nil unless parts[0] == Rails.application.global_id_app

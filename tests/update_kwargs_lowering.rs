@@ -76,6 +76,17 @@ end
     assert!(out.contains(r#"invitation.code = "used""#), "column assign:\n{out}");
     assert!(out.contains("invitation.new_user = nil"), "assoc assign:\n{out}");
     assert!(out.contains("invitation.save!"), "bang form saves with bang:\n{out}");
+    // Bang form's Seq value is the receiver (SelfType), not Bool —
+    // so a method ending in `update!` keeps the model type for Spinel.
+    let save_idx = out
+        .find("invitation.save!")
+        .expect("save! present");
+    let after_save = &out[save_idx..];
+    assert!(
+        after_save.contains("invitation")
+            && after_save.matches("invitation").count() >= 2,
+        "bang Seq should end with a read of the receiver:\n{out}"
+    );
     assert!(diags.is_empty(), "matching site should not produce residue: {diags:?}");
 }
 

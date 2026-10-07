@@ -23,6 +23,14 @@ observation forward fuses an under-informed `Untyped` into the
 converged answer. The loop's last act is a typing pass, so one final
 harvest runs after it — otherwise the registry is permanently a round
 behind the bodies.
+A method whose result reaches its own input (a recursive walk, a cycle
+of methods, a result merged back into its own argument) rebuilds its
+type from the previous round's, so the types carried between rounds
+are bounded (`src/analyze/fixpoint_bound.rs`): a harvested return or a
+unified parameter over 512 type nodes is cut to the deepest container
+nesting that fits, and none nests more than 16 containers; a cut
+position reads `untyped`. This lattice has no recursive types, so past
+the bound the position is gradual rather than a deeper copy each round.
 A companion fixpoint (`Analyzer::build_constant_registry`) types
 app-level constants — see below. After convergence,
 `stamp_inferred_library_signatures` writes what inference discovered

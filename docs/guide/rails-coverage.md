@@ -169,7 +169,7 @@ not add generic class-object/Relation support to strict targets.
 
 | | Blog tier | Campfire tier |
 |---|---|---|
-| Actions | The seven RESTful actions and any other; implicit render | + `head`, `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails) |
+| Actions | The seven RESTful actions and any other; implicit render | + `head`, `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails), `invisible_captcha` (`only:`/`except:`/`prepend:` → honeypot `spam?` on `subtitle` only; rotated/custom names unmodeled), pretender `impersonates :scope` when the controller defines a local `current_<scope>` (wraps it as `true_<scope>`, adds `impersonate_` / `stop_impersonating_`; inherited-only Devise helpers stay unsupported) |
 | Filters | `before_action` with `only:`/`except:`, ivar flow into views | + `around_action`, `after_action`, `if:`/`unless:` guards (symbol and lambda), `skip_before_action`, filters from concerns |
 | Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
@@ -194,10 +194,10 @@ not add generic class-object/Relation support to strict targets.
 | Active Storage | Campfire tier: blobs and attachments, the disk service, the engine's routes (redirect and representation), variants via libvips on Spinel. No cloud services. |
 | Action Text | Campfire tier: `has_rich_text`, the safe-list sanitizer, attachment rendering. |
 | Action Mailer | Ruby tier: mailer classes, `mail(...)`, `deliver_now`/`deliver_later` — delivery appends to `ActionMailer::Base.deliveries` (Rails' `:test` method, which the emitted tests assert against). No SMTP. |
-| Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine. Not: `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Devise's/Doorkeeper's DSL. |
+| Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine, Devise's `devise_for` (static default four: session/registration/password/confirmation + `controllers:` overrides for those mappings only — not model-module-driven), `authenticated`/`unauthenticated`/`devise_scope` as passthrough wrappers (auth not enforced). Not: `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Doorkeeper's DSL, Devise OmniAuth callback routes, Devise `skip:`/`only:`/`path:` options, model-driven module narrowing. |
 | Configuration | `config.x.*`, initializers that define constants or mix modules into models, `Rails.application.config` reads, the app's inflections. Not: `Rails.application.credentials`. |
 | Caching | Fragment caching (`cache` in views, keyed by record) and `Rails.cache.fetch`, in-process. |
-| Gems | The census names what is modeled. Modeled today: bcrypt, image_processing/ruby-vips (Spinel), rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
+| Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + `devise_for` / visibility wrappers), image_processing/ruby-vips (Spinel), invisible_captcha, pretender, rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
 
 ## What is not lowered, anywhere
 
@@ -248,22 +248,23 @@ Anything not in that section that differs from Rails is a bug, and the
 
 ## Security posture
 
-**CSRF is verified on the ruby family where the app declares it** —
-the CRuby and Spinel lanes, which is where Campfire deploys.
-`protect_from_forgery with: :exception` runs as the `before_action`
-Rails registers, at the same place in the chain, with its `only:` /
-`except:` / `if:` / `unless:`; `skip_forgery_protection` removes it.
-A non-GET request must carry the session's token in the
-`authenticity_token` param or the `X-CSRF-Token` header, and a present
-`Origin` must name the request's own host; otherwise the answer is
-Rails' 422. The emitted test harness
+**CSRF is verified on the ruby family** — the CRuby and Spinel lanes,
+which is where Campfire deploys. Rails' `load_defaults` 5.2+ implicit
+`protect_from_forgery with: :exception` heads every
+`ActionController::Base` chain; a written macro re-registers the same
+filter (with its `only:` / `except:` / `if:` / `unless:`);
+`skip_forgery_protection` removes it. A non-GET request must carry the
+session's masked token in the `authenticity_token` param or the
+`X-CSRF-Token` header, and a present `Origin` must name the request's
+own host; otherwise the answer is Rails' 422. The emitted test harness
 turns the check off, as a generated `config/environments/test.rb`
 does.
 
 What differs from Rails, and why:
 
-- **Tokens are not masked.** Rails hands out a per-render masked token
-  (a BREACH mitigation); the emit issues the session token itself.
+- **Tokens are masked on the ruby family.** Rails' per-render one-time-pad
+  XOR lives in `ActionController::AuthenticityToken`; strict-target emit
+  of `base.rb` still answers an empty token (no `Current.session`).
 - **The Origin check compares hosts, not schemes.** Rails compares
   `request.base_url`. The ruby family now reads `X-Forwarded-Proto`
   (absolute URLs behind a TLS proxy are https, as in Rails), but
@@ -284,15 +285,15 @@ What differs from Rails, and why:
   0600), the directory a deployment already persists for its database.
   Set the variable to share one key across instances, or to carry a key
   over from a Rails deployment.
-- **Rails' implicit default is not applied.** Under `load_defaults`
-  5.2+, Rails protects every `ActionController::Base` controller even
-  when the app never writes the macro. Here only a written
-  `protect_from_forgery with: :exception` is enforced: an app that
-  relies on the default (the blog, the Rails tutorial) is not
-  protected on any lane. The default would put the check into every
-  target's emit, and the strict targets have no token to check.
-- **`with: :null_session` / `:reset_session` and `prepend:` are not
-  modeled.** Such a macro is reported as a gap and not enforced.
+- **Rails' implicit default is applied on every lane.** Under
+  `load_defaults` 5.2+, every `ActionController::Base` controller runs
+  `verify_authenticity_token` unless the app opts out. The ruby family
+  mints and checks masked tokens; strict targets still issue no token and
+  treat an empty session secret as "check none" so POSTs are not 422'd.
+- **`with: :null_session` / `:reset_session` still register the 422
+  handler.** Those strategies are recognized as forgery filters but are
+  not modeled as empty-session / wipe pass-throughs. `prepend:` and a
+  custom `store:` remain unmodeled.
 - **Action Cable's Origin check uses Rails' defaults only.** On the
   ruby family, a `/cable` handshake must carry an `Origin` naming the
   request's own host (compared by host, as above), or in development

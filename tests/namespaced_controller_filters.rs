@@ -358,3 +358,78 @@ fn each_spelling_inherits_its_own_base_filters() {
         }
     }
 }
+
+/// A nested base that does NOT end in `Controller` still participates
+/// in the filter ancestry. The fallback must pick the first class that
+/// descends from a controller — not merely “not a T::Struct” — so a
+/// non-Sorbet decoy ahead of `Base` does not steal the selection and
+/// drop `admin_gate` (and ApplicationController filters) from the
+/// emitted dispatcher.
+#[test]
+fn a_nested_base_without_controller_suffix_still_contributes_filters() {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        (
+            "app/controllers/application_controller.rb",
+            APPLICATION_CONTROLLER.as_bytes().to_vec(),
+        ),
+        (
+            "app/controllers/admin/base.rb",
+            br#"module Admin
+  class RedirectPlan < StandardError
+  end
+
+  class Base < ApplicationController
+    before_action :admin_gate
+
+    private
+      def admin_gate
+        @gate = :admin
+      end
+  end
+end
+"#
+            .to_vec(),
+        ),
+        (
+            "app/controllers/admin/posts_controller.rb",
+            action_controller("module Admin\nclass PostsController < Base", "end\nend")
+                .into_bytes(),
+        ),
+        (
+            "config/routes.rb",
+            b"Rails.application.routes.draw do\n  namespace :admin do\n    resources :posts, only: [:index]\n  end\nend\n"
+                .to_vec(),
+        ),
+        (
+            "db/schema.rb",
+            b"ActiveRecord::Schema.define do\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    assert!(
+        app.controllers.iter().any(|c| c.name.0.as_str() == "Admin::Base"),
+        "Admin::Base must stay a controller; got {:?}",
+        app.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>()
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let content = ruby::emit_lowered_controllers(&app)
+        .into_iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/controllers/admin/posts_controller.rb"))
+        .map(|f| f.content)
+        .expect("posts controller emitted");
+    let dispatch = content
+        .split("def process_action")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no dispatcher\n{content}"));
+    assert!(
+        dispatch.contains("admin_gate"),
+        "nested Admin::Base filters must reach the child:\n{content}"
+    );
+    assert!(
+        dispatch.contains("require_authentication"),
+        "ApplicationController filters must still reach the child:\n{content}"
+    );
+}

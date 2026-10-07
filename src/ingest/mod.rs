@@ -17,6 +17,7 @@
 
 mod alba;
 mod graphql_ruby;
+pub(crate) mod class_attribute;
 mod class_configuration;
 pub mod allow_browser;
 pub mod app;
@@ -25,6 +26,10 @@ pub mod controller;
 pub mod expr;
 pub mod fixture;
 pub(crate) mod forwarding;
+pub(crate) mod controller_macro_synth;
+pub(crate) mod devise_routes;
+pub mod impersonates;
+pub mod invisible_captcha;
 pub mod generated_helpers;
 pub mod jbuilder;
 pub mod library_class;

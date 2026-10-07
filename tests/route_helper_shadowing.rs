@@ -111,6 +111,32 @@ end
     );
 }
 
+/// Bare `controller_path` is ActionController::Base's underscored
+/// namespace path, not a route helper. The `_path` suffix heuristic
+/// must not rewrite it to `RouteHelpers.controller_path` — that would
+/// leave the lowerer's synthesized literal override unreachable.
+#[test]
+fn bare_controller_path_is_not_a_route_helper() {
+    let out = emitted(&[(
+        "app/controllers/articles_controller.rb",
+        r#"
+class ArticlesController < ApplicationController
+  def index
+    @prefix = controller_path
+  end
+end
+"#,
+    )]);
+    assert!(
+        !out.contains("RouteHelpers"),
+        "bare controller_path must not become RouteHelpers.controller_path:\n{out}"
+    );
+    assert!(
+        out.contains("controller_path") && out.contains("\"articles\""),
+        "synthesized controller_path literal must remain:\n{out}"
+    );
+}
+
 /// `Rails.application.routes.url_helpers.<x>_path(record)` grounds like
 /// the bare call it stands for.
 ///

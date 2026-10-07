@@ -1771,6 +1771,9 @@ module RequestDispatch
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
     controller.request.body = request_body
+    # Raw query for path-option redirects that keep it — same slot every
+    # target's dispatcher seeds (`query_string` on the controller).
+    controller.query_string = request_query
     # Same object where module-function helpers reach it, and the
     # controller alongside — mirrors the dispatcher's pair.
     ActionController::Current.request = controller.request

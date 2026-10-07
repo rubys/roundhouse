@@ -719,6 +719,7 @@ fn build_library_class(
         name: tm.name.clone(),
         is_module: false,
         parent: tm.parent.clone(),
+        parent_span: Default::default(),
         includes: tm.includes.clone(),
         methods,
         nullable_columns: Vec::new(),

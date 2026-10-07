@@ -62,11 +62,12 @@ module Db
   # PreparedStatement. Because `with_connection` leases a Conn to exactly
   # one thread for a request's duration, the cache needs no lock.
   class Conn
-    attr_reader :raw, :stmt_cache
+    attr_reader :raw, :stmt_cache, :open_statements
 
     def initialize(raw)
       @raw = raw
       @stmt_cache = {}
+      @open_statements = {}.compare_by_identity
     end
   end
 
@@ -83,7 +84,7 @@ module Db
   # need. A replay handle has no PreparedStatement until it is promoted
   # (see `step?`).
   class Stmt
-    attr_accessor :pstmt, :rs, :executed, :cached, :sql, :capture, :replay, :row, :pos
+    attr_accessor :pstmt, :rs, :executed, :cached, :sql, :capture, :replay, :row, :pos, :open
 
     def initialize(pstmt, cached)
       @pstmt = pstmt
@@ -95,6 +96,7 @@ module Db
       @replay = nil
       @row = nil
       @pos = 0
+      @open = nil
     end
   end
 
@@ -102,6 +104,8 @@ module Db
   @all       = nil
   @mutex     = nil
   @cv        = nil
+  @quarantined = []
+  @missing_connections = 0
   # Query-log capture (issue #27) — see db_cruby.rb. `nil` ⇒ not
   # capturing; an Array ⇒ accumulate each issued SQL string.
   @query_log = nil
@@ -113,23 +117,30 @@ module Db
     @cv    = ConditionVariable.new
     @free  = []
     @all   = []
-    ds = SQLiteDataSource.new
-    ds.set_url("jdbc:sqlite:#{path}")
+    @quarantined = []
+    @missing_connections = 0
+    @path = path
     pool_size.times do
-      raw = ds.get_connection
-      raw.set_auto_commit(true)
-      # STATED, not inherited — see the note in db_cruby.rb's open_pool.
-      # The three Db shims must not agree on durability by whichever
-      # SQLite each happened to link.
-      st = raw.create_statement
-      st.execute("PRAGMA journal_mode=WAL")
-      st.execute("PRAGMA synchronous=NORMAL")
-      st.execute("PRAGMA busy_timeout=5000")
-      st.close
-      conn = Conn.new(raw)
+      conn = open_connection
       @free << conn
       @all  << conn
     end
+  end
+
+  def self.open_connection
+    ds = SQLiteDataSource.new
+    ds.set_url("jdbc:sqlite:#{@path}")
+    raw = ds.get_connection
+    raw.set_auto_commit(true)
+    # STATED, not inherited — see the note in db_cruby.rb's open_pool.
+    # The three Db shims must not agree on durability by whichever
+    # SQLite each happened to link.
+    st = raw.create_statement
+    st.execute("PRAGMA journal_mode=WAL")
+    st.execute("PRAGMA synchronous=NORMAL")
+    st.execute("PRAGMA busy_timeout=5000")
+    st.close
+    Conn.new(raw)
   end
 
   # The Conn this thread should read/write through. Set by
@@ -159,30 +170,108 @@ module Db
     conn = nil
     @mutex.synchronize do
       while @free.empty?
-        @cv.wait(@mutex)
+        if @missing_connections > 0
+          replace_connection
+        else
+          @cv.wait(@mutex)
+        end
       end
       conn = @free.pop
     end
     Fiber[:db_handle] = conn
+    request_failed = false
     begin
       yield
+    rescue Exception
+      request_failed = true
+      raise
     ensure
-      Fiber[:db_handle] = nil
-      @mutex.synchronize do
-        @free.push(conn)
-        @cv.signal
+      cleanup_error = nil
+      begin
+        release_open_statements(conn)
+      rescue StandardError => e
+        cleanup_error = e
+      ensure
+        Fiber[:db_handle] = nil
+        begin
+          if conn.open_statements.empty?
+            @mutex.synchronize do
+              @free.push(conn)
+              @cv.signal
+            end
+          else
+            quarantine_connection(conn)
+          end
+        rescue StandardError => e
+          cleanup_error ||= e
+        end
+      end
+      raise cleanup_error if cleanup_error && !request_failed
+    end
+  end
+
+  def self.quarantine_connection(conn)
+    @mutex.synchronize do
+      @quarantined << conn
+      @missing_connections += 1
+      begin
+        # Open first so a shared in-memory database survives replacement.
+        replace_connection
+      ensure
+        # A failed opener must also wake waiters so checkout can retry it
+        # or raise, rather than wait for a connection that cannot check in.
+        @cv.broadcast
       end
     end
+    close_connection(conn)
+  end
+
+  # Called under @mutex; a failed open leaves the missing capacity intact.
+  def self.replace_connection
+    replacement = open_connection
+    @all << replacement
+    @free << replacement
+    @missing_connections -= 1
+  end
+
+  def self.close_connection(conn)
+    error = nil
+    begin
+      release_open_statements(conn)
+    rescue StandardError => e
+      error = e
+    end
+    conn.stmt_cache.each_value do |pstmt|
+      begin
+        pstmt.close unless pstmt.is_closed
+      rescue StandardError => e
+        error ||= e
+      end
+    end
+    begin
+      conn.raw.close unless conn.raw.is_closed
+    rescue StandardError => e
+      error ||= e
+    end
+    error
   end
 
   def self.close
     return if @all.nil?
+    error = nil
     @all.each do |conn|
-      conn.stmt_cache.each_value { |ps| ps.close }
-      conn.raw.close
+      close_error = close_connection(conn)
+      error ||= close_error
     end
     @free = nil
-    @all  = nil
+    # A closed connection can still own idle statements whose close failed.
+    remaining = @all.reject do |conn|
+      conn.raw.is_closed && conn.open_statements.empty? &&
+        conn.stmt_cache.each_value.all?(&:is_closed)
+    end
+    @quarantined = remaining
+    @all = remaining.empty? ? nil : remaining
+    raise error if error
   end
 
   def self.exec(sql)
@@ -223,10 +312,11 @@ module Db
   end
 
   # Prepared-statement cache (roundhouse#12). A cache hit reuses the open
-  # PreparedStatement (a fresh `executeQuery` in `step?` yields a new
-  # ResultSet, so no explicit rewind is needed); `finalize` closes only
-  # the ResultSet and keeps the cached statement. Over-cap statements are
-  # transient and closed on finalize. Key is the composed SQL — inlined
+  # PreparedStatement only when idle. Xerial's `executeQuery` in `step?`
+  # resets the cursor before execution; release clears old parameters.
+  # `finalize` closes the ResultSet and keeps the cached statement. Busy
+  # hits and over-cap statements are transient, closed on finalize.
+  # Key is the composed SQL — inlined
   # literals key id-bearing queries per-id (fine for the bench;
   # STMT_CACHE_CAP bounds growth).
   def self.prepare(sql)
@@ -249,7 +339,10 @@ module Db
     cache  = conn.stmt_cache
     pstmt  = cache[sql]
     cached = true
-    if pstmt.nil?
+    if !pstmt.nil? && conn.open_statements.key?(pstmt)
+      pstmt = conn.raw.prepare_statement(sql)
+      cached = false
+    elsif pstmt.nil?
       pstmt = conn.raw.prepare_statement(sql)
       if cache.size < STMT_CACHE_CAP
         cache[sql] = pstmt
@@ -258,6 +351,30 @@ module Db
       end
     end
     st = Stmt.new(pstmt, cached)
+    st.open = conn.open_statements
+    st.open[pstmt] = st
+    st.sql = sql
+    st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
+  end
+
+  # Explicit uncached reads skip statement reuse, retaining result replay.
+  # finalize closes real transient statements, including replay promotion.
+  def self.prepare_uncached(sql)
+    qcache = Fiber[:rh_qcache]
+    parameterized = sql.include?("?")
+    if !qcache.nil? && !parameterized && (hit = qcache[sql])
+      st = Stmt.new(nil, false)
+      st.sql = sql
+      st.replay = hit
+      return st
+    end
+    record_query(sql)
+    conn = current_dbh
+    pstmt = conn.raw.prepare_statement(sql)
+    st = Stmt.new(pstmt, false)
+    st.open = conn.open_statements
+    st.open[pstmt] = st
     st.sql = sql
     st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
     st
@@ -284,15 +401,16 @@ module Db
       # Cached prefix exhausted without eof (the first consumer stopped
       # early) — promote to a real transient statement, fast-forwarded
       # past the rows already replayed.
-      pstmt = current_dbh.raw.prepare_statement(stmt.sql)
-      rs = pstmt.execute_query
-      stmt.pos.times { rs.next }
+      conn = current_dbh
+      pstmt = conn.raw.prepare_statement(stmt.sql)
       stmt.pstmt = pstmt
-      stmt.rs = rs
-      stmt.executed = true
       stmt.cached = false
       stmt.replay = nil
-      return rs.next
+      stmt.open = conn.open_statements
+      stmt.open[pstmt] = stmt
+      ensure_executed(stmt)
+      stmt.pos.times { stmt.rs.next }
+      return stmt.rs.next
     end
     ensure_executed(stmt)
     ok = stmt.rs.next
@@ -315,6 +433,8 @@ module Db
       end
     end
     ok
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   def self.column_names_of(stmt)
@@ -417,12 +537,16 @@ module Db
     return stmt.replay[:names].length if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_count
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   def self.column_name(stmt, i)
     return stmt.replay[:names][i] if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_name(i + 1)
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   # Release the per-call handle. A pure replay held no statement. A
@@ -432,7 +556,7 @@ module Db
   # close the ResultSet (if a query ran); a cached PreparedStatement
   # stays open for reuse, a transient one is closed.
   def self.finalize(stmt)
-    return nil if stmt.replay
+    return nil if stmt.pstmt.nil?
     if (c = stmt.capture)
       # A capture that never stepped has no column names yet; the next
       # consumer would find an empty, eof-less prefix and promote, which
@@ -442,9 +566,145 @@ module Db
         qcache[stmt.sql] = c
       end
     end
-    stmt.rs.close if stmt.rs
-    stmt.pstmt.close if stmt.pstmt && !stmt.cached
+    release_statement(stmt)
+  end
+
+  # Lease cleanup also covers raises before finalize and replay promotion;
+  # abandoned captures must not enter the request's result cache.
+  def self.release_open_statements(conn)
+    error = nil
+    conn.open_statements.each_value do |stmt|
+      begin
+        release_statement(stmt, conn)
+      rescue StandardError => e
+        error ||= e
+      end
+    end
+    raise error if error
+  end
+
+  def self.release_statement(stmt, conn = nil)
+    pstmt = stmt.pstmt
+    return nil if pstmt.nil?
+    error = nil
+    begin
+      stmt.rs.close if stmt.rs
+    rescue StandardError => e
+      error = e
+    end
+    if stmt.cached
+      begin
+        pstmt.clear_parameters
+      rescue StandardError => e
+        error ||= e
+      end
+      if error
+        conn ||= current_dbh
+        cache = conn.stmt_cache
+        cache.delete(stmt.sql) if cache[stmt.sql].equal?(pstmt)
+        stmt.cached = false
+      end
+    end
+    unless stmt.cached
+      begin
+        pstmt.close
+      rescue StandardError => e
+        error ||= e
+      end
+    end
+    if error.nil? || (pstmt.is_closed && (stmt.rs.nil? || stmt.rs.is_closed))
+      stmt.open.delete(pstmt)
+      stmt.pstmt = nil
+      stmt.rs = nil
+    end
+    stmt.capture = nil
+    raise error if error
     nil
+  end
+
+  def self.statement_failed(stmt, _operation, error)
+    stmt.replay = nil
+    # Xerial can close the native statement after an execute error. Evict
+    # the failed checkout instead of leaving a poisoned cache entry.
+    cache = current_dbh.stmt_cache
+    cache.delete(stmt.sql) if cache[stmt.sql].equal?(stmt.pstmt)
+    stmt.cached = false
+    begin
+      release_statement(stmt)
+    rescue StandardError
+      # Failed closes remain owned until lease cleanup quarantines them.
+    end
+    raise error
+  end
+
+  # Non-optional integer binds share the JDBC setter with the optional
+  # path; the lowerer emits `bind_int` for required columns.
+  def self.bind_int(handle, idx, value)
+    bind_int_opt(handle, idx, value)
+  end
+
+  # Optional read predicates occupy one slot whether nil or present.
+  def self.bind_int_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      ps.set_long(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
+  end
+
+  def self.bind_text_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::VARCHAR)
+    else
+      bind_text(handle, idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
+  end
+
+  def self.bind_bool_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      ps.set_long(idx, value ? 1 : 0)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
+  end
+
+  # Match this shim's inline writer, including ASCII-only BINARY strings
+  # remaining TEXT. set_bytes keeps NUL and non-ASCII binary data out of
+  # Java String decoding; both JDBC setters copy the Ruby value at bind time.
+  def self.bind_text(stmt, idx, value)
+    pstmt = stmt.pstmt
+    return nil if pstmt.nil?
+    value = value.to_s
+    if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
+      pstmt.set_bytes(idx, value.to_java_bytes)
+    else
+      pstmt.set_string(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
+  end
+
+  # SQLite boolean values are integers, with NULL distinct from false/0.
+  def self.bind_bool(stmt, idx, value)
+    pstmt = stmt.pstmt
+    return nil if pstmt.nil?
+    if value.nil?
+      pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      pstmt.set_int(idx, value ? 1 : 0)
+    end
   end
 
   def self.last_insert_rowid

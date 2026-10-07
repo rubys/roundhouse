@@ -97,6 +97,40 @@ impl<'a> BodyTyper<'a> {
         })
     }
 
+    /// Rails' per-column dynamic finders (`find_by_<attr>`,
+    /// `find_by_<attr>!`) are generated at runtime for any real column —
+    /// the same shape `find_by`/`find_by!` already type, just spelled
+    /// with the attribute baked into the method name instead of passed
+    /// as a keyword. Column existence is checked against the model's
+    /// actual schema table (`ClassInfo::has_schema_column` — the same
+    /// check the arel lowerer's `normalize_dynamic_finder_send` makes,
+    /// #558): an attribute no known column backs isn't a dynamic
+    /// finder (and the pipeline has no runtime for inventing one), so
+    /// it falls through to "no known method" rather than guessing. This
+    /// runs only once the caller has already checked `class_methods`
+    /// for the name (see the call site), so a real class method of this
+    /// shape — a `has_secure_password` token finder, say — still wins.
+    fn dynamic_finder_ty(&self, model: &ClassId, method: &Symbol) -> Option<Ty> {
+        let (base, bang) = match method.as_str().strip_suffix('!') {
+            Some(base) => (base, true),
+            None => (method.as_str(), false),
+        };
+        let attr = base.strip_prefix("find_by_")?;
+        if attr.is_empty() {
+            return None;
+        }
+        let cls = self.classes().get(model)?;
+        if !cls.has_schema_column(&Symbol::from(attr)) {
+            return None;
+        }
+        let kind = if bang {
+            crate::catalog::ReturnKind::SelfType
+        } else {
+            crate::catalog::ReturnKind::SelfOrNil
+        };
+        Some(crate::analyze::instantiate_return_kind(kind, model))
+    }
+
     /// `rel.group(:col).count` — Rails' GROUPED count, a Hash of
     /// group-key => COUNT rather than the scalar Integer.
     ///
@@ -179,6 +213,7 @@ impl<'a> BodyTyper<'a> {
         recv_ty: Option<&Ty>,
         method: &Symbol,
         args: &[Expr],
+        class_object_receiver: bool,
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
@@ -223,7 +258,7 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
-        let Some(param_tys) = self.block_params_for(recv_ty, method) else {
+        let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
         };
         for (name, ty) in params.iter().zip(param_tys.iter()) {
@@ -287,10 +322,13 @@ impl<'a> BodyTyper<'a> {
 
 /// Per-param types a block yields, given the receiver type and method.
     /// `None` means "no binding info available" — params stay unknown.
+    /// `class_object_receiver` picks class-method block contracts before
+    /// instance ones, matching ordinary dispatch on a class/module object.
     pub(super) fn block_params_for(
         &self,
         recv_ty: Option<&Ty>,
         method: &Symbol,
+        class_object_receiver: bool,
     ) -> Option<Vec<Ty>> {
         let recv_ty = recv_ty?;
         if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == PARAM_VALUE) {
@@ -317,7 +355,7 @@ impl<'a> BodyTyper<'a> {
             let as_array = Ty::Array {
                 elem: Box::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Untyped)),
             };
-            return self.block_params_for(Some(&as_array), method);
+            return self.block_params_for(Some(&as_array), method, class_object_receiver);
         }
         match recv_ty {
             Ty::Str if method.as_str() == "bytes" => Some(vec![Ty::Int]),
@@ -344,7 +382,7 @@ impl<'a> BodyTyper<'a> {
                 let as_array = Ty::Array {
                     elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
                 };
-                self.block_params_for(Some(&as_array), method)
+                self.block_params_for(Some(&as_array), method, class_object_receiver)
             }
             Ty::Hash { key, value } => match method.as_str() {
                 "each" | "each_pair" | "map" | "collect"
@@ -401,11 +439,33 @@ impl<'a> BodyTyper<'a> {
                     for c in std::iter::once(cls)
                         .chain(cls.includes.iter().filter_map(|m| self.classes().get(m)))
                     {
-                        if let Some(sig) = c
-                            .instance_methods
-                            .get(method)
-                            .or_else(|| c.class_methods.get(method))
-                        {
+                        // Prefer the receiver-side table. The fixpoint
+                        // often seeds that side with a bare return
+                        // (`Nil` / `Str` / …) while the RBS block
+                        // contract still lives on the other side —
+                        // take the other side's block-bearing Fn only
+                        // then. A real receiver-side `Fn` without a
+                        // block must not steal the opposite method's
+                        // block (dispatch still picks the receiver
+                        // side). Dual-name both-sides-with-block keeps
+                        // the receiver side.
+                        let (preferred, other) = if class_object_receiver {
+                            (&c.class_methods, &c.instance_methods)
+                        } else {
+                            (&c.instance_methods, &c.class_methods)
+                        };
+                        let return_seed = |ty: &Ty| !matches!(ty, Ty::Fn { .. });
+                        let sig = match (preferred.get(method), other.get(method)) {
+                            (Some(s @ Ty::Fn { block: Some(_), .. }), _) => Some(s),
+                            (pref, Some(s @ Ty::Fn { block: Some(_), .. }))
+                                if pref.map_or(true, return_seed) =>
+                            {
+                                Some(s)
+                            }
+                            (Some(s), _) => Some(s),
+                            (None, o) => o,
+                        };
+                        if let Some(sig) = sig {
                             // The block's yield may name the receiver
                             // (`{ (instance) -> void }`); substitute
                             // against the class the walk started from,
@@ -455,7 +515,9 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    if let Some(params) = self.block_params_for(Some(v), method) {
+                    if let Some(params) =
+                        self.block_params_for(Some(v), method, class_object_receiver)
+                    {
                         return Some(params);
                     }
                 }
@@ -536,6 +598,92 @@ impl<'a> BodyTyper<'a> {
             current = cls.parent.as_ref();
         }
         None
+    }
+
+    /// `message.boosts.loaded?` — Rails AssociationProxy spelling.
+    ///
+    /// The has_many reader types as `Array[Boost]`, which has no
+    /// `loaded?`. Emit lowers the two-hop onto the synthesized
+    /// `boosts_loaded?` Bool (`lower::assoc_loaded`), but `check` /
+    /// LSP analyze without that pass and would otherwise residual the
+    /// tip Campfire view. Mirror the rewrite's admission here: only
+    /// when the owner actually has `<assoc>_loaded?` (has_many was
+    /// synthesized) answer Bool — never catalog Relation `#loaded?`
+    /// (invariant 6: no silent runtime gap).
+    ///
+    /// View locals are often `Untyped`; then fall back to the same
+    /// unique-name rule `assoc_loaded` uses for non-model owners.
+    pub(super) fn assoc_loaded_ty(
+        &self,
+        recv: Option<&crate::expr::Expr>,
+        method: &Symbol,
+    ) -> Option<Ty> {
+        if method.as_str() != "loaded?" {
+            return None;
+        }
+        let ExprNode::Send {
+            recv: Some(owner),
+            method: assoc,
+            args,
+            block: None,
+            ..
+        } = &*recv?.node
+        else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
+        let has_flat = |id: &ClassId| -> bool {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let Some(cid) = current else { return false };
+                let Some(cls) = self.classes().get(cid) else { return false };
+                if cls.instance_methods.contains_key(&flat) {
+                    return true;
+                }
+                current = cls.parent.as_ref();
+            }
+            false
+        };
+        // Mirror `lower::assoc_loaded::owner_from_typed_recv`: a single
+        // Class admits when it has `<assoc>_loaded?`; a Union admits
+        // only when *every* class alternative does (no first-member
+        // find_map — that would quiet check while emit still refuses).
+        // Typed owners that miss the flat predicate return None — do
+        // not fall through to the unique-name path (that is for
+        // untyped view locals only).
+        match owner.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => {
+                return has_flat(id).then_some(Ty::Bool);
+            }
+            Some(Ty::Union { variants }) => {
+                let ids: Vec<&ClassId> = variants
+                    .iter()
+                    .filter_map(|v| match v {
+                        Ty::Class { id, .. } => Some(id),
+                        _ => None,
+                    })
+                    .collect();
+                return (!ids.is_empty() && ids.iter().all(|id| has_flat(id)))
+                    .then_some(Ty::Bool);
+            }
+            _ => {}
+        }
+        // Untyped / missing owner type (view local): unique `<assoc>_loaded?`
+        // across modeled classes, matching `lower::assoc_loaded`'s
+        // unique-name path for views.
+        let mut found = false;
+        for cls in self.classes().values() {
+            if cls.instance_methods.contains_key(&flat) {
+                if found {
+                    return None;
+                }
+                found = true;
+            }
+        }
+        found.then_some(Ty::Bool)
     }
 
     pub(super) fn normalize_trailing_kwargs(
@@ -907,6 +1055,24 @@ impl<'a> BodyTyper<'a> {
             // of Ruby's own guarantees about the answer.
             Some(Ty::Untyped) => conversion_fallback(method).unwrap_or(Ty::Untyped),
             Some(Ty::Class { id, args }) => {
+                // `GlobalID::Locator.locate(…, only: Model)` /
+                // `locate_signed(…, only: Model, for:)` — the literal
+                // `only:` IS the finder, so the answer is that model
+                // (nilable: a bad/mismatched gid is nil). Refined here
+                // rather than in the registry: the registry cannot see
+                // the call-site kwarg.
+                if id.0.as_str() == "GlobalID::Locator"
+                    && matches!(method.as_str(), "locate" | "locate_signed")
+                {
+                    if let Some(model) = locator_only_class(call_args) {
+                        return Ty::Union {
+                            variants: vec![
+                                Ty::Class { id: model, args: vec![] },
+                                Ty::Nil,
+                            ],
+                        };
+                    }
+                }
                 if id.0.as_str() == "Date" {
                     if let Some(ty) = date_constructor(method, call_args) {
                         return ty;
@@ -938,6 +1104,40 @@ impl<'a> BodyTyper<'a> {
                 }
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
                     return Ty::Union { variants: vec![Ty::Date, Ty::Nil] };
+                }
+                // The Date calendar intrinsics `time_calendar` lowers to.
+                if id.0.as_str() == "ActiveSupport" {
+                    match method.as_str() {
+                        "date_current"
+                        | "date_from_civil"
+                        | "date_days_since"
+                        | "date_days_ago"
+                        | "date_yesterday"
+                        | "date_tomorrow"
+                        | "date_weeks_since"
+                        | "date_weeks_ago"
+                        | "date_months_since"
+                        | "date_months_ago"
+                        | "date_years_since"
+                        | "date_years_ago"
+                        | "date_beginning_of_week"
+                        | "date_end_of_week"
+                        | "date_next_week"
+                        | "date_prev_week"
+                        | "date_beginning_of_month"
+                        | "date_end_of_month"
+                        | "date_beginning_of_year"
+                        | "date_end_of_year" => return Ty::Date,
+                        "date_at_midnight"
+                        | "date_beginning_of_day"
+                        | "date_end_of_day" => return Ty::Time,
+                        "date_today?"
+                        | "date_yesterday?"
+                        | "date_tomorrow?"
+                        | "date_past?"
+                        | "date_future?" => return Ty::Bool,
+                        _ => {}
+                    }
                 }
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_date" {
                     return if matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Date)) {
@@ -1091,14 +1291,32 @@ impl<'a> BodyTyper<'a> {
                     };
                     // The class object and its instances share this one type, so a
                     // name both sides define is ambiguous. The catalog gives every model
-                    // the relation builders (`order`, `group`, `limit`, ...) class-side;
-                    // `belongs_to :order` gives an instance the reader `order`. A relation
-                    // builder called with no arguments is not a query (`Refund.order` is an
-                    // error), so the zero-argument call is the instance reader.
+                    // the relation builders (`order`, `group`, `limit`, `page`, …)
+                    // class-side; an instance may own the same name as a reader
+                    // (`belongs_to :order`, `delegated_type` singular `page`, …).
+                    // A relation builder called with no arguments is not a useful
+                    // query shape here (`Refund.order` is an error; bare
+                    // `leaf.page` is the delegated_type reader, not
+                    // `Relation[Leaf]`), so the zero-argument call is the
+                    // instance reader. Callers that want the builder pass an
+                    // argument (`Model.page(2)`, `Model.order(:name)`).
                     if call_args.is_empty()
                         && matches!(
                             method.as_str(),
-                            "order" | "group" | "limit" | "offset" | "having" | "joins" | "includes" | "select" | "distinct"
+                            "order"
+                                | "group"
+                                | "limit"
+                                | "offset"
+                                | "having"
+                                | "joins"
+                                | "includes"
+                                | "select"
+                                | "distinct"
+                                | "page"
+                                | "per"
+                                | "paginate"
+                                | "padding"
+                                | "without_count"
                         )
                     {
                         if let (Some(cm), Some(im)) =
@@ -1249,11 +1467,15 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
-                // `Process.pid` — the one Process method the corpus
-                // reaches, and it is Ruby's `Logger::Formatter` that
-                // reaches it: every log line carries `#<pid>`. An
+                // `Process.pid` — Ruby's `Logger::Formatter` and
+                // Campfire's web-push pool (`forget_after_fork`). An
                 // Integer on every target that has a process at all.
                 if id.0.as_str() == "Process" && method.as_str() == "pid" {
+                    return Ty::Int;
+                }
+                // `Process.kill(signal, pid)` — TimeLimitedVideoPreviewer
+                // kills a stuck ffmpeg. Answers the signal as Integer.
+                if id.0.as_str() == "Process" && method.as_str() == "kill" {
                     return Ty::Int;
                 }
                 // `Process.clock_gettime(clock, unit = :float_second)`:
@@ -1268,6 +1490,20 @@ impl<'a> BodyTyper<'a> {
                         }
                         Some(_) => Ty::Untyped,
                     };
+                }
+                // `Timeout.timeout(sec) { ... }` — block result, or raises
+                // Timeout::Error. Campfire unfurl + video previewer.
+                if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
+                    return Ty::Untyped;
+                }
+                // `IO.popen` / `IO.copy_stream` — capture path; popen is
+                // polymorphic (block vs handle), copy_stream answers bytes.
+                if id.0.as_str() == "IO" {
+                    match method.as_str() {
+                        "popen" => return Ty::Untyped,
+                        "copy_stream" => return Ty::Int,
+                        _ => {}
+                    }
                 }
                 // JSON stdlib — `JSON.generate` and `JSON.dump` return
                 // String; `JSON.parse` / `JSON.load` return parsed
@@ -1438,6 +1674,17 @@ impl<'a> BodyTyper<'a> {
                 if method.as_str() == "sum" && !args.is_empty() {
                     return Ty::Untyped;
                 }
+                // `[] + [h]` is an Array of `h`: when the receiver's
+                // element is empty or not yet known, `+`, `|` and
+                // `concat` take the argument's. A known receiver element
+                // keeps answering for the result, as before.
+                if let ("+" | "|" | "concat", [other]) = (method.as_str(), args) {
+                    if let (Ty::Var { .. } | Ty::Bottom, Some(Ty::Array { elem: other })) =
+                        (elem, &other.ty)
+                    {
+                        return Ty::Array { elem: other.clone() };
+                    }
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
@@ -1570,6 +1817,13 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
+                // No class-side entry claimed this name (including a
+                // hand-written `self.find_by_<attr>`, caught above) — a
+                // per-column dynamic finder is the last static reading
+                // before falling to the Enumerable surface (#558).
+                if let Some(t) = self.dynamic_finder_ty(of, method) {
+                    return t;
+                }
                 let elem = Ty::Class { id: of.clone(), args: vec![] };
                 array_method(method, &elem, block_ret)
             }
@@ -1592,6 +1846,12 @@ impl<'a> BodyTyper<'a> {
             // has no user-defined ancestors in this corpus.
             Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
             Some(Ty::Date) => date_method(method, args).unwrap_or_else(unknown),
+            // `Integer#in_time_zone` lowers only for ≤1 arg (invariant 6).
+            Some(Ty::Int)
+                if method.as_str() == "in_time_zone" && args.len() > 1 =>
+            {
+                unknown()
+            }
             Some(Ty::Int) => int_method(method),
             Some(Ty::Float) => float_method(method),
             Some(Ty::Bool) => bool_method(method),
@@ -1912,6 +2172,29 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
 
 /// Ruby's native date-only surface. Do not inherit the Time table:
 /// Date has neither epoch seconds nor a zone, and only Date supports >>.
+/// Literal `only: Model` class from a Locator kwargs hash, if present.
+fn locator_only_class(args: &[crate::expr::Expr]) -> Option<ClassId> {
+    for arg in args.iter().rev() {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+        for (key, value) in entries {
+            let ExprNode::Lit {
+                value: crate::expr::Literal::Sym { value: k },
+            } = &*key.node
+            else {
+                continue;
+            };
+            if k.as_str() != "only" {
+                continue;
+            }
+            let ExprNode::Const { path } = &*value.node else { return None };
+            return Some(ClassId(Symbol::from(
+                path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+            )));
+        }
+    }
+    None
+}
+
 fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
     // Every core Date argument is optional. Reject known wrong types
     // and excess arguments rather than declaring a crashing call clean.
@@ -1921,7 +2204,11 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         "parse" => vec![Ty::Str, Ty::Bool, numeric],
         "strptime" => vec![Ty::Str, Ty::Str, numeric],
         "iso8601" => vec![Ty::Str, numeric],
+        // `Date.today` is Ruby stdlib (optional start-day). Rails'
+        // `Date.current` / `yesterday` / `tomorrow` take no arguments.
         "today" => vec![numeric],
+        // ActiveSupport's zone-aware today / neighbors; lowered by `time_calendar`.
+        "current" | "yesterday" | "tomorrow" => vec![],
         _ => return None,
     };
     let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
@@ -1937,15 +2224,100 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
 }
 
 fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    let date = || Ty::Date;
+    let time = || Ty::Time;
+    // Known Integer (or not-yet-typed). Untyped is excluded for day-shift
+    // results: Spinel Date has no `+`/`-`, and lowering only grounds Int/Var.
+    let int_shift = |a: Option<&Ty>| {
+        a.is_none_or(|t| matches!(t, Ty::Int | Ty::Var { .. }))
+    };
+    // `ActiveSupport.in_time_zone` takes a String?/Symbol zone (runtime
+    // `to_s`); reject known non-zone types such as `TimeZoneData`.
+    let zone_arg = |a: Option<&crate::expr::Expr>| {
+        a.is_none_or(|e| {
+            matches!(
+                e.ty.as_ref(),
+                None | Some(Ty::Str | Ty::Sym | Ty::Nil | Ty::Var { .. } | Ty::Untyped)
+            )
+        })
+    };
+    // Arity must match `lower::time_calendar::rewrite_date_value` — typing
+    // a send the lowerer leaves alone is invariant 6 (silent NoMethodError).
+    let zero = args.is_empty();
+    let at_most_one_int = args.len() <= 1 && args.first().map(|a| int_shift(a.ty.as_ref())).unwrap_or(true);
     Some(match method.as_str() {
-        ">>" | "<<" if args.len() == 1
-            && args[0].ty.as_ref().is_none_or(|t| matches!(t, Ty::Int | Ty::Var { .. })) => Ty::Date,
-        "to_date" => Ty::Date,
-        "to_time" => Ty::Time,
-        "year" | "month" | "mon" | "day" | "mday" | "wday" | "yday" => Ty::Int,
+        // Stdlib month shift stays on Date (Spinel implements >> / <<).
+        // `Date >> Untyped` stays gradual — same bar as `+` (operand may
+        // not be an Integer; claiming Date would green-light Date-only
+        // follow-ups after a send that can TypeError).
+        ">>" | "<<" if args.len() == 1 => match args[0].ty.as_ref() {
+            Some(Ty::Untyped) => Ty::Untyped,
+            Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
+            _ => return None,
+        },
+        // `Date + Integer` → Date. `Date + Untyped` stays gradual: the
+        // operand might not be an Integer day shift, and Spinel has no `+`.
+        "+" if args.len() == 1 => match args[0].ty.as_ref() {
+            Some(Ty::Untyped) => Ty::Untyped,
+            Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
+            _ => return None,
+        },
+        // `Date - Integer` → Date; `Date - Date` → a Rational day count
+        // we do not model structurally (gradual, like Time − Time).
+        // `Date - Untyped` stays gradual for the same reason as `+`.
+        "-" if args.len() == 1 => match args[0].ty.as_ref() {
+            Some(Ty::Date) | Some(Ty::Untyped) => Ty::Untyped,
+            Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
+            _ => return None,
+        },
+        "to_date" if zero => date(),
+        // ActiveSupport calendar that preserves a date-only value.
+        "yesterday" | "tomorrow" | "next_week" | "prev_week" | "last_week"
+        | "last_month" | "last_year"
+        | "beginning_of_week" | "end_of_week" | "at_beginning_of_week" | "at_end_of_week"
+        | "beginning_of_month" | "end_of_month" | "at_beginning_of_month" | "at_end_of_month"
+        | "beginning_of_year" | "end_of_year" | "at_beginning_of_year" | "at_end_of_year"
+            if zero =>
+        {
+            date()
+        }
+        "prev_day" | "next_day" | "days_ago" | "days_since" | "weeks_ago" | "weeks_since"
+        | "next_month" | "prev_month" | "months_ago" | "months_since"
+        | "next_year" | "prev_year" | "years_ago" | "years_since"
+            if at_most_one_int =>
+        {
+            date()
+        }
+        // Date → time-of-day / zone conversions (Rails returns TimeWithZone).
+        // `to_fs` / `to_formatted_s` / `after?` / `before?` stay unmodeled
+        // until runtime + lowering exist (invariant 6).
+        "to_time" | "beginning_of_day" | "end_of_day" | "midnight" | "at_midnight"
+        | "at_beginning_of_day" | "at_end_of_day" | "noon" | "at_noon" | "middle_of_day"
+        | "at_middle_of_day" if zero => time(),
+        "in_time_zone" if args.len() <= 1 && zone_arg(args.first()) => time(),
+        // `all_day` is a Time range (day edges); month/week/year stay Date.
+        "all_day" if zero => Ty::Class {
+            id: ClassId(Symbol::from("Range")),
+            args: vec![time()],
+        },
+        "all_week" | "all_month" | "all_year" if zero => Ty::Class {
+            id: ClassId(Symbol::from("Range")),
+            args: vec![date()],
+        },
+        "year" | "month" | "mon" | "day" | "mday" | "wday" | "yday" if zero => Ty::Int,
+        "<=>" if args.len() == 1 => Ty::Int,
         "iso8601" | "xmlschema" | "to_s" | "strftime" | "inspect" => Ty::Str,
-        "<" | ">" | "<=" | ">=" | "leap?" | "monday?" | "tuesday?" | "wednesday?"
-        | "thursday?" | "friday?" | "saturday?" | "sunday?" => Ty::Bool,
+        // `change` / `advance` / `between?` / `after?` / `before?` stay
+        // unmodeled until runtime + lowering exist (invariant 6).
+        "<" | ">" | "<=" | ">=" if args.len() == 1 => Ty::Bool,
+        "leap?"
+        | "past?" | "future?" | "today?" | "yesterday?" | "tomorrow?"
+        | "monday?" | "tuesday?" | "wednesday?" | "thursday?" | "friday?"
+        | "saturday?" | "sunday?" | "on_weekend?" | "on_weekday?"
+            if zero =>
+        {
+            Ty::Bool
+        }
         _ => return None,
     })
 }
@@ -2766,6 +3138,8 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // `ago` / `from_now` / `since` / `until` produce a Time-ish
         // value; same propagation rationale.
         "ago" | "from_now" | "since" | "until" => Ty::Untyped,
+        // ActiveSupport `Numeric#in_time_zone` — epoch seconds → Time.
+        "in_time_zone" => Ty::Time,
         // Common Int formatters from ActiveSupport.
         "ordinalize" | "ordinal" => Ty::Str,
         _ => unknown(),

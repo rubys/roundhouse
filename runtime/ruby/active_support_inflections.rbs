@@ -1,0 +1,11 @@
+module ActiveSupport
+  def self.underscore: (String text) -> String
+  # Literal substring delete — one pattern (String#remove multi-arg
+  # stays dynamic; lowering grounds only the single-arg form).
+  def self.remove: (String text, String pattern) -> String
+  def self.demodulize: (String text) -> String
+  # Regular-suffix singularize only (see runtime body).
+  def self.singularize: (String text) -> String
+  def self.humanize: (String? text) -> String
+  def self.titleize: (String? text) -> String
+end

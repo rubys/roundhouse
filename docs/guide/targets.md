@@ -38,10 +38,11 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 
 The lanes below run across targets in scheduled full validation, or when
 requested with `ci:full`. Ordinary PRs use a Ruby floor plus targeted
-additions for the files they change. Pushes to canonical `main` run that
-Ruby floor plus the full Spinel suite; extra-language SDKs wait for the
-four-hour schedule. Maintainers can request full PR coverage with `ci:full`.
-See [CI coverage](../ci/README.md). The lanes use the blog fixture
+additions for the files they change. After Full goes red, maintainers can
+narrow fix rounds with focus labels (`ci:swift`, `ci:extras`, …) — see
+[CI coverage](../ci/README.md). Pushes to canonical `main` run that Ruby
+floor plus the full Spinel suite; extra-language SDKs wait for the
+four-hour schedule. Maintainers can request full PR coverage with `ci:full`. The lanes use the blog fixture
 (`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
 unless another app is named. A target's row in

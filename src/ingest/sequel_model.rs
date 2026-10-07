@@ -86,6 +86,7 @@ pub fn ingest_sequel_model(
         // The emitted app runs on the AR-shaped framework runtime;
         // `Sequel::Model` plays the role `ApplicationRecord` does there.
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
+        parent_span: Default::default(),
         table: TableRef(Symbol::from(table_name)),
         // Sequel's own override (`set_primary_key`) is not yet
         // recognized; models declaring one keep the `id` default.

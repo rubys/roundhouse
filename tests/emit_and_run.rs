@@ -7,8 +7,15 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/class_attribute.rs"]
+mod class_attribute;
+#[path = "emit_and_run/integer_query_find_by.rs"]
+mod integer_query_find_by;
+
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/runtime_block_signature.rs"]
+mod runtime_block_signature;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -225,6 +232,33 @@ fn scope_free_model_query_builders_run_on_spinel() {
     }
 }
 
+/// The runtime-provided cable mount survives strict analysis and Rack dispatch.
+#[test]
+fn builtin_cable_mount_runs_with_supported_sibling_routes() {
+    emit_and_run::real_blog()
+        .write("app/channels/application_cable/connection.rb", "module ApplicationCable\n  class Connection < ActionCable::Connection::Base\n    def connect\n      reject_unauthorized_connection\n    end\n  end\nend\n")
+        .write("app/controllers/widgets_controller.rb", "class WidgetsController < ActionController::Base\n  def index\n    render plain: 'widgets'\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get '/widgets', to: 'widgets#index'\n  mount ActionCable.server => '/cable'\nend\n")
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+# As in overlay_cable_identity, leave the unused reactor dependencies empty.
+# The actual app authorization must refuse before any reactor API is called.
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+widgets = client.get("/widgets")
+raise "sibling route failed: #{widgets.status} #{widgets.body}" unless widgets.status == 200 && widgets.body == "widgets"
+cable = client.get("/cable", "HTTP_HOST" => "example.test", "HTTP_ORIGIN" => "http://example.test")
+raise "cable endpoint disappeared: #{cable.status} #{cable.body}" unless cable.status == 401 && cable.body == "Unauthorized\n"
+puts "runtime cable endpoint preserved"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
@@ -235,6 +269,79 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// A Concern macro that writes a `class_attribute` runs when the
+/// includer loads, rather than being evaluated at compile time.
+#[test]
+fn concern_class_attribute_macros_run_at_class_load() {
+    let run = class_attribute::overlay().run_ruby(class_attribute::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute contract passed"));
+}
+
+/// An explicit nil on a subclass is its value; unset reads the parent's.
+#[test]
+fn concern_class_attribute_set_to_nil_is_not_unset() {
+    let run = class_attribute::nil_overlay().run_ruby(class_attribute::NIL_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute nil contract passed"));
+}
+
+/// The same Concern types without a diagnostic of any severity: the
+/// macro parameters from the class-body calls (a subclass's included),
+/// the helper's keywords through `**options`, `Array(...)`'s elements,
+/// and the attribute from the values its methods store.
+#[test]
+fn concern_class_attribute_macros_are_fully_typed() {
+    let controllers = [
+        ("probe_controller.rb", "class ProbeController < ApplicationController\n  include PreloadableConfigurationConcern\n  preload_site_configs %w[a b], only: :show\nend\n"),
+        ("own_controller.rb", "class OwnController < ProbeController\n  preload_feature_flags %w[f], only: %i[index show]\nend\n"),
+        ("inherit_controller.rb", "class InheritController < ProbeController\n  def show\n    render plain: self.class._preload_definitions.length.to_s\n  end\nend\n"),
+    ];
+    let tree = [
+        ("app/controllers/concerns/preloadable_configuration_concern.rb".to_string(), class_attribute::CONCERN.to_string()),
+        ("app/controllers/application_controller.rb".to_string(), "class ApplicationController < ActionController::Base\nend\n".to_string()),
+    ]
+    .into_iter()
+    .chain(controllers.iter().map(|(f, s)| (format!("app/controllers/{f}"), s.to_string())))
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let concern: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| {
+            (d.span.file.0 as usize)
+                .checked_sub(1)
+                .and_then(|i| app.sources.get(i))
+                .is_some_and(|f| f.path.ends_with("preloadable_configuration_concern.rb"))
+        })
+        .map(|d| d.message)
+        .collect();
+    assert!(concern.is_empty(), "concern diagnostics: {concern:#?}");
+    // The signature declares the parameter's own type, not the slot's.
+    let probe = app.controllers.iter().find(|c| c.name.0.as_str() == "ProbeController").unwrap();
+    let preload = probe.class_methods().find(|m| m.name.as_str() == "preload_site_configs").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &preload.signature else {
+        panic!("unsigned: {:?}", preload.signature)
+    };
+    assert_eq!(
+        params[0].ty,
+        roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Str) },
+        "codes"
+    );
+    // `only: nil` is nil when absent, which the signature has to say.
+    let add = probe.class_methods().find(|m| m.name.as_str() == "add_preload_definition").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &add.signature else {
+        panic!("unsigned: {:?}", add.signature)
+    };
+    let only = params.iter().find(|p| p.name.as_str() == "only").expect("only");
+    assert!(
+        matches!(&only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
+        "only: {:?}",
+        only.ty
+    );
 }
 
 /// The harness itself: the unedited blog emits and its controller
@@ -479,6 +586,108 @@ end
 "#,
         )
         .run_test("test/controllers/article_selectors_controller_test.rb")
+        .assert_passes();
+}
+
+/// `redirect(path: ...)` is Rails' options form, and unlike the
+/// positional `redirect("/x")` it keeps the request's query string: an
+/// empty query leaves the path alone, a path that already has a `?` is
+/// joined with `&`, and the query goes ahead of a fragment. The last two
+/// diverge from Rails on purpose, since Rails builds `/articles?sort=new?page=2`
+/// and `/articles#top?page=2` (see `synthesize_redirect_controller`).
+/// A `%{id}` is decoded by the router and path-escaped again, in both
+/// redirect forms, as Rails does: an encoded `#` or `?` stays in the
+/// path, `%25` survives, and a non-ASCII or control sequence the router
+/// leaves encoded is not escaped twice. Each expectation is Rails 8.1.4's.
+/// Jumpstart Pro routes its Devise-era `/users/sign_in` this way.
+#[test]
+fn a_path_option_redirect_keeps_the_request_query() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/posts\", to: redirect(path: \"/articles\")\n  get \"/filtered\", to: redirect(path: \"/articles?sort=new\")\n  get \"/step\", to: redirect(path: \"/articles#top\")\n  get \"/old/:id\", to: redirect(path: \"/articles/%{id}\", status: 302)\n  get \"/legacy/:id\", to: redirect(\"/articles/%{id}\")\n",
+        )
+        .write(
+            "test/controllers/path_redirects_controller_test.rb",
+            r#"require "test_helper"
+
+class PathRedirectsControllerTest < ActionDispatch::IntegrationTest
+  test "the options form keeps the query" do
+    get "/posts"
+    assert_response 301
+    assert_redirected_to "/articles"
+    get "/posts?page=2"
+    assert_redirected_to "/articles?page=2"
+    get "/filtered?page=2"
+    assert_redirected_to "/articles?sort=new&page=2"
+    get "/step?page=2"
+    assert_redirected_to "/articles?page=2#top"
+    get "/filtered"
+    assert_redirected_to "/articles?sort=new"
+    get "/old/7?page=2"
+    assert_response 302
+    assert_redirected_to "/articles/7?page=2"
+    get "/old/a%23top?page=2"
+    assert_redirected_to "/articles/a%23top?page=2"
+    get "/legacy/a%20b%3Fc"
+    assert_redirected_to "/articles/a%20b%3Fc"
+    get "/old/jos%C3%A9"
+    assert_redirected_to "/articles/jos%C3%A9"
+    get "/old/100%25"
+    assert_redirected_to "/articles/100%25"
+    get "/legacy/a%2Fb%7e"
+    assert_redirected_to "/articles/a/b~"
+    get "/old/x%0Ay"
+    assert_redirected_to "/articles/x%0Ay"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/path_redirects_controller_test.rb")
+        .assert_passes();
+}
+
+/// A path parameter is percent-decoded the way Rails' router decodes it
+/// (`CGI.unescapeURIComponent`): `%20` is a space, `%2F`/`%2f` a slash
+/// inside the one segment, `%25` a percent, and a `+` stays a `+`. A
+/// glob capture is decoded too. Every expectation is what Rails 8.1.4
+/// answers for the same request.
+#[test]
+fn a_path_parameter_is_percent_decoded() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/echo/:id\", to: \"echoes#show\"\n  get \"/files/*rest\", to: \"echoes#glob\"\n",
+        )
+        .write(
+            "app/controllers/echoes_controller.rb",
+            "class EchoesController < ApplicationController\n  def show\n    render plain: params[:id]\n  end\n\n  def glob\n    render plain: params[:rest]\n  end\nend\n",
+        )
+        .write(
+            "test/controllers/echoes_controller_test.rb",
+            r#"require "test_helper"
+
+class EchoesControllerTest < ActionDispatch::IntegrationTest
+  test "path parameters are percent-decoded" do
+    get "/echo/a%20b+c"
+    assert_equal "a b+c", response.body
+    get "/echo/a%2Fb"
+    assert_equal "a/b", response.body
+    get "/echo/a%2fb%3F%23"
+    assert_equal "a/b?#", response.body
+    get "/echo/100%25"
+    assert_equal "100%", response.body
+    get "/echo/plain"
+    assert_equal "plain", response.body
+    get "/files/a%20b/c%2Fd"
+    assert_equal "a b/c/d", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/echoes_controller_test.rb")
         .assert_passes();
 }
 
@@ -793,6 +1002,155 @@ reloaded = ActionText::Markdown.find(m.id)
 raise "content lost: #{reloaded.content.inspect}" unless reloaded.content == "# Hello"
 raise "name lost: #{reloaded.name.inspect}" unless reloaded.name == "body"
 puts "action_text markdown storage passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// Named plain-text association (`has_markdown :body`): assign through
+/// the owner, autosave on save, reload scoped by owner/name. Abstract
+/// overlay — Writebook `Page#body` is extra fixture coverage only.
+#[test]
+fn named_plain_text_attr_assign_save_reload() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+    t.string "title"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content", default: "", null: false
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_markdown :body\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+a = Article.new
+a.title = "Hello"
+a.body = "# Title\n\nParagraph"
+a.save!
+reloaded = Article.find(a.id)
+raise "body missing" unless reloaded.body
+raise "content lost: #{reloaded.body.content.inspect}" unless reloaded.body.content == "# Title\n\nParagraph"
+raise "name wrong: #{reloaded.body.name.inspect}" unless reloaded.body.name == "body"
+raise "record_type wrong: #{reloaded.body.record_type.inspect}" unless reloaded.body.record_type == "Article"
+raise "record_id wrong: #{reloaded.body.record_id.inspect}" unless reloaded.body.record_id == reloaded.id
+# Ordinary autosave includes blank content (unlike RichText blank suppression).
+b = Article.create!(title: "Empty")
+b.body = ""
+b.save!
+blank = Article.find(b.id)
+raise "blank content not saved: #{blank.body.content.inspect}" unless blank.body.content == ""
+raise "predicate false on blank row" unless blank.body?
+puts "named plain text attr assign/save/reload passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// `delegated_type` singular reader (`entry.page`) must stay a record
+/// reader at runtime — not collide with Relation pagination `page` —
+/// and compose with a plain-text attr on the delegated target.
+#[test]
+fn delegated_type_singular_reader_plain_text_body_runs() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "entries", force: :cascade do |t|
+    t.string "entryable_type", null: false
+    t.integer "entryable_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "pages", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "sections", force: :cascade do |t|
+    t.text "body"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content", default: "", null: false
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/page.rb",
+            "class Page < ApplicationRecord\n  has_markdown :body\nend\n",
+        )
+        .write(
+            "app/models/section.rb",
+            "class Section < ApplicationRecord\nend\n",
+        )
+        .write(
+            "app/models/entry.rb",
+            r#"class Entry < ApplicationRecord
+  delegated_type :entryable, types: %w[ Page Section ]
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+page = Page.new
+page.body = "# Hello"
+page.save!
+entry = Entry.create!(entryable: page)
+raise "page? false" unless entry.page?
+raise "page reader nil" unless entry.page
+raise "body content lost: #{entry.page.body.content.inspect}" unless entry.page.body.content == "# Hello"
+# Zero-arg `page` on a record is the delegated_type reader, not pagination.
+raise "page reader must be Page, got #{entry.page.class}" unless entry.page.is_a?(Page)
+puts "delegated_type singular reader plain text body passed"
 "##,
         )
         .assert_passes();
@@ -1167,9 +1525,14 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[enqueue drain pending_count record_performed performed].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
+end
+# The serving drain wraps these two, and calls the locked ones above.
+%i[enqueue record_performed].each do |m|
+  file = ActiveJob.method(m).source_location[0]
+  raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
 puts "ok"
 "#,
@@ -1294,6 +1657,163 @@ fn date_blog() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit("db/schema.rb", "  create_table \"articles\"", "  create_table \"calendar_entries\" do |t|\n    t.date \"due_on\"\n    t.datetime \"observed_at\"\n    t.time \"opens_at\"\n  end\n\n  create_table \"articles\"")
         .write("app/models/calendar_entry.rb", include_str!("date_columns_model.rb"))
+}
+
+/// ActiveSupport Date calendar: constructors, date-preserving edges, and
+/// Date→Time / Integer→Time zone conversions must both type-clean and run.
+#[test]
+fn activesupport_date_calendar_runs() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "events", force: :cascade do |t|
+    t.date "due_on"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/event.rb",
+            r#"class Event < ApplicationRecord
+  def month_span
+    due_on.beginning_of_month..due_on.end_of_month
+  end
+
+  def prior_day
+    due_on.yesterday
+  end
+
+  def zoned
+    due_on.in_time_zone("UTC")
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/probe\", to: \"probe#show\"\nend\n",
+        )
+        .write(
+            "app/controllers/probe_controller.rb",
+            r#"class ProbeController < ApplicationController
+  def show
+    event = Event.create!(due_on: Date.new(2024, 1, 31))
+    cur = Date.current
+    yday = Date.yesterday
+    span = event.month_span
+    prior = event.prior_day
+    # Non-nilable Date literal: column readers are Date? and binop gate
+    # refuses Date? + Integer (see #394); day arithmetic on a known Date
+    # still grounds through date_days_since.
+    shifted = Date.new(2024, 1, 31) + 2
+    zoned = event.zoned
+    # Today must not be past? (Rails Date#past? is self < Date.current).
+    today_past = Date.current.past?
+    old_past = Date.new(2020, 1, 1).past?
+    epoch = 1_704_067_200.in_time_zone("UTC")
+    render plain: [
+      cur.class.name,
+      yday.class.name,
+      span.begin.iso8601,
+      span.end.iso8601,
+      prior.iso8601,
+      shifted.iso8601,
+      zoned.year,
+      today_past,
+      old_past,
+      epoch.year
+    ].join(",")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+require_relative "app/controllers/probe_controller"
+controller = ProbeController.new
+controller.process_action(:show)
+parts = controller.body.split(",")
+raise "Date.current class: #{parts[0]}" unless parts[0] == "Date"
+raise "Date.yesterday class: #{parts[1]}" unless parts[1] == "Date"
+raise "beginning_of_month: #{parts[2]}" unless parts[2] == "2024-01-01"
+raise "end_of_month: #{parts[3]}" unless parts[3] == "2024-01-31"
+raise "yesterday: #{parts[4]}" unless parts[4] == "2024-01-30"
+raise "Date+2: #{parts[5]}" unless parts[5] == "2024-02-02"
+raise "in_time_zone year: #{parts[6]}" unless parts[6] == "2024"
+raise "today.past?: #{parts[7]}" unless parts[7] == "false"
+raise "old.past?: #{parts[8]}" unless parts[8] == "true"
+raise "Integer#in_time_zone year: #{parts[9]}" unless parts[9] == "2024"
+puts "ActiveSupport Date calendar OK"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Spinel has no native `Date#+`; grounding must carry constructors,
+/// day arithmetic, and calendar-day `past?` — CRuby stdlib can mask that.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn activesupport_date_calendar_runs_on_spinel() {
+    date_blog()
+        .edit(
+            "app/models/calendar_entry.rb",
+            "\nend\n",
+            "\n  def prior_day\n    due_on.yesterday\n  end\n\n  def self.probe\n    entry = create!(due_on: Date.new(2024, 1, 31))\n    [\n      Date.current.class.name,\n      entry.due_on.beginning_of_month.iso8601,\n      entry.due_on.end_of_month.iso8601,\n      entry.prior_day.iso8601,\n      (Date.new(2024, 1, 31) + 2).iso8601,\n      Date.current.past?,\n      Date.new(2020, 1, 1).past?,\n    ]\n  end\nend\n",
+        )
+        .run_spinel(
+            r#"
+Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
+parts = CalendarEntry.probe
+raise "Date.current class: #{parts[0]}" unless parts[0] == "Date"
+raise "beginning_of_month: #{parts[1]}" unless parts[1] == "2024-01-01"
+raise "end_of_month: #{parts[2]}" unless parts[2] == "2024-01-31"
+raise "yesterday: #{parts[3]}" unless parts[3] == "2024-01-30"
+raise "Date+2: #{parts[4]}" unless parts[4] == "2024-02-02"
+raise "today.past?: #{parts[5]}" unless parts[5] == false
+raise "old.past?: #{parts[6]}" unless parts[6] == true
+puts "ActiveSupport Date calendar OK on Spinel"
+"#,
+        )
+        .assert_passes();
+}
+
+/// ActiveSupport's Date calendar extensions and `Date.current`, which
+/// reads today in the app's zone rather than the host's.
+#[test]
+fn date_calendar_extensions_and_current_run() {
+    date_blog()
+        .edit(
+            "app/models/calendar_entry.rb",
+            "\nend\n",
+            "\n  def month_span\n    [due_on.beginning_of_month, due_on.end_of_month]\n  end\n\n  def day_edges\n    [due_on.beginning_of_day, due_on.end_of_day]\n  end\n\n  def self.current_day\n    Date.current\n  end\nend\n",
+        )
+        .run_ruby(r#"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 2, 10))
+first, last = entry.month_span
+raise first.inspect unless first == Date.new(2024, 2, 1)
+raise last.inspect unless last == Date.new(2024, 2, 29)
+ActiveSupport.use_zone("Asia/Tokyo") do
+  b, e = entry.day_edges
+  raise b.inspect unless [b.year, b.month, b.day, b.hour, b.min, b.sec] == [2024, 2, 10, 0, 0, 0]
+  raise e.inspect unless [e.year, e.month, e.day, e.hour, e.min, e.sec] == [2024, 2, 10, 23, 59, 59]
+  raise b.utc_offset.inspect unless b.utc_offset == 9 * 3600
+end
+east = ActiveSupport.use_zone("Pacific/Kiritimati") { CalendarEntry.current_day }
+west = ActiveSupport.use_zone("Pacific/Pago_Pago") { CalendarEntry.current_day }
+raise [east, west].inspect unless east.is_a?(Date) && east > west
+"#)
+        .assert_passes();
 }
 
 fn date_json_blog() -> emit_and_run::Overlay {
@@ -1673,11 +2193,8 @@ puts "ok"
         .assert_passes();
 }
 
-/// `cached: true` on a collection render is one store read of the
-/// concatenated partials. A second render of the same records must not
-/// run the inner fragment bodies.
-#[test]
-fn cached_true_collection_skips_partial_bodies_on_hit() {
+/// Overlay for the `cached: true` collection-cache gate probes.
+fn cached_collection_probe() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
@@ -1712,23 +2229,52 @@ fn cached_true_collection_skips_partial_bodies_on_hit() {
             "app/views/articles/probe.html.erb",
             "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true %>\n",
         )
-        .run_ruby(
+}
+
+/// `n` rows, `second` bumps on the second render (`0` = store hit).
+fn assert_cached_collection_probe(n: i64, second: i64) {
+    cached_collection_probe()
+        .run_ruby(&format!(
             r#"
 Article.delete_all
-Article.create!(title: "one", body: "long enough body")
-Article.create!(title: "two", body: "long enough body")
-rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
+{n}.times {{ |i| Article.create!(title: "row-#{{i}}", body: "long enough body") }}
+rows = ActiveRecord::Relation.new(Article).to_a.sort_by {{ |a| a.title }}
 Article.reset_render_count
 a = Views::Articles.probe(rows)
-raise "first #{Article.render_count}: #{a}" unless Article.render_count == 2
+raise "first #{{Article.render_count}}: #{{a}}" unless Article.render_count == {n}
 Article.reset_render_count
 b = Views::Articles.probe(rows)
-raise "second #{Article.render_count}: #{b}" unless Article.render_count == 0
-raise "html drifted #{a.inspect} vs #{b.inspect}" unless a == b
+raise "second #{{Article.render_count}}: #{{b}}" unless Article.render_count == {second}
+raise "html drifted #{{a.inspect}} vs #{{b.inspect}}" unless a == b
 puts "ok"
-"#,
-        )
+"#
+        ))
         .assert_passes();
+}
+
+/// `cached: true` on a collection render is one store read of the
+/// concatenated partials. A second render of the same records must not
+/// run the inner fragment bodies. Needs more than
+/// `MAX_UNCACHED_COLLECTION_LENGTH` rows — at or below that the cost
+/// gate skips the store.
+#[test]
+fn cached_true_collection_skips_partial_bodies_on_hit() {
+    let n = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH + 1;
+    assert_cached_collection_probe(n, 0);
+}
+
+/// Small `cached: true` collections skip the store: key-build + read
+/// would cost more than rendering (Campfire sidebar after #488).
+#[test]
+fn cached_true_small_collection_skips_the_store() {
+    assert_cached_collection_probe(2, 2);
+}
+
+/// The exclusive gate: length == MAX is still uncached.
+#[test]
+fn cached_true_collection_at_gate_skips_the_store() {
+    let n = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH;
+    assert_cached_collection_probe(n, n);
 }
 
 /// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
@@ -2007,6 +2553,136 @@ fn a_keyword_bundle_reaches_a_keyword_callee_from_an_included_concern() {
         )
         .run_ruby(
             "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.code_svg(color: \"red\") unless a.code_svg(color: \"red\") == \"2:red\"\nraise a.code_svg unless a.code_svg == \"2:black\"",
+        )
+        .assert_passes();
+}
+
+/// real-blog's Article with two token purposes declared from a concern's
+/// `included do`: `:share` (a day's expiry, the title as its value) and
+/// `:plain` (the id alone, never expiring).
+fn article_with_shareable_tokens() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shareable.rb",
+            "module Shareable\n  extend ActiveSupport::Concern\n\n  included do\n    generates_token_for :share, expires_in: 1.day do\n      title\n    end\n    generates_token_for :plain\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shareable\n",
+        )
+}
+
+/// `generates_token_for :purpose, expires_in: D do <value> end` (Rails
+/// 7.1), synthesized over `ActiveRecord::TokenFor`: a token finds its
+/// record, stops verifying when the block's value changes (Rails'
+/// contract), rejects tampering and a wrong purpose, the bang form
+/// raises InvalidSignature as Rails' does, and the declaration is
+/// honored from a concern's `included do` too.
+#[test]
+fn a_generated_token_finds_its_record_until_its_value_changes() {
+    article_with_shareable_tokens()
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\nraise \"find\" unless Article.find_by_token_for(:share, token)&.id == a.id\nraise \"bang\" unless Article.find_by_token_for!(:share, token).id == a.id\nraise \"purpose\" unless Article.find_by_token_for(:plain, token).nil?\nraise \"tamper\" unless Article.find_by_token_for(:share, token + \"x\").nil?\nplain = a.generate_token_for(:plain)\nraise \"plain\" unless Article.find_by_token_for(:plain, plain)&.id == a.id\na.update!(title: \"Changed\")\nraise \"stale\" unless Article.find_by_token_for(:share, token).nil?\nraise \"plain survives\" unless Article.find_by_token_for(:plain, plain)&.id == a.id\nbegin\n  Article.find_by_token_for!(:share, token)\n  raise \"no raise\"\nrescue ActiveSupport::MessageVerifier::InvalidSignature\nend\nputs \"PASS token_for\"",
+        )
+        .assert_passes();
+}
+
+/// A block value goes into the payload as the JSON Rails' `as_json`
+/// writes for its type: an Integer is a number (`[1,1]`) and a boolean
+/// is `true`/`false` (`[1,false]`), not a quoted string. Both tokens
+/// were minted by Rails 8.1.4 (`SECRET_KEY_BASE=test-secret`) and are
+/// unexpiring, so the emitted app must mint the same bytes and accept
+/// Rails' own.
+#[test]
+fn a_non_string_token_value_is_the_json_rails_writes() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :counted do\n    id\n  end\n  generates_token_for :flagged do\n    title.nil?\n  end\n",
+        )
+        .run_ruby(
+            r#"
+Rails.secret_key_base = "test-secret"
+counted = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsMV0sInB1ciI6IkFydGljbGVcbmNvdW50ZWRcbiJ9fQ==--d02f8c1104bf97b778253f734d7156c48eb98e88"
+flagged = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsZmFsc2VdLCJwdXIiOiJBcnRpY2xlXG5mbGFnZ2VkXG4ifX0=--fb27c1ecd775cb15bc0966020341a5c07c7ab57e"
+a = Article.create!(title: "Hello", body: "Body text here")
+raise "expected the first row" unless a.id == 1
+raise "integer value differs from rails" unless a.generate_token_for(:counted) == counted
+raise "boolean value differs from rails" unless a.generate_token_for(:flagged) == flagged
+raise "rails integer token rejected" unless Article.find_by_token_for(:counted, counted)&.id == 1
+raise "rails boolean token rejected" unless Article.find_by_token_for(:flagged, flagged)&.id == 1
+puts "PASS typed values"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A multi-statement block body must still synthesize: the typed
+/// payload writers parenthesize the emitted expression so a Seq (or a
+/// modifier-`if`) is legal as a call argument. Without that, prism
+/// rejects the synthesized source, methods stay typed but undefined
+/// (invariant 6), and `generate_token_for` raises NoMethodError.
+#[test]
+fn a_multi_statement_token_block_still_synthesizes() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :share do\n    t = title\n    t\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\nraise \"find\" unless Article.find_by_token_for(:share, token)&.id == a.id\na.update!(title: \"Changed\")\nraise \"stale\" unless Article.find_by_token_for(:share, token).nil?\nputs \"PASS multi-statement token block\"",
+        )
+        .assert_passes();
+}
+
+/// Declaring a purpose twice keeps the last declaration, as Rails'
+/// `token_definitions.merge` does: the token carries the second block's
+/// value, so changing the first block's value leaves it valid.
+#[test]
+fn a_redeclared_token_purpose_uses_the_last_declaration() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :share do\n    title\n  end\n  generates_token_for :share, expires_in: 1.hour do\n    body\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\na.update!(title: \"Changed\")\nraise \"first declaration used\" unless Article.find_by_token_for(:share, token)&.id == a.id\na.update!(body: \"Other body text\")\nraise \"last declaration ignored\" unless Article.find_by_token_for(:share, token).nil?\nputs \"PASS redeclared\"",
+        )
+        .assert_passes();
+}
+
+/// The tokens are Rails' own: ones minted by Rails 8.1.4 for the same
+/// declarations verify here, with `SECRET_KEY_BASE=test-secret` and the
+/// clock at 2100-01-01 so the day's expiry is still ahead:
+///
+///   {"_rails":{"data":[1,"Hello"],"exp":"2100-01-02T00:00:00.000Z",
+///    "pur":"Article\nshare\n86400"}}
+///   {"_rails":{"data":[1],"pur":"Article\nplain\n"}}
+///
+/// and a token minted here is the bytes Rails mints for the same record
+/// at the same instant, since the purpose, payload and absent `exp` are
+/// all Rails' choices.
+#[test]
+fn a_generated_token_minted_by_rails_verifies() {
+    article_with_shareable_tokens()
+        .run_ruby(
+            r#"
+Rails.secret_key_base = "test-secret"
+share = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsIkhlbGxvIl0sImV4cCI6IjIxMDAtMDEtMDJUMDA6MDA6MDAuMDAwWiIsInB1ciI6IkFydGljbGVcbnNoYXJlXG44NjQwMCJ9fQ==--b944fbcc044254e17f4d952e9a1c1e63ec185093"
+plain = "eyJfcmFpbHMiOnsiZGF0YSI6WzFdLCJwdXIiOiJBcnRpY2xlXG5wbGFpblxuIn19--5a8e42fe42d686af11a02e972f7e5e1c88bb57db"
+a = Article.create!(title: "Hello", body: "Body text here")
+raise "expected the first row" unless a.id == 1
+raise "rails share token rejected" unless Article.find_by_token_for(:share, share)&.id == 1
+raise "rails plain token rejected" unless Article.find_by_token_for!(:plain, plain).id == 1
+raise "unexpiring token differs from rails" unless a.generate_token_for(:plain) == plain
+a.update!(title: "Changed")
+raise "stale rails token accepted" unless Article.find_by_token_for(:share, share).nil?
+puts "PASS rails tokens"
+"#,
         )
         .assert_passes();
 }
@@ -3223,6 +3899,45 @@ fn method_ref_block_arg_runs() {
              end\n",
         )
         .run_test("test/models/doubler_test.rb")
+        .assert_passes();
+}
+
+/// A `T::Struct` nested in a controller concern must lower and run:
+/// keyword construction, readers, and a writable `prop`. Taking that
+/// nested class as the controller used to drop the declarations as
+/// unrecognized macros and skip the concern's module path entirely.
+#[test]
+fn a_t_struct_nested_in_a_controller_concern_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/concerns/window_settings.rb",
+            concat!(
+                "module WindowSettings\n",
+                "  extend ActiveSupport::Concern\n",
+                "\n",
+                "  class Span < T::Struct\n",
+                "    const :from_date, String\n",
+                "    const :to_date, String\n",
+                "    prop :label, String, default: \"window\"\n",
+                "  end\n",
+                "end\n",
+            ),
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  include WindowSettings\n",
+        )
+        .run_ruby(
+            concat!(
+                "span = WindowSettings::Span.new(from_date: \"2026-01-01\", to_date: \"2026-01-31\")\n",
+                "raise \"from\" unless span.from_date == \"2026-01-01\"\n",
+                "raise \"to\" unless span.to_date == \"2026-01-31\"\n",
+                "raise \"default\" unless span.label == \"window\"\n",
+                "span.label = \"quarter\"\n",
+                "raise \"prop\" unless span.label == \"quarter\"\n",
+            ),
+        )
         .assert_passes();
 }
 
@@ -4668,6 +5383,34 @@ end
         .assert_passes();
 }
 
+/// `raise ActionController::RoutingError` in an action answers 404, as
+/// Rails' `ActionDispatch::ExceptionWrapper` maps it to `:not_found`. A
+/// Rails app raises it for a page number out of bounds. Rails' second
+/// constructor argument, `failures`, is optional. The raise is in
+/// `index`, which has no `before_action`, so a `RecordNotFound` from
+/// `set_article` cannot answer the 404 in its place.
+#[test]
+fn an_action_that_raises_routing_error_answers_404() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  def index\n",
+            "  def index\n    raise ActionController::RoutingError.new(\"page out of bounds\") if params[:page] == \"0\"\n    raise ActionController::RoutingError.new(\"No route matches\", []) if params[:page] == \"-1\"\n",
+        )
+        .run_ruby(
+            r#"def get(path, query)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new(""))
+  status
+end
+{ "page=0" => 404, "page=-1" => 404, "page=1" => 200, "" => 200 }.each do |query, want|
+  got = get("/articles", query)
+  raise "GET /articles?#{query} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
+        .assert_passes();
+}
+
 #[path = "emit_and_run/concern_accessors.rs"]
 mod concern_accessors;
 
@@ -5037,6 +5780,263 @@ fn a_template_only_action_is_fed_by_its_before_action() {
         .assert_passes();
 }
 
+#[test]
+fn array_and_hash_checks_preserve_members() {
+    emit_and_run::real_blog()
+        .write("app/lib/container_narrowing_probe.rb", r##"class ContainerNarrowingProbe
+  def self.array_members
+    value = ["alpha", "beta"]
+    if value.is_a?(Array)
+      value.map { |item| item.upcase }
+    else
+      raise("not an Array")
+    end
+  end
+  def self.hash_members
+    value = {"answer" => 41}
+    if value.is_a?(Hash)
+      value.map { |key, item| "#{key.upcase}=#{item + 1}" }
+    else
+      raise("not a Hash")
+    end
+  end
+  def self.nested_members
+    value = [{"name" => "alpha"}, {"name" => "beta"}]
+    if value.is_a?(Array)
+      value.map do |item|
+        if item.is_a?(Hash)
+          item.fetch("name").upcase
+        else
+          raise("not a Hash")
+        end
+      end
+    else
+      raise("not an Array")
+    end
+  end
+end
+"##)
+        .run_ruby(r#"
+raise "Array members changed" unless ContainerNarrowingProbe.array_members == ["ALPHA", "BETA"]
+raise "Hash members changed" unless ContainerNarrowingProbe.hash_members == ["ANSWER=42"]
+raise "nested members changed" unless ContainerNarrowingProbe.nested_members == ["ALPHA", "BETA"]
+"#)
+        .assert_passes();
+}
+
+const ARTICLES_CONTROLLER: &str = "app/controllers/articles_controller.rb";
+const TRACK_FILTER: &str = "  def track\n    \
+                              @tracked = %w[index show].include?(action_name)\n    \
+                              @action = action_name\n  \
+                            end\n";
+const TRACKED_CALLS: &str = "<p id=\"tracked\"><%= @tracked %> <%= @action %></p>\n";
+const TRACKED_ASSERTION: &str = "    assert_match(/<p id=\"tracked\">true index<\\/p>/, response.body)\n";
+
+/// A filter reads `action_name`. Rails gives the name of the action as a
+/// String. The emitted filter body raised NameError, because only the
+/// dispatcher had `action_name`, and the dispatcher gave a Symbol.
+#[test]
+fn a_before_action_reads_action_name() {
+    on_the_index(
+        emit_and_run::real_blog()
+            .edit(
+                ARTICLES_CONTROLLER,
+                "  before_action :set_article,",
+                "  before_action :track\n  before_action :set_article,",
+            )
+            .edit(ARTICLES_CONTROLLER, "  private\n", &format!("  private\n{TRACK_FILTER}\n")),
+        TRACKED_CALLS,
+        TRACKED_ASSERTION,
+    )
+    .assert_passes();
+}
+
+/// The same filter from a concern that the controller includes.
+#[test]
+fn a_before_action_from_a_concern_reads_action_name() {
+    on_the_index(
+        emit_and_run::real_blog()
+            .write(
+                "app/controllers/concerns/tracks_action.rb",
+                &format!(
+                    "module TracksAction\n  \
+                       extend ActiveSupport::Concern\n\n  \
+                       included do\n    \
+                         before_action :track\n  \
+                       end\n\n  \
+                       private\n\n{TRACK_FILTER}end\n"
+                ),
+            )
+            .edit(
+                ARTICLES_CONTROLLER,
+                "class ArticlesController < ApplicationController\n",
+                "class ArticlesController < ApplicationController\n  include TracksAction\n",
+            ),
+        TRACKED_CALLS,
+        TRACKED_ASSERTION,
+    )
+    .assert_passes();
+}
+
+/// A private method reads `self.action_name`, and the action calls it.
+#[test]
+fn a_private_method_reads_self_action_name() {
+    on_the_index(
+        emit_and_run::real_blog()
+            .edit(
+                ARTICLES_CONTROLLER,
+                "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+                "    @articles = Article.includes(:comments).order(created_at: :desc)\n    \
+                   @label = label\n",
+            )
+            .edit(
+                ARTICLES_CONTROLLER,
+                "  private\n",
+                "  private\n  def label\n    self.action_name\n  end\n\n",
+            ),
+        "<p id=\"label\"><%= @label %></p>\n",
+        "    assert_match(/<p id=\"label\">index<\\/p>/, response.body)\n",
+    )
+    .assert_passes();
+}
+
+/// A block filter and a lambda filter read `action_name`. Their bodies run
+/// inside the dispatcher, so a bare `action_name` read the dispatcher's
+/// Symbol, and `self.action_name` read `""`.
+#[test]
+fn block_and_lambda_filters_read_action_name() {
+    on_the_index(
+        emit_and_run::real_blog().edit(
+            ARTICLES_CONTROLLER,
+            "  before_action :set_article,",
+            "  before_action { @bare = action_name }\n  \
+               before_action -> { @own = self.action_name }\n  \
+               before_action :set_article,",
+        ),
+        "<p id=\"names\"><%= @bare.inspect %> <%= @own.inspect %></p>\n",
+        "    assert_match(/<p id=\"names\">&quot;index&quot; &quot;index&quot;<\\/p>/, response.body)\n",
+    )
+    .assert_passes();
+}
+
+/// A block `after_action` reads `action_name`. It runs inside the
+/// dispatcher too, so it read the dispatcher's Symbol.
+#[test]
+fn a_block_after_action_reads_action_name() {
+    emit_and_run::real_blog()
+        .edit(
+            ARTICLES_CONTROLLER,
+            "  before_action :set_article,",
+            "  after_action only: :index do\n    \
+                 raise \"after_action read #{action_name.inspect}\" unless action_name == \"index\"\n  \
+               end\n  \
+               before_action :set_article,",
+        )
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+/// A `rescue_from` block reads `action_name`. The dispatcher runs the
+/// handler, so it read the dispatcher's Symbol.
+#[test]
+fn a_rescue_from_block_reads_action_name() {
+    emit_and_run::real_blog()
+        .edit(
+            ARTICLES_CONTROLLER,
+            "  before_action :set_article,",
+            "  rescue_from ActiveRecord::RecordNotFound do\n    \
+                 redirect_to articles_path, notice: \"missing #{action_name.inspect}\"\n  \
+               end\n  \
+               before_action :set_article,",
+        )
+        .edit(
+            CONTROLLER_TEST,
+            INDEX_ASSERTION,
+            &format!(
+                "{INDEX_ASSERTION}    get \"/articles/0\"\n    \
+                   follow_redirect!\n    \
+                   assert_match(/id=\"notice\">missing &quot;show&quot;</, response.body)\n"
+            ),
+        )
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+/// An inherited filter has an `if:` lambda that reads `action_name`. The
+/// dispatcher runs the guard, so it compared the dispatcher's Symbol with
+/// a String, and the filter never ran.
+#[test]
+fn an_inherited_filter_guard_reads_action_name() {
+    on_the_index(
+        emit_and_run::real_blog().edit(
+            "app/controllers/application_controller.rb",
+            "  allow_browser versions: :modern\n",
+            "  allow_browser versions: :modern\n  \
+               before_action :mark, if: -> { action_name == \"index\" }\n\n  \
+               private\n\n  \
+               def mark\n    \
+                 @marked = true\n  \
+               end\n",
+        ),
+        "<p id=\"marked\"><%= @marked.inspect %></p>\n",
+        "    assert_match(/<p id=\"marked\">true<\\/p>/, response.body)\n",
+    )
+    .assert_passes();
+}
+
+/// An inherited filter and an inlined filter read `action_name`, for the
+/// target that runs the dispatcher natively.
+fn action_name_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  \
+               before_action :track\n\n  \
+               private\n\n  \
+               def track\n    \
+                 @tracked = %w[index show].include?(action_name)\n  \
+               end\n\
+             end\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  \
+               before_action :name_it\n\n  \
+               def index\n    \
+                 render plain: \"#{@tracked} #{@name}\"\n  \
+               end\n\n  \
+               private\n\n  \
+               def name_it\n    \
+                 @name = action_name\n  \
+               end\n\
+             end\n",
+        )
+}
+
+const ACTION_NAME_ASSERTIONS: &str = r#"
+require_relative "app/controllers/widgets_controller"
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "action_name: #{controller.body}" unless controller.body == "true index"
+puts "action_name passed"
+"#;
+
+#[test]
+fn filters_read_action_name_as_a_string() {
+    action_name_app().run_ruby(ACTION_NAME_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn filters_read_action_name_as_a_string_on_spinel() {
+    action_name_app().run_spinel(ACTION_NAME_ASSERTIONS).assert_passes();
+}
+
 /// `case/in` structural pattern matching (#f9): taking `CaseMatchNode`
 /// from an ingest error to a typed `CaseMatch` node is a claim the
 /// emitted program actually dispatches through it (invariant 6), not
@@ -5137,6 +6137,47 @@ end
         .run_ruby(
             r#"raise "delimiter" unless ApplicationHelper.article_total(1234567) == "1,234,567"
 puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Campfire's `TimeLimitedVideoPreviewer` subclasses Rails'
+/// `ActiveStorage::Previewer::VideoPreviewer`. Before the nested class
+/// existed in the runtime, `app/models.rb` raised
+/// `uninitialized constant ActiveStorage::Previewer::VideoPreviewer`
+/// at boot. The capture body (Timeout / IO.popen) is a separate ledger
+/// entry; this pins the constant that inheritance needs to load.
+#[test]
+fn time_limited_video_previewer_subclass_boots() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/time_limited_video_previewer.rb",
+            r#"# Campfire's inheritance shape (capture body omitted — Timeout/IO are
+# not yet modeled). The NameError at boot was the missing superclass.
+class TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+  TIME_LIMIT = 10
+end
+"#,
+        )
+        .write(
+            "config/initializers/extensions.rb",
+            r##"%w[ rails_ext ].each do |extensions_dir|
+  Dir["#{Rails.root}/lib/#{extensions_dir}/*"].each { |path| require "#{extensions_dir}/#{File.basename(path)}" }
+end
+"##,
+        )
+        .run_ruby(
+            r#"raise "missing nested class" unless defined?(ActiveStorage::Previewer::VideoPreviewer)
+raise "subclass missing" unless defined?(TimeLimitedVideoPreviewer)
+raise "wrong parent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+raise "wrong grandparent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer
+raise "TIME_LIMIT" unless TimeLimitedVideoPreviewer::TIME_LIMIT == 10
+raise "PreviewError missing" unless defined?(ActiveStorage::PreviewError)
+raise "Error base missing" unless defined?(ActiveStorage::Error)
+raise "PreviewError parent" unless ActiveStorage::PreviewError < ActiveStorage::Error
+raise "Error parent" unless ActiveStorage::Error < StandardError
+puts "time_limited_video_previewer boot ok"
 "#,
         )
         .assert_passes();
@@ -5609,6 +6650,26 @@ end
         .assert_passes();
 }
 
+/// A rooted `class_name:` names the top-level class (chatwoot's
+/// `has_many :portals, class_name: "::Portal"`).
+#[test]
+fn a_rooted_class_name_association_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  has_many :rooted_comments, class_name: \"::Comment\"\n\n  def first_rooted_body\n    rooted_comments.first.body\n  end\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Rooted", body: "Body text here")
+Comment.create!(article_id: article.id, commenter: "Ann", body: "First remark")
+raise "rooted association count" unless article.rooted_comments.count == 1
+raise "rooted association read" unless article.first_rooted_body == "First remark"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Interface keys belong to `as:`, even when the Concern name matches it.
 #[test]
 fn a_polymorphic_inverse_from_a_concern_runs() {
@@ -5805,6 +6866,10 @@ end
 
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
+#[path = "emit_and_run/attach_hash.rs"]
+mod attach_hash;
+#[path = "emit_and_run/many_attached.rs"]
+mod many_attached;
 
 /// A controller under `ActionController::API`, the base `rails new
 /// --api` writes, dispatches (#163). The runtime defined only `Base`,
@@ -6564,5 +7629,270 @@ class CollectionConstants
 end
 "#)
         .run_ruby("raise 'qualified lowered constants' unless CollectionConstants.values == ['bb', true]")
+        .assert_passes();
+}
+
+/// `invisible_captcha only: :create` → before_action that heads :ok when
+/// a honeypot field is filled (invariant 6: the survey gap closing is a
+/// claim the emitted gate runs).
+#[test]
+fn invisible_captcha_blocks_spam_posts() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  protect_from_forgery with: :exception\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"email\"\n  end\nend\n")
+        .write("app/models/user.rb", "class User < ApplicationRecord\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  post \"/users\", to: \"users#create\"\nend\n")
+        .write(
+            "app/controllers/users_controller.rb",
+            "class UsersController < ApplicationController\n  invisible_captcha only: :create\n\n  def create\n    render plain: \"created\"\n  end\nend\n",
+        )
+        .run_ruby(r#"
+require_relative "app/controllers/users_controller"
+ActionController::Base.allow_forgery_protection = false
+controller = UsersController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.params = { "subtitle" => "http://spam.example" }
+controller.process_action(:create)
+raise "honeypot did not block: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body.to_s.empty?
+controller = UsersController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.params = { "email" => "ok@example.com" }
+controller.process_action(:create)
+raise "clean post failed: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "created"
+puts "invisible_captcha passed"
+"#)
+        .assert_passes();
+}
+
+/// `impersonates :user` wraps `current_user` and exposes pretender's
+/// impersonate / stop helpers (invariant 6).
+#[test]
+fn impersonates_switches_current_user() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  def current_user\n    User.find_by(id: session[:signed_in_user_id])\n  end\n\n  impersonates :user\nend\n",
+        )
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"email\"\n  end\nend\n")
+        .write("app/models/user.rb", "class User < ApplicationRecord\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/who\", to: \"who#show\"\nend\n")
+        .write(
+            "app/controllers/who_controller.rb",
+            "class WhoController < ApplicationController\n  def show\n    render plain: [true_user&.email, current_user&.email].join(\",\")\n  end\nend\n",
+        )
+        .run_ruby(r#"
+require_relative "app/controllers/who_controller"
+admin = User.create!(email: "admin@example.com")
+other = User.create!(email: "other@example.com")
+controller = WhoController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request = req
+ActionController::Current.request = req
+controller.session[:signed_in_user_id] = admin.id
+raise "baseline true=#{controller.true_user&.email} current=#{controller.current_user&.email}" unless controller.true_user&.email == "admin@example.com" && controller.current_user&.email == "admin@example.com"
+controller.impersonate_user(other)
+raise "impersonating true=#{controller.true_user&.email} current=#{controller.current_user&.email}" unless controller.true_user&.email == "admin@example.com" && controller.current_user&.email == "other@example.com"
+controller.stop_impersonating_user
+raise "stopped true=#{controller.true_user&.email} current=#{controller.current_user&.email}" unless controller.true_user&.email == "admin@example.com" && controller.current_user&.email == "admin@example.com"
+puts "impersonates passed"
+"#)
+        .assert_passes();
+}
+
+/// Controller ivars written through `instance_variable_set` with a
+/// statically resolvable name (literal, `controller_name`, or a helper
+/// that inflects `self.class`) reach the template, and a template that
+/// assigns an ivar reaches the layout — the same view context Rails
+/// uses. Overlay is abstract; the forcing fixture is Writebook.
+fn record_ivar_set_overlay() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    def set_article\n      @article = Article.find(params.expect(:id))\n    end\n",
+            r#"    def set_article
+      instance_variable_set "@#{instance_name}", Article.find(params.expect(:id))
+    end
+
+    def instance_name
+      controller_record_name.underscore
+    end
+
+    def controller_record_name
+      self.class.to_s.remove("Controller").demodulize.singularize
+    end
+"#,
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<% content_for :title, \"Showing article\" %>\n",
+            "<% @section_class = \"reading\" %>\n<% content_for :title, \"Showing article\" %>\n",
+        )
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "<main class=\"container mx-auto mt-28 px-5 flex flex-col\">",
+            "<main class=\"container mx-auto mt-28 px-5 flex flex-col <%= @section_class %>\">",
+        )
+}
+
+#[test]
+fn instance_variable_set_and_view_assigned_layout_ivar_run() {
+    record_ivar_set_overlay()
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn controller_name_instance_variable_set_runs_on_show() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    def set_article\n      @article = Article.find(params.expect(:id))\n    end\n",
+            "    def set_article\n      instance_variable_set(\"@#{controller_name.singularize}\", Article.find(params.expect(:id)))\n    end\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn campfire_capture_stdlib_consts_run() {
+    // Campfire tip's TimeLimitedVideoPreviewer#capture and web-push pool
+    // name IO / Timeout / Process. Registering them clears check errors;
+    // this pin proves the emitted Ruby actually runs those Consts
+    // (invariant 6) — without claiming the full ActiveStorage capture
+    // path (#557 lands VideoPreviewer separately).
+    emit_and_run::real_blog()
+        .write(
+            "app/models/capture_stdlib_probe.rb",
+            r#"class CaptureStdlibProbe
+  def self.exercise
+    timed_out = false
+    begin
+      Timeout.timeout(0.05) { sleep 1 }
+    rescue Timeout::Error
+      timed_out = true
+    end
+    raise "Timeout.timeout did not fire" unless timed_out
+
+    pid = Process.pid
+    raise "Process.pid" unless pid.is_a?(Integer) && pid > 0
+
+    clock = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise "CLOCK_MONOTONIC" unless clock.is_a?(Float)
+
+    out = IO.popen(["echo", "hi"], in: IO::NULL, err: IO::NULL) { |io| io.read }
+    raise "IO.popen" unless out.to_s.include?("hi")
+
+    killed = false
+    IO.popen(["sleep", "30"]) do |io|
+      Process.kill(:KILL, io.pid)
+      killed = true
+    end
+    raise "Process.kill" unless killed
+
+    src = StringIO.new("xy")
+    dst = StringIO.new
+    n = IO.copy_stream(src, dst)
+    raise "IO.copy_stream" unless n == 2 && dst.string == "xy"
+
+    rescued = false
+    begin
+      raise SystemCallError, "x"
+    rescue SystemCallError
+      rescued = true
+    end
+    raise "SystemCallError" unless rescued
+
+    rescued = false
+    begin
+      raise OpenSSL::SSL::SSLError, "x"
+    rescue OpenSSL::SSL::SSLError
+      rescued = true
+    end
+    raise "OpenSSL::SSL::SSLError" unless rescued
+
+    # Vips::Error is registered for Campfire's attachment rescue; the
+    # constant is supplied by ruby-vips at runtime, not by this probe.
+
+    "ok"
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+raise "probe" unless CaptureStdlibProbe.exercise == "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn campfire_video_preview_config_runs() {
+    // Campfire tip initializer sets video_preview_arguments (gte(t,5))
+    // and swaps previewers VideoPreviewer → TimeLimitedVideoPreviewer.
+    // Suite asserts ActiveStorage.previewers / video_preview_arguments;
+    // poster reads the vf filter from the same config.
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/time_limited_video_previewer.rb",
+            r#"class TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+  TIME_LIMIT = 10
+end
+"#,
+        )
+        .write(
+            "config/initializers/extensions.rb",
+            r#"Dir[Rails.root.join("lib/rails_ext/*.rb")].sort.each { |f| require f }
+"#,
+        )
+        .write(
+            "config/initializers/active_storage.rb",
+            r#"require "rails_ext/time_limited_video_previewer"
+
+Rails.application.configure do
+  config.active_storage.video_preview_arguments =
+    "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015)+gte(t\\,5),loop=loop=-1:size=2,trim=start_frame=1'" \
+    " -frames:v 1 -f image2"
+
+  config.active_storage.previewers = config.active_storage.previewers.map do |previewer|
+    previewer == ActiveStorage::Previewer::VideoPreviewer ? TimeLimitedVideoPreviewer : previewer
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+raise "args" unless ActiveStorage.video_preview_arguments.include?("gte(t\\,5)")
+raise "filter" unless ActiveStorage.video_preview_vf_filter.include?("gte(t\\,5)")
+raise "previewers include" unless ActiveStorage.previewers.include?(TimeLimitedVideoPreviewer)
+raise "previewers exclude" if ActiveStorage.previewers.include?(ActiveStorage::Previewer::VideoPreviewer)
+
+# `-vf` must match as a whole option, not a prefix of `-vframes`.
+def ActiveStorage.video_preview_arguments
+  "-vframes 1 -vf 'scale=320:240' -f image2"
+end
+raise "vf vs vframes" unless ActiveStorage.video_preview_vf_filter == "scale=320:240"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn an_rbs_array_block_runs_after_app_emission() {
+    emit_and_run::real_blog()
+        .write("app/lib/batch.rb", runtime_block_signature::RUBY)
+        .write("sig/batch.rbs", runtime_block_signature::RBS)
+        .run_ruby("raise 'wrong sum' unless Batch.new.consume == 3")
         .assert_passes();
 }

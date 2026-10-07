@@ -2,4 +2,32 @@
 module ActiveSupport
   def self.parse_db_date: (String? value) -> Date?
   def self.format_db_date: (Date | String | nil value) -> String?
+  def self.date_current: (Time now) -> Date
+  def self.date_at_midnight: (Date d) -> Time
+  def self.date_beginning_of_day: (Date date) -> Time
+  def self.date_end_of_day: (Date date) -> Time
+  def self.date_from_civil: (Integer days) -> Date
+  def self.date_days_since: (Date d, ?Integer n) -> Date
+  def self.date_days_ago: (Date d, ?Integer n) -> Date
+  def self.date_yesterday: (Date d) -> Date
+  def self.date_tomorrow: (Date d) -> Date
+  def self.date_weeks_since: (Date d, ?Integer n) -> Date
+  def self.date_weeks_ago: (Date d, ?Integer n) -> Date
+  def self.date_months_since: (Date d, ?Integer n) -> Date
+  def self.date_months_ago: (Date d, ?Integer n) -> Date
+  def self.date_years_since: (Date d, ?Integer n) -> Date
+  def self.date_years_ago: (Date d, ?Integer n) -> Date
+  def self.date_beginning_of_week: (Date d) -> Date
+  def self.date_end_of_week: (Date d) -> Date
+  def self.date_next_week: (Date d) -> Date
+  def self.date_prev_week: (Date d) -> Date
+  def self.date_beginning_of_month: (Date d) -> Date
+  def self.date_end_of_month: (Date d) -> Date
+  def self.date_beginning_of_year: (Date d) -> Date
+  def self.date_end_of_year: (Date d) -> Date
+  def self.date_today?: (Date d, Date current) -> bool
+  def self.date_yesterday?: (Date d, Date current) -> bool
+  def self.date_tomorrow?: (Date d, Date current) -> bool
+  def self.date_past?: (Date d, Date current) -> bool
+  def self.date_future?: (Date d, Date current) -> bool
 end

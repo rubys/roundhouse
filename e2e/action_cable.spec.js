@@ -2,17 +2,25 @@ import { test, expect } from '@playwright/test'
 
 // article_3 is seeded with zero comments. Assertions are scoped to *our*
 // uniquely-worded comment so this can run in parallel with the Turbo Stream
-// test, which also posts comments on the same article.
+// test, which also posts comments on the same article. BODY is per-attempt
+// so a Playwright retry never sees residue from a prior attempt on the
+// shared smoke DB (JRuby Action Cable delete has been flaky enough to
+// leave the fixed string behind and fail the next open at toHaveCount(0)).
 const ARTICLE_PATH = '/articles/3'
 const COMMENTER = 'Cable Bot'
-const BODY = 'Action Cable broadcast smoke-test comment'
 
 test('a new comment broadcasts live to other viewers via Action Cable', async ({ browser }) => {
+  const BODY = `Action Cable broadcast smoke-test comment ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
   // Two independent contexts = two separate viewers of the same article.
   const observerCtx = await browser.newContext()
   const actorCtx = await browser.newContext()
   const observer = await observerCtx.newPage()
   const actor = await actorCtx.newPage()
+
+  // Accept Turbo's confirm before any delete click (register early; JRuby
+  // smoke has timed out waiting for a late dialog handler).
+  actor.on('dialog', dialog => dialog.accept())
 
   const observerRow = observer.locator('#comments > div').filter({ hasText: BODY })
   const actorRow = actor.locator('#comments > div').filter({ hasText: BODY })
@@ -40,13 +48,12 @@ test('a new comment broadcasts live to other viewers via Action Cable', async ({
     await expect(observerRow).toBeVisible()
     expect(await observer.evaluate(() => window.__noNav)).toBe(true)
 
-    // Cleanup: delete the comment from the actor page (accept the Turbo confirm).
-    actor.on('dialog', dialog => dialog.accept())
+    // Cleanup: delete the comment from the actor page (dialog already accepted).
     await actorRow.getByRole('button', { name: 'Delete' }).click()
-    await expect(actorRow).toHaveCount(0)
+    await expect(actorRow).toHaveCount(0, { timeout: 15_000 })
 
     // The removal broadcasts too — the observer's row disappears, leaving no residue.
-    await expect(observerRow).toHaveCount(0)
+    await expect(observerRow).toHaveCount(0, { timeout: 15_000 })
   } finally {
     await observerCtx.close()
     await actorCtx.close()

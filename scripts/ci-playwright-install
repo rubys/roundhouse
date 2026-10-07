@@ -12,15 +12,28 @@
 # the job timeout, which cancels the WHOLE RUN — so a green campfire
 # floor and nine green toolchains reported as "cancelled".
 #
-# Two bounds, since the stall is external:
+# Slow Azure apt mirrors also burn a 240s combined budget mid-download
+# (run 37677363805: fonts-wqy-zenhei alone took ~160s; three combined
+# `--with-deps` attempts each died before the browser binary phase).
+# Split the work so apt and the browser CDN keep separate budgets:
+#
+#   * `install-deps` — Playwright's own dep list (still one source of
+#     truth; no hand-copied package names) under a longer per-attempt
+#     timeout; completed .deb downloads can accumulate across retries.
+#   * `install --only-shell` — browser bits only, usually seconds.
+#
+# Shared by every Playwright CI job (browser-smoke-*, smoke, smoke-extra,
+# smoke-spinel, smoke-campfire*). Those jobs use a 30m timeout so a slow
+# apt day (~3×360s deps + browser) still leaves room for emit/test work.
+# Normal install stays under a minute.
+#
+# Two bounds on top of the split, since the stall is external:
 #
 #   * the background upgrader that holds the dpkg lock is stopped first,
 #     which is the usual cause on the hosted images;
 #   * each attempt gets its own timeout and the step retries, so a
 #     stalled apt mirror socket costs one attempt rather than the job's
-#     entire budget. Worst case here is 3x240s = 12m, inside the 20m
-#     the smoke matrix allows; the observed normal time is well under a
-#     minute.
+#     entire budget.
 #
 # NOT the other half of 49c596a0's prescription ("an explicit apt-get of
 # the dep list plus a bare `playwright install chromium`"): that list is
@@ -30,17 +43,12 @@
 # deps and bounding the call keeps one source of truth.
 set -euo pipefail
 
-ATTEMPTS="${PLAYWRIGHT_INSTALL_ATTEMPTS:-3}"
-PER_ATTEMPT="${PLAYWRIGHT_INSTALL_TIMEOUT:-240}"
+DEPS_ATTEMPTS="${PLAYWRIGHT_DEPS_ATTEMPTS:-3}"
+DEPS_TIMEOUT="${PLAYWRIGHT_DEPS_TIMEOUT:-360}"
+BROWSER_ATTEMPTS="${PLAYWRIGHT_BROWSER_ATTEMPTS:-2}"
+BROWSER_TIMEOUT="${PLAYWRIGHT_BROWSER_TIMEOUT:-90}"
 
-# Bounds for the apt PLAYWRIGHT runs, which takes no flags from us.
-"$(dirname "$0")/ci-apt-bound"
-
-for attempt in $(seq 1 "$ATTEMPTS"); do
-    if timeout "$PER_ATTEMPT" npx playwright install --with-deps --only-shell chromium; then
-        exit 0
-    fi
-    echo "::warning::playwright install attempt ${attempt}/${ATTEMPTS} did not finish within ${PER_ATTEMPT}s"
+reap_apt_orphans() {
     # `timeout` kills the npx PARENT; the `sudo apt-get` it spawned
     # survives and keeps the dpkg lock, so every retry failed instantly
     # with "held by process N" until this was here. Reap the orphan, let
@@ -50,7 +58,37 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     sleep 5
     sudo pkill -KILL -x apt-get 2>/dev/null || true
     sudo dpkg --configure -a 2>/dev/null || true
-done
+}
 
-echo "::error::playwright install did not finish in ${ATTEMPTS} bounded attempts of ${PER_ATTEMPT}s"
-exit 1
+# Run `timeout SECONDS cmd...` up to ATTEMPTS times. LABEL is for warnings.
+# Pass "reap" as the fourth argument to clear orphan apt after a failed try.
+run_bounded() {
+    local label="$1" attempts="$2" seconds="$3" reap="${4:-}"
+    shift 4
+    local attempt
+    for attempt in $(seq 1 "$attempts"); do
+        if timeout "$seconds" "$@"; then
+            return 0
+        fi
+        echo "::warning::${label} attempt ${attempt}/${attempts} did not finish within ${seconds}s"
+        if [ "$reap" = "reap" ]; then
+            reap_apt_orphans
+        fi
+    done
+    return 1
+}
+
+# Bounds for the apt PLAYWRIGHT runs, which takes no flags from us.
+"$(dirname "$0")/ci-apt-bound"
+
+if ! run_bounded "playwright install-deps" "$DEPS_ATTEMPTS" "$DEPS_TIMEOUT" reap \
+    npx playwright install-deps chromium; then
+    echo "::error::playwright install-deps did not finish in ${DEPS_ATTEMPTS} bounded attempts of ${DEPS_TIMEOUT}s"
+    exit 1
+fi
+
+if ! run_bounded "playwright install" "$BROWSER_ATTEMPTS" "$BROWSER_TIMEOUT" noreap \
+    npx playwright install --only-shell chromium; then
+    echo "::error::playwright install did not finish in ${BROWSER_ATTEMPTS} bounded attempts of ${BROWSER_TIMEOUT}s"
+    exit 1
+fi

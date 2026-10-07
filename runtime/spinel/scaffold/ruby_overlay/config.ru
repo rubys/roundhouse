@@ -35,6 +35,11 @@ end
 # request's COMMIT (Db.checkpoint_in_background!).
 Db.checkpoint_in_background!
 
+# And jobs run off it: `perform_later` queues the work for a drain
+# thread in each serving process instead of running it inside the
+# request (ActiveJob.drain_in_background!).
+ActiveJob.drain_in_background!
+
 # Register the Cable registry as the broadcasts transport: every
 # `Broadcasts.record` call from model callbacks now also fans out
 # the rendered `<turbo-stream>` to every WS connection subscribed

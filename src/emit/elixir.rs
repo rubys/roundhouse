@@ -630,7 +630,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         arms.push_str(&format!(
             "      {raw:?} ->\n\
              \x20       c = {module}.new()\n\
-             \x20       c = %{{c | params: params, request_format: request_format, flash: ActionDispatch.Flash.new(incoming_flash)}}\n\
+             \x20       c = %{{c | params: params, request_format: request_format, query_string: query_string, flash: ActionDispatch.Flash.new(incoming_flash)}}\n\
              \x20       c = {module}.process_action(c, action)\n\
              {finalize}"
         ));
@@ -642,15 +642,17 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
          defmodule Dispatch do\n\
          \x20 @doc \"\"\"\n\
          \x20 Build a controller for `(controller, action)`, thread request\n\
-         \x20 params + format + incoming flash into it, run the action, and\n\
-         \x20 return the captured `{{body, status, content_type, location,\n\
-         \x20 flash}}` response state, where `flash` is the String-keyed map\n\
-         \x20 to carry to the next request (`Flash.to_persisted`).\n\
-         \x20 `request_format` is an atom (`:html` / `:json`); `path_params`,\n\
-         \x20 `body_params`, and `incoming_flash` are string-keyed maps (body\n\
-         \x20 params nested, e.g. `%{{\"article\" => %{{\"title\" => …}}}}`).\n\
+         \x20 params + format + query string + incoming flash into it, run the\n\
+         \x20 action, and return the captured `{{body, status, content_type,\n\
+         \x20 location, flash}}` response state, where `flash` is the\n\
+         \x20 String-keyed map to carry to the next request\n\
+         \x20 (`Flash.to_persisted`). `request_format` is an atom (`:html` /\n\
+         \x20 `:json`); `query_string` is the raw query without a leading\n\
+         \x20 `?`; `path_params`, `body_params`, and `incoming_flash` are\n\
+         \x20 string-keyed maps (body params nested, e.g.\n\
+         \x20 `%{{\"article\" => %{{\"title\" => …}}}}`).\n\
          \x20 \"\"\"\n\
-         \x20 def call(controller, action, path_params, body_params, request_format, incoming_flash) do\n\
+         \x20 def call(controller, action, path_params, body_params, request_format, incoming_flash, query_string \\\\ \"\") do\n\
          \x20   params = Map.merge(path_params, body_params)\n\
          \x20   case controller do\n\
          {arms}\
@@ -802,6 +804,7 @@ fn module_funcs_to_library_class(
         name: crate::ident::ClassId(crate::ident::Symbol::from(name)),
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),

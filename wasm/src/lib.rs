@@ -146,7 +146,7 @@ fn transpile_inner(json_in: &str) -> String {
     // resolved to source positions. Synthetic spans (no source site) are
     // dropped — there's nowhere to put a marker. (Roda: analyze never
     // ran, so its walker diagnostics would be all noise.)
-    let mut diags = if is_roda { Vec::new() } else { diagnose(&app) };
+    let mut diags = if is_roda { app.routes.diagnostics.clone() } else { diagnose(&app) };
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
     roundhouse::analyze::attribution::attribute_analysis_gaps(&mut diags, &app, &mut gaps);
     diags.extend(parse_diags);

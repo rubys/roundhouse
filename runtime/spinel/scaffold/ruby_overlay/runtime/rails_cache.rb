@@ -17,8 +17,15 @@
 #     (both appear in lobsters); expiry checked lazily on read.
 #
 # Process-local by design: the CRuby serving shape is one process (Puma
-# workers=0), matching MemoryStore's own scope. Thread-safety via a
-# single Mutex, as MemoryStore does.
+# workers=0), matching MemoryStore's own scope. Thread-safety: 32 shards
+# keyed the same way as Spinel's `runtime/spinel/fragment_cache.rb`
+# (`shard_of` hashes the tail bytes of fragment keys so a room page's
+# messages fan out instead of colliding on a shared `views/…` prefix).
+# Writes / RMW / eviction take the per-shard Mutex; `read_str` of a
+# live frozen String is RCU — Hash#[] under the MRI GVL is atomic, and
+# each entry is replaced as a whole `[encoded, expires_at]` pair, so a
+# reader never sees a torn value/expiry mix and the hot fragment path
+# does not serialize every Puma thread on one process lock.
 #
 # CRuby-only (overlay, not runtime/ruby): Marshal/Mutex/Time-based
 # eviction are exactly the is_a?-dispatching dynamic shapes the shared
@@ -38,17 +45,26 @@ module Rails
   end
 
   class MemoryStore
+    # Match Spinel's fragment store: more shards than typical Puma
+    # threads, same hash so a room page's keys spread the same way.
+    SHARD_COUNT = 32
+
     def initialize
-      @data  = {}
-      @mutex = Mutex.new
+      @shards = []
+      @mutexes = []
+      i = 0
+      while i < SHARD_COUNT
+        @shards.push({})
+        @mutexes.push(Mutex.new)
+        i += 1
+      end
     end
 
     def fetch(key, opts = {})
       k = key.to_s
-      @mutex.synchronize do
-        entry = @data[k]
-        return decode(entry[0]) if entry && !expired?(entry)
-      end
+      s = shard_of(k)
+      entry = @shards[s][k]
+      return decode(entry[0]) if entry && !expired?(entry)
       value = yield
       write(key, value, opts)
       value
@@ -78,60 +94,60 @@ module Rails
     # MISS rather than a TypeError at the append, and the write that
     # follows corrects it. `read` (the untyped half) still dups, so a
     # caller that mutates a fetched String cannot corrupt the store.
+    #
+    # Hot path is lock-free (RCU): see the class header. Expired entries
+    # re-check under the shard Mutex before delete so a write that lands
+    # between the first observation and eviction is not discarded.
     def read_str(key)
-      @mutex.synchronize do
-        entry = @data[key.to_s]
-        return nil if entry.nil?
-        if expired?(entry)
-          @data.delete(key.to_s)
-          return nil
-        end
-        encoded = entry[0]
-        encoded.is_a?(String) ? encoded : nil
-      end
+      k = key.to_s
+      s = shard_of(k)
+      entry = @shards[s][k]
+      return nil if entry.nil?
+      encoded = expired?(entry) ? live_encoded_after_expiry_recheck(s, k) : entry[0]
+      encoded.is_a?(String) ? encoded : nil
     end
 
     def write_str(key, value, ttl)
       # Dup into the store, then freeze that copy. The caller's
       # accumulator stays mutable; the stored fragment is shared
       # across hits without a read-side dup.
-      s = (value.is_a?(String) ? value.dup : value.to_s).freeze
+      s_val = (value.is_a?(String) ? value.dup : value.to_s).freeze
       expires_at = ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil
-      @mutex.synchronize { @data[key.to_s] = [s, expires_at] }
-      s
+      k = key.to_s
+      shard = shard_of(k)
+      @mutexes[shard].synchronize { @shards[shard][k] = [s_val, expires_at] }
+      s_val
     end
 
     # The counter behind `rate_limit` (`ActionController::RateLimiter`),
     # the third method of the typed seam: the first increment in a
     # window writes the entry with `ttl` to live and every later one
-    # keeps that expiry, as MemoryStore#increment does. Under the one
-    # Mutex, read-modify-write, so two Puma threads counting the same
-    # key do not both see the old value.
+    # keeps that expiry, as MemoryStore#increment does. Under the
+    # shard Mutex, read-modify-write, so two Puma threads counting the
+    # same key do not both see the old value.
     def increment_str(key, ttl)
       k = key.to_s
-      @mutex.synchronize do
-        entry = @data[k]
+      s = shard_of(k)
+      @mutexes[s].synchronize do
+        entry = @shards[s][k]
         if entry && !expired?(entry) && entry[0].is_a?(String)
           n = entry[0].to_i + 1
-          @data[k] = [n.to_s.freeze, entry[1]]
+          @shards[s][k] = [n.to_s.freeze, entry[1]]
           n
         else
-          @data[k] = ["1".freeze, ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
+          @shards[s][k] = ["1".freeze, ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
           1
         end
       end
     end
 
     def read(key)
-      @mutex.synchronize do
-        entry = @data[key.to_s]
-        return nil if entry.nil?
-        if expired?(entry)
-          @data.delete(key.to_s)
-          return nil
-        end
-        decode(entry[0])
-      end
+      k = key.to_s
+      s = shard_of(k)
+      entry = @shards[s][k]
+      return nil if entry.nil?
+      encoded = expired?(entry) ? live_encoded_after_expiry_recheck(s, k) : entry[0]
+      encoded.nil? ? nil : decode(encoded)
     end
 
     def write(key, value, opts = {})
@@ -143,12 +159,16 @@ module Rails
       # mutates what it fetched cannot corrupt the store — the same
       # contract `write_str` already keeps.
       encoded = value.is_a?(String) ? value.dup.freeze : [Marshal.dump(value)]
-      @mutex.synchronize { @data[key.to_s] = [encoded, expires_at] }
+      k = key.to_s
+      s = shard_of(k)
+      @mutexes[s].synchronize { @shards[s][k] = [encoded, expires_at] }
       value
     end
 
     def delete(key)
-      @mutex.synchronize { @data.delete(key.to_s) }
+      k = key.to_s
+      s = shard_of(k)
+      @mutexes[s].synchronize { @shards[s].delete(k) }
       nil
     end
 
@@ -157,10 +177,38 @@ module Rails
     end
 
     def clear
-      @mutex.synchronize { @data.clear }
+      s = 0
+      while s < SHARD_COUNT
+        @mutexes[s].synchronize { @shards[s].clear }
+        s += 1
+      end
     end
 
     private
+
+    # Same tail-byte mix as Spinel's `Rails::Cache#shard_of`: fragment
+    # keys share a long `views/…` prefix and differ in the id/timestamp
+    # at the end; hashing the head would pin a whole room on one shard.
+    def shard_of(k)
+      n = k.bytesize
+      return 0 if n == 0
+      ((k.getbyte(n - 1) * 31) + k.getbyte(n / 2)) % SHARD_COUNT
+    end
+
+    # Unlocked path already saw expiry. Re-check under the shard lock so
+    # a write that landed in between is returned, not discarded as a miss.
+    def live_encoded_after_expiry_recheck(s, k)
+      encoded = nil
+      @mutexes[s].synchronize do
+        entry = @shards[s][k]
+        if entry && expired?(entry)
+          @shards[s].delete(k)
+        elsif entry
+          encoded = entry[0]
+        end
+      end
+      encoded
+    end
 
     # Entry = [encoded_value, expires_at_or_nil]; a Marshal'd payload is
     # boxed in a 1-elem Array so a cached String and a Marshal String

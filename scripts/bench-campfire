@@ -14,9 +14,9 @@
 #            rails-1p | ruby-1p | roundsnap-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
-#          (default: rails ruby spinel rails-1p ruby-1p spinel-1p
-#                    jruby truffleruby rails-truffleruby —
-#                     the nocache pair is a DIAGNOSTIC, ask for it by name)
+#          (default: rails ruby spinel. Since 2026-10-07 the -1p,
+#           JVM-family and nocache lanes are requestable by name only:
+#           the published page compares the deployed shapes, per route.)
 #
 #     roundsnap / roundsnap-1p
 #                    Roundhouse `--target ruby` with `ROUNDSNAP=1`: MRI
@@ -161,21 +161,23 @@
 #   --connections N   wrk concurrency (default 16 — see the note below)
 #   --wrk-threads N   wrk client threads (default 2)
 #   --runs N          repeated runs per cell (default 3)
-#   --endpoint PATH   URL to bench, repeatable. Default: /rooms/1 and
-#                     /rooms/1/messages, the two pages the app exists for.
-#                     Prefix POST: for a write (see --http-suite).
+#   --endpoint PATH   URL to bench, repeatable. Default: the per-route
+#                     suite, the eight routes once-campfire-rust's
+#                     bench/run times: room page, messages?before=,
+#                     sidebar, searches?q=coffee, the signed-in user's
+#                     avatar, a stylesheet, /up, and POST a message.
+#                     Prefix POST: for a write.
 #   --gzip            send Accept-Encoding: gzip. Off by default: wrk
 #                     historically sent no encoding header, so uncompressed
 #                     cells stay comparable to older runs. On: CRuby wraps
 #                     run_rack in Rack::Deflater and Spinel tep gzips HTML;
 #                     CSS/JS stay identity. A gzip run measures what the
 #                     lane actually serves.
-#   --http-suite      time five signed-in HTTP workloads: room page,
-#                     messages?before=, sidebar, searches?q=coffee, POST a
-#                     message into a second room so the measured room stays
-#                     put. Replaces the default two GETs unless --endpoint
-#                     was also given. Resolved against the seeded sqlite
-#                     after prepare.
+#   --http-suite      HTTP only: skip cold start and the WebSocket phase.
+#                     (The route suite itself is now the default; the POST
+#                     goes into a second room so the measured room stays
+#                     put. Resolved against the seeded sqlite after
+#                     prepare.)
 #   --port N          base port (default 4300; lanes get N, N+1, …)
 #   --out DIR         results dir (default bench/results/campfire-<stamp>)
 #   --users N / --rooms N / --messages N   seed size, passed to
@@ -334,13 +336,12 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|roundsnap|spinel|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|roundsnap-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|roundsnap|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|roundsnap-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails ruby spinel rails-1p ruby-1p spinel-1p jruby truffleruby rails-truffleruby)
-(( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
+(( ${#LANES[@]} )) || LANES=(rails ruby spinel)
 GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
 POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
@@ -369,6 +370,10 @@ RUST_ROOT="${RUST_ROOT:-$HOME/git/once-campfire-rust}"
 GO_ROOT="${GO_ROOT:-$HOME/git/once-campfire-go}"
 ELIXIR_ROOT="${ELIXIR_ROOT:-$HOME/git/once-campfire-elixir}"
 RUST_BIN="${RUST_BIN:-$RUST_ROOT/target/release/campfire}"
+# tobi/campfire-once-ruby-ractor: campfire hand-ported to plain Ruby,
+# Falcon on worker Ractors in one process. Bundled in place (vendor/bundle,
+# its two C extensions built per its Dockerfile) under this run's Ruby.
+TOBI_ROOT="${TOBI_ROOT:-$HOME/git/campfire-once-ruby-ractor}"
 GO_BIN="${GO_BIN:-$GO_ROOT/campfire}"
 # ABSOLUTE, IMMEDIATELY. Every path derived from here is handed to a
 # script that `cd`s — the oracle into its own tree, the cable sweep into
@@ -593,6 +598,12 @@ if (( SKIP_PREPARE == 0 )); then
         --users "$USERS" --rooms "$ROOMS" --messages "$MESSAGES" >/dev/null \
         || die "campfire-oracle prepare failed"
 
+    # FRESH TREES. The emitter writes over its output and never removes a
+    # file it no longer generates, so a renamed view outlives the rename:
+    # the box's spinel tree carried a 09-25 `index.rbs` beside the current
+    # `index_turbo_stream.rbs`, and `spinel --rbs` refused the two
+    # declarations of one method (2026-10-07).
+    rm -rf "$EMIT" "$SP_EMIT"
     step "transpiling campfire → $EMIT"
     cargo run --quiet --release --bin roundhouse -- --target ruby "$APP" \
         -o "$EMIT" --allow-unsupported > "$LOG_DIR/emit.log" 2>&1 \
@@ -628,6 +639,11 @@ build_spinel_binary() {
         || { fail "spinel build failed (see $LOG_DIR/build-spinel.log)"; return 1; }
     [[ -x "$SP_EMIT/build/bin/blog" ]] \
         || { fail "spinel build produced no binary"; return 1; }
+    # The binary serves static/assets, which only `make assets` fills:
+    # without it every stylesheet the room page links is a 404.
+    step "staging the spinel tree's assets"
+    ( cd "$SP_EMIT" && make assets ) > "$LOG_DIR/assets-spinel.log" 2>&1 \
+        || fail "spinel make assets failed (see $LOG_DIR/assets-spinel.log)"
     ok "spinel binary at $SP_EMIT/build/bin/blog"
 }
 
@@ -766,6 +782,11 @@ if wants_lane rust && [[ ! -x "$RUST_BIN" ]]; then
     fail "no rust campfire binary at $RUST_BIN — dropping the rust lane"
     drop_lane rust build "once-campfire-rust binary not built (cargo build --release -p campfire)"
 fi
+if wants_lane tobi && ! ( cd "$TOBI_ROOT" 2>/dev/null && bundle check >/dev/null 2>&1 &&
+                          [[ -f lib/campfire_vips.so && -f vendor/gems/extralite/lib/extralite_ext.so ]] ); then
+    fail "$TOBI_ROOT is not bundled and built — dropping the tobi lane"
+    drop_lane tobi build "campfire-once-ruby-ractor not ready (bundle install + the extralite and campfire_vips extensions)"
+fi
 if wants_lane go && [[ ! -x "$GO_BIN" ]]; then
     fail "no go campfire binary at $GO_BIN — dropping the go lane"
     drop_lane go build "once-campfire-go binary not built (bin/build)"
@@ -823,16 +844,21 @@ print(f"/rooms/{room}")
 print(f"/rooms/{room}/messages?before={before_id}")
 print("/users/me/sidebar")
 print("/searches?q=coffee")
+# Per lane, scraped from its own room page: the signed avatar token and
+# the stylesheet digest differ between trees (see ep_path).
+print("/users/{avatar}/avatar")
+print("{css}")
+print("/up")
 print(f"POST:/rooms/{write_room}/messages")
 PY
 }
 
+if (( USER_ENDPOINTS == 0 )); then
+    local_routes="$(resolve_http_suite "$SEED_DB")" || die "could not resolve HTTP suite routes from $SEED_DB"
+    mapfile -t ENDPOINTS <<< "$local_routes"
+    (( ${#ENDPOINTS[@]} >= 8 )) || die "HTTP suite resolution returned ${#ENDPOINTS[@]} routes: ${ENDPOINTS[*]}"
+fi
 if (( HTTP_SUITE )); then
-    if (( USER_ENDPOINTS == 0 )); then
-        local_routes="$(resolve_http_suite "$SEED_DB")" || die "could not resolve HTTP suite routes from $SEED_DB"
-        mapfile -t ENDPOINTS <<< "$local_routes"
-        (( ${#ENDPOINTS[@]} >= 5 )) || die "HTTP suite resolution returned ${#ENDPOINTS[@]} routes: ${ENDPOINTS[*]}"
-    fi
     # HTTP only. Cable stays behind --sockets.
     if (( SOCKETS_SET == 0 )); then
         SOCKETS=0
@@ -841,11 +867,19 @@ if (( HTTP_SUITE )); then
 fi
 
 ep_is_post() { [[ "$1" == POST:* ]]; }
+# `{avatar}` and `{css}` are the two routes whose path is the lane's own:
+# an avatar token is signed with the lane's secret, a stylesheet carries
+# its tree's digest. Both come from the lane's room page (BENCH_AVATAR,
+# BENCH_CSS, set after sign-in); the record keeps the placeholder so the
+# cell lines up across lanes.
 ep_path() {
     local ep="$1"
-    if ep_is_post "$ep"; then echo "${ep#POST:}"; else echo "$ep"; fi
+    if ep_is_post "$ep"; then ep="${ep#POST:}"; fi
+    ep="${ep//\{avatar\}/${BENCH_AVATAR:-}}"
+    ep="${ep//\{css\}/${BENCH_CSS:-}}"
+    echo "$ep"
 }
-ep_parity_name() { echo "$1" | tr '/:?=&' '______'; }
+ep_parity_name() { echo "$1" | tr '/:?=&{}' '_______'; }
 
 # Copy the oracle seed into a destination tree. WAL/SHM go with it: a
 # stale -wal beside a freshly copied database is a different database.
@@ -872,6 +906,9 @@ stage_seeded_db() {
     if wants_lane go && [[ -d "$GO_ROOT" ]]; then
         stage_sqlite "$GO_ROOT/storage/db/production.sqlite3"
     fi
+    if wants_lane tobi && [[ -d "$TOBI_ROOT" ]]; then
+        stage_sqlite "$TOBI_ROOT/storage/db/production.sqlite3"
+    fi
     if wants_lane elixir && [[ -d "$ELIXIR_ROOT" ]]; then
         stage_sqlite "$ELIXIR_ROOT/var/production.sqlite3"
     fi
@@ -896,6 +933,21 @@ import re, sys
 html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 m = re.search(r'name="csrf-token" content="([^"]*)"', html) \
     or re.search(r'name="authenticity_token" value="([^"]*)"', html)
+print(m.group(1) if m else "")
+PY
+}
+
+# The lane-specific half of the per-route suite, read off the lane's own
+# room page: the first avatar image's token and the first stylesheet.
+scrape_from() {
+    python3 - "$1" "$2" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+if sys.argv[2] == "avatar":
+    m = re.search(r'/users/([^/"?]+)/avatar', html)
+else:
+    m = re.search(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+\.css)"', html) \
+        or re.search(r'<link[^>]*href="([^"]+\.css)"[^>]*rel="stylesheet"', html)
 print(m.group(1) if m else "")
 PY
 }
@@ -1088,6 +1140,23 @@ start_lane() {
                 "$RUST_BIN" server ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
+        tobi)
+            # As its Dockerfile runs it: `ruby --yjit bin/campfire`,
+            # jemalloc preloaded, WEB_CONCURRENCY worker Ractors (and as
+            # many job Ractors) in one process. Rails' worker formula,
+            # as once-campfire-rust's bench/run gives every app.
+            local jem w; jem="$(find_jemalloc || true)"; w="$(deployed_worker_count)"
+            printf 'root=%s\nrevision=%s\nruby=%s\njemalloc=%s\nworkers=%s ractors (one process)\n' \
+                "$TOBI_ROOT" "$(git -C "$TOBI_ROOT" rev-parse --short HEAD 2>/dev/null)" \
+                "$(ruby -e 'print RUBY_VERSION')" "${jem:-ABSENT}" "$w" > "$shape"
+            mkdir -p "$TOBI_ROOT/storage/files"
+            ( cd "$TOBI_ROOT" && exec env \
+                SECRET_KEY_BASE="$SPINEL_SECRET" DISABLE_SSL=1 HTTP_PORT="$port" \
+                WEB_CONCURRENCY="$w" JOB_CONCURRENCY="$w" \
+                CAMPFIRE_STORAGE_PATH="$TOBI_ROOT/storage" ${jem:+LD_PRELOAD="$jem"} \
+                bundle exec ruby --yjit bin/campfire ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
         go)
             echo "bin=$GO_BIN" > "$shape"
             echo "workers=1 (one process)" >> "$shape"
@@ -1156,7 +1225,7 @@ login_cookie() {
                     --data-urlencode "authenticity_token=$token")"
             [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
             ;;
-        rust|go)
+        rust|go|tobi)
             # Header-only forgery protection: no authenticity_token on
             # the page. Sec-Fetch-Site + Origin (with port) is enough on
             # plain HTTP; the session cookie still has to be minted by
@@ -1318,6 +1387,7 @@ for lane in "${LANES[@]}"; do
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;
+        tobi)                shape_note="campfire-once-ruby-ractor, Falcon on $(deployed_worker_count) worker Ractors, one process, jemalloc" ;;
         go)                  shape_note="once-campfire-go, one process, own front server" ;;
         elixir)              shape_note="once-campfire-elixir, Bandit, MIX_ENV=prod" ;;
         jruby)               shape_note="one process x $(jvm_threads) threads (one per hardware thread), heap $JVM_HEAP" ;;
@@ -1347,9 +1417,20 @@ for lane in "${LANES[@]}"; do
     csrf=""
     csrf_enc=""
     csrf_html="$LOG_DIR/csrf-$lane.html"
+    # A full page, layout included: the first GET in the list, or, for a
+    # POST-only list, the room the POST writes to. POST:/rooms/2/messages
+    # stripped of its verb is the messages fragment, which has neither the
+    # stylesheet links nor the meta tag.
+    scrape_ep=""
+    for scrape_e in "${ENDPOINTS[@]}"; do ep_is_post "$scrape_e" || { scrape_ep="$scrape_e"; break; }; done
+    [[ -n "$scrape_ep" ]] || { scrape_ep="$(ep_path "${ENDPOINTS[0]}")"; scrape_ep="${scrape_ep%/messages}"; }
     curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
-        -o "$csrf_html" "http://127.0.0.1:$port$(ep_path "${ENDPOINTS[0]}")"
+        -o "$csrf_html" "http://127.0.0.1:$port$(ep_path "$scrape_ep")"
     csrf="$(csrf_token_from "$csrf_html")"
+    BENCH_AVATAR="$(scrape_from "$csrf_html" avatar)"
+    BENCH_CSS="$(scrape_from "$csrf_html" css)"
+    [[ -n "$BENCH_AVATAR" && -n "$BENCH_CSS" ]] ||
+        fail "$lane: room page carried no avatar or stylesheet link (avatar='$BENCH_AVATAR' css='$BENCH_CSS')"
     csrf_enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$csrf")"
     export BENCH_COOKIE="$cookie"
     export BENCH_CSRF="$csrf"
@@ -1409,7 +1490,7 @@ for lane in "${LANES[@]}"; do
         url="http://127.0.0.1:$port$path"
         if ep_is_post "$ep"; then
             case "$lane" in
-                rust|go) ;;
+                rust|go|tobi) ;;
                 *)
                     if [[ -z "$csrf" ]]; then
                         fail "$lane POST skipped: no CSRF token (a 422 is not a write measurement)"
@@ -1458,10 +1539,6 @@ for lane in "${LANES[@]}"; do
     done
 
     stop_lane "$port"
-    if (( wrote )); then
-        step "restaging the seed after $lane writes"
-        restore_seeded_db
-    fi
 
     # Cold start, after the load and with this lane's jar in hand. Redis
     # is NOT flushed between reps, deliberately: restarting a campfire
@@ -1473,6 +1550,16 @@ for lane in "${LANES[@]}"; do
     if (( HTTP_SUITE == 0 )); then
         step "cold start $lane (3 boots)"
         cold_start "$lane" "$port" "$LOG_DIR/jar-$lane.txt" 3
+    fi
+
+    # AFTER the cold start, not before it: the jar's session is a row in
+    # the database this lane signed in against, and the restaged seed has
+    # no such row, so every cold-start boot answered 302 to the login page
+    # until it timed out (10-07, the first nightly with POST in the default
+    # suite). The writes went to the POST route's room, not /rooms/1.
+    if (( wrote )); then
+        step "restaging the seed after $lane writes"
+        restore_seeded_db
     fi
 
     port=$(( port + 1 ))
@@ -1750,6 +1837,8 @@ nocache_ran = targets_ran.include?("rails-nocache")
 jvm_ran     = (targets_ran & %w[jruby truffleruby]).any?
 tr_ran      = targets_ran.include?("truffleruby")
 rails_tr_ran = targets_ran.include?("rails-truffleruby")
+one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
+tobi_ran    = targets_ran.include?("tobi")
 
 env["notes"] = [
   ("<code>rails</code> and the emit lanes BOTH serve campfire's message " \
@@ -1778,12 +1867,12 @@ env["notes"] = [
   "queue are both in-process: at more than one worker a broadcast reaches " \
   "only the subscribers sharing a process with the poster, so campfire " \
   "could not actually run this shape. Its deployable CRuby shape today is " \
-  "one worker, which is the <code>ruby-1p</code> row. Cross-worker pubsub " \
-  "would go behind the existing <code>Broadcasts.set_transport</code> " \
-  "seam and is not implemented. <code>spinel</code> needs none of this: " \
+  "one worker; one process serving every core (Falcon on Ractors, the " \
+  "shape <code>spinel</code> already has) is the planned replacement. " \
+  "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
   "the emit lane the WebSocket tier can measure at its full worker count.",
-  "The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
+  ("The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
   "ONE CPU rather than one process — CRuby needs a process per core " \
   "because of the GVL, while the binary is a single process either way " \
   "and varies its OS worker count instead (<code>SPINEL_WORKERS=1</code>). " \
@@ -1792,7 +1881,7 @@ env["notes"] = [
   "them fewer cores\". Read them per lane-family: <code>ruby</code> and " \
   "<code>spinel</code> differ from their <code>-1p</code> twins in worker " \
   "count and NOTHING else, but <code>rails-1p</code> also sheds Thruster " \
-  "and resque-pool, so its delta is not attributable to cores alone.",
+  "and resque-pool, so its delta is not attributable to cores alone." if one_p_ran),
   "Known omissions, stated rather than discovered: the WebSocket phase's " \
   "rails lane runs Puma with campfire's worker count and its allocator but " \
   "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
@@ -1804,6 +1893,15 @@ env["notes"] = [
   "process. Throughput is unaffected: the rails lanes pay for every " \
   "Redis round trip in their req/s. Counted for rails: Thruster, the " \
   "Puma master and its workers, resque-pool and its workers.",
+  ("<code>tobi</code> is <a href=\"https://github.com/tobi/campfire-once-ruby-ractor\">" \
+   "tobi/campfire-once-ruby-ractor</a>: campfire ported BY HAND to plain " \
+   "Ruby, no Rails, served by Falcon from worker Ractors in one process, " \
+   "with in-process job and cable Ractors. It is the measured answer to " \
+   "\"how fast can careful Ruby serve this app\", and the target for the " \
+   "emitted <code>ruby</code> lane. It reads the same seeded database. " \
+   "Its deliberate differences from Rails (header-only CSRF, so its " \
+   "pages carry no tokens; part-hashed ETags; fewer cookie writes) are " \
+   "listed in its README." if tobi_ran),
   "The CRuby fragment store is PER PROCESS, so the <code>ruby</code> " \
   "lane holds one cache per worker where <code>spinel</code> holds one " \
   "for the whole binary.",

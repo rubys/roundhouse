@@ -53,6 +53,7 @@ fn tiny_blog_round_trips() {
     let post_model = Model {
         name: ClassId(Symbol::from("Post")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("posts")),
         primary_key: None,
         attributes: Row { fields: attrs, rest: None },
@@ -96,6 +97,7 @@ fn tiny_blog_round_trips() {
     let posts_controller = Controller {
         name: ClassId(Symbol::from("PostsController")),
         parent: Some(ClassId(Symbol::from("ApplicationController"))),
+        parent_span: Default::default(),
         body: vec![roundhouse::ControllerBodyItem::Action {
             action: index_action,
             leading_comments: vec![],
@@ -117,6 +119,7 @@ fn tiny_blog_round_trips() {
         }],
         direct_helpers: vec![],
         redirects: vec![],
+        diagnostics: vec![],
     };
 
     let app = App {
@@ -147,7 +150,9 @@ fn tiny_blog_round_trips() {
         helper_method_index: std::collections::HashMap::new(),
         view_visible_controller_methods: std::collections::BTreeSet::new(),
         global_id_locate_models: std::collections::BTreeSet::new(),
+        global_id_locate_signed_models: std::collections::BTreeSet::new(),
         attachable_unsigned_models: Vec::new(),
+        pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),

@@ -78,3 +78,14 @@ fn a_block_that_yields_nothing_binds_nothing() {
     );
     assert!(r.is_empty(), "{r:?}");
 }
+
+#[test]
+fn an_instance_method_without_a_block_does_not_steal_the_class_side_block() {
+    // Same name on both sides: instance `with` has no block; class `with`
+    // yields Writer. An instance call must not bind from the class contract.
+    let r = receivers(
+        "class Writer\nend\n\nclass Registry\n  #: () { (Writer) -> void } -> void\n  def self.with; end\n\n  #: () -> void\n  def with; end\nend\n",
+        "Registry.new.with { |writer| writer.bogus }",
+    );
+    assert!(r.is_empty(), "stole class-side block: {r:?}");
+}

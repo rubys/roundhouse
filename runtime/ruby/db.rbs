@@ -14,6 +14,8 @@ module Db
   def self.close: () -> void
   def self.exec: (String) -> void
   def self.prepare: (String) -> Integer
+  # Reads with too many SQL shapes bypass the cache; finalize releases them.
+  def self.prepare_uncached: (String) -> Integer
   def self.step?: (Integer) -> bool
   def self.column_int: (Integer, Integer) -> Integer
   def self.column_float: (Integer, Integer) -> Float
@@ -32,9 +34,13 @@ module Db
   # gate emits parameterized queries. Keys the prepared-statement cache
   # on the static query shape instead of per-value. Every Db shim
   # (cruby-gem + spinel-FFI) implements these.
-  def self.bind_int: (Integer, Integer, Integer) -> void
+  def self.bind_int: (Integer, Integer, Integer?) -> void
   def self.bind_text: (Integer, Integer, String) -> void
-  def self.bind_bool: (Integer, Integer, bool) -> void
+  # A nullable boolean binds SQL NULL, never the false/0 representation.
+  def self.bind_bool: (Integer, Integer, bool?) -> void
+  def self.bind_int_opt: (Integer, Integer, Integer?) -> void
+  def self.bind_text_opt: (Integer, Integer, String?) -> void
+  def self.bind_bool_opt: (Integer, Integer, bool?) -> void
   def self.last_insert_rowid: () -> Integer
   def self.changes: () -> Integer
   # Query-log capture (issue #27) — records the SQL each prepare/exec

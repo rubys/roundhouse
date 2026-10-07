@@ -33,4 +33,23 @@ module ActionController
 
   class UnknownFormat < StandardError
   end
+
+  # Raised by app code to answer 404 for a path that a route matches
+  # but the app rejects (for example, a page number out of bounds).
+  # Rails maps it to 404 in `ActionDispatch::ExceptionWrapper`, and the
+  # ruby-family and spinel dispatchers rescue it beside
+  # `ActiveRecord::RecordNotFound`. The constructor has the signature
+  # of the Rails constructor: the message is required, and `failures`
+  # is optional. Rails fills `failures` from its router. App code
+  # passes an empty Array, so the RBS declares `Array[String]`.
+  class RoutingError < StandardError
+    def initialize(message, failures = [])
+      @failures = failures
+      super(message)
+    end
+
+    def failures
+      @failures
+    end
+  end
 end

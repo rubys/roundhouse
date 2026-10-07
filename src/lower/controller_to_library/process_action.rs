@@ -8,6 +8,7 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+use super::rewrites;
 use super::util::method_name_for_action;
 
 /// A statement in the synthesized before_action preamble — the filter
@@ -82,6 +83,35 @@ pub(super) struct WrapFilters {
     pub after: Vec<PreambleStmt>,
 }
 
+/// The dispatcher's parameter in a controller that reads `action_name`.
+const ROUTED_ACTION: &str = "routed_action";
+
+/// The expressions that the dispatcher runs in its own body: the filter
+/// blocks and lambdas, the `if:`/`unless:` lambdas, and the
+/// `rescue_from` handlers. Filter methods and actions are not here,
+/// because they run as methods of their own.
+pub(super) fn dispatcher_bodies<'a>(
+    preamble: &'a [PreambleStmt],
+    wraps: &'a WrapFilters,
+    rescues: &'a [RescueHandler],
+) -> Vec<&'a Expr> {
+    let filter_guards =
+        |f: &'a Filter| [&f.if_cond_expr, &f.unless_cond_expr].into_iter().flatten();
+    let mut out: Vec<&Expr> = Vec::new();
+    for stmt in preamble.iter().chain(&wraps.after) {
+        match stmt {
+            PreambleStmt::Call { filter, .. } => out.extend(filter_guards(filter)),
+            PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+                out.push(body);
+                out.extend([if_cond_expr, unless_cond_expr].into_iter().flatten());
+            }
+        }
+    }
+    out.extend(wraps.around.iter().flat_map(filter_guards));
+    out.extend(rescues.iter().map(|h| &h.body));
+    out
+}
+
 pub(super) fn synthesize_process_action(
     preamble: &[PreambleStmt],
     publics: &[Action],
@@ -90,13 +120,36 @@ pub(super) fn synthesize_process_action(
     deferred_tails: &std::collections::HashMap<Symbol, Expr>,
     rescues: &[RescueHandler],
     wraps: &WrapFilters,
+    reads_action_name: bool,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
+
+    // Rails' `action_name` is controller state, not a dispatcher local.
+    // Only a controller that reads it gets this call. The Rust emitter
+    // adds `assign_action_name` only to a controller that calls it, so
+    // the other controllers emit as before. That controller also gets
+    // a different parameter name. A filter body runs inside
+    // this method, so a parameter named `action_name` would hide the
+    // String reader from a bare `action_name` in the body.
+    let param = if reads_action_name { ROUTED_ACTION } else { "action_name" };
+    if reads_action_name {
+        // Explicit `self` so Rust emits `self.assign_action_name(...)`
+        // against the shim's `&mut self` method (a receiverless Send
+        // becomes a bare function call). Also feeds `mutates_self`
+        // propagation so `process_action` is not classified static.
+        stmts.push(syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::SelfRef)),
+            method: Symbol::from("assign_action_name"),
+            args: vec![var_ref(param)],
+            block: None,
+            parenthesized: true,
+        }));
+    }
 
     for p in preamble {
         let (stmt, halt_check) = match p {
             PreambleStmt::Call { filter, halt_check } => {
-                (filter_dispatch_stmt(filter), *halt_check)
+                (filter_dispatch_stmt(filter, param), *halt_check)
             }
             PreambleStmt::Block {
                 body,
@@ -115,6 +168,7 @@ pub(super) fn synthesize_process_action(
                     unless_cond,
                     if_cond_expr,
                     unless_cond_expr,
+                    param,
                 ) {
                     Some(cond) => syn(ExprNode::If {
                         cond,
@@ -139,7 +193,7 @@ pub(super) fn synthesize_process_action(
         // is what Rails' skipped callback does. lobsters'
         // `track_story_reads` loads the story and the read ribbon the
         // story page renders, then bumps the ribbon after it.
-        let mut dispatch = case_dispatch(publics, inherited, deferred_tails);
+        let mut dispatch = case_dispatch(publics, inherited, deferred_tails, param);
         for f in wraps.around.iter().rev() {
             let wrapped = syn(ExprNode::Send {
                 recv: None,
@@ -154,7 +208,7 @@ pub(super) fn synthesize_process_action(
                 })),
                 parenthesized: false,
             });
-            dispatch = match filter_cond(f) {
+            dispatch = match filter_cond(f, param) {
                 Some(cond) => syn(ExprNode::If { cond, then_branch: wrapped, else_branch: dispatch }),
                 None => wrapped,
             };
@@ -164,7 +218,7 @@ pub(super) fn synthesize_process_action(
         // returned above; an action that raised is in the rescue).
         for a in wraps.after.iter().rev() {
             stmts.push(match a {
-                PreambleStmt::Call { filter, .. } => filter_dispatch_stmt(filter),
+                PreambleStmt::Call { filter, .. } => filter_dispatch_stmt(filter, param),
                 PreambleStmt::Block {
                     body,
                     only,
@@ -181,6 +235,7 @@ pub(super) fn synthesize_process_action(
                     unless_cond,
                     if_cond_expr,
                     unless_cond_expr,
+                    param,
                 ) {
                     Some(cond) => syn(ExprNode::If {
                         cond,
@@ -232,7 +287,16 @@ pub(super) fn synthesize_process_action(
         body.inherit_span(first.body.span);
     }
 
-    let action_name_param = Symbol::from("action_name");
+    // Action bodies already run `rewrite_request_format` through
+    // `lower_action_body`. Everything *spliced into* this dispatcher —
+    // filter `if:`/`unless:` lambdas, block-form filter bodies
+    // (`before_action -> { … }`), and `rescue_from` handlers — skips
+    // that pipeline. One pass over the finished body closes the class
+    // of gap (map_expr walks If / Seq / Lambda / BeginRescue). The
+    // transform is idempotent on already-rewritten action-arm Sends.
+    body = rewrites::rewrite_request_format(&body);
+
+    let param_sym = Symbol::from(param);
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -240,21 +304,22 @@ pub(super) fn synthesize_process_action(
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(action_name_param.clone())],
+        params: vec![Param::positional(param_sym.clone())],
         body,
         // process_action dispatches to the named action and returns
         // whatever it returns; concretely each action body terminates
         // in render/redirect (returns Nil), so dispatch returns Nil.
         signature: Some(crate::lower::typing::fn_sig(
-            vec![(action_name_param, Ty::Sym)],
+            vec![(param_sym, Ty::Sym)],
             Ty::Nil,
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(enclosing_class),
         kind: AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        // True when the dispatcher writes `action_name` via the shim.
+        mutates_self: reads_action_name,
+        block_param: None,
     }
 }
 
@@ -281,8 +346,9 @@ pub(super) fn halt_if_performed() -> Expr {
 }
 
 /// `set_X if [:a, :b, ...].include?(action_name)` — or unconditionally
-/// (no filter `only:` / `except:`) just `set_X`.
-fn filter_dispatch_stmt(f: &Filter) -> Expr {
+/// (no filter `only:` / `except:`) just `set_X`. `param` names the
+/// dispatcher parameter that holds the action Symbol.
+fn filter_dispatch_stmt(f: &Filter, param: &str) -> Expr {
     let target_call = syn(ExprNode::Send {
         recv: None,
         method: f.target.clone(),
@@ -290,7 +356,7 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
         block: None,
         parenthesized: false,
     });
-    match filter_cond(f) {
+    match filter_cond(f, param) {
         Some(cond) => syn(ExprNode::If {
             cond,
             then_branch: target_call,
@@ -301,7 +367,7 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
 }
 
 /// The guard a filter runs under, `None` when it always runs.
-fn filter_cond(f: &Filter) -> Option<Expr> {
+fn filter_cond(f: &Filter, param: &str) -> Option<Expr> {
     cond_from_guards(
         &f.only,
         &f.except,
@@ -309,6 +375,7 @@ fn filter_cond(f: &Filter) -> Option<Expr> {
         &f.unless_cond,
         &f.if_cond_expr,
         &f.unless_cond_expr,
+        param,
     )
 }
 
@@ -342,10 +409,11 @@ fn cond_from_guards(
     unless_cond: &Option<Symbol>,
     if_cond_expr: &Option<Expr>,
     unless_cond_expr: &Option<Expr>,
+    param: &str,
 ) -> Option<Expr> {
     let mut conds: Vec<Expr> = Vec::new();
     if !(only.is_empty() && except.is_empty()) {
-        conds.push(include_check(only, except));
+        conds.push(include_check(only, except, param));
     }
     let predicate = |name: &Symbol| {
         syn(ExprNode::Send {
@@ -371,6 +439,11 @@ fn cond_from_guards(
     if let Some(name) = unless_cond {
         conds.push(negate(predicate(name)));
     }
+    // `request.format.<pred>?` in these exprs is rewritten once over
+    // the finished `process_action` body in `synthesize_process_action`
+    // (same helper action bodies get via `lower_action_body`). Do not
+    // re-apply here — that would special-case only the guard combiner
+    // and leave block-form filter / rescue bodies still raw.
     if let Some(c) = if_cond_expr {
         conds.push(c.clone());
     }
@@ -390,7 +463,7 @@ fn cond_from_guards(
 /// `[:a, :b].include?(action_name)` — or for `except:`,
 /// `![:a, :b].include?(action_name)` (we pass the list through `not`
 /// upstream; this helper just builds the include? form).
-fn include_check(only: &[Symbol], except: &[Symbol]) -> Expr {
+fn include_check(only: &[Symbol], except: &[Symbol], param: &str) -> Expr {
     let (syms, negate) = if !only.is_empty() {
         (only, false)
     } else {
@@ -403,7 +476,7 @@ fn include_check(only: &[Symbol], except: &[Symbol]) -> Expr {
     let include = syn(ExprNode::Send {
         recv: Some(array),
         method: Symbol::from("include?"),
-        args: vec![var_ref("action_name")],
+        args: vec![var_ref(param)],
         block: None,
         parenthesized: true,
     });
@@ -445,6 +518,7 @@ fn case_dispatch(
     publics: &[Action],
     inherited: &[Symbol],
     deferred_tails: &std::collections::HashMap<Symbol, Expr>,
+    param: &str,
 ) -> Expr {
     // The default render for an action whose body must not carry it —
     // see `actions_reached_by_super`. Already lowered: it was
@@ -486,7 +560,7 @@ fn case_dispatch(
         .collect();
     arms.extend(inherited.iter().map(|n| arm_for(n.as_str(), None)));
     syn(ExprNode::Case {
-        scrutinee: var_ref("action_name"),
+        scrutinee: var_ref(param),
         arms,
     })
 }

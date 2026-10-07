@@ -16,6 +16,11 @@ pub(super) fn is_partial_view_name(name: &Symbol) -> bool {
     name.as_str().split('/').any(|seg| seg.starts_with('_'))
 }
 
+/// Layout templates live under `layouts/` (`layouts/application`).
+pub(super) fn is_layout_view_name(name: &Symbol) -> bool {
+    name.as_str().starts_with("layouts/")
+}
+
 /// Walk a view body collecting `render ...` call sites. For each recognized
 /// shape, determine the target partial's view name and the locals the render
 /// passes into it, merging into `out`.

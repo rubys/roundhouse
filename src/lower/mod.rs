@@ -67,6 +67,7 @@ mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
+pub mod generates_token_for;
 pub mod spliced_concern_bodies;
 pub mod unported_rails_subclasses;
 pub mod pathname_ctor;
@@ -154,6 +155,7 @@ pub mod send_dispatch;
 pub mod relation_counted_terminal;
 pub(crate) mod secure_password;
 pub mod attached;
+pub mod attachment_model;
 pub mod attached_url;
 pub mod send_file;
 pub mod helper_kwargs;
@@ -162,6 +164,7 @@ pub mod column_ops;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
 pub mod time_current;
@@ -175,6 +178,7 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
+pub mod deferred_preload;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -1478,9 +1482,10 @@ pub use test_module_to_library::{
 };
 pub use ty_coerce_insertion::{insert_ty_coercions, insert_ty_coercions_with_extras};
 pub use view_to_library::{
-    ViewLowerCtx, flatten_lcs_to_functions, lower_view_to_library_class,
-    lower_views_to_library_classes, lower_views_to_library_functions,
-    preliminary_view_classes, type_view_library_classes,
+    MAX_UNCACHED_COLLECTION_LENGTH, ViewLowerCtx, flatten_lcs_to_functions,
+    lower_view_to_library_class, lower_views_to_library_classes,
+    lower_views_to_library_functions, preliminary_view_classes,
+    type_view_library_classes,
 };
 pub use jbuilder_to_library::{
     jbuilder_signature_classes, lower_jbuilder_to_library_class, lower_jbuilder_to_library_classes,
@@ -1557,6 +1562,7 @@ pub fn module_funcs_to_library_class(
         name: ClassId(crate::ident::Symbol::from(name)),
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),

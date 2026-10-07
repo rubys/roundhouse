@@ -85,6 +85,9 @@ pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
         _ if is_time_operand(lhs_ty) || is_time_operand(rhs_ty) => {
             SubCase::Unknown
         }
+        // Date - Integer (day shift) and Date - Date (Rational day
+        // count) are valid Ruby; lowering grounds the Integer form.
+        (Ty::Date, Ty::Int) | (Ty::Date, Ty::Date) => SubCase::Unknown,
         _ => SubCase::Incompatible,
     }
 }

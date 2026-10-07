@@ -791,6 +791,9 @@ pub(super) fn has_str_coercion(e: &Expr) -> bool {
 
 /// Render a Rust expression node after shared complete-call primitive classification.
 fn emit_expr_inner(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Rust, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Rust, emit_expr) {
         return s;
     }

@@ -1,4 +1,4 @@
-# Raw-SQL surface of `Model.connection` / `ActiveRecord::Base.connection`.
+# Ruby-family model surfaces: raw-SQL connections and request-key finders.
 #
 # Rails hands back the adapter itself here; this runtime hands back a
 # thin stateless facade over the per-target `Db` primitive shim — just
@@ -12,6 +12,121 @@
 # columns), so a typed bag is the honest contract rather than an
 # avoidable erasure.
 module ActiveRecord
+  # Integer finder inputs must be validated before entering a typed adapter.
+  # Keep validity separate from the Integer payload: every signed 64-bit
+  # value, including INT64_MIN, is a valid payload, never a nil sentinel.
+  # The current SQLite adapter has signed 64-bit integer keys even for
+  # schema.rb `id: :integer`; narrower adapter widths need their own metadata.
+  class IntegerKeyCast
+    attr_reader :valid, :value
+
+    # Validity is separate so every signed Integer can remain a payload.
+    def initialize(valid, value)
+      @valid = valid
+      @value = value
+    end
+
+    # Preserve String keys; ordinary scalar inputs use their decimal text.
+    def self.input_text(id)
+      if id.nil?
+        ""
+      elsif id.is_a?(String)
+        id
+      else
+        id.to_s
+      end
+    end
+
+    # Apply Rails decimal-prefix rules and the adapter range before to_i.
+    def self.parse(id)
+      # An Integer already has a native representation. Keep it intact,
+      # including MIN, rather than round-tripping through decimal formatting.
+      if id.is_a?(Integer)
+        return IntegerKeyCast.new(false, 0) if id < -9223372036854775808
+        return IntegerKeyCast.new(false, 0) if id > 9223372036854775807
+        return IntegerKeyCast.new(true, id)
+      elsif id.is_a?(Float)
+        # Numeric inputs truncate their VALUE, not a scientific-notation
+        # String prefix. Use an exclusive 2**63 upper bound: Float(MAX)
+        # rounds up to 2**63. These comparisons also reject NaN/infinities
+        # before to_i, while preserving the exactly representable MIN.
+        return IntegerKeyCast.new(false, 0) unless id >= -9223372036854775808.0 && id < 9223372036854775808.0
+        return IntegerKeyCast.new(true, id.to_i)
+      end
+      text = input_text(id)
+      i = number_start(text)
+      negative = text[i, 1].to_s == "-"
+      if negative || text[i, 1].to_s == "+"
+        i += 1
+      end
+      digits = +""
+      found = false
+      while i < text.length
+        char = text[i, 1].to_s
+        if digit_value(char) >= 0
+          digits = digits + char unless digits.empty? && char == "0"
+          return IntegerKeyCast.new(false, 0) if digits.length > 19
+          found = true
+          i += 1
+        elsif char == "_" && found && digit_value(text[i + 1, 1].to_s) >= 0
+          # Ruby's decimal to_i accepts single underscores BETWEEN digits.
+          # "1_0" is 10; "1__0" stops at the first underscore and is 1.
+          i += 1
+        else
+          break
+        end
+      end
+      return IntegerKeyCast.new(false, 0) unless found
+      digits = "0" if digits.empty?
+      limit = negative ? "9223372036854775808" : "9223372036854775807"
+      return IntegerKeyCast.new(false, 0) if exceeds_limit(digits, limit)
+      # Apply the sign BEFORE conversion: +2**63 is not representable,
+      # while -2**63 is. Native to_i must never see an overflowing input.
+      signed = negative ? "-" + digits : digits
+      IntegerKeyCast.new(true, signed.to_i)
+    end
+
+    # Locate the optional sign/digits after Ruby-compatible ASCII whitespace.
+    def self.number_start(text)
+      i = 0
+      while i < text.length
+        char = text[i, 1].to_s
+        if char != " " && char != "\t" && char != "\n" &&
+           char != "\r" && char != "\v" && char != "\f"
+          return i
+        end
+        i += 1
+      end
+      i
+    end
+
+    # Decimal ASCII digit, or -1; Unicode numeric characters are not IDs.
+    def self.digit_value(char)
+      digits = "0123456789"
+      i = 0
+      while i < digits.length
+        return i if digits[i, 1].to_s == char
+        i += 1
+      end
+      -1
+    end
+
+    # Compare normalized unsigned text without overflowing a native Integer.
+    def self.exceeds_limit(digits, limit)
+      return true if digits.length > limit.length
+      return false if digits.length < limit.length
+      i = 0
+      while i < digits.length
+        value = digit_value(digits[i, 1].to_s)
+        bound = digit_value(limit[i, 1].to_s)
+        return true if value > bound
+        return false if value < bound
+        i += 1
+      end
+      false
+    end
+  end
+
   # Row set from `Connection#execute` / `#exec_query`. Mirrors the
   # slice of `ActiveRecord::Result` the corpus uses: `to_a`, `first`,
   # `each`, `rows`.
@@ -121,7 +236,7 @@ module ActiveRecord
     end
   end
 
-  # The Base half of the raw-SQL surface. Lives HERE (not base.rb)
+  # The Base half of the Ruby-family model surface. Lives HERE (not base.rb)
   # deliberately: base.rb is transpiled into every strict target's
   # runtime via the runtime_loader tables, and this surface uses
   # begin/rescue (which several emitters don't lower yet) and the
@@ -129,6 +244,70 @@ module ActiveRecord
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
   class Base
+    # Deferred `includes`/`preload` (ActiveRecord::PendingPreload): the
+    # Relation that loaded this record hands it the group's pending
+    # preload, and the first association read on any record of the group
+    # runs it. Every emitted association reader (and `<assoc>_loaded?`)
+    # starts with `_await_preload` (lower::deferred_preload); on a record
+    # with nothing pending it is one nil check.
+    def _pend_preload(pending)
+      @__pending_preload = pending
+      nil
+    end
+
+    def _await_preload
+      pending = @__pending_preload
+      return nil if pending.nil?
+      @__pending_preload = nil
+      pending.run
+      nil
+    end
+
+    # Keep public input intact until schema-selected normalization, then raise
+    # the same RecordNotFound for an invalid key or an absent record.
+    # Reject nil before a key-typed adapter can coerce it to a real
+    # zero/empty-string key.
+    def self.find(id)
+      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if id.nil?
+      result = _find_primary_key_input(id)
+      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if result.nil?
+      result
+    end
+
+    # Schema-generated models override this with one normalization path
+    # before their scalar adapter. The fallback retains the legacy Ruby
+    # contract for hand-written subclasses using the generic adapter.
+    def self._find_primary_key_input(id)
+      key = _cast_primary_key(id)
+      return nil if key.nil?
+      _adapter_find_by_id(key)
+    end
+
+    # Relation and legacy-adapter finders use this shared conversion.
+    # The integer parser never converts an out-of-range decimal string.
+    def self._cast_primary_key(id)
+      return nil if id.nil?
+      return IntegerKeyCast.input_text(id) if _string_primary_key
+      cast = IntegerKeyCast.parse(id)
+      cast.valid ? cast.value : nil
+    end
+
+    # Reject nil before a key-typed adapter can coerce it. Generated
+    # models override `_exists_primary_key_input` with schema-selected
+    # dispatch (same split as find) so Spinel never compiles String into
+    # an Integer adapter slot.
+    def self.exists?(id)
+      return false if id.nil?
+      _exists_primary_key_input(id)
+    end
+
+    # Fallback for hand-written subclasses using the generic adapter.
+    def self._exists_primary_key_input(id)
+      key = _cast_primary_key(id)
+      return false if key.nil?
+      _adapter_exists_by_id?(key)
+    end
+
     # Stateless facade — every member delegates straight to `Db`, so a
     # fresh instance per call is cheap and dodges class-ivar state.
     def self.connection
@@ -373,6 +552,13 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).where(conditions.to_h)
     end
 
+    # Model Hash finders use the relation's NULL / IN predicates too.
+    # `.to_h` matches `where` above: Hash is a no-op (nil / Array values
+    # survive); non-Hash inputs raise rather than reach Relation's SQL path.
+    def self.find_by(conditions)
+      ActiveRecord::Relation.new(self).find_by(conditions.to_h)
+    end
+
     # Rails-shape `all` fallback, same story as `where` above: a lazy
     # Relation so refiner chains the lowerers left dynamic
     # (`Category.all.order("category asc, tags.tag asc")…` on lobsters'
@@ -439,17 +625,6 @@ module ActiveRecord
     # their models always carry the emitted override.
     def self._hydrate_all(sql)
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
-    end
-
-    # Finder inputs cast according to the schema's primary-key type,
-    # not the caller's Ruby type. This conversion belongs beside the
-    # ruby-family Relation; strict runtimes don't ship that class.
-    def self._cast_primary_key(id)
-      return id.to_s if _string_primary_key
-      # ActiveModel::Type::Integer serializes nonnumeric Strings as nil,
-      # not zero. Numeric prefixes ("0x", "31-slug") still use to_i.
-      return nil if id.is_a?(String) && !id.match?(/\A\s*[+-]?\d/)
-      id.to_i
     end
 
     # Rails' `update_attribute`: one writer, then save WITHOUT

@@ -640,6 +640,13 @@ pub(super) fn try_recv_typed_method(
                     }} }}"
             ));
         }
+        // Session/Flash `#[]` / `#get` rust-emit as `Option<T>` even
+        // when IR types the result as Untyped. `nil?` must use
+        // `.is_none()` (the Option API), not `.is_null()` (Value).
+        // Same split as `ruby_to_s_emit` for those recvs.
+        if method == "nil?" && args.is_empty() && rust_emits_session_or_flash_get(r) {
+            return Some(format!("{}.is_none()", emit_expr(r)));
+        }
         // `value.nil?` on a receiver that rust emits as
         // `serde_json::Value` — `.is_null()` (not `.is_none`, which
         // is the Option method the generic `nil?` bridge below
@@ -725,6 +732,28 @@ pub(super) fn try_recv_typed_method(
             }
         }
     None
+}
+
+/// Session / Flash `#[]` and `#get` rust-emit as `Option<T>` via the
+/// hand-written `.get` shim. IR still types those reads as Untyped.
+fn rust_emits_session_or_flash_get(recv: &Expr) -> bool {
+    let ExprNode::Send {
+        method,
+        recv: Some(inner),
+        ..
+    } = &*recv.node
+    else {
+        return false;
+    };
+    if !matches!(method.as_str(), "[]" | "get") {
+        return false;
+    }
+    let Some(crate::ty::Ty::Class { id, .. }) = inner.ty.as_ref().map(peel_nil) else {
+        return false;
+    };
+    let name = id.0.as_str();
+    let leaf = name.rsplit("::").next().unwrap_or(name);
+    matches!(leaf, "Session" | "Flash")
 }
 
 /// True when the receiver is a map whose values render as

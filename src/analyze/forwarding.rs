@@ -324,6 +324,15 @@ fn contract_error(
     contracts: &SourceContractIndex<'_>,
 ) -> Option<&'static str> {
     let Some(resolved) = resolved else {
+        // `super(...)` with no in-app ancestor — Campfire's
+        // `WebPush::Connections::Stages` is `extend`ed onto a
+        // `Net::HTTP` instance, so `super` lands on stdlib. We cannot
+        // verify that ABI from app source; allowing the forward is the
+        // honest alternative to residualizing a pattern RH Ruby/Spinel
+        // already emit and run.
+        if matches!(&*call.node, ExprNode::Super { .. }) {
+            return None;
+        }
         return Some("forwarding destination's declaration cannot be verified");
     };
     if let Some(error) = declaration_error(resolved) {

@@ -115,6 +115,104 @@ class RouterTest < Minitest::Test
     assert_equal :first, m.action
   end
 
+  # A capture follows path escaping, so literal plus is not a form-space.
+  def test_path_captures_decode_percent_escapes_once_and_preserve_plus
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/+%2B%20%252F")
+    raise "expected match" if h.nil?
+    assert_equal "++ %2F", h["value"]
+  end
+
+  # Literal UTF-8 and escaped multibyte characters must share the same output.
+  def test_path_captures_decode_utf8_and_preserve_literal_unicode
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/café%20%E6%9D%B1%E4%BA%AC%F0%9F%8E%89")
+    raise "expected match" if h.nil?
+    assert_equal "café 東京🎉", h["value"]
+  end
+
+  # Percent-encoded invalid sequences are portable to every target String.
+  # Raw binary transport is exercised separately by Ruby/Spinel/Elixir probes.
+  def test_invalid_utf8_is_rejected_after_byte_decoding
+    ["%FF", "%E0%80%AF", "%ED%A0%80", "%F4%90%80%80", "%C2"].each do |segment|
+      assert_raises(ArgumentError) do
+        ActionDispatch::Router.match_pattern("/echo/:value", "/echo/" + segment)
+      end
+    end
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/%25FF")
+    raise "expected match" if h.nil?
+    assert_equal "%FF", h["value"]
+  end
+
+  # Bounds rejection cannot mistake the valid zero byte for a missing value.
+  def test_checked_byte_access_preserves_zero_and_rejects_missing_offsets
+    zero_byte = ActionDispatch::Router.capture_byte([0, 255], 0)
+    maximum_byte = ActionDispatch::Router.capture_byte([0, 255], 1)
+    assert_equal 0, zero_byte
+    assert_equal 255, maximum_byte
+    assert_raises(ArgumentError) { ActionDispatch::Router.capture_byte([0], -1) }
+    assert_raises(ArgumentError) { ActionDispatch::Router.capture_byte([0], 1) }
+  end
+
+  # NUL is a real capture byte, not a terminator or a reason to decode twice.
+  def test_nul_capture_preserves_bytes_and_decodes_once
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/%00")
+    raise "expected match" if h.nil?
+    assert_equal "\0", h["value"]
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/%2500")
+    raise "expected match" if h.nil?
+    assert_equal "%00", h["value"]
+  end
+
+  # Escaped separators belong to a matched capture, including glob captures.
+  def test_prefixed_and_glob_captures_decode_after_segmentation
+    h = ActionDispatch::Router.match_pattern("/~:name", "/~alice%2Bbob")
+    raise "expected match" if h.nil?
+    assert_equal "alice+bob", h["name"]
+    h = ActionDispatch::Router.match_pattern("/files/*name", "/files/dir%2finside/file%20name")
+    raise "expected match" if h.nil?
+    assert_equal "dir/inside/file name", h["name"]
+  end
+
+  # An escaped dot cannot retrospectively change the route format suffix.
+  def test_encoded_dot_is_part_of_the_capture_not_a_format
+    table = [ActionDispatch::Router::Route.new("GET", "/echo/:value", :echo_controller, :show)]
+    m = ActionDispatch::Router.match("GET", "/echo/1%2Ejson", table)
+    raise "expected match" if m.nil?
+    assert_equal "1.json", m.path_params["value"]
+    assert_equal false, m.path_params.key?("format")
+  end
+
+  # Decoding cannot turn a different static path or failed constraint into a match.
+  def test_static_segments_and_constraints_match_before_decoding
+    assert_nil ActionDispatch::Router.match_pattern("/echo/:value", "/%65cho/1")
+    assert_nil ActionDispatch::Router.match_pattern("/echo/:value", "/echo/%31", "value")
+  end
+
+  # A rejected route must not interpret bytes that belong to another candidate.
+  def test_invalid_encoding_in_a_nonmatching_pattern_does_not_raise
+    assert_nil ActionDispatch::Router.match_pattern("/echo/:value/edit", "/echo/%FF/other")
+  end
+
+  # A later invalid capture cannot expose a partially decoded match. A new
+  # request must still decode both captures and the independent format key.
+  def test_multiple_captures_remain_atomic_after_invalid_encoding
+    assert_raises(ArgumentError) do
+      ActionDispatch::Router.match_pattern("/pair/:first/:second", "/pair/good%2B/%FF")
+    end
+    table = [ActionDispatch::Router::Route.new("GET", "/pair/:first/:second", :echo_controller, :show)]
+    m = ActionDispatch::Router.match("GET", "/pair/one%2B/two%20words.json", table)
+    raise "expected match" if m.nil?
+    assert_equal "one+", m.path_params["first"]
+    assert_equal "two words", m.path_params["second"]
+    assert_equal "json", m.path_params["format"]
+  end
+
+  # Incomplete or nonhex escapes remain literal path bytes, as in Rails.
+  def test_malformed_percent_syntax_is_retained
+    h = ActionDispatch::Router.match_pattern("/echo/:value", "/echo/%GG%2%")
+    raise "expected match" if h.nil?
+    assert_equal "%GG%2%", h["value"]
+  end
+
   # ── match_pattern ──
   # Lower-level helper called by match. Tested for parity with
   # the public surface so changes to one half can't drift from
@@ -280,5 +378,25 @@ class RouterTest < Minitest::Test
     assert_equal "dir/moon", m.path_params["filename"]
     assert_equal "jpg", m.path_params["format"]
     assert_nil ActionDispatch::Router.match("GET", "/rails/active_storage/disk/abc", table)
+  end
+  # Direct decode_capture checks (match goes through decode_captures).
+  # UTF-8 sequences decode; malformed `%` syntax stays literal.
+  def test_a_capture_is_percent_decoded
+    assert_equal "a b+c", ActionDispatch::Router.decode_capture("a%20b+c")
+    assert_equal "a/b?#", ActionDispatch::Router.decode_capture("a%2fb%3F%23")
+    assert_equal "100%", ActionDispatch::Router.decode_capture("100%25")
+    assert_equal "bad%zz%2", ActionDispatch::Router.decode_capture("bad%zz%2")
+    assert_equal "josé", ActionDispatch::Router.decode_capture("jos%C3%A9")
+    assert_equal "plain", ActionDispatch::Router.decode_capture("plain")
+  end
+
+  # The inverse a routing redirect's `%{name}` needs: Rails' PATH set
+  # escaped over the decoded capture (including UTF-8 bytes as `%XX`).
+  def test_escape_path_reverses_a_decoded_capture
+    assert_equal "a%23top%3Fx%20y/b:c@d!e%5Bf%5D", ActionDispatch::Router.escape_path("a#top?x y/b:c@d!e[f]")
+    assert_equal "100%25", ActionDispatch::Router.escape_path("100%")
+    assert_equal "jos%C3%A9", ActionDispatch::Router.escape_path("josé")
+    assert_equal "x%0Ay", ActionDispatch::Router.escape_path("x\ny")
+    assert_equal "a/b~", ActionDispatch::Router.escape_path("a/b~")
   end
 end

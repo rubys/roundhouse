@@ -150,12 +150,31 @@ The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
 `root`, `resources`/`resource` (with `only:`/`except:`/`as:`/
 `controller:`/`param:`/`path:`, symbol or string spellings alike, as Rails
 `to_sym`s them), `namespace`/`scope`,
-`member`/`collection`/`constraints` blocks, `mount`, `draw(:name)`
+`member`/`collection`/`constraints` blocks, `draw(:name)`
 split files under `config/routes/`, and options like `defaults:`,
 `on:`, and `via:` — `src/ingest/routes.rs` is the authority on the
-current surface. A `redirect(...)` target — on a verb or on `root` —
-is not modeled: the route is dropped with a `route dropped:` ledger
-line, the same contract as `mount`.
+current surface. Literal `redirect("/path")` targets on a verb or `root`
+are synthesized into controller actions. Some block redirects are synthesized
+too: `redirect_block` accepts bodies that pass its string-expression check,
+including string literals and interpolations, conditionals whose branches
+pass the check, sequences whose final expression passes it, and selected
+method calls. It checks for at most two required block parameters, named
+`_`, `params`, `request`, or `req`. Other dynamic targets outside this
+recognizer remain a separate known gap: they are dropped and reported only
+in survey mode. The mount diagnostic change does not broaden that boundary;
+recognizing or diagnosing those targets needs its own regressions.
+
+Engine/Rack `mount` entries are omitted with a located error diagnostic
+carried on `RouteTable`, so normal analysis can report them beside other
+errors. Strict emission refuses those errors; `--allow-unsupported` can
+write the incomplete project. Survey mode additionally records the gap
+without clearing the error. The fixed runtime's top-level
+`mount ActionCable.server => "/cable"` (or `at: "/cable"`) is preserved;
+custom helper names (`as:`), paths, and enclosing route wrappers remain
+unsupported because the fixed runtime does not model them.
+The existing CRuby/JRuby pruning policy still omits Cable from apps without
+a live broadcast surface; the mount exemption does not change that policy.
+
 
 **Downstream consumers (analyze/lower):**
 

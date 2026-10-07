@@ -171,6 +171,12 @@ pub struct App {
     /// where the finder is spelled as a literal constant.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub global_id_locate_models: BTreeSet<Symbol>,
+    /// Model class names a `GlobalID::Locator.locate_signed(sgid,
+    /// only: K, for:)` call site names. Same monomorphize reason as
+    /// [`Self::global_id_locate_models`]; the generated entry point is
+    /// `locate_signed_<model>(sgid, purpose)`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub global_id_locate_signed_models: BTreeSet<Symbol>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -183,6 +189,12 @@ pub struct App {
     /// as it is in stock Rails.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachable_unsigned_models: Vec<Symbol>,
+    /// Pending `on_load(:active_storage_attachment)` includes-only
+    /// reopens: `(model_name, module_paths)`. File order can visit the
+    /// load-hook file before the model; ingest applies these once
+    /// `app.models` is complete, just before the concern splice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attachment_on_load: Vec<(Symbol, Vec<Symbol>)>,
     /// Modules `include`d inside `ActiveSupport.on_load(:active_record)`
     /// that provide class-method macros. Mixin instance methods are not
     /// installed. Expansion treats these as an explicit provider origin
@@ -706,7 +718,9 @@ impl App {
             view_visible_controller_methods: BTreeSet::new(),
             generated_helper_methods: BTreeMap::new(),
             global_id_locate_models: BTreeSet::new(),
+            global_id_locate_signed_models: BTreeSet::new(),
             attachable_unsigned_models: Vec::new(),
+            pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),

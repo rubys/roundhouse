@@ -45,6 +45,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         name: crate::ident::ClassId(crate::ident::Symbol::from("__emit_module__")),
         is_module: false,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods: std::mem::take(&mut colored),
         nullable_columns: Vec::new(),
@@ -145,7 +146,15 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
                 // lowerings call it through a typed receiver
                 // (`parent.dom_prefix()`), and a static override of an
                 // instance contract strands that call site.
-                && !matches!(m.name.as_str(), "dom_prefix" | "dom_record_key" | "to_param")
+                // Literal controller identity methods still implement an instance API.
+                && !matches!(
+                    m.name.as_str(),
+                    "dom_prefix"
+                        | "dom_record_key"
+                        | "to_param"
+                        | "controller_name"
+                        | "controller_path"
+                )
         })
         .map(|m| m.name.as_str().to_string())
         .collect();
@@ -1075,6 +1084,36 @@ end
         assert!(
             !body.contains("method_override_input(opts"),
             "gradual opts must not cross method_override_input:\n{body}"
+        );
+    }
+
+    /// Session `#[]` rust-emits `Option<String>`. `verified_request?`
+    /// must use `.is_none()` / `unwrap_or_default`, not Value `.is_null()`.
+    #[test]
+    fn verified_request_session_nil_uses_is_none() {
+        let src = emit_action_controller();
+        let secret = method_body(&src, "csrf_session_secret");
+        assert!(
+            secret.contains("is_none()"),
+            "session[] nil? should be Option::is_none:\n{secret}"
+        );
+        assert!(
+            !secret.contains("is_null()"),
+            "session[] nil? must not emit Value::is_null:\n{secret}"
+        );
+        assert!(
+            secret.contains("unwrap_or_default()"),
+            "session[] to_s should be Option unwrap_or_default:\n{secret}"
+        );
+        let pred = method_body(&src, "verified_request_pred");
+        assert!(
+            pred.contains("csrf_token_valid_pred")
+                && (pred.contains("&(") || pred.contains("&self.csrf_session_secret") || pred.contains("&csrf_session_secret")),
+            "csrf_token_valid? String args must borrow as &str:\n{pred}"
+        );
+        assert!(
+            !pred.contains("csrf_token_valid_pred") || !pred.contains("expected.clone()"),
+            "owned expected.clone() is E0308 against &str:\n{pred}"
         );
     }
 

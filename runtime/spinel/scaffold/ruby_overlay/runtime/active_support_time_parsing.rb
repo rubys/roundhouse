@@ -43,6 +43,10 @@ module ActiveSupport
     date.iso8601
   end
 
+  # Date calendar helpers (`date_*`) live only in
+  # `active_support_date_parsing.rb` (date-gated package). Do not
+  # redefine them here — CRuby boot re-injects that file after overlay.
+
   # Rails zone name → IANA identifier (the ActiveSupport::TimeZone::
   # MAPPING subset corpora have needed; extend as apps demand). Names
   # not listed pass through unchanged — a valid IANA string works

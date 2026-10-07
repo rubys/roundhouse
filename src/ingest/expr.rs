@@ -377,7 +377,10 @@ fn takes_trailing_ascription(node: &Node<'_>) -> bool {
         || node.as_yield_node().is_some()
 }
 
-fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
+/// Strict expression ingest: never substitutes survey-mode `nil`.
+/// Call sites that claim a default or other recovered value use this so
+/// a survey recovery cannot be mistaken for a successful parse.
+pub(super) fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     if !takes_trailing_ascription(node) {
         return ingest_expr_node(node, file);
     }

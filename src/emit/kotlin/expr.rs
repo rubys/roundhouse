@@ -841,6 +841,9 @@ fn children(e: &Expr) -> Vec<&Expr> {
 
 /// Render a Kotlin value expression after shared primitive and string-builder selection.
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Kotlin, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Kotlin, emit_expr) {
         return s;
     }
@@ -1741,6 +1744,27 @@ fn emit_send(
             "start_with?" => return format!("{}.startsWith({})", emit_expr(r), args_s[0]),
             "end_with?" => return format!("{}.endsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.contains({})", emit_expr(r), args_s[0]),
+            // `String#match?(re)` → `re.containsMatchIn(s)`. Kotlin's
+            // `Regex` is the receiver; a bare `matchPred` on String
+            // does not exist (same flip TypeScript/`re.test` uses).
+            "match?" => {
+                // Require Regexp ty or a regex literal — not bare Const
+                // shape (a String-valued PATTERN must not flip).
+                let arg_is_regexp = matches!(
+                    args[0].ty.as_ref(),
+                    Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                ) || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Regex { .. } });
+                let recv_is_regexp = matches!(
+                    r.ty.as_ref(),
+                    Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                );
+                if arg_is_regexp && !recv_is_regexp {
+                    return format!("{}.containsMatchIn({})", args_s[0], emit_expr(r));
+                }
+                if recv_is_regexp {
+                    return format!("{}.containsMatchIn({})", emit_expr(r), args_s[0]);
+                }
+            }
             "join" => return format!("{}.joinToString({})", emit_expr(r), args_s[0]),
             // Kotlin's own `String.split` returns a read-only `List<String>`,
             // but `Array[String]` is declared `MutableList<String>` — Ruby

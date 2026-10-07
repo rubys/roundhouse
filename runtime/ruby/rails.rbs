@@ -68,6 +68,8 @@ module Rails
     def credentials: () -> Hash[Symbol, untyped]
     def config_time_zone: () -> String
     def active_storage_excluded_content_types: () -> Array[String]
+    def active_storage_video_preview_arguments: () -> String
+    def active_storage_previewers: () -> Array[untyped]
     def vips_block_untrusted: () -> bool
     def vips_blocked_operations: () -> Array[String]
     def default_per_page: () -> Integer
@@ -79,4 +81,5 @@ module GlobalID
   # for a uuid-keyed model; the mint only ever calls `to_s` on it.
   def self.param: (String model_name, Integer | String id) -> String
   def self.uri: (String model_name, Integer | String id) -> String
+  def self.signed: (String model_name, Integer | String id, String | Symbol purpose) -> String
 end

@@ -180,8 +180,8 @@ class ArchiveEvidenceTests(unittest.TestCase):
         self,
     ):
         self.make_inventory("browse", {"spinel.tgz": b"native"}, revision=SPINEL)
-        self.make_validation("smoke-spinel", b"native")
-        plan = {"archives": ["spinel"], "jobs": ["smoke-spinel"], "smoke": []}
+        self.make_validation("spinel-smoke", b"native")
+        plan = {"archives": ["spinel"], "jobs": ["spinel-smoke"], "smoke": []}
         report, _ = self.make_report(plan)
         item = self.status(report, "browse/spinel.tgz")
         self.assertEqual(item["status"], "unverified")
@@ -195,14 +195,14 @@ class ArchiveEvidenceTests(unittest.TestCase):
         self.make_inventory(
             "campfire", {"spinel.tgz": data, "docker.tgz": data}, revision=SPINEL
         )
-        self.make_validation("smoke-campfire", data, revision=SPINEL)
-        self.make_validation("smoke-campfire-docker", data)
+        self.make_validation("campfire-smoke", data, revision=SPINEL)
+        self.make_validation("campfire-smoke-docker", data)
         plan = {
             "archives": [],
             "jobs": [
-                "build-campfire-archive",
-                "smoke-campfire",
-                "smoke-campfire-docker",
+                "campfire-archive-build",
+                "campfire-smoke",
+                "campfire-smoke-docker",
             ],
             "smoke": [],
         }
@@ -214,10 +214,10 @@ class ArchiveEvidenceTests(unittest.TestCase):
 
     def test_docker_unknown_packaging_revision_is_unverified(self):
         self.make_inventory("campfire", {"docker.tgz": b"docker"})
-        self.make_validation("smoke-campfire-docker", b"docker")
+        self.make_validation("campfire-smoke-docker", b"docker")
         plan = {
             "archives": [],
-            "jobs": ["build-campfire-archive", "smoke-campfire-docker"],
+            "jobs": ["campfire-archive-build", "campfire-smoke-docker"],
             "smoke": [],
         }
         report, _ = self.make_report(plan)
@@ -315,15 +315,15 @@ class ArchiveEvidenceTests(unittest.TestCase):
 
     def test_old_success_does_not_certify_failed_or_masked_rerun(self):
         self.make_inventory("browse", {"spinel.tgz": b"native"})
-        self.make_validation("smoke-spinel", b"native", revision=SPINEL)
+        self.make_validation("spinel-smoke", b"native", revision=SPINEL)
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
         for result in ["failure", "success"]:
             with self.subTest(result=result):
                 report, _ = self.make_report(
-                    {"archives": ["spinel"], "jobs": ["smoke-spinel"]},
+                    {"archives": ["spinel"], "jobs": ["spinel-smoke"]},
                     {
                         "build-site": {"result": "success"},
-                        "smoke-spinel": {
+                        "spinel-smoke": {
                             "result": result,
                             "outputs": {"execution": "failure"},
                         },

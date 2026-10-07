@@ -257,10 +257,31 @@ fn the_spinel_sidecars_key_contract_is_as_wide_as_the_apps_keys() {
     let narrow = sidecar(&int);
     assert!(narrow.contains("def id: () -> Integer\n"), "{narrow}");
     assert!(narrow.contains("def _adapter_insert: () -> Integer\n"), "{narrow}");
-    assert_eq!(
-        narrow,
-        std::fs::read_to_string("runtime/ruby/active_record/base.rbs").expect("source sidecar"),
-    );
+    // Byte-for-byte the source, except the declarations the ruby-family
+    // reopen (connection.rbs) re-declares: the Spinel tree keeps one
+    // declaration per method (`project::resolve_runtime_sig_conflicts`).
+    let source = std::fs::read_to_string("runtime/ruby/active_record/base.rbs").expect("source sidecar");
+    let reopened: std::collections::HashSet<String> =
+        std::fs::read_to_string("runtime/ruby/active_record/connection.rbs")
+            .expect("connection.rbs")
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("def "))
+            .filter_map(|rest| rest.split(':').next())
+            .map(|name| name.trim().to_string())
+            .collect();
+    let mut kept = narrow.lines().peekable();
+    for line in source.lines() {
+        if kept.peek() == Some(&line) {
+            kept.next();
+            continue;
+        }
+        let name = line.trim_start().strip_prefix("def ").and_then(|r| r.split(':').next()).map(str::trim);
+        assert!(
+            name.is_some_and(|n| reopened.contains(n)),
+            "the integer-key sidecar dropped a line connection.rbs does not re-declare: {line:?}"
+        );
+    }
+    assert!(kept.peek().is_none(), "the integer-key sidecar added a line: {:?}", kept.peek());
 }
 
 

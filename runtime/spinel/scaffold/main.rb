@@ -455,6 +455,7 @@ module Main
     # against what was promised: Active Storage's direct-upload PUT.
     request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")
     controller.request = request_obj
+    controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
     # Cookie-carried session: restore the whole session from the session
@@ -505,7 +506,7 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
       return

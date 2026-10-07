@@ -72,6 +72,7 @@ pub fn apply_fused_late_rewrites(app: &mut App) {
 pub fn apply_fused_context_rewrites(app: &mut App) {
     let formats = std::mem::take(&mut app.time_formats);
     let mut gid_models: BTreeSet<Symbol> = BTreeSet::new();
+    let mut gid_signed: BTreeSet<Symbol> = BTreeSet::new();
     let materialized = super::assoc_pluck::materialized_assoc_names(app);
     let try_definers = super::try_guard::collect_definers(app);
     let try_parents = super::try_guard::collect_parents(app);
@@ -79,7 +80,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     super::for_each_hook_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
-            super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::global_id_locate::rewrite_node(e, &mut gid_models, &mut gid_signed);
             super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
@@ -110,13 +111,14 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     }
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut |e| {
-            super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::global_id_locate::rewrite_node(e, &mut gid_models, &mut gid_signed);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     }
 
     app.time_formats = formats;
     app.global_id_locate_models.extend(gid_models);
+    app.global_id_locate_signed_models.extend(gid_signed);
 }
 
 /// Independent rewrites after the STI predecessor cluster and before

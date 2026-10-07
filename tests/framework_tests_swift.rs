@@ -1,9 +1,9 @@
 //! Framework-test transpile gate (Swift target).
 //!
-//! Ingests the five wired `runtime/ruby/test/**/*_test.rb` files as
+//! Ingests the wired framework and regression test files as
 //! TestModules in an otherwise-empty App, runs `swift::emit`, and runs
 //! all emitted XCTest classes under one `swift test`. This compiles the
-//! shared runtime and SPM dependencies once rather than five times.
+//! shared runtime and SPM dependencies once rather than once per suite.
 //!
 //! What this catches that `swift_toolchain` (emit-then-compile of
 //! real-blog) doesn't: transpile-fidelity gaps in the Ruby→Swift lowering
@@ -254,6 +254,31 @@ end
     assert!(!ivar_guard.contains("m!"), "{body}");
 }
 
+/// Keep the native regression in the default suite as an emission check too.
+/// The full framework gate below executes these same Ruby assertions in XCTest.
+#[test]
+fn throwing_calls_are_grouped_as_comparison_operands() {
+    let path = "tests/fixtures/swift_throwing_comparison_test.rb";
+    let source = std::fs::read(path).expect("read throwing comparison regression");
+    let mut app = App::new();
+    app.test_modules.push(
+        ingest_test_file(&source, path).expect("ingest regression").expect("test class"),
+    );
+    load_framework_rbs(&mut app);
+    Analyzer::new(&app).analyze(&mut app);
+    let file = swift::emit(&app)
+        .into_iter()
+        .find(|f| f.path.ends_with("ThrowingComparisonTest.swift"))
+        .expect("ThrowingComparisonTest.swift");
+    for condition in [
+        r#""a b" != (try Router.decodeCapture("a%20b"))"#,
+        r#"try Router.decodeCapture("a%2Fb") != "a/b""#,
+        r#"try Router.decodeCapture("jos%C3%A9") != (try Router.decodeCapture("josé"))"#,
+    ] {
+        assert!(file.content.contains(condition), "{condition}:\n{}", file.content);
+    }
+}
+
 // errors + ac_base were the last deferred pair; both are green now and CI
 // runs this file unfiltered. What it took, recorded because kotlin needed
 // the same four fixes and rust still does:
@@ -288,6 +313,7 @@ fn framework_tests_pass_under_swift() {
             "runtime/ruby/test/action_view/view_helpers_test.rb",
             "runtime/ruby/test/active_record/errors_test.rb",
             "runtime/ruby/test/action_controller/base_test.rb",
+            "tests/fixtures/swift_throwing_comparison_test.rb",
         ],
         "all",
     );

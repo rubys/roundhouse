@@ -261,6 +261,7 @@ mod tests {
         Model {
             name: cid(name),
             parent: None,
+            parent_span: Default::default(),
             table: TableRef(sym(&name.to_lowercase())),
             primary_key: None,
             attributes: Row::default(),

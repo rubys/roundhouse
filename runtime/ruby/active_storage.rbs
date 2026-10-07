@@ -7,9 +7,13 @@ module ActiveStorage
   def self.default_variable_content_types: () -> Array[String]
   def self.variable_content_types: () -> Array[String]
   def self.variable_content_type?: (String content_type) -> bool
+  def self.video_preview_arguments: () -> String
+  def self.video_preview_vf_filter: () -> String
+  def self.previewers: () -> Array[untyped]
   def self.content_type_for_format: (String format) -> String
   def self.format_for_content_type: (String content_type) -> String
   def self.filename_base: (String filename) -> String
+  def self.content_type_for_filename: (String filename) -> String
   def self.url_filename: (String filename) -> String
 
   class Service
@@ -107,8 +111,17 @@ module ActiveStorage
     def self.dimensions: (String data, String content_type) -> Array[Integer]
   end
 
+  class Error < StandardError
+  end
+
+  class PreviewError < ActiveStorage::Error
+  end
+
   class Previewer
     def self.poster: (String path) -> String
+
+    class VideoPreviewer < ActiveStorage::Previewer
+    end
   end
 
   class Preview
@@ -205,6 +218,33 @@ module ActiveStorage
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil
     # `Attached::One#destroy` — see the .rb: purge under Rails' name.
+    def destroy: () -> nil
+  end
+
+  # Join-row value behind `AttachedMany#attachments` — mirrors the
+  # Attachment MODEL surface the runtime cannot name without gradual.
+  class ManyAttachment
+    @id: Integer
+    @blob: ActiveStorage::Blob?
+    def initialize: (Integer id, ActiveStorage::Blob? blob) -> void
+    def id: () -> Integer
+    def blob: () -> ActiveStorage::Blob?
+    def filename: () -> ActiveStorage::Filename?
+    def content_type: () -> String?
+    def url: () -> String
+  end
+
+  # `has_many_attached` proxy — always non-nil; `attach_blob` appends.
+  class AttachedMany
+    @record_type: String
+    @record_id: Integer
+    @name: String
+    def initialize: (String record_type, Integer record_id, String name) -> void
+    def attached?: () -> bool
+    def attachments: () -> Array[ActiveStorage::ManyAttachment]
+    def attach_blob: (ActiveStorage::Blob blob) -> nil
+    def attach: (String data, String filename, String content_type) -> nil
+    def purge: () -> nil
     def destroy: () -> nil
   end
 end

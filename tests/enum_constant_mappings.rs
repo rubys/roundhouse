@@ -882,14 +882,14 @@ fn late_validation_reports_only_invalid_enum_declarations_under_survey() {
             let result = ingest_enum(&model, &[
                 ("app/services/rating.rb", RATING),
                 ("db/seeds.rb", observation),
-                ("config/routes.rb", "Rails.application.routes.draw do\n  devise_for :users\nend\n"),
+                ("config/routes.rb", "Rails.application.routes.draw do\n  use_doorkeeper\nend\n"),
             ]);
             let gaps = survey::drain();
             result.expect("survey continues while reporting unsupported mappings");
             let (enum_gaps, mut unrelated): (Vec<_>, Vec<_>) = gaps.iter()
                 .map(ToString::to_string).partition(|gap| gap.contains("enum :state mapping"));
             assert_eq!(enum_gaps.len(), expected_enum_gaps, "{gaps:?}");
-            assert!(unrelated.iter().any(|gap| gap.contains("devise_for")), "{gaps:?}");
+            assert!(unrelated.iter().any(|gap| gap.contains("use_doorkeeper")), "{gaps:?}");
             unrelated.sort();
             if let Some(baseline) = &unrelated_baseline {
                 assert_eq!(&unrelated, baseline, "enum validation must not repeat unrelated diagnostics");

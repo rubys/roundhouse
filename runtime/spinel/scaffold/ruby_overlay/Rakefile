@@ -92,6 +92,23 @@ file "#{STATIC}/icon.svg" => STATIC do |t|
   sh "cp #{src} #{t.name}" if File.exist?(src)
 end
 
+# The app's own assets, laid out as Propshaft serves them: every file
+# under each directory of app/assets (stylesheets, images, sounds, …)
+# and under app/javascript, at /assets/<path within that directory>.
+# campfire's layout links 26 stylesheets this way, and without them
+# every one was a 404. A path a task above already builds keeps that task.
+APP_ASSETS = (Dir["app/assets/*/"] + Dir["app/javascript/"]).flat_map do |dir|
+  FileList["#{dir}**/*"].reject { |src| File.directory?(src) }.filter_map do |src|
+    dest = "#{ASSETS}/#{src.delete_prefix(dir)}"
+    next if Rake::Task.task_defined?(dest)
+    file dest => src do
+      mkdir_p File.dirname(dest), verbose: false
+      cp src, dest, verbose: false
+    end
+    dest
+  end
+end
+
 # Prerequisites are conditional on the emitted tree's own sources: a
 # Rails-shaped app ships app/assets/tailwind.css + app/javascript/*
 # and gets the full pipeline; a JS-less app (the Roda + Sequel
@@ -106,6 +123,7 @@ if File.exist?("app/javascript/application.js")
   asset_deps += APP_JS.select { |rel| File.exist?("app/javascript/#{rel}") }
                       .map { |rel| "#{ASSETS}/#{rel}" }
 end
+asset_deps += APP_ASSETS
 asset_deps += ["#{STATIC}/icon.png", "#{STATIC}/icon.svg"]
 task :assets => asset_deps
 

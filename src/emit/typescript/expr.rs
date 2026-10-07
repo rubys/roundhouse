@@ -1061,6 +1061,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 
 /// Build a JavaScript expression with its source span and shared primitive behavior.
 pub(super) fn js_expr(e: &Expr) -> Js {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::TypeScript, emit_expr) {
+        return Js::new(e.span, JsExpr::Raw(s));
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::TypeScript, emit_expr) {
         return Js::new(e.span, JsExpr::Raw(s));
     }

@@ -497,6 +497,23 @@ pub(in crate::analyze) fn register(
     let mut app_ctrl_entry = app_ctrl;
     app_ctrl_entry.parent = Some(acb_id);
     classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl_entry);
+
+    // `ActionDispatch::Router.escape_path`, the one router method generated
+    // code calls: a routing redirect's `%{name}` re-escapes the decoded
+    // capture with it (`synthesize_redirect_controller`). Only that one,
+    // read from the runtime's signatures; the router's matching internals
+    // are not Rails API an app could call. Lives next to the other
+    // ActionDispatch types, not the ActionView registrar.
+    {
+        const RBS: &str = include_str!("../../../runtime/ruby/action_dispatch/router.rbs");
+        if let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) {
+            let id = ClassId(Symbol::from("ActionDispatch::Router"));
+            let name = Symbol::from("escape_path");
+            if let Some(ty) = parsed.get(&id).and_then(|methods| methods.get(&name)) {
+                classes.entry(id).or_default().class_methods.entry(name).or_insert_with(|| ty.clone());
+            }
+        }
+    }
 }
 
 /// The type of a value read out of an `ActionController::Parameters`:

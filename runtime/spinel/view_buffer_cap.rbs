@@ -1,0 +1,5 @@
+# Typing for runtime/view_buffer_cap.rb (Spinel stub and CRuby overlay).
+module ViewBufferCap
+  def self.alloc: (Symbol) -> String
+  def self.store: (Symbol, Integer) -> nil
+end

@@ -446,6 +446,9 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // `ActionController.masked_authenticity_token` backs
         // `form_authenticity_token` (Masked CSRF); the namespace
         // class lives alongside Base in action_controller_base.ts.
+        // Without this import the worker throws `ActionController is
+        // not defined` on any layout that renders csrf_meta_tags /
+        // authenticity_token fields.
         imports: &[
             ("type Base", "./active_record_base.js"),
             ("ActionController", "./action_controller_base.js"),
@@ -616,7 +619,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         // `Route` and `MatchResult` classes alongside the
         // `Router.match` / `Router.match_pattern` class methods.
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        // Path decoding rejects invalid UTF-8 through the shared error primitive.
+        imports: &[("raise", "errors_ext"), ("ArgumentError", "errors_ext")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -1296,7 +1300,7 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         out_path: "Sources/App/Router.swift",
         mode: Mode::Library,
         imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
+        prelude: include_str!("../runtime/swift/route_path_error.swift"),
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
     runtime_entry! {
@@ -1923,7 +1927,9 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         out_path: "app/router.py",
         mode: Mode::Library,
         imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
+        // Python maps the shared Router's invalid-argument rejection to its
+        // host ValueError, preserving the explicit path-validation message.
+        prelude: "from builtins import ValueError as ArgumentError\n\n",
         extra_roots: NO_EXTRA_ROOTS,
     },
     runtime_entry! {

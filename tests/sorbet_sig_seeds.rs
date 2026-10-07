@@ -183,7 +183,7 @@ fn the_annotation_wins_a_disagreement_with_the_body() {
     // and the disagreement is not reported today.
     //
     // It follows from the table rather than from anything this reader
-    // does. `insert_inferred_return` (`src/analyze/mod.rs`) never
+    // does. `insert_inferred_return` (`src/analyze/harvest_return.rs`) never
     // overwrites an existing `Ty::Fn`, which is the rule the
     // `sig/**/*.rbs` sidecar has always relied on — a seed is a seed
     // wherever it was written. That function is also where a

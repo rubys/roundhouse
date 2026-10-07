@@ -160,6 +160,20 @@ fn date_target_boundary_rejects_before_reading_or_emitting_files() {
         assert!(model.1.contains("ActiveSupport.format_db_date"));
         assert!(!model.1.contains("present_db(@__t_due_on"));
         assert!(model.1.contains("schema_date_columns"));
+        let boot = files.iter().find(|(p, _)| p == "boot.rb").unwrap();
+        assert!(
+            boot.1.contains("require_relative \"runtime/active_support_date_parsing\""),
+            "CRuby date apps share date_* helpers with Spinel"
+        );
+        assert!(
+            !boot.1.contains("require_relative \"runtime/date\""),
+            "CRuby must keep stdlib Date — not Spinel's polyfill:\n{}",
+            boot.1
+        );
+        assert!(
+            !boot.1.contains("active_record_date_serialization"),
+            "CRuby overlay already wraps date JSON — do not double-alias"
+        );
     }
 }
 
@@ -293,6 +307,9 @@ fn known_bad_constructor_arguments_remain_errors() {
         "Date.iso8601(2024)",
         "Date.strptime(\"2024-01-31\", 17)",
         "Date.today(\"bad\")",
+        "Date.current(\"bad\")",
+        "Date.yesterday(1)",
+        "Date.tomorrow(1)",
     ] {
         let mut app = app_with(
             "",
@@ -310,6 +327,11 @@ fn known_bad_constructor_arguments_remain_errors() {
         "Date.strptime(\"2024-01-31\", \"%Y-%m-%d\")",
         "Date.iso8601(\"2024-01-31\")",
         "Date.today",
+        // Rails ActiveSupport: zone-aware, still a Date.
+        "Date.current",
+        "::Date.current",
+        "Date.yesterday",
+        "Date.tomorrow",
     ] {
         let mut app = app_with(
             "",

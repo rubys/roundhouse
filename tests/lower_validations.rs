@@ -41,6 +41,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
     let model = Model {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("widgets")),
         primary_key: None,
         attributes: Row::closed(),
@@ -75,6 +76,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
     let model = Model {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("widgets")),
         primary_key: None,
         attributes: Row::closed(),

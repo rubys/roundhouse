@@ -97,6 +97,7 @@ fn build_row_class(model_name: &ClassId, table: &Table) -> LibraryClass {
         name: row_class_id,
         is_module: false,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: super::nullable_column_names(Some(table)),

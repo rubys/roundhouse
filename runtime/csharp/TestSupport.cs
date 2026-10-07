@@ -99,6 +99,8 @@ public class RoundhouseTestCase
         controller.RequestFormat = "html";
         controller.RequestMethod = method;
         controller.RequestPath = path;
+        var qIdx = path.IndexOf('?');
+        controller.QueryString = qIdx >= 0 ? path[(qIdx + 1)..] : "";
         controller.Flash = __flash;
         controller.Session = __session;
         try

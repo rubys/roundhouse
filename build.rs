@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    // CARGO_MANIFEST_DIR is Cargo-injected for build scripts; Cargo does not
+    // honor rerun-if-env-changed for it (cargo#8693). Switching checkouts that
+    // share a target dir is covered by reading the env at execution time below.
     embed_runtime_files();
     println!("cargo:rerun-if-env-changed=ROUNDHOUSE_COMMIT");
     let commit = std::env::var("ROUNDHOUSE_COMMIT")
@@ -26,12 +29,12 @@ fn main() {
 /// triggers on HEAD and its loose or packed branch ref. Git resolves
 /// these paths because linked worktrees share refs but have their own HEAD.
 fn git_head() -> Option<String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let head = git_path(root, "HEAD")?;
+    let root = manifest_root();
+    let head = git_path(&root, "HEAD")?;
     println!("cargo:rerun-if-changed={}", head.display());
     if let Ok(contents) = std::fs::read_to_string(&head) {
         if let Some(rf) = contents.trim().strip_prefix("ref: ") {
-            let loose = git_path(root, rf)?;
+            let loose = git_path(&root, rf)?;
             if loose.exists() {
                 println!("cargo:rerun-if-changed={}", loose.display());
             } else {
@@ -41,7 +44,7 @@ fn git_head() -> Option<String> {
                 if let Some(parent) = loose.ancestors().skip(1).find(|p| p.exists()) {
                     println!("cargo:rerun-if-changed={}", parent.display());
                 }
-                if let Some(packed) = git_path(root, "packed-refs").filter(|p| p.exists()) {
+                if let Some(packed) = git_path(&root, "packed-refs").filter(|p| p.exists()) {
                     println!("cargo:rerun-if-changed={}", packed.display());
                 }
             }
@@ -49,12 +52,19 @@ fn git_head() -> Option<String> {
     }
     let out = Command::new("git")
         .args(["rev-parse", "--short=8", "HEAD"])
-        .current_dir(root)
+        .current_dir(&root)
         .output()
         .ok()
         .filter(|o| o.status.success())?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!sha.is_empty()).then_some(sha)
+}
+
+/// A compiled build script may be reused by checkouts sharing a Cargo
+/// target directory. Cargo supplies the current manifest at execution;
+/// `env!` would retain the checkout that first compiled this script.
+fn manifest_root() -> PathBuf {
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
 }
 
 fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
@@ -82,7 +92,7 @@ fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
 /// skipped, non-UTF-8 files skipped. Directory filtering (`SKIP_DIRS`)
 /// stays with the walkers, which apply it per query.
 fn embed_runtime_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_root();
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     for top in ["runtime/ruby", "runtime/spinel"] {
         let dir = root.join(top);

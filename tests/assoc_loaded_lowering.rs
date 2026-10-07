@@ -403,3 +403,110 @@ end
         "must not flatten mixed-owner union onto boosts_loaded?:\n{src}"
     );
 }
+
+#[test]
+fn assoc_loaded_mixed_owner_union_residuals_under_check() {
+    // Twin of `assoc_loaded_skips_mixed_owner_union` for analyze/check:
+    // Message|Room must not type as Bool (only Message has boosts).
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  def check(flag)
+    owner = flag ? Message.first : Room.first
+    owner.boosts.loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let diags = roundhouse::analyze::diagnose(&app);
+    assert!(
+        diags.iter().any(|d| d.to_string().contains("loaded?")),
+        "mixed-owner union must residual under check (not quiet Bool): {diags:?}"
+    );
+}
+
+#[test]
+fn assoc_loaded_two_hop_types_as_bool_under_check() {
+    // `check` analyzes without post-analyze lowerings; the two-hop must
+    // still type as Bool so tip Campfire views are not residual.
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+    t.datetime "created_at"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+        (
+            "app/views/messages/boosts/_boosts.html.erb",
+            r#"<%= message.boosts.loaded? ? "y" : "n" %>
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let diags = roundhouse::analyze::diagnose(&app);
+    let loaded = diags
+        .iter()
+        .filter(|d| d.to_string().contains("loaded?"))
+        .collect::<Vec<_>>();
+    assert!(
+        loaded.is_empty(),
+        "check-shaped analyze must type message.boosts.loaded?: {loaded:?}"
+    );
+}

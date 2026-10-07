@@ -118,7 +118,7 @@ fn routing_tree_linearizes_to_rest_routes() {
                 controller.0.to_string(),
                 action.to_string(),
             )),
-            RouteSpec::Root { target } => {
+            RouteSpec::Root { target, .. } => {
                 flat.push(("Get".into(), "/".into(), "root".into(), target.clone()))
             }
             other => panic!("unexpected route spec: {other:?}"),

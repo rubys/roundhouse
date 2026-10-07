@@ -32,6 +32,9 @@ module ActiveSupport
 
   def self.format_db_date: (Date | String | nil value) -> String?
 
+  # Date calendar helpers (`date_*`) are declared on the
+  # date-gated package (`active_support_date_parsing.rbs`), not here.
+
   def self.parse_db_time: (String? str) -> Time?
 
   def self.json_time: (String? str) -> String?

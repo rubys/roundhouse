@@ -798,7 +798,13 @@ fn every_runtime_method_body_concretely_typed() {
     // still dominated by polymorphic SQL / helper-opt hashes;
     // `Relation[T]` is the longer-term fix. Merged main's 299; measure
     // after the security helpers before changing this number.
-    const CEILING: usize = 299;
+    // `ActionController::RoutingError#initialize` adds 2: its
+    // `super(message)` is gradual, as in `ParameterMissing`.
+    // `Timeout.timeout` (Spinel port for Campfire tip) adds 3: Pattern D
+    // block/return gradual after `sec: Integer | Float` — polymorphic yield.
+    // `AttachedMany#attachments` stays typed via raw SQL + ManyAttachment
+    // (not Relation over the synthesized Attachment MODEL).
+    const CEILING: usize = 304;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

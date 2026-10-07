@@ -90,7 +90,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python ruby ruby-1p roundsnap roundsnap-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p roundsnap roundsnap-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
 ENDPOINT_ORDER = %w[
   /articles /articles/1 /articles/new /articles.json /articles/1.json
   /rooms/1 /rooms/1/messages /users/me/sidebar /searches?q=coffee
@@ -124,6 +124,7 @@ COLOR = {
   'swift'      => '#f05138',
   'csharp'     => '#8a6fe0',
   'spinel'     => '#7d4cdb',
+  'tobi'       => '#d4883a',
   'spinel-1p'  => '#a98ae4',
   'spinel-fiber' => '#b59ae8',
   'elixir'     => '#4b275f',
@@ -161,12 +162,30 @@ cells.each { |c| by[c['endpoint']][c['target']] = c }
 # that makes campfire's comparison honest, was dropped from every chart,
 # leaving a page that said "Rails is 1.6x faster" by omission. What a
 # report renders is the data it was handed. The hint only orders it.
+# How a route reads on the page. campfire's per-route suite records the
+# lane-specific paths as placeholders ({avatar}, {css}) and writes as
+# `POST:<path>`; the record keeps those so cells line up across lanes.
+def ep_label(ep)
+  ep.sub(/\APOST:/, 'POST ').sub('{avatar}', ':avatar_token').sub(/\A\{css\}\z/, 'a stylesheet (/assets/*.css)')
+end
+
+# For a chart band rather than a heading: eight routes share 760px.
+def ep_short_label(ep)
+  return 'POST' if ep.start_with?('POST:')
+  return 'css' if ep == '{css}'
+  return 'avatar' if ep.include?('{avatar}')
+  ep.sub(%r{\A/rooms/[^/]+\z}, 'room').sub(%r{\A/rooms/[^/]+/messages.*}, 'messages')
+    .sub(%r{\A/users/me/sidebar\z}, 'sidebar').sub(%r{\A/searches.*}, 'search')
+end
+
 def order_first(values, hint)
   known = hint & values
   known + (values - known).sort
 end
 
-endpoints = order_first(by.keys, ENDPOINT_ORDER)
+# A harness that names its endpoints (campfire's per-route suite) has
+# already put them in reading order; that order wins over the hint.
+endpoints = order_first(by.keys, Array(env&.dig('harness', 'endpoints')) | ENDPOINT_ORDER)
 targets   = order_first(cells.map { |c| c['target'] }.uniq, TARGET_ORDER)
 
 # A cell with a nil req_sec was never measured: wrk found nothing serving,
@@ -389,8 +408,11 @@ end
 
 # ── grouped vertical bars (lowerer dividend, YJIT, multiplier) ───────
 
-def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suffix: '')
+def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suffix: '', log: false)
   # groups: [{label:, values: {series_key => value}}]
+  # log: decade axis, for groups spanning orders of magnitude (campfire's
+  # per-route suite runs from ~300 req/sec pages to ~30k /up, and on a
+  # linear axis the pages, the routes the dividend is about, were slivers).
   width      = 760
   left_pad   = 50
   right_pad  = 20
@@ -403,6 +425,15 @@ def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suf
   all_vals = groups.flat_map { |g| g[:values].values }.compact
   max_v = max || ((all_vals.max || 0) * 1.15)
   max_v = 1.0 if !max_v.is_a?(Numeric) || !max_v.finite? || max_v <= 0
+  if log
+    pos = all_vals.select { |v| v.to_f.positive? }
+    lo = pos.empty? ? 0 : Math.log10(pos.min).floor
+    lo -= 1 if !pos.empty? && Math.log10(pos.min) - lo < 0.2
+    hi = [pos.empty? ? 1 : Math.log10(pos.max * 1.15).ceil, lo + 1].max
+    scale = ->(v) { v.to_f <= 0 ? 0.0 : ((Math.log10(v) - lo) / (hi - lo)).clamp(0.0, 1.0) }
+  else
+    scale = ->(v) { v.to_f / max_v }
+  end
   band  = plot_w.to_f / groups.size
   bar_count = series.size
   bar_w = [(band - 24) / bar_count, 80].min
@@ -411,10 +442,14 @@ def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suf
   buf = +svg_open(width, height)
 
   # Y-axis gridlines (nice round ticks at 5 levels)
-  step = nice_step(max_v / 5.0)
-  ticks = (0..(max_v / step).ceil).map { |i| i * step }
+  ticks = if log
+            (lo..hi).map { |d| 10.0**d }
+          else
+            step = nice_step(max_v / 5.0)
+            (0..(max_v / step).ceil).map { |i| i * step }
+          end
   ticks.each do |v|
-    y = top_pad + plot_h - (v / max_v) * plot_h
+    y = top_pad + plot_h - scale.(v) * plot_h
     buf << l(left_pad, y, width - right_pad, y, stroke: '#eee')
     buf << t(left_pad - 6, y + 4, fmt_int(v), anchor: 'end', fill: '#888', size: 10)
   end
@@ -424,7 +459,7 @@ def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suf
     series.each_with_index do |key, si|
       v = g[:values][key].to_f
       bx = cx - (bar_w * bar_count + inner_gap * (bar_count - 1)) / 2.0 + si * (bar_w + inner_gap)
-      bh = (v / max_v) * plot_h
+      bh = scale.(v) * plot_h
       by = top_pad + plot_h - bh
       buf << r(bx, by, bar_w, bh, fill: color_for(key))
       buf << t(bx + bar_w / 2.0, by - 4, value_fmt.call(v) + suffix,
@@ -719,7 +754,7 @@ html << h2.('Throughput across targets')
 html << %(<p>Each endpoint is its own chart. Bars are log-scaled; raw req/sec is shown at the right.</p>\n)
 endpoints.each do |ep|
   rows = targets.map { |t| by[ep][t] }.compact
-  html << "<h3>#{ep}</h3>\n"
+  html << "<h3>#{ep_label(ep)}</h3>\n"
   html << hbar_log(rows, metric: 'req_sec', unit: 'req/sec')
 end
 
@@ -731,19 +766,19 @@ end
 if (%w[ruby rails] - measured_targets).empty?
   html << h2.('Lowerer dividend (ruby vs rails)')
   html << <<~P
-    <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier above each pair is the lift from the lowerer pipeline.</p>
+    <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier under each pair is the lift from the lowerer pipeline.#{endpoints.size > 4 ? ' Bars are log-scaled, so the multiplier, not bar height, is the ratio.' : ''}</p>
   P
 
   groups = endpoints.map do |ep|
     ruby_v  = by[ep]['ruby']&.dig('req_sec').to_f
     rails_v = by[ep]['rails']&.dig('req_sec').to_f
     {
-      label:      ep,
+      label:      endpoints.size > 4 ? ep_short_label(ep) : ep_label(ep),
       annotation: rails_v > 0 ? "#{fmt_dec(ruby_v / rails_v, 1)}×" : '',
       values:     { 'ruby' => ruby_v, 'rails' => rails_v },
     }
   end
-  html << grouped_bars(groups, series: %w[ruby rails])
+  html << grouped_bars(groups, series: %w[ruby rails], log: endpoints.size > 4)
 
   # The same swap on each JIT runtime that ran both its cells, as the
   # measured ratio. One sentence per runtime: the JRuby one says the
@@ -825,7 +860,7 @@ html << <<~P
 P
 endpoints.each do |ep|
   rows = targets.map { |t| by[ep][t] }.compact
-  html << "<h3>#{ep}</h3>\n"
+  html << "<h3>#{ep_label(ep)}</h3>\n"
   html << hbar_log(rows, metric: 'rps_per_gb', unit: 'req/sec/GB')
 end
 
@@ -928,33 +963,48 @@ end
 # what the latency means.
 at_c = concurrency ? " at c=#{concurrency}" : ''
 html << h2.("Latency (p50 / p99#{at_c})")
-html << "<p>Latencies are#{at_c.empty? ? '' : "#{at_c} concurrent connections"}; treat p50 as the median per-connection wait and p99 as the tail. Rows are ordered by measured median p50 across endpoints, fastest first.</p>\n"
+html << "<p>Latencies are#{at_c.empty? ? '' : "#{at_c} concurrent connections"}; treat p50 as the median per-connection wait and p99 as the tail. Lanes are ordered by measured median p50 across endpoints, fastest first.</p>\n"
 
-html << "<table>\n<thead><tr><th>target</th>"
-endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
-html << "</tr>\n<tr><th></th>"
-endpoints.each { html << "<th>p50</th><th>p99</th>" }
-html << "</tr></thead>\n<tbody>\n"
-# Order rows by latency (median p50 across endpoints, ascending) so the
+# Order by latency (median p50 across endpoints, ascending) so the
 # table reads as a ranking like the sorted bar charts. Median is robust
 # to single-endpoint outliers.
 lat_order = targets.sort_by do |tgt|
   ps = endpoints.map { |ep| by[ep][tgt]&.dig('p50_ms') }.compact.sort
   ps.empty? ? Float::INFINITY : ps[ps.size / 2]
 end
-lat_order.each do |tgt|
-  html << "<tr><td><strong>#{tgt}</strong></td>"
-  endpoints.each do |ep|
-    c = by[ep][tgt]
-    p50 = cell_metric(c, 'p50_ms')
-    p99 = cell_metric(c, 'p99_ms')
-    if p50 || p99
-      html << %(<td class="num">#{p50 ? fmt_dec(p50, 1) : '—'}</td><td class="num">#{p99 ? fmt_dec(p99, 1) : '—'}</td>)
-    else
-      html << "<td>—</td><td>—</td>"
-    end
+lat_pair = lambda do |c|
+  p50 = cell_metric(c, 'p50_ms')
+  p99 = cell_metric(c, 'p99_ms')
+  if p50 || p99
+    %(<td class="num">#{p50 ? fmt_dec(p50, 1) : '—'}</td><td class="num">#{p99 ? fmt_dec(p99, 1) : '—'}</td>)
+  else
+    "<td>—</td><td>—</td>"
   end
-  html << "</tr>\n"
+end
+# Many routes and few lanes (campfire's per-route suite) read better with
+# a row per route; the blog's five endpoints keep a row per target.
+if endpoints.size > lat_order.size
+  html << "<table>\n<thead><tr><th>route</th>"
+  lat_order.each { |tgt| html << "<th colspan=2>#{tgt}</th>" }
+  html << "</tr>\n<tr><th></th>"
+  lat_order.each { html << "<th>p50</th><th>p99</th>" }
+  html << "</tr></thead>\n<tbody>\n"
+  endpoints.each do |ep|
+    html << "<tr><td><code>#{ep_label(ep)}</code></td>"
+    lat_order.each { |tgt| html << lat_pair.(by[ep][tgt]) }
+    html << "</tr>\n"
+  end
+else
+  html << "<table>\n<thead><tr><th>target</th>"
+  endpoints.each { |ep| html << "<th colspan=2>#{ep_label(ep)}</th>" }
+  html << "</tr>\n<tr><th></th>"
+  endpoints.each { html << "<th>p50</th><th>p99</th>" }
+  html << "</tr></thead>\n<tbody>\n"
+  lat_order.each do |tgt|
+    html << "<tr><td><strong>#{tgt}</strong></td>"
+    endpoints.each { |ep| html << lat_pair.(by[ep][tgt]) }
+    html << "</tr>\n"
+  end
 end
 html << "</tbody></table>\n"
 html << %(<p class="legend">All values in milliseconds. Lower is better.</p>\n)
@@ -1051,7 +1101,7 @@ unless parity_rows.empty?
   html << "<table>\n<thead><tr><th>lane</th><th>endpoint</th><th>status</th><th>tags</th><th>bytes</th></tr></thead>\n<tbody>\n"
   parity_rows.each do |line|
     lane, ep, status, tags, bytes = line.split("\t").map { |f| f.to_s.sub(/\A[a-z_]+=/, '') }
-    html << %(<tr><td>#{lane}</td><td><code>#{ep}</code></td>) +
+    html << %(<tr><td>#{lane}</td><td><code>#{ep_label(ep)}</code></td>) +
             %(<td class="num">#{status}</td><td class="num">#{fmt_int(tags.to_i)}</td>) +
             %(<td class="num">#{fmt_int(bytes.to_i)}</td></tr>\n)
   end

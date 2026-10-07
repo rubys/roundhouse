@@ -10,4 +10,10 @@ module ActionController
 
   class UnknownFormat < StandardError
   end
+
+  class RoutingError < StandardError
+    @failures: Array[String]
+    def initialize: (String message, ?Array[String] failures) -> void
+    def failures: () -> Array[String]
+  end
 end

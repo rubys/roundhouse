@@ -428,6 +428,37 @@ impl Ty {
         }
     }
 
+    /// True when `self` is [`Ty::Untyped`] / [`Ty::Var`], or a union
+    /// that carries either as a top-level arm.
+    pub(crate) fn has_unknown_arm(&self) -> bool {
+        match self {
+            Ty::Union { variants } => variants.iter().any(Ty::is_unknown),
+            other => other.is_unknown(),
+        }
+    }
+
+    /// Drop every top-level [`Ty::Untyped`] / [`Ty::Var`] arm from a
+    /// union, returning the concrete core: the sole survivor if one
+    /// remains, a narrower `Union` if several do, and `Untyped` if
+    /// nothing concrete remains. Unlike [`Self::strip_nil`] (which
+    /// leaves non-unions unchanged, including bare `Nil`), a bare
+    /// [`Ty::Var`] collapses to [`Ty::Untyped`] so harvest cores treat
+    /// inference variables like unknown; other non-unions pass through.
+    pub(crate) fn strip_unknown(self) -> Ty {
+        match self {
+            Ty::Union { variants } => {
+                let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
+                match kept.len() {
+                    0 => Ty::Untyped,
+                    1 => kept.into_iter().next().unwrap(),
+                    _ => Ty::Union { variants: kept },
+                }
+            }
+            Ty::Var { .. } => Ty::Untyped,
+            other => other,
+        }
+    }
+
     /// Sort a flattened variant list into the canonical order: `Nil`
     /// last (so nilable unions keep reading `T | Nil`), everything else
     /// by a structural total order. Two unions built from the same

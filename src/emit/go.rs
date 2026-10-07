@@ -973,6 +973,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         s.push_str("\t\tc.Params = params\n");
         s.push_str("\t\tc.RequestMethod = r.Method\n");
         s.push_str("\t\tc.RequestPath = r.URL.Path\n");
+        s.push_str("\t\tc.QueryString = r.URL.RawQuery\n");
         s.push_str("\t\tc.RequestFormat = requestFormat\n");
         s.push_str("\t\tc.ProcessAction(action)\n");
         // Layout wrap — only for text/html responses with non-empty

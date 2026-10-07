@@ -751,8 +751,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     // ---- Instance-method writes ----
     // Mutations on a loaded record. Rails bangs-vs-non-bangs
-    // convention: non-bang returns Bool (success/failure);
-    // bang returns Self or raises on failure.
+    // convention: non-bang returns Bool (success/failure); bangs that
+    // share the compiled `Base` method (`save!`/`destroy`/`destroy!`)
+    // return `ActiveRecord::Base` per the sidecar (not Self — see
+    // `save!` below); monomorphized constructors stay SelfType.
     CatalogedMethod {
         name: "save",
         receiver: ReceiverContext::Instance,
@@ -760,12 +762,24 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Bool),
     },
+    // `save!` is declared `() -> Base` in
+    // `runtime/ruby/active_record/base.rbs`, literally — not `self` or
+    // `instance` (RBS self-types the parser doesn't read yet, per that
+    // file's own comment). Unlike `find`/`create!`, `save!` is never
+    // monomorphized per model at emit time: every model shares the one
+    // compiled `Base#save!`, which returns a `Base`-typed value no
+    // matter which subclass calls it. Seeding `SelfType` here told a
+    // caller like `WidgetStamp#run` (whose tail is `widget.save!`) that
+    // the call answers `Widget`, so roundhouse emitted `-> Widget` for
+    // `run` — a claim the shared runtime function can't back, and
+    // spinel's AOT build refused the mismatched pointer types
+    // (roundhouse#296). `ClassRef` matches the sidecar literally.
     CatalogedMethod {
         name: "save!",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::SelfType),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
     },
     CatalogedMethod {
         name: "update",
@@ -781,19 +795,21 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::SelfType),
     },
+    // `destroy`/`destroy!` are `() -> Base` in the same sidecar, for
+    // the same reason `save!` is — see the comment there.
     CatalogedMethod {
         name: "destroy",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::SelfType),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
     },
     CatalogedMethod {
         name: "destroy!",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::SelfType),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
     },
     CatalogedMethod {
         name: "delete",
@@ -826,13 +842,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     // ---- Instance-method reads ----
     // `#reload` refreshes from the DB — writes-vs-reads-wise it's
     // a read, but carries the DbRead effect because it issues a
-    // SELECT.
+    // SELECT. Also `() -> Base` in the sidecar — see `save!` above.
     CatalogedMethod {
         name: "reload",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbRead,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::SelfType),
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
     },
     // ---- Instance-method state predicates ----
     // Pure — query in-memory flags the record already carries.
@@ -921,6 +937,28 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ArrayOfSym),
+    },
+    // Association introspection used by Action Text / attachment macro
+    // helpers (`safe_markdown_attribute`, `with_attached_*` guards).
+    // Returns a reflection handle (or nil at runtime); the analyzer
+    // keeps the handle shape so `.klass` / presence checks type.
+    CatalogedMethod {
+        name: "reflect_on_association",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef(
+            "ActiveRecord::Reflection::AssociationReflection",
+        )),
+    },
+    // Class-level default for `has_rich_text` / `has_markdown`
+    // `strict_loading:` kwargs — a Bool reader on every AR model.
+    CatalogedMethod {
+        name: "strict_loading_by_default",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
     },
     CatalogedMethod {
         name: "read_attribute",

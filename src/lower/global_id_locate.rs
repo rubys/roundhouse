@@ -1,4 +1,6 @@
 //! `GlobalID::Locator.locate(gid, only: Room)` → `locate_room(gid)`.
+//! `GlobalID::Locator.locate_signed(sgid, only: Room, for: purpose)` →
+//! `locate_signed_room(sgid, purpose)`.
 //!
 //! `only:` is not a filter here, it is THE FINDER. globalid's own
 //! `locate` constantizes the model name off the wire and finds on the
@@ -28,10 +30,15 @@
 //!
 //! ONLY A LITERAL `only:` IS REWRITTEN. A computed one would need the
 //! dispatch this pass exists to remove; it is left alone, so it still
-//! reaches the generic `locate` — which runs correctly on the Ruby
-//! lanes and is refused at compile time on a strict one. A refusal
-//! naming the real construct beats a silent rewrite that finds on the
-//! wrong class.
+//! reaches the generic `locate` / `locate_signed` — which runs
+//! correctly on the Ruby lanes and is refused at compile time on a
+//! strict one. A refusal naming the real construct beats a silent
+//! rewrite that finds on a class the caller did not name.
+//!
+//! `locate_signed` also requires a `for:` purpose kwarg (Symbol,
+//! String, or constant naming one). The purpose expression is kept as
+//! the specialized entry point's second argument; only `only:` is
+//! baked into the method name.
 //!
 //! Runs on BOTH Ruby-lane and strict-target emits, deliberately: the
 //! overlay and the spinel binary share `runtime/global_id_locator.rb`,
@@ -52,23 +59,30 @@ const RECEIVER: [&str; 2] = ["GlobalID", "Locator"];
 
 pub fn apply_global_id_locate_lowering(app: &mut App) {
     let mut models: BTreeSet<Symbol> = BTreeSet::new();
-    super::for_each_hook_body(app, &mut |expr| rewrite(expr, &mut models));
+    let mut signed_models: BTreeSet<Symbol> = BTreeSet::new();
+    super::for_each_hook_body(app, &mut |expr| rewrite(expr, &mut models, &mut signed_models));
     for view in &mut app.views {
-        rewrite(&mut view.body, &mut models);
+        rewrite(&mut view.body, &mut models, &mut signed_models);
     }
     app.global_id_locate_models.extend(models);
+    app.global_id_locate_signed_models.extend(signed_models);
 }
 
-fn rewrite(expr: &mut Expr, models: &mut BTreeSet<Symbol>) {
-    expr.node.for_each_child_mut(&mut |child| rewrite(child, models));
-    rewrite_node(expr, models);
+fn rewrite(expr: &mut Expr, models: &mut BTreeSet<Symbol>, signed: &mut BTreeSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |child| rewrite(child, models, signed));
+    rewrite_node(expr, models, signed);
 }
 
-pub(crate) fn rewrite_node(expr: &mut Expr, models: &mut BTreeSet<Symbol>) {
+pub(crate) fn rewrite_node(
+    expr: &mut Expr,
+    models: &mut BTreeSet<Symbol>,
+    signed: &mut BTreeSet<Symbol>,
+) {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
-    if method.as_str() != "locate" || args.len() != 2 {
+    let name = method.as_str();
+    if name != "locate" && name != "locate_signed" {
         return;
     }
     let ExprNode::Const { path } = &*recv.node else { return };
@@ -77,11 +91,25 @@ pub(crate) fn rewrite_node(expr: &mut Expr, models: &mut BTreeSet<Symbol>) {
     {
         return;
     }
-    let Some(model) = only_kwarg_class(&args[1]) else { return };
-
-    models.insert(model.clone());
-    *method = Symbol::from(format!("locate_{}", entry_point_suffix(model.as_str())));
+    if name == "locate" {
+        if args.len() != 2 {
+            return;
+        }
+        let Some(model) = only_kwarg_class(&args[1]) else { return };
+        models.insert(model.clone());
+        *method = Symbol::from(format!("locate_{}", entry_point_suffix(model.as_str())));
+        args.truncate(1);
+        return;
+    }
+    // locate_signed(sgid, only: Model, for: purpose)
+    if args.len() != 2 {
+        return;
+    }
+    let Some((model, purpose)) = signed_kwargs(&args[1]) else { return };
+    signed.insert(model.clone());
+    *method = Symbol::from(format!("locate_signed_{}", entry_point_suffix(model.as_str())));
     args.truncate(1);
+    args.push(purpose);
 }
 
 /// The class named by a lone trailing `only:` kwarg, or None for any
@@ -99,6 +127,31 @@ fn only_kwarg_class(arg: &Expr) -> Option<Symbol> {
     Some(Symbol::from(
         path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
     ))
+}
+
+/// `only:` + `for:` kwargs for `locate_signed`. Order of keys in the
+/// hash does not matter; both must be present, `only:` a literal class,
+/// `for:` any expression (Symbol lit, String lit, Const, …).
+fn signed_kwargs(arg: &Expr) -> Option<(Symbol, Expr)> {
+    let ExprNode::Hash { entries, kwargs: true, .. } = &*arg.node else { return None };
+    let mut only = None;
+    let mut purpose = None;
+    for (key, value) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: k } } = &*key.node else {
+            return None;
+        };
+        match k.as_str() {
+            "only" => {
+                let ExprNode::Const { path } = &*value.node else { return None };
+                only = Some(Symbol::from(
+                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+                ));
+            }
+            "for" => purpose = Some(value.clone()),
+            _ => return None,
+        }
+    }
+    Some((only?, purpose?))
 }
 
 /// `Room` → `room`, `Rooms::Open` → `rooms__open`. A method name, so

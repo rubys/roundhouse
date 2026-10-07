@@ -29,7 +29,7 @@ def read_bound_id(id)
 end
 
 # A live outer cursor survives reuse of other shapes on the SAME connection.
-# Nesting an identical shape is not covered yet; that needs a separate fix.
+# Identical-shape ownership is covered by StatementCacheTest above.
 Db.with_connection do
   Db.query_cache_begin
   outer = Db.prepare("SELECT id FROM bind_rows WHERE id >= ? ORDER BY id")
@@ -130,6 +130,45 @@ expect_text("collected bind_text", "ephemeral-" + "雪é" * 2048, Db.column_text
 Db.finalize(stmt)
 puts "runtime: quotes, UTF-8, long text, copy ownership and GC passed"
 
+# Reads must match the values Db.exec writes inline, not merely round-trip
+# through the bind API. In particular SQLite TEXT and BLOB with identical
+# bytes are not equal, and ASCII-only BINARY strings are written as TEXT.
+Db.exec("CREATE TABLE bind_string_rows (value TEXT NOT NULL)")
+def inline_bound_string(label, value)
+  Db.exec("DELETE FROM bind_string_rows")
+  Db.exec("INSERT INTO bind_string_rows VALUES (" + Db.escape_string(value) + ")")
+  stored = Db.prepare("SELECT typeof(value), hex(value) FROM bind_string_rows")
+  raise "missing inline string" if !Db.step?(stored)
+  storage_type = Db.column_text(stored, 0)
+  storage_bytes = Db.column_text(stored, 1)
+  Db.finalize(stored)
+
+  inline = Db.prepare("SELECT COUNT(*) FROM bind_string_rows WHERE value = " + Db.escape_string(value))
+  raise "missing inline count" if !Db.step?(inline)
+  expect_int(label + " inline lookup", 1, Db.column_int(inline, 0))
+  Db.finalize(inline)
+  bound = Db.prepare("SELECT COUNT(*) FROM bind_string_rows WHERE value = ?")
+  Db.bind_text(bound, 1, value)
+  raise "missing bound count" if !Db.step?(bound)
+  expect_int(label + " bound lookup", 1, Db.column_int(bound, 0))
+  Db.finalize(bound)
+
+  bytes = Db.prepare("SELECT typeof(?), hex(?)")
+  Db.bind_text(bytes, 1, value)
+  Db.bind_text(bytes, 2, value)
+  raise "missing bound bytes" if !Db.step?(bytes)
+  expect_text(label + " storage class", storage_type, Db.column_text(bytes, 0))
+  expect_text(label + " stored bytes", storage_bytes, Db.column_text(bytes, 1))
+  Db.finalize(bytes)
+end
+inline_bound_string("quotes", "quote's \"double\" ? -- SQL")
+inline_bound_string("UTF-8", "雪 café 🦀")
+inline_bound_string("ASCII binary", "plain-ascii".b)
+inline_bound_string("empty binary", "".b)
+inline_bound_string("UTF-8 binary", "café".b)
+inline_bound_string("invalid UTF-8 binary", "\xFF\xFE'".b)
+puts "runtime: inline writes and bound reads agree on text/binary storage and bytes"
+
 # Observe bytes as a BLOB, not SQLite length(TEXT) or column_text's C-string
 # conversion: SQLite string expressions on embedded NUL are not specified.
 # The bound value must preserve all three bytes (61 00 62).
@@ -139,3 +178,20 @@ raise "missing NUL text" if !Db.step?(stmt)
 expect_text("embedded NUL bytes", "610062", Db.column_text(stmt, 0))
 Db.finalize(stmt)
 puts "runtime: embedded NUL bytes passed"
+
+# The primitive must keep nil distinct from false even if a caller bypasses
+# the lowerer's nullable inline path. Alternate on one cached shape as well.
+def expect_bound_bool(value, expected)
+  stmt = Db.prepare("SELECT COALESCE(?, -7)")
+  Db.bind_bool(stmt, 1, value)
+  raise "missing bool row" if !Db.step?(stmt)
+  expect_int("nullable bool", expected, Db.column_int(stmt, 0))
+  Db.finalize(stmt)
+end
+
+expect_bound_bool(false, 0)
+expect_bound_bool(nil, -7)
+expect_bound_bool(true, 1)
+expect_bound_bool(nil, -7)
+expect_bound_bool(false, 0)
+puts "runtime: nullable boolean preserves SQL NULL passed"

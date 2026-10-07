@@ -60,11 +60,21 @@ module ActionController
     def request_path=: (String) -> String
     def request_format: () -> Symbol
     def request_format=: (Symbol) -> Symbol
+    def query_string: () -> String
+    def query_string=: (String) -> String
     def accepts_any_format: () -> bool
     def accepts_any_format=: (bool) -> bool
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
+    def action_name: () -> String
+    def assign_action_name: (Symbol name) -> String
+
+    # Rails' demodulized underscored leaf (`ArticlesController` →
+    # `"articles"`) and the path form that keeps namespaces
+    # (`Admin::UsersController` → `"admin/users"`).
+    def controller_name: () -> String
+    def controller_path: () -> String
 
     # `attr_reader` — getter only. Setters are internal (assigned via
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
@@ -125,6 +135,7 @@ module ActionController
     def send_data: (String data, ?type: String, ?disposition: String) -> void
     def verify_authenticity_token: () -> void
     def verified_request?: () -> bool
+    def csrf_session_secret: () -> String
     def csrf_header_token: () -> String
     def request_for_csrf: () -> untyped
     def same_host_location: (String loc) -> String

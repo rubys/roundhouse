@@ -8,6 +8,10 @@ module ActiveRecord
     def self.generate: (String data_json, String purpose, Integer expires_in) -> String
     def self.verified_data: (String token, String purpose) -> String
     def self.secure_password_data: (Integer id, String? digest) -> String
+    def self.value_data: (Integer id, String? value) -> String
+    def self.int_value_data: (Integer id, Integer? value) -> String
+    def self.bool_value_data: (Integer id, bool? value) -> String
+    def self.id_data: (Integer id) -> String
     def self.data_id: (String data) -> Integer
   end
 end

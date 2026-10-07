@@ -680,6 +680,9 @@ fn emit_block_with_value(e: &Expr) -> String {
 
 /// Render an Elixir expression while preserving complete-call primitive semantics.
 pub(super) fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Elixir, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Elixir, emit_expr) {
         return s;
     }
@@ -2533,6 +2536,7 @@ mod tests {
                 name: ClassId(Symbol::from(name)),
                 is_module: false,
                 parent: None,
+                parent_span: Default::default(),
                 includes: vec![],
                 methods: vec![],
                 nullable_columns: Vec::new(),
@@ -2658,6 +2662,7 @@ mod tests {
             name: ClassId(sym("ActionController::Base")),
             is_module: false,
             parent: None,
+            parent_span: Default::default(),
             includes: vec![],
             methods: vec![render, resolve],
             nullable_columns: Vec::new(),
@@ -2895,6 +2900,7 @@ mod tests {
             name: ClassId(Symbol::from("ActionView::ViewHelpers")),
             is_module: true,
             parent: None,
+            parent_span: Default::default(),
             includes: vec![],
             methods: vec![truncate],
             nullable_columns: Vec::new(),

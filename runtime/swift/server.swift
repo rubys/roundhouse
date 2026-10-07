@@ -112,7 +112,8 @@ enum Server {
         #endif
     }
 
-    // The whole synchronous request — runs on one pool thread.
+    /// Run a synchronous request on one pool thread, mapping routing and
+    /// controller errors at their respective HTTP boundaries.
     static func dispatch(
         _ rawMethod: String,
         _ rawPath: String,
@@ -145,7 +146,17 @@ enum Server {
             path = String(path.dropLast(5))
         }
 
-        guard let match = Router.match(method, path, routes),
+        // Decode only captures of the selected route. Invalid UTF-8 is a
+        // bad request; it must not trap the process or prevalidate a 404 path.
+        let routed: MatchResult?
+        do {
+            routed = try Router.match(method, path, routes)
+        } catch is RoutePathEncodingError {
+            return DispatchResult(status: 400, contentType: "text/plain", location: nil, body: "Bad Request")
+        } catch {
+            return DispatchResult(status: 500, contentType: "text/plain", location: nil, body: "Internal Server Error")
+        }
+        guard let match = routed,
               let factory = controllers[match.controller]
         else {
             return DispatchResult(status: 404, contentType: "text/plain", location: nil, body: "Not Found")

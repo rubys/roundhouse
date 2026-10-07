@@ -87,6 +87,12 @@ end
 raise SqliteAdapter.escape_value(Date.new(2024, 2, 29)).inspect unless SqliteAdapter.escape_value(Date.new(2024, 2, 29)) == "'2024-02-29'"
 raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "2024-01-31"
 raise Date.new(2024, 1, 31).xmlschema.inspect unless Date.new(2024, 1, 31).xmlschema == "2024-01-31"
+raise ActiveSupport.date_beginning_of_month(Date.new(2024, 2, 14)).iso8601 unless ActiveSupport.date_beginning_of_month(Date.new(2024, 2, 14)).iso8601 == "2024-02-01"
+raise ActiveSupport.date_end_of_month(Date.new(2024, 2, 14)).iso8601 unless ActiveSupport.date_end_of_month(Date.new(2024, 2, 14)).iso8601 == "2024-02-29"
+raise ActiveSupport.date_end_of_month(Date.new(2023, 12, 1)).iso8601 unless ActiveSupport.date_end_of_month(Date.new(2023, 12, 1)).iso8601 == "2023-12-31"
+raise ActiveSupport.date_beginning_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") unless ActiveSupport.date_beginning_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") == "2024-02-14 00:00:00"
+raise ActiveSupport.date_end_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") unless ActiveSupport.date_end_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") == "2024-02-14 23:59:59"
+raise ActiveSupport.date_current(ActiveSupport.now).inspect unless ActiveSupport.date_current(ActiveSupport.now).year >= 2024
 puts "Spinel Date column contract passed"
 "#);
     run.assert_passes();

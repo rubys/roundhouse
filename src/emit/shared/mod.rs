@@ -23,3 +23,5 @@ pub mod schema_sql;
 pub mod seed_sql;
 pub mod string_bytes;
 pub mod sub;
+
+pub mod utf8_chr;

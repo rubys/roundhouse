@@ -6,13 +6,22 @@
 //! `config/routes/`.
 //!
 //! Recovery discipline: in survey mode an unsupported DSL construct
-//! (`mount`, `use_doorkeeper`, `devise_for`, …) records a gap and drops
+//! (`use_doorkeeper`, …) records a gap and drops
 //! that one entry — the rest of the table still flattens. In strict
 //! mode it still fails loud so the fixture that introduces a new form
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
-//! ledger line, never a silently empty route table.
+//! ledger line, never a silently empty route table. Engine mounts recover
+//! in every mode with a located error carried on the route table; strict
+//! emission refuses it unless explicitly overridden.
+//!
+//! Devise's wrappers (`authenticated` / `unauthenticated` /
+//! `devise_scope`) flatten like `constraints` — nested routes are kept,
+//! auth is not enforced. `devise_for` expands a static route/helper
+//! table (sessions / registrations / passwords / confirmations) from
+//! the resource name and optional `controllers:` overrides; it does
+//! not claim Warden or Devise controller runtime.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
@@ -21,6 +30,8 @@ use ruby_prism::Node;
 use crate::dialect::{DirectHelper, HttpMethod, ResourceScope, RouteSpec, RouteTable};
 use crate::naming::camelize;
 use crate::{ClassId, Symbol};
+use crate::diagnostic::Diagnostic;
+use crate::span::Span;
 
 use super::util::{
     constant_id_str, constant_path_of, find_call_named, flatten_statements, string_value, symbol_list_value,
@@ -66,6 +77,8 @@ pub fn ingest_routes_with_dsl(
         concerns: RefCell::new(HashMap::new()),
         active: RefCell::new(Vec::new()),
         hoisted: RefCell::new(Vec::new()),
+        diagnostics: RefCell::new(Vec::new()),
+        mount_scope_depth: Cell::new(0),
     };
 
     // Every `Rails.application.routes.draw do … end` in the file: Rails
@@ -105,7 +118,7 @@ pub fn ingest_routes_with_dsl(
     // table whatever scope the `load` call was written inside.
     entries.extend(cx.hoisted.take());
 
-    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain() })
+    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics: cx.diagnostics.take() })
 }
 
 /// The `draw do … end` calls that are statements of the program itself
@@ -159,6 +172,55 @@ struct Ctx<'a> {
     active: RefCell<Vec<String>>,
     /// Entries of `load`ed files that drew at top level.
     hoisted: RefCell<Vec<RouteSpec>>,
+    /// Located errors recovered while retaining sibling routes.
+    diagnostics: RefCell<Vec<Diagnostic>>,
+    /// Fixed runtime mounts cannot inherit path/constraint DSL wrappers.
+    mount_scope_depth: Cell<usize>,
+}
+
+impl Ctx<'_> {
+    /// Restore the enclosing mount context even when a nested walk fails.
+    fn with_mount_scope<T>(&self, depth: usize, walk: impl FnOnce() -> T) -> T {
+        let previous = self.mount_scope_depth.replace(depth);
+        let result = walk();
+        self.mount_scope_depth.set(previous);
+        result
+    }
+}
+
+/// The runtime supplies only the top-level `/cable` endpoint. Accept the
+/// generated Rails hashrocket form and its equivalent `at:` spelling.
+fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
+    fn cable_server(node: &Node<'_>) -> bool {
+        let Some(server) = node.as_call_node() else { return false };
+        constant_id_str(&server.name()) == "server"
+            && server.arguments().is_none()
+            && server.block().is_none()
+            && server.receiver().and_then(|r| constant_path_of(&r))
+                .is_some_and(|parts| parts == ["ActionCable"])
+    }
+    let Some(args) = call.arguments() else { return false };
+    let mut server = false;
+    let mut path = None;
+    for arg in args.arguments().iter() {
+        if cable_server(&arg) {
+            server = true;
+            continue;
+        }
+        let Some(hash) = arg.as_keyword_hash_node() else { return false };
+        for item in hash.elements().iter() {
+            let Some(assoc) = item.as_assoc_node() else { return false };
+            if cable_server(&assoc.key()) {
+                server = true;
+                path = string_value(&assoc.value());
+            } else if symbol_value(&assoc.key()).as_deref() == Some("at") {
+                path = string_value(&assoc.value());
+            } else {
+                return false;
+            }
+        }
+    }
+    server && path.as_deref() == Some("/cable") && call.block().is_none()
 }
 
 struct Concern {
@@ -290,7 +352,9 @@ fn ingest_route_stmts<'pr>(
             if let Some(rest) = cond.subsequent() {
                 arms.push(rest);
             }
-            entries.extend(ingest_route_stmts(arms.into_iter(), file, parent, cx)?);
+            entries.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+                ingest_route_stmts(arms.into_iter(), file, parent, cx)
+            })?);
             continue;
         }
         if let Some(cond) = stmt.as_unless_node() {
@@ -301,7 +365,9 @@ fn ingest_route_stmts<'pr>(
             if let Some(rest) = cond.else_clause() {
                 arms.push(rest.as_node());
             }
-            entries.extend(ingest_route_stmts(arms.into_iter(), file, parent, cx)?);
+            entries.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+                ingest_route_stmts(arms.into_iter(), file, parent, cx)
+            })?);
             continue;
         }
         if let Some(rest) = stmt.as_else_node() {
@@ -361,16 +427,28 @@ fn ingest_route_stmts<'pr>(
         //     flattened child with its `ResourceScope` and let the
         //     flattener build the right path. `find_comment` reading
         //     `params[:id]` depends on the member routes carrying `:id`.
-        if matches!(method.as_str(), "constraints" | "member" | "collection") {
+        //   - `authenticated` / `unauthenticated` / `devise_scope` —
+        //     Devise visibility wrappers. Runtime auth is not modeled;
+        //     nested routes still belong in the table.
+        if matches!(
+            method.as_str(),
+            "constraints"
+                | "member"
+                | "collection"
+                | "authenticated"
+                | "unauthenticated"
+                | "devise_scope"
+        ) {
             if let Some(block_node) = call.block() {
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
-                        let mut inner =
-                            ingest_route_body(inner_body, file, parent, cx)?;
+                        let mut inner = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+                            ingest_route_body(inner_body, file, parent, cx)
+                        })?;
                         let scope = match method.as_str() {
                             "member" => Some(ResourceScope::Member),
                             "collection" => Some(ResourceScope::Collection),
-                            _ => None, // constraints: no scope change
+                            _ => None, // constraints / Devise wrappers: no scope change
                         };
                         if let Some(scope) = scope {
                             retag_scope(&mut inner, scope);
@@ -730,18 +808,30 @@ fn ingest_route_call(
         // how to build a URL for a model. It names no route and defines
         // no helper, so there is nothing for the table to hold.
         "resolve" => Ok(None),
-        // `mount SomeEngine, at: "/path"` — the mounted engine is
-        // external code (mission_control, sidekiq-web, …), never part
-        // of the transpiled app. Dropping the route is the modeled
-        // truth (same contract as `to: redirect(...)` above); survey
-        // runs still get a ledger line so the drop is visible.
+        // Keep supported siblings and the ordinary error stream. A mount
+        // is not a parse failure, and --allow-unsupported can inspect the
+        // incomplete output. Only the existing fixed runtime cable endpoint
+        // is exempt; this does not add engine route composition.
         "mount" => {
-            if super::survey::is_active() {
-                super::survey::record(&IngestError::Unsupported {
-                    file: file.into(),
-                    message: "route dropped: `mount` of an external engine".into(),
-                });
+            if cx.mount_scope_depth.get() == 0 && runtime_cable_mount(call) {
+                return Ok(None);
             }
+            let location = call.location();
+            let detail = "mounted Rack applications and engine routes are not composed into the host route table";
+            cx.diagnostics.borrow_mut().push(Diagnostic::unsupported(
+                Span {
+                    file: super::sources::file_id(file),
+                    start: location.start_offset() as u32,
+                    end: location.end_offset() as u32,
+                },
+                None,
+                "route mount",
+                detail,
+            ));
+            super::survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: format!("route mount: {detail}"),
+            });
             Ok(None)
         }
         // `direct :fresh_user_avatar do |user, options| … end` — a
@@ -759,11 +849,10 @@ fn ingest_route_call(
         // custom URL helper, not a route, so it contributes no entry
         // here.
         "direct" => Ok(None),
-        // Unknown DSL — `concern`, `devise_for`,
-        // `use_doorkeeper`, `authenticate`, etc. land here. Strict
-        // ingest fails loud so the fixture that introduces them forces
-        // a recognizer; survey callers get a per-entry ledger line
-        // (see ingest_route_stmts).
+        // `devise_for` — static Devise route/helper table; see
+        // `ingest::devise_routes`. Controllers override via
+        // `controllers:`. Does not model Warden or OmniAuth callbacks.
+        "devise_for" => super::devise_routes::ingest_devise_for(call, file),
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -775,6 +864,10 @@ fn ingest_route_call(
             nest: false,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // Unknown DSL — `concern`, `use_doorkeeper`, `authenticate`
+        // (non-block), etc. land here. Strict ingest fails loud so the
+        // fixture that introduces them forces a recognizer; survey
+        // callers get a per-entry ledger line (see ingest_route_stmts).
         _ => Err(IngestError::Unsupported {
             file: file.into(),
             message: format!("unsupported routes DSL: `{method}`"),
@@ -933,7 +1026,7 @@ fn block_entries(
     parent: Option<&str>,
     cx: &Ctx<'_>,
 ) -> IngestResult<Vec<RouteSpec>> {
-    match call.block() {
+    cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || match call.block() {
         Some(block_node) => match block_node.as_block_node() {
             Some(block) => match block.body() {
                 Some(body) => ingest_route_body(body, file, parent, cx),
@@ -942,7 +1035,7 @@ fn block_entries(
             None => Ok(Vec::new()),
         },
         None => Ok(Vec::new()),
-    }
+    })
 }
 
 /// `namespace :admin do … end` — `scope` with path, controller module,
@@ -1089,15 +1182,18 @@ fn ingest_route_file_include(
     let included = (|| -> IngestResult<Option<RouteSpec>> {
         let drawn = top_level_app_draws(&root);
         if method != "draw" && !drawn.is_empty() {
-            let mut entries = Vec::new();
-            for draw_call in &drawn {
-                let Some(block) = draw_call.block().and_then(|b| b.as_block_node()) else {
-                    continue;
-                };
-                if let Some(body) = block.body() {
-                    entries.extend(ingest_route_body(body, path, None, cx)?);
+            let entries = cx.with_mount_scope(0, || -> IngestResult<Vec<RouteSpec>> {
+                let mut entries = Vec::new();
+                for draw_call in &drawn {
+                    let Some(block) = draw_call.block().and_then(|b| b.as_block_node()) else {
+                        continue;
+                    };
+                    if let Some(body) = block.body() {
+                        entries.extend(ingest_route_body(body, path, None, cx)?);
+                    }
                 }
-            }
+                Ok(entries)
+            })?;
             cx.hoisted.borrow_mut().extend(entries);
             return Ok(None);
         }
@@ -1178,7 +1274,14 @@ fn register_concern(call: &ruby_prism::CallNode<'_>, file: &str, cx: &Ctx<'_>) {
                     })
                 })
         });
-    let body = block.body().map(|b| b.location().as_slice().to_vec());
+    let body = block.body().map(|b| {
+        let location = b.location();
+        // Reparse only the macro body, retaining its original byte offsets so
+        // a recovered mount diagnostic still points into the defining file.
+        let mut source = vec![b' '; location.start_offset()];
+        source.extend_from_slice(location.as_slice());
+        source
+    });
     cx.concerns
         .borrow_mut()
         .insert(name, Concern { param, body, file: file.to_string() });
@@ -1913,6 +2016,7 @@ fn ingest_root_route(
     // (#82).
     let mut target: Option<String> = None;
     let mut redirect_target: Option<(String, u16, bool)> = None;
+    let mut as_name: Option<Symbol> = None;
     if let Some(args_node) = call.arguments() {
         for arg in args_node.arguments().iter() {
             if let Some(s) = rstring(&arg) {
@@ -1923,12 +2027,19 @@ fn ingest_root_route(
                 for el in kh.elements().iter() {
                     let Some(assoc) = el.as_assoc_node() else { continue };
                     let Some(key_sym) = symbol_value(&assoc.key()) else { continue };
-                    if key_sym.as_str() == "to" {
-                        if let Some(v) = rstring(&assoc.value()) {
-                            target = Some(v);
-                        } else if let Some(r) = redirect_literal(&assoc.value()) {
-                            redirect_target = Some(r);
+                    match key_sym.as_str() {
+                        "to" => {
+                            if let Some(v) = rstring(&assoc.value()) {
+                                target = Some(v);
+                            } else if let Some(r) = redirect_literal(&assoc.value()) {
+                                redirect_target = Some(r);
+                            }
                         }
+                        "as" => {
+                            as_name = symbol_or_string_value(&assoc.value())
+                                .map(|s| Symbol::from(s.as_str()));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1949,13 +2060,16 @@ fn ingest_root_route(
             path: "/".to_string(),
             controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
             action,
-            as_name: Some(Symbol::from("root")),
+            as_name: Some(as_name.unwrap_or_else(|| Symbol::from("root"))),
             constraints: IndexMap::new(),
             scope: ResourceScope::default(),
         }));
     }
     match target {
-        Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root { target })),
+        Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root {
+            target,
+            as_name,
+        })),
         // Same contract as `mount` and the explicit verbs' redirect
         // drop: not an error, but never silent.
         _ => {
@@ -2135,7 +2249,9 @@ fn ingest_resources_route(
     let mut nested = block_entries(call, file, Some(name_str.as_str()), cx)?;
     if !concern_names.is_empty() {
         let none = eval::RVal::Hash(Vec::new());
-        nested.extend(run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)?);
+        nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+            run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)
+        })?);
     }
 
     Ok(RouteSpec::Resources {
@@ -2152,7 +2268,7 @@ fn ingest_resources_route(
 }
 
 /// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.
-fn controller_class_name(short: &str) -> String {
+pub(super) fn controller_class_name(short: &str) -> String {
     let mut s = short
         .split('/')
         .map(camelize)

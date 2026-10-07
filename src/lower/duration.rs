@@ -170,6 +170,47 @@ fn rewrite_expires_in(expr: &mut Expr) {
     }
 }
 
+/// Fold a compile-time duration expression to whole seconds when it is
+/// an Integer literal or `N.<fixed-unit>` /
+/// `ActiveSupport::Duration.<unit>(N)` for second/minute/hour/day/week.
+/// Month and year have no fixed length; anything computed is `None`.
+///
+/// Used where the integer must be known at compile time (for example
+/// `generates_token_for`'s purpose string embeds the seconds). Callers
+/// that only need a runtime Integer should keep using `.to_i` instead.
+pub(crate) fn literal_seconds(e: &Expr) -> Option<i64> {
+    let int = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Int { value } } => Some(*value),
+        _ => None,
+    };
+    let unit_seconds = |unit: &str| match unit {
+        "second" | "seconds" => Some(1),
+        "minute" | "minutes" => Some(60),
+        "hour" | "hours" => Some(3_600),
+        "day" | "days" => Some(86_400),
+        "week" | "weeks" => Some(604_800),
+        _ => None,
+    };
+    match &*e.node {
+        ExprNode::Lit { .. } => int(e),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. } => {
+            let (n, unit) = match (&*recv.node, args.as_slice()) {
+                (ExprNode::Const { path }, [n])
+                    if path.len() == 2
+                        && path[0].as_str() == "ActiveSupport"
+                        && path[1].as_str() == "Duration" =>
+                {
+                    (int(n)?, method.as_str())
+                }
+                (_, []) => (int(recv)?, method.as_str()),
+                _ => return None,
+            };
+            n.checked_mul(unit_seconds(unit)?)
+        }
+        _ => None,
+    }
+}
+
 /// `<e>` → `<e>.to_i`, stamped Int.
 fn seconds_of(inner: Expr) -> Expr {
     let span = inner.span;
