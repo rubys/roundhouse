@@ -500,10 +500,19 @@ module ActionDispatch
     end
 
     # One byte as `%` + two uppercase hex digits (Rails' PATH escape).
+    # Quotient and remainder by repeated subtract — not `/`. Python and
+    # Elixir emit Int/Int `/` as true division, so `b / 16` became
+    # `2.1875` for `#` and broke every `%{name}` escape that needed a
+    # non-PATH byte (MEASURED on the #456 tip emit). One `while` so the
+    # Elixir lowering stays in shape.
     def self.percent_escape_byte(b)
-      hi = b / 16
-      lo = b - hi * 16
-      "%" + hex_char(hi) + hex_char(lo)
+      hi = 0
+      rem = b
+      while rem >= 16
+        rem = rem - 16
+        hi = hi + 1
+      end
+      "%" + hex_char(hi) + hex_char(rem)
     end
 
     def self.hex_char(n)

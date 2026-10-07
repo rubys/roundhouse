@@ -43,6 +43,37 @@ fn percent_scanner_lowers_to_elixir_recursion() {
     assert!(!router.contains("While not supported"), "{router}");
 }
 
+/// `percent_escape_byte` must not use Int/Int `/`: Python and Elixir emit
+/// true division, which turned `#` into `%2.18750.0` and broke redirect
+/// `%{name}` fills (Thermos P1 on #456). The shared body subtracts 16.
+#[test]
+fn escape_path_nibble_avoids_true_division_on_python_and_elixir() {
+    let cases = [
+        (
+            roundhouse::project::BuildTarget::Python,
+            emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Python),
+            "app/router.py",
+        ),
+        (
+            roundhouse::project::BuildTarget::Elixir,
+            app().emit(roundhouse::project::BuildTarget::Elixir),
+            "lib/router.ex",
+        ),
+    ];
+    for (target, (emitted, errors), rel) in cases {
+        assert!(errors.is_empty(), "{target:?}: {errors:?}");
+        let router = std::fs::read_to_string(emitted.join(rel)).unwrap();
+        assert!(
+            !router.contains("/ 16") && !router.contains("/16"),
+            "Int/Int `/` survives into {target:?} escape_path; got:\n{router}"
+        );
+        assert!(
+            router.contains("rem >= 16") || router.contains("rem() >= 16"),
+            "expected subtract-16 nibble loop in {target:?}; got:\n{router}"
+        );
+    }
+}
+
 /// Keep the full project's Router dependency on the shared error primitive
 /// visible; the ignored Rust toolchain test compiles and executes the project.
 #[test]
