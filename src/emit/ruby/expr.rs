@@ -1016,8 +1016,9 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// collapse `:sym` to a string and need no help. A genuinely symbol-keyed
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
-/// is any `untyped`/unknown receiver — we coerce on positive evidence
-/// only.
+/// is any `untyped`/unknown receiver. A request's params value is
+/// String-keyed at run time whatever the key's static type, so it also
+/// matches (`is_indifferent_params`) and its keys are coerced in full.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1032,14 +1033,29 @@ fn is_string_keyed_hash(recv: &Expr) -> bool {
     }
 }
 
+/// Is `recv` a request's params, the indifferent-access store? Either a
+/// params value (`ParamValue`) or the lowered controller's own `@params`,
+/// which is typed as a plain `Hash[String, untyped]` and is told apart
+/// from other hashes by being that ivar.
+fn is_indifferent_params(recv: &Expr) -> bool {
+    match &*recv.node {
+        ExprNode::Ivar { name } if name.as_str() == "params" => true,
+        _ => matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE),
+    }
+}
+
 /// Coerce a key indexing a string-keyed hash: a symbol literal `:id` →
-/// `"id"`, an already-string key unchanged, and any dynamic key wrapped
-/// with `.to_s`. Safe on a `Hash[String, _]` — the key is a string, so
-/// `.to_s` is a no-op on a string and repairs a symbol.
-fn coerce_str_key(key: &Expr) -> String {
+/// `"id"`, an already-string key unchanged, and a dynamic key wrapped
+/// with `.to_s`. On params (`indifferent`) every dynamic key is wrapped:
+/// the key may hold a Symbol the static type does not show, and the store
+/// reads it by its String. On a plain `Hash[String, _]` only a key typed
+/// Symbol is, since the signature may sit over a hash that natively
+/// misses a Symbol key and an untyped key is then emitted as written.
+fn coerce_str_key(key: &Expr, indifferent: bool) -> String {
     match &*key.node {
         ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
         ExprNode::Lit { value: Literal::Str { .. } } => emit_expr(key),
+        _ if !indifferent && !matches!(key.ty, Some(Ty::Sym)) => emit_expr(key),
         _ => {
             let k = emit_expr(key);
             if recv_needs_parens(key) { format!("({k}).to_s") } else { format!("{k}.to_s") }
@@ -1066,11 +1082,12 @@ fn coerce_str_sym_key(key: &Expr) -> String {
 /// `h[x]` → `h[x.to_s]` case a literal-only pre-pass could not).
 fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
     let recv_s = emit_expr(recv);
+    let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0]))),
+        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
-            coerce_str_key(&args[0]),
+            coerce_str_key(&args[0], indifferent),
             emit_arg(&args[1])
         )),
         "fetch" | "key?" | "has_key?" | "include?" | "delete" if !args.is_empty() => {
@@ -1587,7 +1604,7 @@ fn emit_lvalue(lv: &LValue) -> String {
             // Index-write target (`h[:x] = …`): coerce the key when writing
             // to a string-keyed hash, same as the read path above.
             let key = if is_string_keyed_hash(recv) {
-                coerce_str_key(index)
+                coerce_str_key(index, is_indifferent_params(recv))
             } else {
                 emit_expr(index)
             };
